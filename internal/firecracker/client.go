@@ -27,7 +27,7 @@ func NewClient(socketPath string) *Client {
 				return (&net.Dialer{}).DialContext(ctx, "unix", socketPath)
 			},
 		},
-		Timeout: 10 * time.Second,
+		Timeout: 60 * time.Second,
 	}
 
 	return &Client{

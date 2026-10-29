@@ -21,7 +21,7 @@ type DaemonClient struct {
 }
 
 func NewDaemonClient(endpoint string) *DaemonClient {
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{Timeout: 60 * time.Second}
 
 	if strings.HasPrefix(endpoint, "unix://") {
 		sockPath := strings.TrimPrefix(endpoint, "unix://")

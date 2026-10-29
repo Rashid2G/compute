@@ -86,21 +86,49 @@ ping -c 2 "${VM_IP}" >/dev/null 2>&1
 echo "[+] PASS: Host successfully pinged guest IP ${VM_IP}"
 
 # -------------------------------------------------------------------------
-# Test 4: SSH Connectivity & Remote Code Execution
+# Test 4: SSH Connectivity, Non-Root User, Passwordless Sudo & Serverless Tools
 # -------------------------------------------------------------------------
 echo
-echo "--> [Test 4] Testing SSH connectivity and code execution..."
+echo "--> [Test 4] Testing SSH connectivity and non-root execution..."
 SSH_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'uname -s && nproc')
 echo "${SSH_OUT}"
 assert_contains "${SSH_OUT}" "Linux" "Guest OS is Linux"
 assert_contains "${SSH_OUT}" "2" "Guest detects 2 configured vCPUs"
+
+echo "    Verifying default non-root user 'mforge'..."
+USER_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'whoami')
+assert_eq "mforge" "${USER_OUT}" "Default SSH user is non-root mforge"
+
+echo "    Verifying passwordless sudo execution..."
+SUDO_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'sudo whoami')
+assert_eq "root" "${SUDO_OUT}" "mforge has passwordless sudo access"
+
+echo "    Verifying guest hostname configuration..."
+HOST_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'hostname')
+assert_eq "${VM_ID}" "${HOST_OUT}" "Guest hostname reflects VM ID"
+
+echo "    Verifying standard serverless runtimes and utilities..."
+NODE_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'node -v')
+assert_contains "${NODE_OUT}" "v20" "Node.js runtime is installed"
+
+PY_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'python3 --version')
+assert_contains "${PY_OUT}" "Python 3" "Python 3 runtime is installed"
+
+JQ_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'jq --version')
+assert_contains "${JQ_OUT}" "jq-" "jq JSON processor is installed"
+
+GIT_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'git --version')
+assert_contains "${GIT_OUT}" "git version" "git is installed"
+
+CURL_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'curl --version')
+assert_contains "${CURL_OUT}" "curl" "curl is installed"
 
 # -------------------------------------------------------------------------
 # Test 5: Outbound Network & Virtual NAT Access
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 5] Testing guest outbound internet access over virtual NAT..."
-NAT_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'ping -c 2 1.1.1.1')
+NAT_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'sudo ping -c 2 1.1.1.1')
 assert_contains "${NAT_OUT}" "0% packet loss" "Guest reached public internet (1.1.1.1) via NAT"
 
 # -------------------------------------------------------------------------
@@ -109,8 +137,8 @@ assert_contains "${NAT_OUT}" "0% packet loss" "Guest reached public internet (1.
 echo
 echo "--> [Test 6] Testing disk write persistence..."
 UNIQUE_TOKEN="test-token-$(date +%s)-$RANDOM"
-"${MFORGE_BIN}" ssh "${VM_ID}" -- "echo '${UNIQUE_TOKEN}' > /root/persist_token.txt && sync"
-echo "    Wrote token to /root/persist_token.txt: ${UNIQUE_TOKEN}"
+"${MFORGE_BIN}" ssh "${VM_ID}" -- "echo '${UNIQUE_TOKEN}' > /home/mforge/persist_token.txt && sync"
+echo "    Wrote token to /home/mforge/persist_token.txt: ${UNIQUE_TOKEN}"
 
 echo "    Stopping VM..."
 STOP_OUT=$("${MFORGE_BIN}" stop "${VM_ID}")
@@ -120,7 +148,7 @@ echo "    Restarting VM from persistent disk..."
 "${MFORGE_BIN}" run "${VM_ID}"
 sleep 1
 
-READ_TOKEN=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /root/persist_token.txt')
+READ_TOKEN=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /home/mforge/persist_token.txt')
 assert_eq "${UNIQUE_TOKEN}" "${READ_TOKEN}" "Persisted disk preserved data across reboot cycle"
 
 # -------------------------------------------------------------------------
@@ -129,7 +157,7 @@ assert_eq "${UNIQUE_TOKEN}" "${READ_TOKEN}" "Persisted disk preserved data acros
 echo
 echo "--> [Test 7] Testing microVM state snapshot..."
 # Write an in-memory marker
-"${MFORGE_BIN}" ssh "${VM_ID}" -- "echo 'in-memory-state' > /tmp/mem_marker.txt"
+"${MFORGE_BIN}" ssh "${VM_ID}" -- "echo 'in-memory-state' > /home/mforge/mem_marker.txt"
 
 SAVE_OUT=$("${MFORGE_BIN}" save-state "${VM_ID}")
 echo "${SAVE_OUT}"
@@ -149,7 +177,7 @@ echo "${RESUME_OUT}"
 assert_contains "${RESUME_OUT}" "Status=running" "VM resumed to running status"
 
 # Verify in-memory state remained intact
-MEM_READ=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /tmp/mem_marker.txt')
+MEM_READ=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /home/mforge/mem_marker.txt')
 assert_eq "in-memory-state" "${MEM_READ}" "In-memory state preserved across snapshot and resume"
 
 # -------------------------------------------------------------------------

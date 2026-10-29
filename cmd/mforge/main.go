@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -77,7 +78,7 @@ func main() {
 
 	case "resume":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: mforge resume <vm_id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: mforge %s <vm_id>\n", cmd)
 			os.Exit(1)
 		}
 		vmID := os.Args[2]
@@ -90,7 +91,7 @@ func main() {
 
 	case "stop":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: mforge stop <vm_id>\n")
+			fmt.Fprintf(os.Stderr, "Usage: mforge %s <vm_id>\n", cmd)
 			os.Exit(1)
 		}
 		vmID := os.Args[2]
@@ -118,10 +119,18 @@ func main() {
 
 	case "ssh":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: mforge ssh <vm_id> [-- <command...>]\n")
+			fmt.Fprintf(os.Stderr, "Usage: mforge ssh [user@]<vm_id> [-- <command...>]\n")
 			os.Exit(1)
 		}
-		vmID := os.Args[2]
+		targetArg := os.Args[2]
+		targetUser := "mforge"
+		vmID := targetArg
+		if strings.Contains(targetArg, "@") {
+			parts := strings.SplitN(targetArg, "@", 2)
+			targetUser = parts[0]
+			vmID = parts[1]
+		}
+
 		v, err := client.GetVM(ctx, vmID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting VM details: %v\n", err)
@@ -130,6 +139,16 @@ func main() {
 		if v.Status != "running" {
 			fmt.Fprintf(os.Stderr, "VM %s is not running (status: %s). Run 'mforge run %s' first.\n", vmID, v.Status, vmID)
 			os.Exit(1)
+		}
+
+		// Check for extra commands after "--"
+		extraArgs := []string{}
+		for i, arg := range os.Args[3:] {
+			if arg == "--" {
+				extraArgs = os.Args[3+i+1:]
+				break
+			}
+			extraArgs = append(extraArgs, arg)
 		}
 
 		sshArgs := []string{
@@ -142,18 +161,15 @@ func main() {
 			sshArgs = append(sshArgs, "-i", v.SSHKeyPath)
 		}
 
-		target := fmt.Sprintf("root@%s", v.IPAddress)
-		sshArgs = append(sshArgs, target)
-
-		// Check for extra commands after "--"
-		extraArgs := []string{}
-		for i, arg := range os.Args[3:] {
-			if arg == "--" {
-				extraArgs = os.Args[3+i+1:]
-				break
-			}
-			extraArgs = append(extraArgs, arg)
+		isInteractive := len(extraArgs) == 0
+		if isInteractive {
+			// Allocate pseudo-terminal for interactive session
+			sshArgs = append(sshArgs, "-t")
+			fmt.Fprintf(os.Stderr, "Connecting to %s@%s (%s)...\n", targetUser, v.IPAddress, vmID)
 		}
+
+		target := fmt.Sprintf("%s@%s", targetUser, v.IPAddress)
+		sshArgs = append(sshArgs, target)
 		sshArgs = append(sshArgs, extraArgs...)
 
 		// Retry connecting up to 15 seconds if guest sshd is still initializing
@@ -217,7 +233,7 @@ func printUsage() {
 	fmt.Println("  resume       Restore VM from saved state (mforge resume <vm_id>)")
 	fmt.Println("  stop         Stop a running VM (mforge stop <vm_id>)")
 	fmt.Println("  list, ps     List all managed VMs")
-	fmt.Println("  ssh          SSH into running VM (mforge ssh <vm_id> [-- <cmd>])")
+	fmt.Println("  ssh          SSH into running VM (mforge ssh [user@]<vm_id> [-- <cmd>])")
 	fmt.Println("  delete, rm   Delete VM and cleanup its resources (mforge delete <vm_id>)")
 	fmt.Println()
 	fmt.Println("Environment Variables:")

@@ -18,19 +18,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// Config holds top-level orchestrator configuration
 type Config struct {
-	FirecrackerBinary string `json:"firecracker_binary"` // /usr/local/bin/firecracker
+	FirecrackerBinary string
 }
 
-// CreateRequest holds options for creating a VM
-type CreateRequest struct {
-	Name     string `json:"name"`
-	VCPUs    int    `json:"vcpus"`
-	MemoryMB int    `json:"memory_mb"`
-}
-
-// Manager orchestrates microVM lifecycles
 type Manager struct {
 	cfg     Config
 	store   *db.Store
@@ -39,7 +30,6 @@ type Manager struct {
 	mu      sync.Mutex
 }
 
-// NewManager creates a new VM Manager
 func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *storage.Manager) *Manager {
 	if cfg.FirecrackerBinary == "" {
 		cfg.FirecrackerBinary = "/usr/local/bin/firecracker"
@@ -52,7 +42,13 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 	}
 }
 
-// CreateVM provisions a new VM metadata, allocates IP/MAC, and initializes persistent disk
+type CreateRequest struct {
+	Name     string `json:"name"`
+	VCPUs    int    `json:"vcpus"`
+	MemoryMB int    `json:"memory_mb"`
+}
+
+// CreateVM reserves networking, initializes storage, and registers a created VM
 func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -176,9 +172,9 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("failed to set machine config: %w", err)
 	}
 
-	// Boot source
+	// Boot source with hostname passed into kernel ip configuration
 	gwIP := m.netMgr.GetGatewayIP()
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:255.255.0.0::eth0:off root=/dev/vda rw quiet", vm.IPAddress, gwIP)
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:255.255.0.0:%s:eth0:off root=/dev/vda rw quiet", vm.IPAddress, gwIP, vm.ID)
 	if err := fcClient.SetBootSource(ctx, firecracker.BootSource{
 		KernelImagePath: vm.KernelPath,
 		BootArgs:        bootArgs,
@@ -340,7 +336,7 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	}
 
 	if vm.PID > 0 && isProcessAlive(vm.PID) {
-		// 1. Try graceful sync over SSH if accessible
+		// 1. Try graceful sync over SSH if accessible (try non-root mforge user with sudo, then fallback to root)
 		if vm.IPAddress != "" && vm.SSHKeyPath != "" {
 			syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Second)
 			sshCmd := exec.CommandContext(syncCtx, "ssh",
@@ -348,10 +344,20 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 				"-o", "StrictHostKeyChecking=no",
 				"-o", "UserKnownHostsFile=/dev/null",
 				"-o", "ConnectTimeout=1",
-				fmt.Sprintf("root@%s", vm.IPAddress),
-				"sync; poweroff",
+				fmt.Sprintf("mforge@%s", vm.IPAddress),
+				"sudo sync; sudo poweroff",
 			)
-			_ = sshCmd.Run()
+			if err := sshCmd.Run(); err != nil {
+				fallbackCmd := exec.CommandContext(syncCtx, "ssh",
+					"-i", vm.SSHKeyPath,
+					"-o", "StrictHostKeyChecking=no",
+					"-o", "UserKnownHostsFile=/dev/null",
+					"-o", "ConnectTimeout=1",
+					fmt.Sprintf("root@%s", vm.IPAddress),
+					"sync; poweroff",
+				)
+				_ = fallbackCmd.Run()
+			}
 			syncCancel()
 		}
 
