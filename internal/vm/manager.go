@@ -335,6 +335,7 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	}
 
 	if vm.Status == db.StatusStopped && !isProcessAlive(vm.PID) {
+		_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 		return nil
 	}
 

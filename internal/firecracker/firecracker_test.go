@@ -11,13 +11,14 @@ import (
 )
 
 func TestFirecrackerClientMock(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "mforge-fc-test-*")
+	// Unix socket path max length is 108 bytes on Linux, so use /tmp
+	tmpDir, err := os.MkdirTemp("/tmp", "fc-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	sockPath := filepath.Join(tmpDir, "firecracker.sock")
+	sockPath := filepath.Join(tmpDir, "fc.sock")
 	l, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("failed to listen on unix sock: %v", err)
@@ -102,6 +103,10 @@ func TestFirecrackerClientMock(t *testing.T) {
 
 	if err := client.Resume(ctx); err != nil {
 		t.Fatalf("Resume failed: %v", err)
+	}
+
+	if err := client.SendCtrlAltDel(ctx); err != nil {
+		t.Fatalf("SendCtrlAltDel failed: %v", err)
 	}
 
 	expected := []string{
