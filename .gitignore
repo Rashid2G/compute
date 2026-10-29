@@ -1,0 +1,26 @@
+# Binaries
+bin/
+/mforge
+/microforged
+
+# Temporary files & sockets
+*.sock
+*.pid
+*.tmp
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Storage & test artifacts
+vms/
+snapshots/
+disks/
+
+# Node / Vite if any
+node_modules/
+dist/
+
+# Test binaries
+*.test
