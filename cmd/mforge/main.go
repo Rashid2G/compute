@@ -77,7 +77,7 @@ func main() {
 
 	case "resume":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: mforge resume <vm_id>\n", )
+			fmt.Fprintf(os.Stderr, "Usage: mforge resume <vm_id>\n")
 			os.Exit(1)
 		}
 		vmID := os.Args[2]
@@ -136,6 +136,7 @@ func main() {
 			"-o", "StrictHostKeyChecking=no",
 			"-o", "UserKnownHostsFile=/dev/null",
 			"-o", "LogLevel=ERROR",
+			"-o", "ConnectTimeout=2",
 		}
 		if v.SSHKeyPath != "" {
 			sshArgs = append(sshArgs, "-i", v.SSHKeyPath)
@@ -155,18 +156,34 @@ func main() {
 		}
 		sshArgs = append(sshArgs, extraArgs...)
 
-		sshCmd := exec.Command("ssh", sshArgs...)
-		sshCmd.Stdin = os.Stdin
-		sshCmd.Stdout = os.Stdout
-		sshCmd.Stderr = os.Stderr
+		// Retry connecting up to 15 seconds if guest sshd is still initializing
+		deadline := time.Now().Add(15 * time.Second)
+		var lastErr error
+		for time.Now().Before(deadline) {
+			sshCmd := exec.Command("ssh", sshArgs...)
+			sshCmd.Stdin = os.Stdin
+			sshCmd.Stdout = os.Stdout
+			sshCmd.Stderr = os.Stderr
 
-		if err := sshCmd.Run(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
+			lastErr = sshCmd.Run()
+			if lastErr == nil {
+				return
 			}
-			fmt.Fprintf(os.Stderr, "SSH connection error: %v\n", err)
-			os.Exit(1)
+
+			// If exit code indicates non-connection error, don't keep retrying
+			if exitErr, ok := lastErr.(*exec.ExitError); ok {
+				if exitErr.ExitCode() != 255 {
+					os.Exit(exitErr.ExitCode())
+				}
+			}
+			time.Sleep(400 * time.Millisecond)
 		}
+
+		if exitErr, ok := lastErr.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "SSH connection error: %v\n", lastErr)
+		os.Exit(1)
 
 	case "delete", "rm":
 		if len(os.Args) < 3 {
