@@ -9,7 +9,7 @@ echo "=========================================================="
 
 echo
 echo "[Step 1] Creating a new Firecracker on-demand VM..."
-CREATE_OUT=$("${MFORGE_BIN}" create --name demo-runner --vcpus 1 --memory 256)
+CREATE_OUT=$("${MFORGE_BIN}" create --name demo-runner --vcpus 1 --memory 512)
 echo "${CREATE_OUT}"
 
 VM_ID=$(echo "${CREATE_OUT}" | grep -o 'ID=vm-[a-zA-Z0-9]*' | cut -d= -f2)
@@ -28,8 +28,10 @@ echo "[Step 4] Checking VM status (running)..."
 "${MFORGE_BIN}" list
 
 echo
-echo "[Step 5] Executing isolated code over SSH..."
-"${MFORGE_BIN}" ssh "${VM_ID}" -- 'uname -a && echo "Compute Job Finished at $(date)" > /root/job_output.txt && cat /root/job_output.txt'
+echo "[Step 5] Executing isolated code over SSH (non-root mforge user & serverless runtimes)..."
+"${MFORGE_BIN}" ssh "${VM_ID}" -- 'whoami && hostname && node -e "console.log(\"Node.js serverless compute working:\", 2 + 2)"'
+"${MFORGE_BIN}" ssh "${VM_ID}" -- 'python3 -c "import sys; print(\"Python serverless compute working:\", sys.version.split()[0])"'
+"${MFORGE_BIN}" ssh "${VM_ID}" -- 'sudo id && echo "Compute Job Finished at $(date)" > /home/mforge/job_output.txt && cat /home/mforge/job_output.txt'
 
 echo
 echo "[Step 6] Saving VM execution state and RAM snapshot..."
@@ -45,7 +47,7 @@ echo "[Step 8] Resuming VM from snapshot state..."
 
 echo
 echo "[Step 9] Verifying memory and filesystem persistence after resume..."
-"${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /root/job_output.txt && uptime'
+"${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /home/mforge/job_output.txt && uptime'
 
 echo
 echo "[Step 10] Stopping the microVM gracefully..."
@@ -58,12 +60,3 @@ echo "[Step 11] Checking VM status (stopped)..."
 echo
 echo "[Step 12] Deleting VM and freeing network/storage resources..."
 "${MFORGE_BIN}" delete "${VM_ID}"
-
-echo
-echo "[Step 13] Final VM list:"
-"${MFORGE_BIN}" list
-
-echo
-echo "=========================================================="
-echo "  End-to-End Demo Completed Successfully!                 "
-echo "=========================================================="

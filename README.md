@@ -5,6 +5,23 @@ A lightweight software suite designed to manage isolated code execution in ephem
 ## Features
 
 - **CLI & Daemon Architecture**: Clean separation between a client CLI (`mforge`) and a background daemon (`microforged`).
+- **Standard Serverless Image**:
+  - Pre-baked standard Alpine image containing essential serverless runtimes:
+    - **Runtimes**: Node.js 20 (`node`, `npm`), Python 3.12 (`python3`, `py3-pip`), Bash
+    - **Serverless Utilities**: `jq`, `curl`, `wget`, `git`, `tar`, `gzip`, `unzip`, `zip`, `procps` (`ps`, `top`), `socat`, `netcat`, `bind-tools` (`dig`), `ca-certificates`
+- **Security & Non-Root Execution**:
+  - MicroVMs run as a dedicated non-root user `mforge` (UID 1000).
+  - Out-of-the-box passwordless `sudo` (`mforge ALL=(ALL) NOPASSWD: ALL`).
+- **User-Friendly SSH Experience**:
+  - Interactive pseudo-terminal allocation (`-t`).
+  - Formatted, colored shell prompt displaying username, guest hostname, and current directory (`mforge@vm-xxxx:~$ `).
+  - Clean login welcome banner (MOTD) displaying VM status and pre-installed runtimes.
+  - Flexibility: defaults to `mforge` user, supports `mforge ssh [user@]<vm_id> [-- <cmd>]`.
+- **Comprehensive Performance Benchmarking**:
+  - Dedicated benchmark tool (`bin/mforge-bench`) and automated script (`scripts/benchmark.sh`).
+  - Benchmarks API latency (GET `/health`, GET `/api/v1/vms`, concurrent load).
+  - Benchmarks full VM lifecycle: Cold boot time, Time to First SSH (cold start latency), remote SSH execution, Node.js and Python serverless function latency, RAM snapshotting (`save-state`), instant restore (`resume`), warm start latency, and teardown.
+  - Automated regression detection (`--compare baseline.json`): identifies improvements and regressions against previous runs.
 - **Full MicroVM Lifecycle**:
   - `create`: Provisions VM metadata, allocates IP/MAC, and creates persistent sparse rootfs disk.
   - `run` / `start`: Launches Firecracker with isolated TAP device, attaches drives, and boots the guest Linux kernel.
@@ -61,6 +78,7 @@ make build
 The compiled binaries will be placed in `./bin/`:
 - `./bin/microforged`: Daemon
 - `./bin/mforge`: CLI tool
+- `./bin/mforge-bench`: Performance benchmark suite
 
 ### 2. Host Setup
 
@@ -70,10 +88,10 @@ Configure the host virtual bridge (`mft3br0`) and IP forwarding:
 sudo ./scripts/setup-host.sh
 ```
 
-Generate the base Alpine rootfs with OpenSSH and OpenRC:
+Generate the standard serverless Alpine rootfs with Node.js, Python 3, OpenSSH, and non-root user:
 
 ```bash
-sudo ./scripts/build-rootfs.sh /var/lib/microforge/images 512
+./scripts/build-rootfs.sh /var/lib/microforge/images 1024
 ```
 
 ### 3. Start the Daemon
@@ -86,7 +104,7 @@ sudo ./bin/microforged -listen 0.0.0.0:18080
 
 ```bash
 # Provision a new microVM
-./bin/mforge create --name runner-1 --vcpus 1 --memory 256
+./bin/mforge create --name runner-1 --vcpus 1 --memory 512
 
 # Start the microVM
 ./bin/mforge run <vm_id>
@@ -94,8 +112,13 @@ sudo ./bin/microforged -listen 0.0.0.0:18080
 # List running VMs
 ./bin/mforge list
 
-# Execute code or start an interactive shell via SSH
-./bin/mforge ssh <vm_id> -- uname -a
+# Interactive SSH (opens colored bash shell as mforge user with passwordless sudo)
+./bin/mforge ssh <vm_id>
+
+# Execute serverless code directly via SSH
+./bin/mforge ssh <vm_id> -- node -e 'console.log("Hello from Node.js in microVM!")'
+./bin/mforge ssh <vm_id> -- python3 -c 'print("Hello from Python 3 in microVM!")'
+./bin/mforge ssh <vm_id> -- sudo whoami
 
 # Save execution state (RAM + CPU state)
 ./bin/mforge save-state <vm_id>
@@ -110,8 +133,33 @@ sudo ./bin/microforged -listen 0.0.0.0:18080
 ./bin/mforge delete <vm_id>
 ```
 
-### 5. Run the Automated End-to-End Demo
+### 5. Run Performance Benchmarks
+
+Run the automated performance benchmark suite:
+
+```bash
+make bench
+```
+
+Or run directly with comparison against a saved baseline to detect regressions:
+
+```bash
+# 1. Establish baseline
+./bin/mforge-bench --daemon 127.0.0.1:18080 --output baseline.json
+
+# 2. After making changes, compare against baseline:
+./bin/mforge-bench --daemon 127.0.0.1:18080 --compare baseline.json
+```
+
+Run unit-level micro-benchmarks:
+
+```bash
+make bench-unit
+```
+
+### 6. Run the Automated End-to-End Demo & Feature Tests
 
 ```bash
 ./scripts/demo.sh
+./scripts/test-all-features.sh ./bin/mforge 127.0.0.1:18080
 ```

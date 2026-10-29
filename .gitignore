@@ -2,11 +2,13 @@
 bin/
 /mforge
 /microforged
+/mforge-bench
 
 # Temporary files & sockets
 *.sock
 *.pid
 *.tmp
+*.log
 
 # SQLite databases
 *.db
@@ -17,6 +19,8 @@ bin/
 vms/
 snapshots/
 disks/
+coverage.out
+benchmark-*.json
 
 # Node / Vite if any
 node_modules/
