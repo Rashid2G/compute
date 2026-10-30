@@ -7,10 +7,13 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
+	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 )
 
@@ -33,6 +36,24 @@ func main() {
 	defer cancel()
 
 	switch cmd {
+	case "gui", "web", "ui":
+		guiCmd := flag.NewFlagSet("gui", flag.ExitOnError)
+		port := guiCmd.Int("port", 8080, "Port to serve the Web UI on")
+		addr := guiCmd.String("addr", "0.0.0.0", "Address to bind the Web UI server to")
+		targetDaemon := guiCmd.String("daemon", daemonAddr, "MicroForge daemon URL/address")
+		guiCmd.Parse(os.Args[2:])
+
+		listenAddr := fmt.Sprintf("%s:%d", *addr, *port)
+
+		sigCtx, sigCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer sigCancel()
+
+		if err := gui.StartServer(sigCtx, listenAddr, *targetDaemon); err != nil {
+			fmt.Fprintf(os.Stderr, "GUI server error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+
 	case "create":
 		createCmd := flag.NewFlagSet("create", flag.ExitOnError)
 		name := createCmd.String("name", "", "Human-readable VM name")
@@ -66,7 +87,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error starting VM %s: %v\n", vmID, err)
 			os.Exit(1)
 		}
-		fmt.Printf("VM Started: ID=%s IP=%s PID=%d Status=%s\n", v.ID, v.IPAddress, v.PID, v.Status)
+		fmt.Printf("VM Started: ID=%s Name=%s IP=%s Status=%s PID=%d\n", v.ID, v.Name, v.IPAddress, v.Status, v.PID)
 
 	case "save-state", "snapshot":
 		if len(os.Args) < 3 {
@@ -76,14 +97,14 @@ func main() {
 		vmID := os.Args[2]
 		v, err := client.SaveState(ctx, vmID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error saving VM state %s: %v\n", vmID, err)
+			fmt.Fprintf(os.Stderr, "Error creating snapshot for VM %s: %v\n", vmID, err)
 			os.Exit(1)
 		}
-		fmt.Printf("VM State Saved: ID=%s Status=%s Snapshot=%s\n", v.ID, v.Status, v.SnapshotPath)
+		fmt.Printf("VM Snapshotted: ID=%s Status=%s Snapshot=%s\n", v.ID, v.Status, v.SnapshotPath)
 
 	case "resume":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: mforge %s <vm_id>\n", cmd)
+			fmt.Fprintf(os.Stderr, "Usage: mforge resume <vm_id>\n")
 			os.Exit(1)
 		}
 		vmID := os.Args[2]
@@ -92,11 +113,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error resuming VM %s: %v\n", vmID, err)
 			os.Exit(1)
 		}
-		fmt.Printf("VM Resumed: ID=%s Status=%s PID=%d\n", v.ID, v.Status, v.PID)
+		fmt.Printf("VM Resumed: ID=%s Name=%s Status=%s PID=%d\n", v.ID, v.Name, v.Status, v.PID)
 
 	case "stop":
 		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: mforge %s <vm_id>\n", cmd)
+			fmt.Fprintf(os.Stderr, "Usage: mforge stop <vm_id>\n")
 			os.Exit(1)
 		}
 		vmID := os.Args[2]
@@ -113,12 +134,16 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error listing VMs: %v\n", err)
 			os.Exit(1)
 		}
+		if len(vms) == 0 {
+			fmt.Println("No VMs found.")
+			return
+		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tIP\tVCPUS\tMEM\tTAP\tPID\tCREATED")
 		for _, v := range vms {
+			created := v.CreatedAt.Format("2006-01-02 15:04:05")
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%dMB\t%s\t%d\t%s\n",
-				v.ID, v.Name, v.Status, v.IPAddress, v.VCPUs, v.MemoryMB, v.TAPDevice, v.PID,
-				v.CreatedAt.Format("2006-01-02 15:04:05"))
+				v.ID, v.Name, v.Status, v.IPAddress, v.VCPUs, v.MemoryMB, v.TAPDevice, v.PID, created)
 		}
 		w.Flush()
 
@@ -356,6 +381,9 @@ func handleNetworkCommand(ctx context.Context, client *DaemonClient, args []stri
 
 func printUsage() {
 	fmt.Println("Usage: mforge <command> [options]")
+	fmt.Println()
+	fmt.Println("Web GUI Command:")
+	fmt.Println("  gui                Launch the Web UI server (--port, --addr, --daemon)")
 	fmt.Println()
 	fmt.Println("VM Lifecycle Commands:")
 	fmt.Println("  create             Provision a new VM (--name, --vcpus, --memory, --ip, --mac)")

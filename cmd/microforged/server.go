@@ -25,21 +25,42 @@ func NewServer(vmMgr *vm.Manager) *Server {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/vms", s.handleVMs)
 	s.mux.HandleFunc("/api/v1/vms/", s.handleVMActions)
 	s.mux.HandleFunc("/api/v1/network", s.handleNetworkInfo)
 	s.mux.HandleFunc("/api/v1/network/allocations", s.handleNetworkAllocations)
+	s.mux.HandleFunc("/api/v1/network/inspect/", s.handleNetworkInspect)
 	s.mux.HandleFunc("/api/v1/network/prune", s.handleNetworkPrune)
 	s.mux.HandleFunc("/api/v1/network/config", s.handleNetworkConfig)
 }
 
+func (s *Server) SetGUIHandler(h http.Handler) {
+	s.mux.Handle("/", h)
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	stats, err := s.vmMgr.GetStats(r.Context())
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(stats)
 }
 
 func (s *Server) handleNetworkInfo(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +90,25 @@ func (s *Server) handleNetworkAllocations(w http.ResponseWriter, r *http.Request
 		allocs = []*db.NetworkAllocation{}
 	}
 	json.NewEncoder(w).Encode(allocs)
+}
+
+func (s *Server) handleNetworkInspect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/network/inspect/")
+	vmID := strings.Trim(path, "/")
+	if vmID == "" {
+		httpError(w, "missing vm id", http.StatusBadRequest)
+		return
+	}
+	res, err := s.vmMgr.InspectNetwork(r.Context(), vmID)
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(res)
 }
 
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +249,19 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
 		json.NewEncoder(w).Encode(v)
+
+	case "exec":
+		var req vm.ExecRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		res, err := s.vmMgr.ExecVM(ctx, vmID, req)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(res)
 
 	default:
 		httpError(w, "unknown action: "+action, http.StatusBadRequest)

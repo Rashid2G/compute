@@ -231,3 +231,36 @@ func TestReconcileAndPrune(t *testing.T) {
 		t.Fatalf("expected dead VM to be marked stopped, got: %+v", loaded)
 	}
 }
+
+
+func TestInspectNetworkAndStats(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+
+	vm1 := &db.VM{ID: "vm-net-1", Name: "net-vm", Status: db.StatusCreated, VCPUs: 2, MemoryMB: 1024, IPAddress: "10.20.0.10", MACAddress: "06:00:0a:14:00:0a", TAPDevice: "mftap-1"}
+	if err := store.SaveVM(ctx, vm1); err != nil {
+		t.Fatal(err)
+	}
+
+	inspect, err := m.InspectNetwork(ctx, vm1.ID)
+	if err != nil {
+		t.Fatalf("InspectNetwork error = %v", err)
+	}
+	if inspect.VMID != vm1.ID || inspect.IPAddress != vm1.IPAddress || inspect.Reachable {
+		t.Fatalf("unexpected inspect result: %+v", inspect)
+	}
+
+	stats, err := m.GetStats(ctx)
+	if err != nil {
+		t.Fatalf("GetStats error = %v", err)
+	}
+	if stats.TotalVMs != 1 || stats.CreatedVMs != 1 || stats.TotalVCPUs != 2 || stats.TotalMemoryMB != 1024 || stats.AllocatedIPs != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	// Exec on non-running VM should fail
+	_, err = m.ExecVM(ctx, vm1.ID, ExecRequest{Command: "echo hello"})
+	if err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("ExecVM on stopped VM expected error, got %v", err)
+	}
+}
