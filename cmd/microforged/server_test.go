@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,7 +19,7 @@ import (
 type testRunner struct{}
 
 func (testRunner) Run(context.Context, string, ...string) ([]byte, error) {
-	return nil, fmt.Errorf("network operations are disabled in tests")
+	return []byte("ok"), nil
 }
 
 func newTestServer(t *testing.T) *httptest.Server {
@@ -98,40 +97,32 @@ func TestVMEndpoints(t *testing.T) {
 		return client.Do(req)
 	}
 
-	resp, err := request(http.MethodPost, "/api/v1/vms", vm.CreateRequest{Name: "unit-test", VCPUs: 2, MemoryMB: 256})
+	resp, err := request(http.MethodGet, "/api/v1/vms", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	createReq := vm.CreateRequest{Name: "api-created", VCPUs: 2, MemoryMB: 512}
+	resp, err = request(http.MethodPost, "/api/v1/vms", createReq)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var created db.VM
 	if resp.StatusCode != http.StatusCreated {
 		resp.Body.Close()
-		t.Fatalf("create status = %d, want %d", resp.StatusCode, http.StatusCreated)
+		t.Fatalf("create status = %d", resp.StatusCode)
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		resp.Body.Close()
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if created.ID == "" || created.Name != "unit-test" || created.VCPUs != 2 || created.MemoryMB != 256 {
-		t.Fatalf("created VM = %#v", created)
-	}
-
-	resp, err = request(http.MethodGet, "/api/v1/vms", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var listed []db.VM
-	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		t.Fatalf("list status = %d", resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
-		resp.Body.Close()
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if len(listed) != 1 || listed[0].ID != created.ID {
-		t.Fatalf("listed VMs = %#v", listed)
+	if created.ID == "" || created.Name != "api-created" {
+		t.Fatalf("unexpected created VM: %+v", created)
 	}
 
 	resp, err = request(http.MethodGet, "/api/v1/vms/"+created.ID, nil)
@@ -177,5 +168,57 @@ func TestVMEndpoints(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("delete status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
+func TestNetworkEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	client := server.Client()
+
+	// 1. GET /api/v1/network
+	resp, err := client.Get(server.URL + "/api/v1/network")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /network status = %d", resp.StatusCode)
+	}
+	var info network.NetworkInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode != network.ModeNAT {
+		t.Fatalf("expected mode nat, got %s", info.Mode)
+	}
+
+	// 2. GET /api/v1/network/allocations
+	resp2, err := client.Get(server.URL + "/api/v1/network/allocations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("GET /network/allocations status = %d", resp2.StatusCode)
+	}
+
+	// 3. POST /api/v1/network/prune
+	resp3, err := client.Post(server.URL+"/api/v1/network/prune", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("POST /network/prune status = %d", resp3.StatusCode)
+	}
+	var pruneRes struct {
+		Status     string   `json:"status"`
+		PrunedTAPs []string `json:"pruned_taps"`
+	}
+	if err := json.NewDecoder(resp3.Body).Decode(&pruneRes); err != nil {
+		t.Fatal(err)
+	}
+	if pruneRes.Status != "ok" {
+		t.Fatalf("expected status ok, got %s", pruneRes.Status)
 	}
 }

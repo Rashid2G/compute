@@ -27,6 +27,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/vms", s.handleVMs)
 	s.mux.HandleFunc("/api/v1/vms/", s.handleVMActions)
+	s.mux.HandleFunc("/api/v1/network", s.handleNetworkInfo)
+	s.mux.HandleFunc("/api/v1/network/allocations", s.handleNetworkAllocations)
+	s.mux.HandleFunc("/api/v1/network/prune", s.handleNetworkPrune)
+	s.mux.HandleFunc("/api/v1/network/config", s.handleNetworkConfig)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -36,6 +40,63 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleNetworkInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	info, err := s.vmMgr.GetNetworkInfo(r.Context())
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(info)
+}
+
+func (s *Server) handleNetworkAllocations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	allocs, err := s.vmMgr.GetStore().GetNetworkAllocations(r.Context())
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if allocs == nil {
+		allocs = []*db.NetworkAllocation{}
+	}
+	json.NewEncoder(w).Encode(allocs)
+}
+
+func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	pruned, err := s.vmMgr.ReconcileAndPrune(r.Context())
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if pruned == nil {
+		pruned = []string{}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":      "ok",
+		"pruned_taps": pruned,
+	})
+}
+
+func (s *Server) handleNetworkConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := s.vmMgr.GetNetworkManager().GetConfig()
+	json.NewEncoder(w).Encode(cfg)
 }
 
 func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {

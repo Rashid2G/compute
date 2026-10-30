@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -37,18 +38,22 @@ func main() {
 		name := createCmd.String("name", "", "Human-readable VM name")
 		vcpus := createCmd.Int("vcpus", 1, "Number of vCPUs")
 		mem := createCmd.Int("memory", 512, "Memory size in MiB")
+		ipAddr := createCmd.String("ip", "", "Static IPv4 address in subnet (e.g. 172.16.0.50)")
+		macAddr := createCmd.String("mac", "", "Custom MAC address (e.g. 06:00:ac:10:00:32)")
 		createCmd.Parse(os.Args[2:])
 
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:     *name,
-			VCPUs:    *vcpus,
-			MemoryMB: *mem,
+			Name:       *name,
+			VCPUs:      *vcpus,
+			MemoryMB:   *mem,
+			IPAddress:  *ipAddr,
+			MACAddress: *macAddr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating VM: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("VM Created: ID=%s Name=%s IP=%s Status=%s\n", v.ID, v.Name, v.IPAddress, v.Status)
+		fmt.Printf("VM Created: ID=%s Name=%s IP=%s MAC=%s Status=%s\n", v.ID, v.Name, v.IPAddress, v.MACAddress, v.Status)
 
 	case "run", "start":
 		if len(os.Args) < 3 {
@@ -172,34 +177,40 @@ func main() {
 		sshArgs = append(sshArgs, target)
 		sshArgs = append(sshArgs, extraArgs...)
 
-		// Retry connecting up to 15 seconds if guest sshd is still initializing
+		// Wait for guest SSH port 22 to accept connections before launching SSH
 		deadline := time.Now().Add(15 * time.Second)
-		var lastErr error
+		var portOpen bool
 		for time.Now().Before(deadline) {
-			sshCmd := exec.Command("ssh", sshArgs...)
-			sshCmd.Stdin = os.Stdin
-			sshCmd.Stdout = os.Stdout
-			sshCmd.Stderr = os.Stderr
-
-			lastErr = sshCmd.Run()
-			if lastErr == nil {
-				return
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:22", v.IPAddress), 1*time.Second)
+			if err == nil {
+				conn.Close()
+				portOpen = true
+				break
 			}
-
-			// If exit code indicates non-connection error, don't keep retrying
-			if exitErr, ok := lastErr.(*exec.ExitError); ok {
-				if exitErr.ExitCode() != 255 {
-					os.Exit(exitErr.ExitCode())
-				}
-			}
-			time.Sleep(400 * time.Millisecond)
+			time.Sleep(300 * time.Millisecond)
+		}
+		if !portOpen {
+			fmt.Fprintf(os.Stderr, "SSH connection error: guest SSH service on %s:22 did not become reachable within 15s\n", v.IPAddress)
+			os.Exit(1)
 		}
 
-		if exitErr, ok := lastErr.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+		// Execute SSH command directly
+		sshCmd := exec.Command("ssh", sshArgs...)
+		sshCmd.Stdin = os.Stdin
+		sshCmd.Stdout = os.Stdout
+		sshCmd.Stderr = os.Stderr
+
+		if err := sshCmd.Run(); err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			fmt.Fprintf(os.Stderr, "SSH error: %v\n", err)
+			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "SSH connection error: %v\n", lastErr)
-		os.Exit(1)
+		return
+
+	case "network", "net":
+		handleNetworkCommand(ctx, client, os.Args[2:])
 
 	case "delete", "rm":
 		if len(os.Args) < 3 {
@@ -223,19 +234,145 @@ func main() {
 	}
 }
 
+func handleNetworkCommand(ctx context.Context, client *DaemonClient, args []string) {
+	subcmd := "status"
+	if len(args) > 0 {
+		subcmd = args[0]
+	}
+
+	switch subcmd {
+	case "status", "info":
+		info, err := client.GetNetworkInfo(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting network info: %v\n", err)
+			os.Exit(1)
+		}
+
+		bridgeState := "DOWN"
+		if info.BridgeActive {
+			bridgeState = "UP"
+		}
+		natState := "Disabled"
+		if info.NATEnabled {
+			natState = "Active (MASQUERADE)"
+		}
+		nicInfo := "<none>"
+		if info.PhysicalNIC != "" {
+			nicInfo = info.PhysicalNIC
+		}
+
+		fmt.Println("==================================================")
+		fmt.Println("          MICROFORGE NETWORK STATUS               ")
+		fmt.Println("==================================================")
+		fmt.Printf("Mode:              %s\n", strings.ToUpper(string(info.Mode)))
+		fmt.Printf("Bridge Interface:  %s (%s)\n", info.BridgeName, bridgeState)
+		fmt.Printf("Bridge IPv4/CIDR:  %s\n", info.BridgeIP)
+		fmt.Printf("Internal Subnet:   %s\n", info.SubnetCIDR)
+		fmt.Printf("Default Gateway:   %s (Netmask: %s)\n", info.GatewayIP, info.Netmask)
+		fmt.Printf("Physical NIC:      %s\n", nicInfo)
+		fmt.Printf("NAT Masquerading:  %s\n", natState)
+		fmt.Printf("Allocated IPs:     %d\n", info.AllocatedIPs)
+		fmt.Printf("Active Host TAPs:  %d (%s)\n", len(info.ActiveTAPs), strings.Join(info.ActiveTAPs, ", "))
+		fmt.Println("==================================================")
+
+	case "list", "allocations", "leases":
+		allocs, err := client.GetNetworkAllocations(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing network allocations: %v\n", err)
+			os.Exit(1)
+		}
+		if len(allocs) == 0 {
+			fmt.Println("No active network allocations found.")
+			return
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		fmt.Fprintln(w, "IP ADDRESS\tMAC ADDRESS\tTAP DEVICE\tSTATUS\tVM ID\tVM NAME")
+		for _, a := range allocs {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+				a.IPAddress, a.MACAddress, a.TAPDevice, a.Status, a.VMID, a.VMName)
+		}
+		w.Flush()
+
+	case "prune", "clean":
+		pruned, err := client.PruneNetwork(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error pruning network: %v\n", err)
+			os.Exit(1)
+		}
+		if len(pruned) == 0 {
+			fmt.Println("Network is clean. No orphaned TAP interfaces or dead leases found.")
+		} else {
+			fmt.Printf("Pruned %d orphaned TAP interface(s):\n", len(pruned))
+			for _, tap := range pruned {
+				fmt.Printf("  - %s (deleted)\n", tap)
+			}
+		}
+
+	case "inspect":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: mforge network inspect <vm_id>\n")
+			os.Exit(1)
+		}
+		vmID := args[1]
+		v, err := client.GetVM(ctx, vmID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting VM details: %v\n", err)
+			os.Exit(1)
+		}
+
+		info, _ := client.GetNetworkInfo(ctx)
+		bridgeName := "mft3br0"
+		gwIP := "172.16.0.1"
+		if info != nil {
+			bridgeName = info.BridgeName
+			gwIP = info.GatewayIP
+		}
+
+		// Test reachability if running
+		pingStatus := "Not reachable (VM is not running)"
+		if v.Status == "running" {
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:22", v.IPAddress), 1*time.Second)
+			if err == nil {
+				conn.Close()
+				pingStatus = "Reachable (SSH port 22 OPEN)"
+			} else {
+				pingStatus = fmt.Sprintf("Unreachable (SSH port 22 closed or unresponsive: %v)", err)
+			}
+		}
+
+		fmt.Printf("VM Network Inspection: %s (%s)\n", v.ID, v.Name)
+		fmt.Printf("  Status:        %s\n", v.Status)
+		fmt.Printf("  IPv4 Address:  %s\n", v.IPAddress)
+		fmt.Printf("  MAC Address:   %s\n", v.MACAddress)
+		fmt.Printf("  TAP Interface: %s (master: %s)\n", v.TAPDevice, bridgeName)
+		fmt.Printf("  Gateway:       %s\n", gwIP)
+		fmt.Printf("  Connectivity:  %s\n", pingStatus)
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown network subcommand '%s'. Usage: mforge network [status|list|prune|inspect <vm_id>]\n", subcmd)
+		os.Exit(1)
+	}
+}
+
 func printUsage() {
 	fmt.Println("Usage: mforge <command> [options]")
 	fmt.Println()
-	fmt.Println("Commands:")
-	fmt.Println("  create       Provision a new VM (--name, --vcpus, --memory)")
-	fmt.Println("  run          Start a microVM (mforge run <vm_id>)")
-	fmt.Println("  save-state   Save running VM state & memory snapshot (mforge save-state <vm_id>)")
-	fmt.Println("  resume       Restore VM from saved state (mforge resume <vm_id>)")
-	fmt.Println("  stop         Stop a running VM (mforge stop <vm_id>)")
-	fmt.Println("  list, ps     List all managed VMs")
-	fmt.Println("  ssh          SSH into running VM (mforge ssh [user@]<vm_id> [-- <cmd>])")
-	fmt.Println("  delete, rm   Delete VM and cleanup its resources (mforge delete <vm_id>)")
+	fmt.Println("VM Lifecycle Commands:")
+	fmt.Println("  create             Provision a new VM (--name, --vcpus, --memory, --ip, --mac)")
+	fmt.Println("  run, start         Start an existing VM (<vm_id>)")
+	fmt.Println("  stop               Gracefully shut down a VM (<vm_id>)")
+	fmt.Println("  save-state         Create a memory + CPU snapshot (<vm_id>)")
+	fmt.Println("  resume             Restore a paused/snapshotted VM (<vm_id>)")
+	fmt.Println("  delete, rm         Delete VM, storage, and clean up network resources (<vm_id>)")
+	fmt.Println("  list, ps           List all VMs")
+	fmt.Println("  ssh                Connect to VM via SSH or run remote commands ([user@]<vm_id> [-- <cmd...>])")
 	fmt.Println()
-	fmt.Println("Environment Variables:")
-	fmt.Println("  MFORGE_DAEMON   Daemon address (default: 127.0.0.1:18080 or unix:///path.sock)")
+	fmt.Println("Network Management Commands:")
+	fmt.Println("  network status     Display network topology, mode, bridge status, and NAT info")
+	fmt.Println("  network list       List all allocated IPs, MACs, and TAP devices")
+	fmt.Println("  network inspect    Inspect VM network configuration and reachability (<vm_id>)")
+	fmt.Println("  network prune      Clean up orphaned TAP devices and inactive state")
+	fmt.Println()
+	fmt.Println("Global Options:")
+	fmt.Println("  MFORGE_DAEMON      Daemon address (default: 127.0.0.1:18080)")
 }

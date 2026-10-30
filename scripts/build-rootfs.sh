@@ -22,7 +22,7 @@ WORKDIR=$(mktemp -d /tmp/mforge-rootfs-XXXXXX)
 cleanup() {
     docker rm -f "${CONTAINER_ID}" >/dev/null 2>&1 || true
     if [ -d "${WORKDIR}" ]; then
-        sudo rm -rf "${WORKDIR}" 2>/dev/null || rm -rf "${WORKDIR}" 2>/dev/null || true
+        rm -rf "${WORKDIR}" 2>/dev/null || sudo rm -rf "${WORKDIR}" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -106,7 +106,6 @@ SUDO_CONF
     chmod 600 /mnt/rootfs/root/.ssh/authorized_keys /mnt/rootfs/home/mforge/.ssh/authorized_keys
 
     echo "    --> Configuring friendly shell prompt, colors, and aliases..."
-    # System-wide bashrc with colored prompt
     mkdir -p /mnt/rootfs/etc/bash
     cat << "BASHRC" > /mnt/rootfs/etc/bash/bashrc
 if [ -z "$PS1" ]; then
@@ -160,6 +159,16 @@ ROOTPROF
     # Set ownership of mforge home
     chown -R 1000:1000 /mnt/rootfs/home/mforge
 
+    echo "    --> Configuring filesystem mounts, fstab, and devpts..."
+    # Ensure /dev/pts and pseudo-terminals work for SSH
+    mkdir -p /mnt/rootfs/dev/pts /mnt/rootfs/dev/shm
+    cat << "FSTAB" > /mnt/rootfs/etc/fstab
+devpts /dev/pts devpts gid=5,mode=620,ptmxmode=666 0 0
+proc /proc proc defaults 0 0
+sysfs /sys sysfs defaults 0 0
+tmpfs /dev/shm tmpfs defaults 0 0
+FSTAB
+
     echo "    --> Configuring MOTD banner and networking..."
     cat << "MOTD" > /mnt/rootfs/etc/motd
    __  ___ _               ____                       
@@ -178,25 +187,70 @@ nameserver 1.1.1.1
 nameserver 8.8.8.8
 RESOLV
 
+    echo "    --> Setting up OpenRC runlevels..."
+    mkdir -p /mnt/rootfs/etc/runlevels/sysinit
+    mkdir -p /mnt/rootfs/etc/runlevels/boot
     mkdir -p /mnt/rootfs/etc/runlevels/default
-    ln -sf /etc/init.d/sshd /mnt/rootfs/etc/runlevels/default/sshd
+
+    ln -sf /etc/init.d/devfs /mnt/rootfs/etc/runlevels/sysinit/devfs 2>/dev/null || true
+    ln -sf /etc/init.d/procfs /mnt/rootfs/etc/runlevels/sysinit/procfs 2>/dev/null || true
+    ln -sf /etc/init.d/sysfs /mnt/rootfs/etc/runlevels/sysinit/sysfs 2>/dev/null || true
+    ln -sf /etc/init.d/bootmisc /mnt/rootfs/etc/runlevels/boot/bootmisc 2>/dev/null || true
+    ln -sf /etc/init.d/hostname /mnt/rootfs/etc/runlevels/boot/hostname 2>/dev/null || true
+    ln -sf /etc/init.d/sshd /mnt/rootfs/etc/runlevels/default/sshd 2>/dev/null || true
 
     cat << "INITHK" > /mnt/rootfs/etc/init.d/mforge-net
 #!/sbin/openrc-run
-description="Initialize Firecracker VM Network and Hostname"
+description="Initialize Firecracker VM Network, Hostname, and PTYs"
 
 start() {
-    ebegin "Configuring network interfaces and hostname"
-    ip link set lo up
-    ip link set eth0 up 2>/dev/null || true
+    ebegin "Configuring network interfaces, hostname, and pseudo-terminals"
 
+    # 1. Mount devpts for pseudo-terminal allocation (SSH / interactive bash)
+    if ! mountpoint -q /dev/pts; then
+        mkdir -p /dev/pts
+        mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
+    fi
+
+    # 2. Loopback interface
+    ip link set lo up 2>/dev/null || true
+
+    # 3. Parse kernel ip= parameters
+    # Syntax: ip=<client-ip>:<server-ip>:<gw-ip>:<netmask>:<hostname>:<device>:<autoconf>:<dns0-ip>:<dns1-ip>
     if grep -q "ip=" /proc/cmdline; then
-        KHST=$(grep -o "ip=[^ ]*" /proc/cmdline | cut -d: -f5)
+        IP_SPEC=$(grep -o "ip=[^ ]*" /proc/cmdline | head -n1 | cut -d= -f2)
+        CIP=$(echo "$IP_SPEC" | cut -d: -f1)
+        GW=$(echo "$IP_SPEC" | cut -d: -f3)
+        MASK=$(echo "$IP_SPEC" | cut -d: -f4)
+        KHST=$(echo "$IP_SPEC" | cut -d: -f5)
+        DEV=$(echo "$IP_SPEC" | cut -d: -f6)
+        [ -z "$DEV" ] && DEV="eth0"
+
         if [ -n "$KHST" ]; then
             hostname "$KHST"
             echo "$KHST" > /etc/hostname
         fi
+
+        if [ -n "$CIP" ]; then
+            PREFIX=16
+            case "$MASK" in
+                255.255.255.255) PREFIX=32 ;;
+                255.255.255.0)   PREFIX=24 ;;
+                255.255.0.0)     PREFIX=16 ;;
+                255.0.0.0)       PREFIX=8  ;;
+                [0-9]*)          PREFIX="$MASK" ;;
+            esac
+            ip link set "$DEV" up 2>/dev/null || true
+            ip addr flush dev "$DEV" 2>/dev/null || true
+            ip addr add "${CIP}/${PREFIX}" dev "$DEV" 2>/dev/null || true
+            if [ -n "$GW" ]; then
+                ip route add default via "$GW" dev "$DEV" 2>/dev/null || true
+            fi
+        fi
+    else
+        ip link set eth0 up 2>/dev/null || true
     fi
+
     eend 0
 }
 INITHK
@@ -210,27 +264,43 @@ INITHK
     fi
 '
 
-sudo umount "${EXT4_PATH}" 2>/dev/null || true
 echo "==> [Step 4/5] Building ext4 filesystem image (${IMAGE_SIZE_MB}MB)..."
-sudo dd if=/dev/zero of="${EXT4_PATH}" bs=1M count="${IMAGE_SIZE_MB}" status=none
-sudo mkfs.ext4 -F -q -L "rootfs" "${EXT4_PATH}"
+# Use privileged docker to create, format, and populate image seamlessly without host sudo
+docker run --rm --privileged \
+    -v "${DEST_DIR}:/out" \
+    -v "${WORKDIR}:/mnt/rootfs:ro" \
+    alpine:3.20 sh -c "
+    set -euo pipefail
+    apk add --no-cache e2fsprogs openssh-keygen >/dev/null
 
-echo "==> [Step 5/5] Copying rootfs into ext4 filesystem and generating host SSH keys..."
-MOUNTDIR=$(mktemp -d /tmp/mforge-mnt-XXXXXX)
-sudo mount -o loop "${EXT4_PATH}" "${MOUNTDIR}"
-sudo cp -a "${WORKDIR}/." "${MOUNTDIR}/"
-# Ensure the filesystem root, tmp, and user home have correct permissions and ownership
-sudo chown root:root "${MOUNTDIR}" "${MOUNTDIR}/home"
-sudo chmod 755 "${MOUNTDIR}" "${MOUNTDIR}/home"
-sudo chmod 1777 "${MOUNTDIR}/tmp" "${MOUNTDIR}/var/tmp" 2>/dev/null || true
-sudo chown -R 1000:1000 "${MOUNTDIR}/home/mforge"
-sudo chmod 750 "${MOUNTDIR}/home/mforge"
-sudo chmod 700 "${MOUNTDIR}/home/mforge/.ssh"
-sudo chmod 600 "${MOUNTDIR}/home/mforge/.ssh/authorized_keys"
-sudo chroot "${MOUNTDIR}" /usr/bin/ssh-keygen -A
-sudo umount "${MOUNTDIR}"
-rm -rf "${MOUNTDIR}"
+    IMAGE=/out/alpine-3.20.ext4
+    rm -f \"\${IMAGE}\"
+    dd if=/dev/zero of=\"\${IMAGE}\" bs=1M count=${IMAGE_SIZE_MB} status=none
+    mkfs.ext4 -F -q -L 'rootfs' \"\${IMAGE}\"
+
+    MNT=\$(mktemp -d /tmp/mforge-mnt-XXXXXX)
+    mount -o loop \"\${IMAGE}\" \"\${MNT}\"
+    cp -a /mnt/rootfs/. \"\${MNT}/\"
+
+    # Ensure permissions
+    chown root:root \"\${MNT}\" \"\${MNT}/home\"
+    chmod 755 \"\${MNT}\" \"\${MNT}/home\"
+    chmod 1777 \"\${MNT}/tmp\" \"\${MNT}/var/tmp\" 2>/dev/null || true
+    chown -R 1000:1000 \"\${MNT}/home/mforge\"
+    chmod 750 \"\${MNT}/home/mforge\"
+    chmod 700 \"\${MNT}/home/mforge/.ssh\"
+    chmod 600 \"\${MNT}/home/mforge/.ssh/authorized_keys\"
+
+    # Generate host SSH keys
+    chroot \"\${MNT}\" /usr/bin/ssh-keygen -A
+
+    umount \"\${MNT}\"
+    rm -rf \"\${MNT}\"
+"
+
+echo "==> [Step 5/5] Finalizing image permissions..."
+chmod 644 "${EXT4_PATH}" 2>/dev/null || true
 
 echo "==> SUCCESS: Rootfs image ready at ${EXT4_PATH}!"
 echo "==> SSH private key: ${KEY_DIR}/id_ed25519"
-echo "==> Standard image: non-root user 'mforge', passwordless sudo, colored prompt, serverless utils."
+echo "==> Standard image: non-root user 'mforge', passwordless sudo, devpts, colored prompt, serverless utils."
