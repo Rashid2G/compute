@@ -1,71 +1,46 @@
-# On-Demand Firecracker VMs (`microforged` & `mforge`)
+# MicroForge: High-Performance On-Demand MicroVM Orchestrator
 
-A lightweight software suite designed to manage isolated code execution in ephemeral and persistent Firecracker microVMs on demand.
+MicroForge is an on-demand microVM provisioning platform powered by AWS Firecracker and Linux KVM. It features sub-second cold starts, dynamic networking with multiple topology modes (virtual NAT, virtual bridge, and physical NIC enslavement), persistent storage, memory + CPU snapshot pausing/resuming, and an agent-ready non-root SSH environment with Node.js and Python 3 runtimes.
 
-## Features
+---
 
-- **CLI & Daemon Architecture**: Clean separation between a client CLI (`mforge`) and a background daemon (`microforged`).
-- **Standard Serverless Image**:
-  - Pre-baked standard Alpine image containing essential serverless runtimes:
-    - **Runtimes**: Node.js 20 (`node`, `npm`), Python 3.12 (`python3`, `py3-pip`), Bash
-    - **Serverless Utilities**: `jq`, `curl`, `wget`, `git`, `tar`, `gzip`, `unzip`, `zip`, `procps` (`ps`, `top`), `socat`, `netcat`, `bind-tools` (`dig`), `ca-certificates`
-- **Security & Non-Root Execution**:
-  - MicroVMs run as a dedicated non-root user `mforge` (UID 1000).
-  - Out-of-the-box passwordless `sudo` (`mforge ALL=(ALL) NOPASSWD: ALL`).
-- **User-Friendly SSH Experience**:
-  - Interactive pseudo-terminal allocation (`-t`).
-  - Formatted, colored shell prompt displaying username, guest hostname, and current directory (`mforge@vm-xxxx:~$ `).
-  - Clean login welcome banner (MOTD) displaying VM status and pre-installed runtimes.
-  - Flexibility: defaults to `mforge` user, supports `mforge ssh [user@]<vm_id> [-- <cmd>]`.
-- **Comprehensive Performance Benchmarking**:
-  - Dedicated benchmark tool (`bin/mforge-bench`) and automated script (`scripts/benchmark.sh`).
-  - Benchmarks API latency (GET `/health`, GET `/api/v1/vms`, concurrent load).
-  - Benchmarks full VM lifecycle: Cold boot time, Time to First SSH (cold start latency), remote SSH execution, Node.js and Python serverless function latency, RAM snapshotting (`save-state`), instant restore (`resume`), warm start latency, and teardown.
-  - Automated regression detection (`--compare baseline.json`): identifies improvements and regressions against previous runs.
-- **Full MicroVM Lifecycle**:
-  - `create`: Provisions VM metadata, allocates IP/MAC, and creates persistent sparse rootfs disk.
-  - `run` / `start`: Launches Firecracker with isolated TAP device, attaches drives, and boots the guest Linux kernel.
-  - `save-state`: Pauses the running VM, dumps microVM device states and guest RAM into snapshot files.
-  - `resume`: Restores a running VM from saved snapshot files in milliseconds.
-  - `stop`: Gracefully powers down microVMs, flushing disk caches, and cleaning up runtime resources.
-  - `ssh`: Directly connects to running microVMs over SSH or runs isolated remote commands.
-  - `list` / `ps`: Tabular status overview of all managed microVMs.
-  - `delete` / `rm`: Cleans up VM workspace, disk images, and removes DB records.
-- **SQLite Persistence**: Complete state machine, IP assignments, MACs, storage paths, and PIDs persisted in SQLite with WAL mode.
-- **Virtual Network & NAT**:
-  - Simulated NIC via virtio-net over per-VM TAP interfaces (`mftap-<id>`).
-  - Host bridge (`mft3br0`) acting as gateway (`172.16.0.1/16`).
-  - IPAM engine allocating deterministic guest IPs and locally administered unicast MACs.
-  - Outbound internet access provided via host `iptables` NAT masquerade.
-- **Persisted Disks**:
-  - Copy-on-write sparse disk initialized from base Alpine rootfs for each VM.
-  - Changes made by code execution persist across stop and restart cycles.
+## Key Features
 
-## Architecture
+- **MicroVM Orchestration**: Fast microVM lifecycle management (`create`, `run`, `stop`, `save-state`, `resume`, `delete`).
+- **Flexible Network Topologies**:
+  - **Virtual NAT Mode (`nat`)**: Dedicated bridge (`mft3br0`) behind virtual NAT with iptables masquerading and IP forwarding.
+  - **Virtual Bridge Mode (`bridge`)**: Standard layer-2 virtual bridge for isolated or user-managed routing without NAT.
+  - **Physical NIC Mode (`nic`)**: Direct physical network attachment enslaving a real host NIC (`eth0`, `enp...`).
+- **Zero Orphan Guarantee**: Automatic host TAP interface reconciliation and prune command to remove leftover devices and reclaim IPs.
+- **Agent & User Friendly SSH**:
+  - OpenSSH server with non-root user `mforge` and passwordless `sudo`.
+  - Full pseudo-terminal (`/dev/pts`) support for interactive terminal sessions.
+  - Preloaded serverless tools: Node.js, Python 3, bash, git, curl, jq, iproute2, and bind-tools.
+- **RAM & CPU Snapshots**: Save and resume running microVM memory states in milliseconds.
+- **RESTful API & CLI**: Complete HTTP API and intuitive `mforge` CLI.
+- **Performance Benchmarking Suite**: Automated latency, throughput, and regression tracking (`mforge-bench`).
 
-```
-                 +-----------------------------+
-                 |       mforge (CLI)          |
-                 +--------------+--------------+
-                                | REST API (HTTP or Unix Domain Socket)
-                 +--------------v--------------+
-                 |    microforged (Daemon)     |
-                 +--+-----------+-----------+--+
-                    |           |           |
-       +------------v--+  +-----v-----+  +--v-------------+
-       | SQLite Store  |  |  Storage  |  | Network / IPAM |
-       | (modernc)     |  | (Disks &  |  |  (Bridge, TAP, |
-       |               |  | Snapshots)|  |   NAT iptables)|
-       +---------------+  +-----------+  +----------------+
-                                |
-                    +-----------v-------------+
-                    |  Firecracker v1.9.0     |
-                    |  - vCPU / Memory        |
-                    |  - Kernel vmlinux       |
-                    |  - Rootfs ext4 drive    |
-                    |  - virtio-net / eth0    |
-                    +-------------------------+
-```
+---
+
+## Network Architecture & Modes
+
+MicroForge supports three distinct network modes configured via JSON config files or daemon flags:
+
+| Mode | Topology | Best For |
+|---|---|---|
+| `nat` *(Default)* | Virtual bridge (`mft3br0`) + iptables NAT masquerade + IP forwarding | VMs needing outbound Internet access behind private subnet (`172.16.0.0/16`). |
+| `bridge` | Layer-2 Linux bridge without NAT masquerading | Private inter-VM networks or host networks where routing/DHCP is managed externally. |
+| `nic` | Enslaves a real physical host interface (e.g. `eth0`) into the bridge | VMs directly accessible on the host's physical LAN. |
+
+### Network Config Files
+
+Default configurations are located in `config/`:
+- `config/network.nat.json`: Virtual bridge with virtual NAT.
+- `config/network.bridge.json`: Virtual bridge without NAT.
+- `config/network.nic.json`: Enslaved real NIC mode.
+- `config/network.json`: Active configuration loaded automatically by the daemon.
+
+---
 
 ## Quick Start
 
@@ -88,7 +63,7 @@ Configure the host virtual bridge (`mft3br0`) and IP forwarding:
 sudo ./scripts/setup-host.sh
 ```
 
-Generate the standard serverless Alpine rootfs with Node.js, Python 3, OpenSSH, and non-root user:
+Generate the standard serverless Alpine rootfs with Node.js, Python 3, OpenSSH, devpts, and non-root user:
 
 ```bash
 ./scripts/build-rootfs.sh /var/lib/microforge/images 1024
@@ -97,14 +72,42 @@ Generate the standard serverless Alpine rootfs with Node.js, Python 3, OpenSSH, 
 ### 3. Start the Daemon
 
 ```bash
+# Default mode (NAT via config/network.json)
 sudo ./bin/microforged -listen 0.0.0.0:18080
+
+# Or specify a network config file directly
+sudo ./bin/microforged -network-config config/network.nat.json
+
+# Or override via flags (e.g. bridge mode or physical NIC)
+sudo ./bin/microforged -network-mode nic -physical-nic eth0
 ```
 
-### 4. Use the CLI
+### 4. CLI Network Management
+
+MicroForge CLI provides network management commands:
 
 ```bash
-# Provision a new microVM
+# Check current network mode, bridge status, NAT, and active TAPs
+./bin/mforge network status
+
+# List all active IP leases, MACs, and TAP devices
+./bin/mforge network list
+
+# Inspect network details and host connectivity for a VM
+./bin/mforge network inspect <vm_id>
+
+# Clean up any orphaned TAP interfaces or stale resources
+./bin/mforge network prune
+```
+
+### 5. VM Lifecycle Management
+
+```bash
+# Provision a microVM with automatic IP allocation
 ./bin/mforge create --name runner-1 --vcpus 1 --memory 512
+
+# Provision with a static IP and custom MAC
+./bin/mforge create --name runner-static --ip 172.16.0.50 --mac 06:00:ac:10:00:32
 
 # Start the microVM
 ./bin/mforge run <vm_id>
@@ -112,10 +115,10 @@ sudo ./bin/microforged -listen 0.0.0.0:18080
 # List running VMs
 ./bin/mforge list
 
-# Interactive SSH (opens colored bash shell as mforge user with passwordless sudo)
+# Interactive SSH shell (full PTY allocation, colored prompt)
 ./bin/mforge ssh <vm_id>
 
-# Execute serverless code directly via SSH
+# Execute remote commands directly via SSH
 ./bin/mforge ssh <vm_id> -- node -e 'console.log("Hello from Node.js in microVM!")'
 ./bin/mforge ssh <vm_id> -- python3 -c 'print("Hello from Python 3 in microVM!")'
 ./bin/mforge ssh <vm_id> -- sudo whoami
@@ -126,14 +129,14 @@ sudo ./bin/microforged -listen 0.0.0.0:18080
 # Resume microVM instantly
 ./bin/mforge resume <vm_id>
 
-# Stop microVM
+# Stop microVM (automatically frees TAP device)
 ./bin/mforge stop <vm_id>
 
-# Delete microVM
+# Delete microVM (frees IP address and cleans persistent disks)
 ./bin/mforge delete <vm_id>
 ```
 
-### 5. Run Performance Benchmarks
+### 6. Run Performance Benchmarks
 
 Run the automated performance benchmark suite:
 
@@ -157,7 +160,7 @@ Run unit-level micro-benchmarks:
 make bench-unit
 ```
 
-### 6. Run the Automated End-to-End Demo & Feature Tests
+### 7. Run Automated Feature Tests
 
 ```bash
 ./scripts/demo.sh

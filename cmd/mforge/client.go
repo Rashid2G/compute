@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 )
 
@@ -128,4 +129,31 @@ func (c *DaemonClient) StopVM(ctx context.Context, id string) (*db.VM, error) {
 
 func (c *DaemonClient) DeleteVM(ctx context.Context, id string) error {
 	return c.doRequest(ctx, http.MethodDelete, "/api/v1/vms/"+id, nil, nil)
+}
+
+func (c *DaemonClient) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, error) {
+	var info network.NetworkInfo
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network", nil, &info)
+	return &info, err
+}
+
+func (c *DaemonClient) GetNetworkAllocations(ctx context.Context) ([]*db.NetworkAllocation, error) {
+	var allocs []*db.NetworkAllocation
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/allocations", nil, &allocs)
+	return allocs, err
+}
+
+func (c *DaemonClient) PruneNetwork(ctx context.Context) ([]string, error) {
+	var res struct {
+		Status     string   `json:"status"`
+		PrunedTAPs []string `json:"pruned_taps"`
+	}
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/network/prune", nil, &res)
+	return res.PrunedTAPs, err
+}
+
+func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, error) {
+	var cfg network.Config
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/config", nil, &cfg)
+	return &cfg, err
 }

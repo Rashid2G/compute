@@ -36,3 +36,14 @@ type VM struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
+
+// NetworkAllocation represents an assigned network lease
+type NetworkAllocation struct {
+	VMID       string    `json:"vm_id"`
+	VMName     string    `json:"vm_name"`
+	Status     VMStatus  `json:"status"`
+	IPAddress  string    `json:"ip_address"`
+	MACAddress string    `json:"mac_address"`
+	TAPDevice  string    `json:"tap_device"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}

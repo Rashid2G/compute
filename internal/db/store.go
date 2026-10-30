@@ -219,3 +219,30 @@ func (s *Store) GetAllocatedIPs(ctx context.Context) (map[string]bool, error) {
 	}
 	return allocated, rows.Err()
 }
+
+// GetNetworkAllocations returns structured allocation information for all VMs with an IP
+func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, name, status, ip_address, mac_address, tap_device, updated_at
+	FROM vms WHERE ip_address != '' ORDER BY ip_address ASC;
+	`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var allocs []*NetworkAllocation
+	for rows.Next() {
+		var a NetworkAllocation
+		var status string
+		if err := rows.Scan(&a.VMID, &a.VMName, &status, &a.IPAddress, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
+			a.Status = VMStatus(status)
+			allocs = append(allocs, &a)
+		}
+	}
+	return allocs, rows.Err()
+}

@@ -107,6 +107,10 @@ echo "    Verifying guest hostname configuration..."
 HOST_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'hostname')
 assert_eq "${VM_ID}" "${HOST_OUT}" "Guest hostname reflects VM ID"
 
+echo "    Verifying guest devpts mount..."
+PTS_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'mount | grep pts')
+assert_contains "${PTS_OUT}" "devpts on /dev/pts" "devpts is properly mounted"
+
 echo "    Verifying standard serverless runtimes and utilities..."
 NODE_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'node -v')
 assert_contains "${NODE_OUT}" "v20" "Node.js runtime is installed"
@@ -132,10 +136,31 @@ NAT_OUT=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'sudo ping -c 2 1.1.1.1')
 assert_contains "${NAT_OUT}" "0% packet loss" "Guest reached public internet (1.1.1.1) via NAT"
 
 # -------------------------------------------------------------------------
-# Test 6: Disk Persistence Across Stop & Restart
+# Test 6: Network CLI Commands & Inspection
 # -------------------------------------------------------------------------
 echo
-echo "--> [Test 6] Testing disk write persistence..."
+echo "--> [Test 6] Testing CLI Network Management Commands..."
+NET_STATUS=$("${MFORGE_BIN}" network status)
+echo "${NET_STATUS}"
+assert_contains "${NET_STATUS}" "Mode:" "network status displays Mode"
+assert_contains "${NET_STATUS}" "Bridge Interface:" "network status displays Bridge"
+assert_contains "${NET_STATUS}" "NAT Masquerading:" "network status displays NAT status"
+
+NET_LIST=$("${MFORGE_BIN}" network list)
+echo "${NET_LIST}"
+assert_contains "${NET_LIST}" "${VM_IP}" "network list includes running VM IP"
+assert_contains "${NET_LIST}" "${VM_ID}" "network list includes running VM ID"
+
+NET_INSPECT=$("${MFORGE_BIN}" network inspect "${VM_ID}")
+echo "${NET_INSPECT}"
+assert_contains "${NET_INSPECT}" "IPv4 Address:  ${VM_IP}" "network inspect shows VM IP"
+assert_contains "${NET_INSPECT}" "Reachable" "network inspect confirms reachability"
+
+# -------------------------------------------------------------------------
+# Test 7: Disk Persistence Across Stop & Restart
+# -------------------------------------------------------------------------
+echo
+echo "--> [Test 7] Testing disk write persistence..."
 UNIQUE_TOKEN="test-token-$(date +%s)-$RANDOM"
 "${MFORGE_BIN}" ssh "${VM_ID}" -- "echo '${UNIQUE_TOKEN}' > /home/mforge/persist_token.txt && sync"
 echo "    Wrote token to /home/mforge/persist_token.txt: ${UNIQUE_TOKEN}"
@@ -152,10 +177,10 @@ READ_TOKEN=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /home/mforge/persist_token.t
 assert_eq "${UNIQUE_TOKEN}" "${READ_TOKEN}" "Persisted disk preserved data across reboot cycle"
 
 # -------------------------------------------------------------------------
-# Test 7: Save State (MicroVM Snapshot & Memory Dump)
+# Test 8: Save State (MicroVM Snapshot & Memory Dump)
 # -------------------------------------------------------------------------
 echo
-echo "--> [Test 7] Testing microVM state snapshot..."
+echo "--> [Test 8] Testing microVM state snapshot..."
 # Write an in-memory marker
 "${MFORGE_BIN}" ssh "${VM_ID}" -- "echo 'in-memory-state' > /home/mforge/mem_marker.txt"
 
@@ -168,10 +193,10 @@ PAUSED_LIST=$("${MFORGE_BIN}" list)
 assert_contains "${PAUSED_LIST}" "paused" "VM listed as paused"
 
 # -------------------------------------------------------------------------
-# Test 8: Instant Resume from State
+# Test 9: Instant Resume from State
 # -------------------------------------------------------------------------
 echo
-echo "--> [Test 8] Resuming microVM from snapshot..."
+echo "--> [Test 9] Resuming microVM from snapshot..."
 RESUME_OUT=$("${MFORGE_BIN}" resume "${VM_ID}")
 echo "${RESUME_OUT}"
 assert_contains "${RESUME_OUT}" "Status=running" "VM resumed to running status"
@@ -181,10 +206,10 @@ MEM_READ=$("${MFORGE_BIN}" ssh "${VM_ID}" -- 'cat /home/mforge/mem_marker.txt')
 assert_eq "in-memory-state" "${MEM_READ}" "In-memory state preserved across snapshot and resume"
 
 # -------------------------------------------------------------------------
-# Test 9: Graceful Stop & Teardown
+# Test 10: Graceful Stop & Teardown
 # -------------------------------------------------------------------------
 echo
-echo "--> [Test 9] Graceful stop and resource cleanup..."
+echo "--> [Test 10] Graceful stop and resource cleanup..."
 "${MFORGE_BIN}" stop "${VM_ID}"
 
 DEL_OUT=$("${MFORGE_BIN}" delete "${VM_ID}")
@@ -197,7 +222,12 @@ if [[ "${FINAL_LIST}" == *"${VM_ID}"* ]]; then
 fi
 echo "[+] PASS: VM record completely removed from database"
 
+# Verify network prune
+PRUNE_OUT=$("${MFORGE_BIN}" network prune)
+echo "${PRUNE_OUT}"
+assert_contains "${PRUNE_OUT}" "Network is clean" "network prune reports clean state"
+
 echo
 echo "=================================================================="
-echo "    ALL 9 FEATURE INTEGRATION TESTS PASSED WITH 100% SUCCESS!     "
+echo "    ALL 10 TEST SUITES PASSED SUCCESSFULLY!                      "
 echo "=================================================================="

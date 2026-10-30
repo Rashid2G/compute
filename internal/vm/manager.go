@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,10 +43,22 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 	}
 }
 
+// GetNetworkManager returns the underlying network manager
+func (m *Manager) GetNetworkManager() *network.Manager {
+	return m.netMgr
+}
+
+// GetStore returns the underlying database store
+func (m *Manager) GetStore() *db.Store {
+	return m.store
+}
+
 type CreateRequest struct {
-	Name     string `json:"name"`
-	VCPUs    int    `json:"vcpus"`
-	MemoryMB int    `json:"memory_mb"`
+	Name       string `json:"name"`
+	VCPUs      int    `json:"vcpus"`
+	MemoryMB   int    `json:"memory_mb"`
+	IPAddress  string `json:"ip_address,omitempty"`
+	MACAddress string `json:"mac_address,omitempty"`
 }
 
 // CreateVM reserves networking, initializes storage, and registers a created VM
@@ -70,15 +83,31 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		memoryMB = 512
 	}
 
-	// Allocate IP & MAC
+	// Fetch current IP allocations
 	usedIPs, err := m.store.GetAllocatedIPs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch used IPs: %w", err)
 	}
 
-	ip, mac, err := m.netMgr.AllocateIP(usedIPs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to allocate IP: %w", err)
+	var ip, mac string
+	if req.IPAddress != "" {
+		if err := m.netMgr.ValidateIP(req.IPAddress, usedIPs); err != nil {
+			return nil, fmt.Errorf("invalid requested IP: %w", err)
+		}
+		ip = req.IPAddress
+		if req.MACAddress != "" {
+			mac = req.MACAddress
+		} else {
+			mac = network.GenerateMAC(net.ParseIP(ip))
+		}
+	} else {
+		ip, mac, err = m.netMgr.AllocateIP(usedIPs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to allocate IP: %w", err)
+		}
+		if req.MACAddress != "" {
+			mac = req.MACAddress
+		}
 	}
 
 	// TAP device name (kernel max 15 chars)
@@ -134,8 +163,8 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 	}
 
 	// 1. Ensure Bridge & TAP
-	if err := m.netMgr.EnsureBridge(ctx); err != nil {
-		return fmt.Errorf("failed to ensure bridge: %w", err)
+	if err := m.netMgr.EnsureNetwork(ctx); err != nil {
+		return fmt.Errorf("failed to ensure network: %w", err)
 	}
 	if err := m.netMgr.SetupTAP(ctx, vm.TAPDevice); err != nil {
 		return fmt.Errorf("failed to setup TAP device: %w", err)
@@ -146,17 +175,27 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 	sockPath := filepath.Join(vmDir, "firecracker.sock")
 	logPath := filepath.Join(vmDir, "firecracker.log")
 
+	// Ensure cleanup on failure rollback
+	var success bool
+	var cmd *exec.Cmd
+	defer func() {
+		if !success {
+			if cmd != nil && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+			_ = os.Remove(sockPath)
+		}
+	}()
+
 	// 3. Launch Firecracker
-	cmd, err := firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, vmID, logPath)
+	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, vmID, logPath)
 	if err != nil {
 		return fmt.Errorf("failed to launch firecracker process: %w", err)
 	}
 
 	// Wait for socket
 	if err := firecracker.WaitForSocket(sockPath, 5*time.Second); err != nil {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
 		return fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
@@ -168,18 +207,17 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 		VCPUCount:  vm.VCPUs,
 		MemSizeMiB: vm.MemoryMB,
 	}); err != nil {
-		cmd.Process.Kill()
 		return fmt.Errorf("failed to set machine config: %w", err)
 	}
 
-	// Boot source with hostname passed into kernel ip configuration
+	// Boot source with exact netmask and gateway
 	gwIP := m.netMgr.GetGatewayIP()
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:255.255.0.0:%s:eth0:off root=/dev/vda rw quiet", vm.IPAddress, gwIP, vm.ID)
+	netmask := m.netMgr.GetNetmask()
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:%s:%s:eth0:off root=/dev/vda rw quiet", vm.IPAddress, gwIP, netmask, vm.ID)
 	if err := fcClient.SetBootSource(ctx, firecracker.BootSource{
 		KernelImagePath: vm.KernelPath,
 		BootArgs:        bootArgs,
 	}); err != nil {
-		cmd.Process.Kill()
 		return fmt.Errorf("failed to set boot source: %w", err)
 	}
 
@@ -190,7 +228,6 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 		IsRootDevice: true,
 		IsReadOnly:   false,
 	}); err != nil {
-		cmd.Process.Kill()
 		return fmt.Errorf("failed to attach root drive: %w", err)
 	}
 
@@ -200,17 +237,16 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 		GuestMAC:    vm.MACAddress,
 		HostDevName: vm.TAPDevice,
 	}); err != nil {
-		cmd.Process.Kill()
 		return fmt.Errorf("failed to attach network interface: %w", err)
 	}
 
 	// Start Instance
 	if err := fcClient.StartInstance(ctx); err != nil {
-		cmd.Process.Kill()
 		return fmt.Errorf("failed to start instance: %w", err)
 	}
 
 	// Update DB record
+	success = true
 	vm.Status = db.StatusRunning
 	vm.PID = cmd.Process.Pid
 	vm.SocketPath = sockPath
@@ -253,6 +289,7 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 		syscall.Kill(vm.PID, syscall.SIGKILL)
 	}
 	os.Remove(vm.SocketPath)
+	_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 
 	vm.Status = db.StatusPaused
 	vm.SnapshotPath = snapPath
@@ -282,9 +319,9 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("memory dump missing at %s: %w", vm.MemFilePath, err)
 	}
 
-	// 1. Ensure Bridge & TAP
-	if err := m.netMgr.EnsureBridge(ctx); err != nil {
-		return fmt.Errorf("failed to ensure bridge: %w", err)
+	// 1. Ensure Network & TAP
+	if err := m.netMgr.EnsureNetwork(ctx); err != nil {
+		return fmt.Errorf("failed to ensure network: %w", err)
 	}
 	if err := m.netMgr.SetupTAP(ctx, vm.TAPDevice); err != nil {
 		return fmt.Errorf("failed to setup TAP device: %w", err)
@@ -295,25 +332,34 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	sockPath := filepath.Join(vmDir, "firecracker.sock")
 	logPath := filepath.Join(vmDir, "firecracker.log")
 
-	cmd, err := firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, vmID, logPath)
+	var success bool
+	var cmd *exec.Cmd
+	defer func() {
+		if !success {
+			if cmd != nil && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+			_ = os.Remove(sockPath)
+		}
+	}()
+
+	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, vmID, logPath)
 	if err != nil {
 		return fmt.Errorf("failed to launch firecracker process: %w", err)
 	}
 
 	if err := firecracker.WaitForSocket(sockPath, 5*time.Second); err != nil {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
 		return fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
 	// 3. Load Snapshot with resume=true
 	fcClient := firecracker.NewClient(sockPath)
 	if err := fcClient.LoadSnapshot(ctx, vm.SnapshotPath, vm.MemFilePath, true); err != nil {
-		cmd.Process.Kill()
 		return fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
+	success = true
 	vm.Status = db.StatusRunning
 	vm.PID = cmd.Process.Pid
 	vm.SocketPath = sockPath
@@ -336,7 +382,7 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	}
 
 	if vm.PID > 0 && isProcessAlive(vm.PID) {
-		// 1. Try graceful sync over SSH if accessible (try non-root mforge user with sudo, then fallback to root)
+		// 1. Try graceful sync over SSH if accessible
 		if vm.IPAddress != "" && vm.SSHKeyPath != "" {
 			syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Second)
 			sshCmd := exec.CommandContext(syncCtx, "ssh",
@@ -404,8 +450,66 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Ensure TAP device is removed from host
+	vm, _ := m.store.GetVM(ctx, vmID)
+	if vm != nil && vm.TAPDevice != "" {
+		_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+	}
+
 	_ = m.storMgr.CleanupVM(vmID)
 	return m.store.DeleteVM(ctx, vmID)
+}
+
+// ReconcileAndPrune synchronizes database records with live system processes,
+// cleans up stale state from dead microVMs, and removes orphaned TAP interfaces.
+func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list VMs for reconciliation: %w", err)
+	}
+
+	activeTAPs := make(map[string]bool)
+	for _, v := range vms {
+		if v.Status == db.StatusRunning {
+			if !isProcessAlive(v.PID) {
+				v.Status = db.StatusStopped
+				v.PID = 0
+				_ = m.store.SaveVM(ctx, v)
+				_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
+			} else {
+				activeTAPs[v.TAPDevice] = true
+			}
+		} else {
+			// Created/stopped VMs do not hold active TAP devices
+			_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
+		}
+	}
+
+	return m.netMgr.PruneOrphanTAPs(ctx, activeTAPs)
+}
+
+// GetNetworkInfo collects runtime state and returns a summary
+func (m *Manager) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, error) {
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var activeTAPs []string
+	var allocatedCount int
+	for _, v := range vms {
+		if v.IPAddress != "" {
+			allocatedCount++
+		}
+		if v.Status == db.StatusRunning && isProcessAlive(v.PID) {
+			activeTAPs = append(activeTAPs, v.TAPDevice)
+		}
+	}
+
+	return m.netMgr.GetNetworkInfo(ctx, activeTAPs, allocatedCount)
 }
 
 // GetVM retrieves VM details
