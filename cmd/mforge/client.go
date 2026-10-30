@@ -157,3 +157,21 @@ func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, e
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/config", nil, &cfg)
 	return &cfg, err
 }
+
+func (c *DaemonClient) ExecVM(ctx context.Context, id string, req vm.ExecRequest) (*vm.ExecResponse, error) {
+	var res vm.ExecResponse
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/exec", req, &res)
+	return &res, err
+}
+
+func (c *DaemonClient) InspectNetwork(ctx context.Context, id string) (*vm.NetworkInspectResult, error) {
+	var res vm.NetworkInspectResult
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/inspect/"+id, nil, &res)
+	return &res, err
+}
+
+func (c *DaemonClient) GetStats(ctx context.Context) (*vm.StatsResult, error) {
+	var stats vm.StatsResult
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/stats", nil, &stats)
+	return &stats, err
+}

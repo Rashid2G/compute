@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -59,6 +60,43 @@ type CreateRequest struct {
 	MemoryMB   int    `json:"memory_mb"`
 	IPAddress  string `json:"ip_address,omitempty"`
 	MACAddress string `json:"mac_address,omitempty"`
+}
+
+type ExecRequest struct {
+	Command string `json:"command"`
+	User    string `json:"user,omitempty"`
+	Timeout int    `json:"timeout_seconds,omitempty"`
+}
+
+type ExecResponse struct {
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+type NetworkInspectResult struct {
+	VMID         string `json:"vm_id"`
+	VMName       string `json:"vm_name"`
+	Status       string `json:"status"`
+	IPAddress    string `json:"ip_address"`
+	MACAddress   string `json:"mac_address"`
+	TAPDevice    string `json:"tap_device"`
+	BridgeName   string `json:"bridge_name"`
+	Gateway      string `json:"gateway"`
+	Reachable    bool   `json:"reachable"`
+	Connectivity string `json:"connectivity"`
+}
+
+type StatsResult struct {
+	TotalVMs       int `json:"total_vms"`
+	RunningVMs     int `json:"running_vms"`
+	SnapshottedVMs int `json:"snapshotted_vms"`
+	StoppedVMs     int `json:"stopped_vms"`
+	CreatedVMs     int `json:"created_vms"`
+	TotalVCPUs     int `json:"total_vcpus"`
+	TotalMemoryMB  int `json:"total_memory_mb"`
+	AllocatedIPs   int `json:"allocated_ips"`
 }
 
 // CreateVM reserves networking, initializes storage, and registers a created VM
@@ -510,6 +548,145 @@ func (m *Manager) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, err
 	}
 
 	return m.netMgr.GetNetworkInfo(ctx, activeTAPs, allocatedCount)
+}
+
+// InspectNetwork checks the live network connectivity and configuration for a VM
+func (m *Manager) InspectNetwork(ctx context.Context, vmID string) (*NetworkInspectResult, error) {
+	vm, err := m.store.GetVM(ctx, vmID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get vm: %w", err)
+	}
+	if vm == nil {
+		return nil, fmt.Errorf("vm not found: %s", vmID)
+	}
+
+	netInfo, _ := m.GetNetworkInfo(ctx)
+	bridgeName := "mft3br0"
+	gwIP := "172.16.0.1"
+	if netInfo != nil {
+		bridgeName = netInfo.BridgeName
+		gwIP = netInfo.GatewayIP
+	}
+
+	reachable := false
+	connStatus := "Not reachable (VM is not running)"
+	if vm.Status == db.StatusRunning && vm.IPAddress != "" {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:22", vm.IPAddress), 1*time.Second)
+		if err == nil {
+			conn.Close()
+			reachable = true
+			connStatus = "Reachable (SSH port 22 OPEN)"
+		} else {
+			connStatus = fmt.Sprintf("Unreachable (SSH port 22 closed or unresponsive: %v)", err)
+		}
+	}
+
+	return &NetworkInspectResult{
+		VMID:         vm.ID,
+		VMName:       vm.Name,
+		Status:       string(vm.Status),
+		IPAddress:    vm.IPAddress,
+		MACAddress:   vm.MACAddress,
+		TAPDevice:    vm.TAPDevice,
+		BridgeName:   bridgeName,
+		Gateway:      gwIP,
+		Reachable:    reachable,
+		Connectivity: connStatus,
+	}, nil
+}
+
+// ExecVM executes a remote command inside a running VM via SSH
+func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*ExecResponse, error) {
+	vm, err := m.store.GetVM(ctx, vmID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get vm: %w", err)
+	}
+	if vm == nil {
+		return nil, fmt.Errorf("vm not found: %s", vmID)
+	}
+	if vm.Status != db.StatusRunning {
+		return nil, fmt.Errorf("vm %s is not running (status: %s)", vmID, vm.Status)
+	}
+	if vm.IPAddress == "" {
+		return nil, fmt.Errorf("vm %s has no allocated IP address", vmID)
+	}
+
+	user := req.User
+	if user == "" {
+		user = "mforge"
+	}
+	timeoutSec := req.Timeout
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	sshArgs := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=5",
+	}
+	if vm.SSHKeyPath != "" {
+		sshArgs = append(sshArgs, "-i", vm.SSHKeyPath)
+	}
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), req.Command)
+
+	cmd := exec.CommandContext(execCtx, "ssh", sshArgs...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	start := time.Now()
+	runErr := cmd.Run()
+	durationMs := time.Since(start).Milliseconds()
+
+	exitCode := 0
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return nil, fmt.Errorf("command execution error: %w", runErr)
+		}
+	}
+
+	return &ExecResponse{
+		Stdout:     stdout.String(),
+		Stderr:     stderr.String(),
+		ExitCode:   exitCode,
+		DurationMs: durationMs,
+	}, nil
+}
+
+// GetStats returns summary metrics for the orchestrator
+func (m *Manager) GetStats(ctx context.Context) (*StatsResult, error) {
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stats := &StatsResult{
+		TotalVMs: len(vms),
+	}
+	for _, v := range vms {
+		stats.TotalVCPUs += v.VCPUs
+		stats.TotalMemoryMB += v.MemoryMB
+		switch v.Status {
+		case db.StatusRunning:
+			stats.RunningVMs++
+		case db.StatusPaused:
+			stats.SnapshottedVMs++
+		case db.StatusStopped:
+			stats.StoppedVMs++
+		case db.StatusCreated:
+			stats.CreatedVMs++
+		}
+		if v.IPAddress != "" {
+			stats.AllocatedIPs++
+		}
+	}
+	return stats, nil
 }
 
 // GetVM retrieves VM details

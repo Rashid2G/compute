@@ -1,0 +1,290 @@
+/* MicroForge Functional Theme */
+:root {
+  --mf-bg: #0d1117;
+  --mf-surface: #161b22;
+  --mf-surface-hover: #1c2128;
+  --mf-surface-active: #21262d;
+  --mf-border: #30363d;
+  --mf-border-muted: #21262d;
+  --mf-text: #e6edf3;
+  --mf-text-muted: #8b949e;
+  --mf-primary: #2f81f7;
+  --mf-success: #238636;
+  --mf-success-light: #3fb950;
+  --mf-warning: #d29922;
+  --mf-danger: #da3633;
+  --mf-info: #58a6ff;
+  --mf-code-bg: #0b0e14;
+}
+
+body {
+  background-color: var(--mf-bg);
+  color: var(--mf-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  min-height: 100vh;
+}
+
+/* Functional typography */
+code, kbd, samp, pre, .font-monospace {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace !important;
+}
+
+/* Navbar */
+.navbar-custom {
+  background-color: var(--mf-surface) !important;
+  border-bottom: 1px solid var(--mf-border);
+}
+
+.brand-badge {
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  padding: 0.2rem 0.45rem;
+  vertical-align: middle;
+}
+
+/* Nav Pills Customization */
+.nav-pills .nav-link {
+  color: var(--mf-text-muted);
+  border-radius: 6px;
+  padding: 0.45rem 0.85rem;
+  font-weight: 500;
+  font-size: 0.9rem;
+  transition: all 0.15s ease;
+}
+
+.nav-pills .nav-link:hover {
+  color: var(--mf-text);
+  background-color: var(--mf-surface-hover);
+}
+
+.nav-pills .nav-link.active {
+  color: #fff;
+  background-color: var(--mf-primary);
+}
+
+/* Cards */
+.card-custom {
+  background-color: var(--mf-surface);
+  border: 1px solid var(--mf-border);
+  border-radius: 6px;
+  margin-bottom: 1rem;
+}
+
+.card-header-custom {
+  background-color: var(--mf-surface);
+  border-bottom: 1px solid var(--mf-border);
+  font-weight: 600;
+  padding: 0.75rem 1rem;
+}
+
+/* Stat Cards */
+.stat-card {
+  background-color: var(--mf-surface);
+  border: 1px solid var(--mf-border);
+  border-radius: 6px;
+  padding: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  transition: border-color 0.15s ease;
+}
+
+.stat-card:hover {
+  border-color: #484f58;
+}
+
+.stat-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.35rem;
+  background-color: var(--mf-surface-hover);
+  border: 1px solid var(--mf-border-muted);
+}
+
+.stat-value {
+  font-size: 1.45rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--mf-text);
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--mf-text-muted);
+  margin-top: 0.2rem;
+}
+
+/* Status Indicators */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.status-dot.running {
+  background-color: var(--mf-success-light);
+  box-shadow: 0 0 6px rgba(63, 185, 80, 0.6);
+}
+
+.status-dot.created {
+  background-color: var(--mf-warning);
+}
+
+.status-dot.paused {
+  background-color: var(--mf-info);
+}
+
+.status-dot.stopped {
+  background-color: var(--mf-text-muted);
+}
+
+/* Tables */
+.table-custom {
+  --bs-table-bg: transparent;
+  --bs-table-color: var(--mf-text);
+  --bs-table-border-color: var(--mf-border);
+  border-collapse: separate;
+  border-spacing: 0;
+  margin-bottom: 0;
+}
+
+.table-custom th {
+  background-color: var(--mf-surface);
+  color: var(--mf-text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--mf-border);
+}
+
+.table-custom td {
+  padding: 0.7rem 0.85rem;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--mf-border-muted);
+}
+
+.table-custom tbody tr:hover td {
+  background-color: var(--mf-surface-hover);
+}
+
+/* Console Container */
+.console-box {
+  background-color: var(--mf-code-bg);
+  border: 1px solid var(--mf-border);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  padding: 1rem;
+  min-height: 280px;
+  max-height: 520px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #c9d1d9;
+}
+
+.console-prompt {
+  color: #58a6ff;
+  font-weight: 600;
+}
+
+.console-stderr {
+  color: #f85149;
+}
+
+.console-stdout {
+  color: #e6edf3;
+}
+
+/* Modals */
+.modal-content-custom {
+  background-color: var(--mf-surface);
+  border: 1px solid var(--mf-border);
+  color: var(--mf-text);
+  border-radius: 8px;
+}
+
+.modal-header-custom {
+  border-bottom: 1px solid var(--mf-border);
+  padding: 0.85rem 1.25rem;
+}
+
+.modal-footer-custom {
+  border-top: 1px solid var(--mf-border);
+  padding: 0.85rem 1.25rem;
+}
+
+/* Form Controls */
+.form-control-custom, .form-select-custom {
+  background-color: var(--mf-bg);
+  border: 1px solid var(--mf-border);
+  color: var(--mf-text);
+  border-radius: 6px;
+}
+
+.form-control-custom:focus, .form-select-custom:focus {
+  background-color: var(--mf-bg);
+  border-color: var(--mf-primary);
+  color: var(--mf-text);
+  box-shadow: 0 0 0 2px rgba(47, 129, 247, 0.3);
+}
+
+/* Copy buttons */
+.btn-copy {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.75rem;
+  color: var(--mf-text-muted);
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 4px;
+}
+
+.btn-copy:hover {
+  color: var(--mf-text);
+  background-color: var(--mf-surface-active);
+  border-color: var(--mf-border);
+}
+
+/* Quick command chips */
+.cmd-chip {
+  font-size: 0.78rem;
+  padding: 0.2rem 0.55rem;
+  background-color: var(--mf-surface-hover);
+  border: 1px solid var(--mf-border);
+  border-radius: 4px;
+  color: var(--mf-text);
+  cursor: pointer;
+  transition: all 0.1s ease;
+  user-select: none;
+}
+
+.cmd-chip:hover {
+  background-color: var(--mf-surface-active);
+  border-color: var(--mf-primary);
+  color: var(--mf-primary);
+}
+
+/* Toast container */
+.toast-container-custom {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 1080;
+}
+
+.toast-custom {
+  background-color: var(--mf-surface);
+  border: 1px solid var(--mf-border);
+  color: var(--mf-text);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}

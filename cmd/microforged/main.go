@@ -16,6 +16,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/db"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 )
 
@@ -125,6 +126,16 @@ func main() {
 
 	// 6. Setup Server
 	server := NewServer(vmMgr)
+
+	// Mount embedded Web GUI
+	daemonTarget := *listenAddr
+	if !strings.HasPrefix(daemonTarget, "unix://") {
+		if guiHandler, err := gui.NewHandler("http://" + daemonTarget); err == nil {
+			server.SetGUIHandler(guiHandler)
+			log.Printf("[microforged] Web GUI mounted and active at http://%s/", daemonTarget)
+		}
+	}
+
 
 	var listener net.Listener
 	if strings.HasPrefix(*listenAddr, "unix://") {

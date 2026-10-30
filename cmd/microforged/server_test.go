@@ -222,3 +222,51 @@ func TestNetworkEndpoints(t *testing.T) {
 		t.Fatalf("expected status ok, got %s", pruneRes.Status)
 	}
 }
+
+
+func TestStatsAndInspectEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	client := server.Client()
+
+	// GET /api/v1/stats
+	resp, err := client.Get(server.URL + "/api/v1/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /stats status = %d", resp.StatusCode)
+	}
+	var stats vm.StatsResult
+	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a VM to inspect
+	createReq := vm.CreateRequest{Name: "test-inspect", VCPUs: 1, MemoryMB: 512}
+	data, _ := json.Marshal(createReq)
+	resp2, err := client.Post(server.URL+"/api/v1/vms", "application/json", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created db.VM
+	_ = json.NewDecoder(resp2.Body).Decode(&created)
+	resp2.Body.Close()
+
+	// GET /api/v1/network/inspect/<id>
+	resp3, err := client.Get(server.URL + "/api/v1/network/inspect/" + created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Fatalf("GET /network/inspect status = %d", resp3.StatusCode)
+	}
+	var inspect vm.NetworkInspectResult
+	if err := json.NewDecoder(resp3.Body).Decode(&inspect); err != nil {
+		t.Fatal(err)
+	}
+	if inspect.VMID != created.ID {
+		t.Fatalf("expected inspect VMID %s, got %s", created.ID, inspect.VMID)
+	}
+}

@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MicroForge - MicroVM Orchestrator</title>
+  
+  <!-- Pre-built UI Library: Bootstrap 5.3 & Bootstrap Icons -->
+  <link rel="stylesheet" href="/static/bootstrap.min.css">
+  <link rel="stylesheet" href="/static/bootstrap-icons.min.css">
+  <!-- Functional Theme Styling -->
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+  <!-- Top Navbar -->
+  <nav class="navbar navbar-expand-lg navbar-custom sticky-top">
+    <div class="container-fluid px-3">
+      <!-- Brand -->
+      <a class="navbar-brand d-flex align-items-center gap-2 me-4" href="#" onclick="switchTab('dashboard'); return false;">
+        <i class="bi bi-cpu text-primary fs-4"></i>
+        <span class="fw-bold tracking-tight text-white">MicroForge</span>
+        <span class="badge bg-secondary brand-badge text-uppercase">v1.0</span>
+      </a>
+
+      <!-- Navigation Pills -->
+      <ul class="nav nav-pills flex-grow-1 mb-2 mb-lg-0" id="main-nav-tabs">
+        <li class="nav-item">
+          <button class="nav-link active" id="nav-dashboard-tab" onclick="switchTab('dashboard')">
+            <i class="bi bi-speedometer2 me-1"></i> Dashboard
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" id="nav-vms-tab" onclick="switchTab('vms')">
+            <i class="bi bi-hdd-stack me-1"></i> MicroVMs 
+            <span class="badge bg-primary-subtle text-primary ms-1" id="nav-vms-count">0</span>
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" id="nav-console-tab" onclick="switchTab('console')">
+            <i class="bi bi-terminal me-1"></i> Web Console
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" id="nav-network-tab" onclick="switchTab('network')">
+            <i class="bi bi-diagram-3 me-1"></i> Network
+          </button>
+        </li>
+        <li class="nav-item">
+          <button class="nav-link" id="nav-config-tab" onclick="switchTab('config')">
+            <i class="bi bi-sliders me-1"></i> Config & CLI
+          </button>
+        </li>
+      </ul>
+
+      <!-- Controls & Actions -->
+      <div class="d-flex align-items-center gap-2">
+        <!-- Daemon Health Indicator -->
+        <div class="d-none d-md-flex align-items-center px-2 py-1 rounded bg-dark border border-secondary-subtle font-monospace text-secondary" style="font-size: 0.8rem;">
+          <span class="status-dot running me-1" id="daemon-health-dot"></span>
+          <span id="daemon-health-text">Checking daemon...</span>
+        </div>
+
+        <!-- Auto-Refresh Toggle Dropdown -->
+        <div class="dropdown">
+          <button class="btn btn-sm btn-outline-secondary dropdown-toggle d-flex align-items-center gap-1" type="button" data-bs-toggle="dropdown" id="btn-refresh-interval">
+            <i class="bi bi-arrow-repeat"></i>
+            <span id="refresh-interval-label">5s</span>
+          </button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><h6 class="dropdown-header">Auto-refresh Rate</h6></li>
+            <li><button class="dropdown-item" onclick="setRefreshInterval(3)">Every 3 seconds</button></li>
+            <li><button class="dropdown-item active" onclick="setRefreshInterval(5)">Every 5 seconds</button></li>
+            <li><button class="dropdown-item" onclick="setRefreshInterval(10)">Every 10 seconds</button></li>
+            <li><hr class="dropdown-divider"></li>
+            <li><button class="dropdown-item" onclick="setRefreshInterval(0)">Pause Auto-refresh</button></li>
+          </ul>
+        </div>
+
+        <!-- Manual Refresh Button -->
+        <button class="btn btn-sm btn-outline-secondary" onclick="manualRefresh()" title="Refresh Now (Ctrl+R)">
+          <i class="bi bi-arrow-clockwise" id="refresh-icon"></i>
+        </button>
+
+        <!-- New VM Button -->
+        <button class="btn btn-sm btn-primary d-flex align-items-center gap-1" onclick="openCreateModal()">
+          <i class="bi bi-plus-lg"></i> Provision VM
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Main Content Container -->
+  <main class="container-fluid px-4 py-3">
+
+    <!-- TAB 1: DASHBOARD -->
+    <div id="tab-dashboard" class="tab-pane active">
+      <!-- Stat Cards Grid -->
+      <div class="row g-3 mb-3">
+        <div class="col-6 col-md-4 col-xl-2">
+          <div class="stat-card">
+            <div class="stat-icon text-primary"><i class="bi bi-hdd-stack"></i></div>
+            <div>
+              <div class="stat-value" id="stat-total-vms">0</div>
+              <div class="stat-label">Total MicroVMs</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+          <div class="stat-card">
+            <div class="stat-icon text-success"><i class="bi bi-play-circle"></i></div>
+            <div>
+              <div class="stat-value" id="stat-running-vms">0</div>
+              <div class="stat-label">Running VMs</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+          <div class="stat-card">
+            <div class="stat-icon text-info"><i class="bi bi-pause-circle"></i></div>
+            <div>
+              <div class="stat-value" id="stat-snapshotted-vms">0</div>
+              <div class="stat-label">Snapshotted</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+          <div class="stat-card">
+            <div class="stat-icon text-secondary"><i class="bi bi-stop-circle"></i></div>
+            <div>
+              <div class="stat-value" id="stat-stopped-vms">0</div>
+              <div class="stat-label">Stopped / Created</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+          <div class="stat-card">
+            <div class="stat-icon text-warning"><i class="bi bi-cpu"></i></div>
+            <div>
+              <div class="stat-value" id="stat-total-vcpus">0</div>
+              <div class="stat-label">Assigned vCPUs</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+          <div class="stat-card">
+            <div class="stat-icon text-danger"><i class="bi bi-memory"></i></div>
+            <div>
+              <div class="stat-value" id="stat-total-mem">0 MB</div>
+              <div class="stat-label">Assigned Memory</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Network Architecture Overview Card -->
+      <div class="card card-custom mb-3">
+        <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+          <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-diagram-3 text-primary"></i>
+            <span>Network Architecture & Host Status</span>
+            <span class="badge bg-secondary font-monospace" id="dash-net-mode">NAT</span>
+          </div>
+          <div class="d-flex gap-2">
+            <button class="btn btn-sm btn-outline-warning d-flex align-items-center gap-1" onclick="pruneNetwork()">
+              <i class="bi bi-brush"></i> Prune Orphaned TAPs
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="switchTab('network')">
+              Detailed Network View <i class="bi bi-chevron-right"></i>
+            </button>
+          </div>
+        </div>
+        <div class="card-body py-2">
+          <div class="row g-3 py-1 font-monospace" style="font-size: 0.85rem;">
+            <div class="col-md-3">
+              <span class="text-secondary d-block">Bridge Interface:</span>
+              <span class="fw-bold text-white" id="dash-bridge-name">mft3br0</span>
+              <span class="badge bg-success ms-1" id="dash-bridge-status">UP</span>
+            </div>
+            <div class="col-md-3">
+              <span class="text-secondary d-block">Bridge IPv4 / Gateway:</span>
+              <span class="text-white" id="dash-bridge-ip">172.16.0.1/16</span>
+            </div>
+            <div class="col-md-3">
+              <span class="text-secondary d-block">Subnet / Netmask:</span>
+              <span class="text-white" id="dash-subnet">172.16.0.0/16</span>
+            </div>
+            <div class="col-md-3">
+              <span class="text-secondary d-block">NAT Masquerading:</span>
+              <span class="badge bg-success" id="dash-nat-status">Active (MASQUERADE)</span>
+            </div>
+          </div>
+          <div class="border-top border-secondary-subtle pt-2 mt-2 d-flex flex-wrap align-items-center gap-2" style="font-size: 0.8rem;">
+            <span class="text-secondary">Active Host TAP Interfaces (<span id="dash-active-taps-count">0</span>):</span>
+            <div id="dash-active-taps-list" class="d-flex flex-wrap gap-1">
+              <span class="text-secondary fst-italic">None active</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick MicroVMs View -->
+      <div class="card card-custom">
+        <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+          <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-hdd-rack text-primary"></i>
+            <span>Active MicroVM Instances</span>
+          </div>
+          <button class="btn btn-sm btn-outline-primary" onclick="switchTab('vms')">
+            Manage All VMs <i class="bi bi-arrow-right"></i>
+          </button>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-custom align-middle">
+            <thead>
+              <tr>
+                <th style="width: 120px;">Status</th>
+                <th>VM Name / ID</th>
+                <th>Specifications</th>
+                <th>IPv4 / MAC Address</th>
+                <th>Host TAP Device</th>
+                <th>Created</th>
+                <th class="text-end" style="width: 220px;">Quick Actions</th>
+              </tr>
+            </thead>
+            <tbody id="dash-vms-table-body">
+              <tr>
+                <td colspan="7" class="text-center py-4 text-secondary">Loading MicroVMs...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: MICROVMS MANAGEMENT -->
+    <div id="tab-vms" class="tab-pane d-none">
+      <div class="card card-custom">
+        <!-- Filter Toolbar -->
+        <div class="card-header card-header-custom">
+          <div class="row g-2 align-items-center">
+            <div class="col-md-4">
+              <div class="input-group input-group-sm">
+                <span class="input-group-text bg-dark border-secondary-subtle text-secondary"><i class="bi bi-search"></i></span>
+                <input type="text" class="form-control form-control-custom" id="vm-search-input" placeholder="Search by name, ID, or IP..." oninput="renderVMsTable()">
+              </div>
+            </div>
+            <div class="col-md-5">
+              <div class="btn-group btn-group-sm" role="group" id="vm-status-filter-group">
+                <button type="button" class="btn btn-outline-secondary active" onclick="setVMFilter('all', this)">All</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="setVMFilter('running', this)">Running</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="setVMFilter('paused', this)">Paused</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="setVMFilter('created', this)">Created</button>
+                <button type="button" class="btn btn-outline-secondary" onclick="setVMFilter('stopped', this)">Stopped</button>
+              </div>
+            </div>
+            <div class="col-md-3 text-end d-flex justify-content-end gap-2">
+              <button class="btn btn-sm btn-outline-secondary" onclick="refreshVMs()" title="Refresh VM list">
+                <i class="bi bi-arrow-clockwise"></i>
+              </button>
+              <button class="btn btn-sm btn-primary d-flex align-items-center gap-1" onclick="openCreateModal()">
+                <i class="bi bi-plus-lg"></i> Provision MicroVM
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Full MicroVMs Table -->
+        <div class="table-responsive">
+          <table class="table table-custom align-middle">
+            <thead>
+              <tr>
+                <th style="width: 130px;">Status</th>
+                <th>VM Identifier</th>
+                <th>VCPUs & RAM</th>
+                <th>Network (IP / MAC)</th>
+                <th>Host TAP Device</th>
+                <th>PID / Socket</th>
+                <th>Created</th>
+                <th class="text-end" style="width: 240px;">Operations</th>
+              </tr>
+            </thead>
+            <tbody id="vms-table-body">
+              <tr>
+                <td colspan="8" class="text-center py-4 text-secondary">Loading MicroVMs...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: WEB CONSOLE / EXEC -->
+    <div id="tab-console" class="tab-pane d-none">
+      <div class="card card-custom">
+        <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+          <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-terminal-fill text-primary"></i>
+            <span>MicroVM Remote Execution Console (SSH)</span>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <span class="text-secondary" style="font-size: 0.8rem;">Target Guest VM:</span>
+            <select class="form-select form-select-sm form-select-custom font-monospace" id="console-vm-select" style="min-width: 200px;" onchange="onConsoleVMChange()">
+              <option value="">-- Select Running VM --</option>
+            </select>
+            <select class="form-select form-select-sm form-select-custom font-monospace" id="console-user-select" style="width: 110px;">
+              <option value="mforge" selected>mforge</option>
+              <option value="root">root</option>
+            </select>
+          </div>
+        </div>
+        <div class="card-body">
+          <!-- Quick Command Presets -->
+          <div class="mb-3 d-flex flex-wrap align-items-center gap-1">
+            <span class="text-secondary me-1" style="font-size: 0.8rem;">Command Presets:</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('uname -a')">uname -a</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('uptime')">uptime</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('ip a')">ip a</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('free -h && df -h')">free -h &amp; df -h</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('node -e \'console.log(\"Node.js:\", process.version)\'')">node -v</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('python3 -c \'import sys; print(\"Python:\", sys.version.split()[0])\'')">python3 -v</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('sudo whoami')">sudo whoami</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('ps aux')">ps aux</span>
+            <span class="cmd-chip font-monospace" onclick="setConsoleCommand('cat /etc/os-release')">os-release</span>
+          </div>
+
+          <!-- Command Input -->
+          <div class="input-group mb-3">
+            <span class="input-group-text bg-dark border-secondary-subtle font-monospace text-primary" id="console-prompt-label">mforge@vm:~$</span>
+            <input type="text" class="form-control form-control-custom font-monospace" id="console-command-input" placeholder="Type a shell command to execute inside guest microVM..." onkeydown="handleConsoleKeyDown(event)">
+            <button class="btn btn-primary d-flex align-items-center gap-1 px-3" id="btn-console-exec" onclick="executeConsoleCommand()">
+              <i class="bi bi-play-fill" id="console-exec-icon"></i>
+              <span id="console-exec-text">Execute</span>
+            </button>
+          </div>
+
+          <!-- Terminal Output Container -->
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <div class="d-flex align-items-center gap-2" style="font-size: 0.8rem;">
+              <span class="text-secondary">Execution Output:</span>
+              <span class="badge bg-secondary font-monospace" id="console-status-badge">Idle</span>
+              <span class="text-secondary font-monospace" id="console-duration-badge"></span>
+            </div>
+            <div class="d-flex gap-2">
+              <button class="btn btn-sm btn-outline-secondary" onclick="copyConsoleOutput()" title="Copy Output">
+                <i class="bi bi-clipboard"></i> Copy
+              </button>
+              <button class="btn btn-sm btn-outline-secondary" onclick="clearConsoleOutput()" title="Clear Output">
+                <i class="bi bi-trash"></i> Clear
+              </button>
+            </div>
+          </div>
+          <div class="console-box" id="console-output-box">Select a running microVM and enter a command to execute. Output will appear here.</div>
+
+          <!-- SSH Helper Tip -->
+          <div class="mt-3 p-2 rounded bg-dark border border-secondary-subtle d-flex justify-content-between align-items-center font-monospace" style="font-size: 0.8rem;">
+            <div class="text-secondary">
+              <i class="bi bi-info-circle text-info me-1"></i>
+              CLI Direct Access: <code class="text-white" id="console-cli-ssh-hint">mforge ssh &lt;vm_id&gt;</code>
+            </div>
+            <button class="btn-copy" onclick="copyText(document.getElementById('console-cli-ssh-hint').innerText)">
+              <i class="bi bi-clipboard"></i> Copy CLI Command
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 4: NETWORK MANAGEMENT -->
+    <div id="tab-network" class="tab-pane d-none">
+      <div class="row g-3">
+        <!-- Network Status Card -->
+        <div class="col-lg-6">
+          <div class="card card-custom h-100">
+            <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-diagram-3-fill text-primary"></i>
+                <span>Network Topology Configuration</span>
+              </div>
+              <button class="btn btn-sm btn-outline-warning d-flex align-items-center gap-1" onclick="pruneNetwork()">
+                <i class="bi bi-brush"></i> Prune Orphaned TAPs
+              </button>
+            </div>
+            <div class="card-body">
+              <table class="table table-custom font-monospace" style="font-size: 0.85rem;">
+                <tbody>
+                  <tr>
+                    <td class="text-secondary" style="width: 200px;">Topology Mode:</td>
+                    <td><span class="badge bg-primary" id="net-detail-mode">NAT</span></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Host Bridge Interface:</td>
+                    <td>
+                      <span class="fw-bold" id="net-detail-bridge">mft3br0</span>
+                      <span class="badge bg-success ms-2" id="net-detail-bridge-state">UP</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Bridge IPv4 / CIDR:</td>
+                    <td class="text-white" id="net-detail-bridge-ip">172.16.0.1/16</td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Internal VM Subnet:</td>
+                    <td class="text-white" id="net-detail-subnet">172.16.0.0/16</td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Default Gateway:</td>
+                    <td class="text-white" id="net-detail-gateway">172.16.0.1 (Netmask: 255.255.0.0)</td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">NAT Masquerading:</td>
+                    <td><span class="badge bg-success" id="net-detail-nat">Active (MASQUERADE)</span></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Physical NIC:</td>
+                    <td class="text-white" id="net-detail-nic">&lt;none&gt;</td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Allocated IP Addresses:</td>
+                    <td><span class="badge bg-info" id="net-detail-allocated">0</span></td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <!-- Active Host TAPs list -->
+              <div class="mt-3">
+                <h6 class="text-secondary text-uppercase" style="font-size: 0.75rem; letter-spacing: 0.05em;">Active Host TAP Devices</h6>
+                <div id="net-active-taps-container" class="d-flex flex-wrap gap-1 font-monospace mt-1">
+                  <span class="text-secondary fst-italic">None active</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Network JSON Config Viewer -->
+        <div class="col-lg-6">
+          <div class="card card-custom h-100">
+            <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-filetype-json text-primary"></i>
+                <span>Active Network JSON Config</span>
+              </div>
+              <button class="btn btn-sm btn-outline-secondary" onclick="copyJSONConfig()">
+                <i class="bi bi-clipboard"></i> Copy JSON
+              </button>
+            </div>
+            <div class="card-body p-0">
+              <pre class="m-0 p-3 font-monospace text-secondary" id="net-json-config" style="background-color: var(--mf-code-bg); max-height: 380px; overflow-y: auto; font-size: 0.8rem;">Loading config...</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Network Allocations / Leases Table -->
+        <div class="col-12">
+          <div class="card card-custom">
+            <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center gap-2">
+                <i class="bi bi-list-check text-primary"></i>
+                <span>Active IP &amp; MAC Allocations</span>
+                <span class="badge bg-secondary font-monospace" id="allocations-count-badge">0 Leases</span>
+              </div>
+              <button class="btn btn-sm btn-outline-secondary" onclick="refreshNetworkAllocations()">
+                <i class="bi bi-arrow-clockwise"></i> Refresh Leases
+              </button>
+            </div>
+            <div class="table-responsive">
+              <table class="table table-custom font-monospace align-middle">
+                <thead>
+                  <tr>
+                    <th>Assigned IPv4</th>
+                    <th>Hardware MAC Address</th>
+                    <th>Host TAP Interface</th>
+                    <th>VM Instance Status</th>
+                    <th>MicroVM ID</th>
+                    <th>MicroVM Name</th>
+                  </tr>
+                </thead>
+                <tbody id="net-allocations-table-body">
+                  <tr>
+                    <td colspan="6" class="text-center py-4 text-secondary">Loading allocations...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 5: CONFIG & CLI DOCUMENTATION -->
+    <div id="tab-config" class="tab-pane d-none">
+      <div class="row g-3">
+        <div class="col-lg-5">
+          <!-- Daemon Status Card -->
+          <div class="card card-custom mb-3">
+            <div class="card-header card-header-custom">
+              <i class="bi bi-server text-primary me-1"></i> MicroForge Daemon Connection
+            </div>
+            <div class="card-body font-monospace" style="font-size: 0.85rem;">
+              <table class="table table-custom mb-0">
+                <tbody>
+                  <tr>
+                    <td class="text-secondary">Daemon API URL:</td>
+                    <td class="text-white" id="config-daemon-url">http://127.0.0.1:18080</td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Health Status:</td>
+                    <td><span class="badge bg-success" id="config-health-status">OK (Healthy)</span></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Response Latency:</td>
+                    <td class="text-white" id="config-latency-ms">~2ms</td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Web GUI Port:</td>
+                    <td class="text-white" id="config-gui-port">:8080</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Feature Checklist Card -->
+          <div class="card card-custom">
+            <div class="card-header card-header-custom">
+              <i class="bi bi-check2-circle text-success me-1"></i> Feature Support Matrix
+            </div>
+            <div class="card-body py-2" style="font-size: 0.85rem;">
+              <ul class="list-unstyled mb-0 d-flex flex-column gap-2">
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> Sub-second MicroVM cold boot lifecycle</li>
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> RAM + CPU Memory state snapshots &amp; fast resume</li>
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> NAT, Bridge, and Enslaved Physical NIC modes</li>
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> Zero Orphan TAP reconciliation &amp; cleanup</li>
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> Interactive SSH shell &amp; remote command runner</li>
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> Pre-installed Alpine rootfs (Node.js, Python 3, OpenSSH)</li>
+                <li><i class="bi bi-check-circle-fill text-success me-2"></i> CLI command <code>mforge gui</code> embedded web server</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-7">
+          <!-- CLI Cheatsheet Card -->
+          <div class="card card-custom">
+            <div class="card-header card-header-custom d-flex justify-content-between align-items-center">
+              <div><i class="bi bi-terminal text-primary me-1"></i> MicroForge CLI Reference</div>
+              <span class="badge bg-secondary font-monospace">mforge --help</span>
+            </div>
+            <div class="card-body p-0">
+              <pre class="m-0 p-3 font-monospace text-secondary" style="background-color: var(--mf-code-bg); font-size: 0.8rem; max-height: 480px; overflow-y: auto;">
+# VM Lifecycle Management:
+mforge create --name runner-1 --vcpus 1 --memory 512
+mforge create --name static-vm --ip 172.16.0.50 --mac 06:00:ac:10:00:32
+mforge run &lt;vm_id&gt;
+mforge list
+mforge stop &lt;vm_id&gt;
+mforge save-state &lt;vm_id&gt;
+mforge resume &lt;vm_id&gt;
+mforge delete &lt;vm_id&gt;
+
+# SSH Direct Access & Remote Execution:
+mforge ssh &lt;vm_id&gt;
+mforge ssh &lt;vm_id&gt; -- node -e 'console.log("Hello Node.js")'
+mforge ssh &lt;vm_id&gt; -- python3 -c 'print("Hello Python")'
+mforge ssh &lt;vm_id&gt; -- sudo whoami
+
+# Network Management:
+mforge network status
+mforge network list
+mforge network inspect &lt;vm_id&gt;
+mforge network prune
+
+# Web GUI Server:
+mforge gui --port 8080 --addr 0.0.0.0
+</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ==================== MODALS ==================== -->
+
+  <!-- 1. Provision MicroVM Modal -->
+  <div class="modal fade" id="modal-create-vm" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content modal-content-custom">
+        <div class="modal-header modal-header-custom">
+          <h5 class="modal-title d-flex align-items-center gap-2">
+            <i class="bi bi-plus-circle text-primary"></i> Provision New MicroVM
+          </h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <form id="form-create-vm" onsubmit="submitCreateVM(event)">
+          <div class="modal-body py-3">
+            <!-- VM Name -->
+            <div class="mb-3">
+              <label class="form-label text-secondary" style="font-size: 0.85rem;">MicroVM Name</label>
+              <input type="text" class="form-control form-control-custom font-monospace" id="create-vm-name" placeholder="e.g. runner-worker-1 (optional, auto-generated if blank)">
+            </div>
+
+            <!-- vCPUs Selection -->
+            <div class="mb-3">
+              <label class="form-label text-secondary" style="font-size: 0.85rem;">vCPU Allocation</label>
+              <div class="btn-group w-100" role="group">
+                <input type="radio" class="btn-check" name="create-vcpus" id="vcpu-1" value="1" checked>
+                <label class="btn btn-outline-secondary" for="vcpu-1">1 vCPU</label>
+                <input type="radio" class="btn-check" name="create-vcpus" id="vcpu-2" value="2">
+                <label class="btn btn-outline-secondary" for="vcpu-2">2 vCPUs</label>
+                <input type="radio" class="btn-check" name="create-vcpus" id="vcpu-4" value="4">
+                <label class="btn btn-outline-secondary" for="vcpu-4">4 vCPUs</label>
+              </div>
+            </div>
+
+            <!-- Memory Selection -->
+            <div class="mb-3">
+              <label class="form-label text-secondary" style="font-size: 0.85rem;">Memory Allocation (RAM)</label>
+              <div class="btn-group w-100" role="group">
+                <input type="radio" class="btn-check" name="create-memory" id="mem-256" value="256">
+                <label class="btn btn-outline-secondary" for="mem-256">256MB</label>
+                <input type="radio" class="btn-check" name="create-memory" id="mem-512" value="512" checked>
+                <label class="btn btn-outline-secondary" for="mem-512">512MB</label>
+                <input type="radio" class="btn-check" name="create-memory" id="mem-1024" value="1024">
+                <label class="btn btn-outline-secondary" for="mem-1024">1024MB</label>
+                <input type="radio" class="btn-check" name="create-memory" id="mem-2048" value="2048">
+                <label class="btn btn-outline-secondary" for="mem-2048">2048MB</label>
+              </div>
+            </div>
+
+            <!-- Static IP (Optional) -->
+            <div class="mb-3">
+              <label class="form-label text-secondary" style="font-size: 0.85rem;">Custom Static IPv4 (Optional)</label>
+              <input type="text" class="form-control form-control-custom font-monospace" id="create-vm-ip" placeholder="e.g. 172.16.0.50 (auto-allocated if blank)">
+              <div class="form-text text-secondary" style="font-size: 0.75rem;">Must be within the subnet <code>172.16.0.0/16</code></div>
+            </div>
+
+            <!-- Static MAC (Optional) -->
+            <div class="mb-3">
+              <label class="form-label text-secondary" style="font-size: 0.85rem;">Custom MAC Address (Optional)</label>
+              <input type="text" class="form-control form-control-custom font-monospace" id="create-vm-mac" placeholder="e.g. 06:00:ac:10:00:32 (auto-generated if blank)">
+            </div>
+
+            <!-- Start immediately checkbox -->
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" id="create-vm-autostart" checked>
+              <label class="form-check-label text-white" for="create-vm-autostart" style="font-size: 0.85rem;">
+                Start MicroVM immediately after provisioning
+              </label>
+            </div>
+          </div>
+          <div class="modal-footer modal-footer-custom">
+            <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-sm btn-primary d-flex align-items-center gap-1" id="btn-submit-create">
+              <i class="bi bi-plus-lg" id="create-spinner-icon"></i>
+              <span>Create VM</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Inspect MicroVM Modal -->
+  <div class="modal fade" id="modal-inspect-vm" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content modal-content-custom">
+        <div class="modal-header modal-header-custom">
+          <h5 class="modal-title d-flex align-items-center gap-2">
+            <i class="bi bi-info-circle text-primary"></i> MicroVM Inspection: <span id="inspect-title-id" class="font-monospace"></span>
+          </h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body py-3 font-monospace" style="font-size: 0.85rem;">
+          <!-- Basic Info -->
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <table class="table table-custom mb-0">
+                <tbody>
+                  <tr>
+                    <td class="text-secondary" style="width: 140px;">Instance ID:</td>
+                    <td class="text-white" id="inspect-id"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">VM Name:</td>
+                    <td class="text-white" id="inspect-name"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Current Status:</td>
+                    <td id="inspect-status"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">VCPUs & RAM:</td>
+                    <td class="text-white" id="inspect-specs"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Process PID:</td>
+                    <td class="text-white" id="inspect-pid"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="col-md-6">
+              <table class="table table-custom mb-0">
+                <tbody>
+                  <tr>
+                    <td class="text-secondary" style="width: 140px;">IPv4 Address:</td>
+                    <td class="text-white" id="inspect-ip"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">MAC Address:</td>
+                    <td class="text-white" id="inspect-mac"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Host TAP Dev:</td>
+                    <td class="text-white" id="inspect-tap"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Default Gateway:</td>
+                    <td class="text-white" id="inspect-gw"></td>
+                  </tr>
+                  <tr>
+                    <td class="text-secondary">Port 22 SSH Probe:</td>
+                    <td id="inspect-connectivity"></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Filesystem & Socket Paths -->
+          <h6 class="text-secondary text-uppercase border-top border-secondary-subtle pt-3" style="font-size: 0.75rem;">Underlying Storage & Sockets</h6>
+          <table class="table table-custom mb-3" style="font-size: 0.8rem;">
+            <tbody>
+              <tr>
+                <td class="text-secondary" style="width: 140px;">Persistent Disk:</td>
+                <td class="text-white" id="inspect-disk"></td>
+              </tr>
+              <tr>
+                <td class="text-secondary">Base Rootfs:</td>
+                <td class="text-white" id="inspect-rootfs"></td>
+              </tr>
+              <tr>
+                <td class="text-secondary">Kernel Image:</td>
+                <td class="text-white" id="inspect-kernel"></td>
+              </tr>
+              <tr>
+                <td class="text-secondary">SSH Private Key:</td>
+                <td class="text-white" id="inspect-sshkey"></td>
+              </tr>
+              <tr>
+                <td class="text-secondary">Firecracker Sock:</td>
+                <td class="text-white" id="inspect-sock"></td>
+              </tr>
+              <tr id="inspect-snap-row" class="d-none">
+                <td class="text-secondary">Snapshot Paths:</td>
+                <td class="text-white" id="inspect-snap"></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <!-- SSH Access Helper -->
+          <div class="p-3 rounded bg-dark border border-secondary-subtle">
+            <h6 class="text-white mb-2" style="font-size: 0.85rem;"><i class="bi bi-key text-warning me-1"></i> SSH Access Commands</h6>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <span class="text-secondary">CLI wrapper:</span>
+              <div class="d-flex align-items-center gap-2">
+                <code class="text-success" id="inspect-cmd-cli">mforge ssh &lt;id&gt;</code>
+                <button class="btn-copy" onclick="copyText(document.getElementById('inspect-cmd-cli').innerText)"><i class="bi bi-clipboard"></i></button>
+              </div>
+            </div>
+            <div class="d-flex justify-content-between align-items-center">
+              <span class="text-secondary">Direct SSH:</span>
+              <div class="d-flex align-items-center gap-2">
+                <code class="text-info" id="inspect-cmd-ssh">ssh -i &lt;key&gt; mforge@&lt;ip&gt;</code>
+                <button class="btn-copy" onclick="copyText(document.getElementById('inspect-cmd-ssh').innerText)"><i class="bi bi-clipboard"></i></button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer modal-footer-custom">
+          <button type="button" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-1" id="btn-inspect-open-console" onclick="openConsoleForCurrentVM()">
+            <i class="bi bi-terminal"></i> Open in Web Console
+          </button>
+          <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Delete Confirmation Modal -->
+  <div class="modal fade" id="modal-delete-vm" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content modal-content-custom">
+        <div class="modal-header modal-header-custom">
+          <h5 class="modal-title d-flex align-items-center gap-2 text-danger">
+            <i class="bi bi-exclamation-triangle-fill"></i> Delete MicroVM Confirmation
+          </h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body py-3">
+          <p>Are you sure you want to permanently delete microVM <strong id="delete-vm-id-text" class="font-monospace text-white"></strong>?</p>
+          <div class="alert alert-danger mb-0" style="font-size: 0.85rem;">
+            <i class="bi bi-info-circle me-1"></i> This action terminates any running Firecracker process, deletes persistent rootfs disks, removes TAP network interfaces, and frees the assigned IP address.
+          </div>
+        </div>
+        <div class="modal-footer modal-footer-custom">
+          <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-sm btn-danger d-flex align-items-center gap-1" id="btn-confirm-delete" onclick="confirmDeleteVM()">
+            <i class="bi bi-trash"></i> Delete MicroVM
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div class="toast-container toast-container-custom">
+    <div id="action-toast" class="toast toast-custom align-items-center border-0" role="alert" aria-live="assertive" aria-atomic="true">
+      <div class="d-flex">
+        <div class="toast-body d-flex align-items-center gap-2" id="toast-message">
+          <i class="bi bi-check-circle text-success fs-5" id="toast-icon"></i>
+          <span id="toast-text">Operation completed</span>
+        </div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pre-built Bootstrap 5 JS Bundle -->
+  <script src="/static/bootstrap.bundle.min.js"></script>
+  <!-- Application Client Logic -->
+  <script src="/app.js"></script>
+</body>
+</html>

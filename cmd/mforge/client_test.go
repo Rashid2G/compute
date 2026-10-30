@@ -108,6 +108,22 @@ func TestDaemonClient(t *testing.T) {
 		})
 	})
 
+	
+	mux.HandleFunc("/api/v1/vms/vm-test1234/exec", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(&vm.ExecResponse{Stdout: "output", ExitCode: 0, DurationMs: 10})
+	})
+
+	mux.HandleFunc("/api/v1/network/inspect/vm-test1234", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(&vm.NetworkInspectResult{VMID: "vm-test1234", Reachable: true, Connectivity: "Reachable"})
+	})
+
+	mux.HandleFunc("/api/v1/stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(&vm.StatsResult{TotalVMs: 1, RunningVMs: 1})
+	})
+
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -177,5 +193,23 @@ func TestDaemonClient(t *testing.T) {
 	pruned, err := client.PruneNetwork(ctx)
 	if err != nil || len(pruned) != 1 || pruned[0] != "mftap-orphan1" {
 		t.Fatalf("PruneNetwork failed: %v, got %+v", err, pruned)
+	}
+
+	// 12. ExecVM
+	execRes, err := client.ExecVM(ctx, "vm-test1234", vm.ExecRequest{Command: "echo test"})
+	if err != nil || execRes.Stdout != "output" {
+		t.Fatalf("ExecVM failed: %v, got %+v", err, execRes)
+	}
+
+	// 13. InspectNetwork
+	ins, err := client.InspectNetwork(ctx, "vm-test1234")
+	if err != nil || !ins.Reachable {
+		t.Fatalf("InspectNetwork failed: %v, got %+v", err, ins)
+	}
+
+	// 14. GetStats
+	stats, err := client.GetStats(ctx)
+	if err != nil || stats.TotalVMs != 1 {
+		t.Fatalf("GetStats failed: %v, got %+v", err, stats)
 	}
 }

@@ -17,6 +17,7 @@ MicroForge is an on-demand microVM provisioning platform powered by AWS Firecrac
   - Full pseudo-terminal (`/dev/pts`) support for interactive terminal sessions.
   - Preloaded serverless tools: Node.js, Python 3, bash, git, curl, jq, iproute2, and bind-tools.
 - **RAM & CPU Snapshots**: Save and resume running microVM memory states in milliseconds.
+- **Web GUI & Remote Console**: Functional dark-mode Web UI with live monitoring, provisioning, lifecycle management, and in-browser SSH remote execution console (`mforge gui`).
 - **RESTful API & CLI**: Complete HTTP API and intuitive `mforge` CLI.
 - **Performance Benchmarking Suite**: Automated latency, throughput, and regression tracking (`mforge-bench`).
 
@@ -82,7 +83,29 @@ sudo ./bin/microforged -network-config config/network.nat.json
 sudo ./bin/microforged -network-mode nic -physical-nic eth0
 ```
 
-### 4. CLI Network Management
+### 4. Web GUI (Browser Interface)
+
+MicroForge includes an embedded, zero-dependency Web UI for monitoring and managing microVMs, network topologies, and remote execution.
+
+Launch the GUI server with the CLI:
+
+```bash
+# Launch GUI on default port 8080 (connects to daemon on 127.0.0.1:18080)
+./bin/mforge gui
+
+# Or customize listen address, port, and daemon endpoint:
+./bin/mforge gui --addr 0.0.0.0 --port 8080 --daemon 127.0.0.1:18080
+```
+
+Once running, navigate to `http://localhost:8080` (or `http://<host-ip>:8080`) in your browser to access:
+- **Dashboard**: Live cluster metrics, resource allocation (vCPUs/RAM), network bridge & NAT state, and auto-refresh intervals.
+- **MicroVM Management**: Searchable, filterable instance table with full lifecycle actions (Run, Stop, Snapshot, Resume, Delete, Inspect).
+- **Web Exec Console**: Direct remote execution inside any running microVM via SSH with preset commands and output terminal.
+- **Network Management**: Live network topology card, active IP/MAC lease allocations, TAP interface list, and one-click orphan TAP pruning.
+
+*Note: The `microforged` daemon also serves the Web GUI directly on its listen port (e.g. `http://<daemon-ip>:18080/`).*
+
+### 5. CLI Network Management
 
 MicroForge CLI provides network management commands:
 
@@ -100,7 +123,7 @@ MicroForge CLI provides network management commands:
 ./bin/mforge network prune
 ```
 
-### 5. VM Lifecycle Management
+### 6. VM Lifecycle Management
 
 ```bash
 # Provision a microVM with automatic IP allocation
@@ -136,7 +159,7 @@ MicroForge CLI provides network management commands:
 ./bin/mforge delete <vm_id>
 ```
 
-### 6. Run Performance Benchmarks
+### 7. Run Performance Benchmarks
 
 Run the automated performance benchmark suite:
 
@@ -160,7 +183,7 @@ Run unit-level micro-benchmarks:
 make bench-unit
 ```
 
-### 7. Run Automated Feature Tests
+### 8. Run Automated Feature Tests
 
 ```bash
 ./scripts/demo.sh
