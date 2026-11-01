@@ -50,16 +50,16 @@ assert_contains "${HEALTH_RESP}" '"status":"ok"' "Daemon reports healthy status"
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 2] Provisioning VM with custom specs (2 vCPUs, 512MB RAM)..."
-CREATE_OUT=$("${COMPUTE_BIN}" create --name feat-test-runner --vcpus 2 --memory 512)
+CREATE_OUT=$("${COMPUTE_BIN}" sandbox create --name feat-test-runner --vcpus 2 --memory 512)
 echo "${CREATE_OUT}"
-assert_contains "${CREATE_OUT}" "VM Created" "CLI reports VM created"
+assert_contains "${CREATE_OUT}" "Sandbox Created" "CLI reports sandbox created"
 
 VM_ID=$(echo "${CREATE_OUT}" | grep -o 'ID=vm-[a-zA-Z0-9]*' | cut -d= -f2)
 VM_IP=$(echo "${CREATE_OUT}" | grep -o 'IP=[0-9.]*' | cut -d= -f2)
 echo "    Allocated VM ID: ${VM_ID}, IP: ${VM_IP}"
 
 # Verify initial status in list
-LIST_OUT=$("${COMPUTE_BIN}" list)
+LIST_OUT=$("${COMPUTE_BIN}" sandbox list)
 assert_contains "${LIST_OUT}" "${VM_ID}" "VM appears in list"
 assert_contains "${LIST_OUT}" "created" "VM initial status is 'created'"
 
@@ -68,9 +68,9 @@ assert_contains "${LIST_OUT}" "created" "VM initial status is 'created'"
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 3] Launching Firecracker microVM..."
-RUN_OUT=$("${COMPUTE_BIN}" run "${VM_ID}")
+RUN_OUT=$("${COMPUTE_BIN}" sandbox start "${VM_ID}")
 echo "${RUN_OUT}"
-assert_contains "${RUN_OUT}" "VM Started" "CLI reports VM started"
+assert_contains "${RUN_OUT}" "Sandbox Started" "CLI reports sandbox started"
 assert_contains "${RUN_OUT}" "Status=running" "Status is updated to running"
 
 VM_PID=$(echo "${RUN_OUT}" | grep -o 'PID=[0-9]*' | cut -d= -f2)
@@ -90,41 +90,41 @@ echo "[+] PASS: Host successfully pinged guest IP ${VM_IP}"
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 4] Testing SSH connectivity and non-root execution..."
-SSH_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'uname -s && nproc')
+SSH_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'uname -s && nproc')
 echo "${SSH_OUT}"
 assert_contains "${SSH_OUT}" "Linux" "Guest OS is Linux"
 assert_contains "${SSH_OUT}" "2" "Guest detects 2 configured vCPUs"
 
 echo "    Verifying default non-root user 'compute'..."
-USER_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'whoami')
+USER_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'whoami')
 assert_eq "compute" "${USER_OUT}" "Default SSH user is non-root compute"
 
 echo "    Verifying passwordless sudo execution..."
-SUDO_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'sudo whoami')
+SUDO_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'sudo whoami')
 assert_eq "root" "${SUDO_OUT}" "compute has passwordless sudo access"
 
 echo "    Verifying guest hostname configuration..."
-HOST_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'hostname')
+HOST_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'hostname')
 assert_eq "${VM_ID}" "${HOST_OUT}" "Guest hostname reflects VM ID"
 
 echo "    Verifying guest devpts mount..."
-PTS_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'mount | grep pts')
+PTS_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'mount | grep pts')
 assert_contains "${PTS_OUT}" "devpts on /dev/pts" "devpts is properly mounted"
 
 echo "    Verifying standard serverless runtimes and utilities..."
-NODE_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'node -v')
+NODE_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'node -v')
 assert_contains "${NODE_OUT}" "v20" "Node.js runtime is installed"
 
-PY_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'python3 --version')
+PY_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'python3 --version')
 assert_contains "${PY_OUT}" "Python 3" "Python 3 runtime is installed"
 
-JQ_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'jq --version')
+JQ_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'jq --version')
 assert_contains "${JQ_OUT}" "jq-" "jq JSON processor is installed"
 
-GIT_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'git --version')
+GIT_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'git --version')
 assert_contains "${GIT_OUT}" "git version" "git is installed"
 
-CURL_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'curl --version')
+CURL_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'curl --version')
 assert_contains "${CURL_OUT}" "curl" "curl is installed"
 
 # -------------------------------------------------------------------------
@@ -132,7 +132,7 @@ assert_contains "${CURL_OUT}" "curl" "curl is installed"
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 5] Testing guest outbound internet access over virtual NAT..."
-NAT_OUT=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'sudo ping -c 2 1.1.1.1')
+NAT_OUT=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'sudo ping -c 2 1.1.1.1')
 assert_contains "${NAT_OUT}" "0% packet loss" "Guest reached public internet (1.1.1.1) via NAT"
 
 # -------------------------------------------------------------------------
@@ -162,18 +162,18 @@ assert_contains "${NET_INSPECT}" "Reachable" "network inspect confirms reachabil
 echo
 echo "--> [Test 7] Testing disk write persistence..."
 UNIQUE_TOKEN="test-token-$(date +%s)-$RANDOM"
-"${COMPUTE_BIN}" ssh "${VM_ID}" -- "echo '${UNIQUE_TOKEN}' > /home/compute/persist_token.txt && sync"
+"${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- "echo '${UNIQUE_TOKEN}' > /home/compute/persist_token.txt && sync"
 echo "    Wrote token to /home/compute/persist_token.txt: ${UNIQUE_TOKEN}"
 
 echo "    Stopping VM..."
-STOP_OUT=$("${COMPUTE_BIN}" stop "${VM_ID}")
-assert_contains "${STOP_OUT}" "Status=stopped" "VM stopped successfully"
+STOP_OUT=$("${COMPUTE_BIN}" sandbox stop "${VM_ID}")
+assert_contains "${STOP_OUT}" "Status=stopped" "Sandbox stopped successfully"
 
 echo "    Restarting VM from persistent disk..."
-"${COMPUTE_BIN}" run "${VM_ID}"
+"${COMPUTE_BIN}" sandbox start "${VM_ID}"
 sleep 1
 
-READ_TOKEN=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'cat /home/compute/persist_token.txt')
+READ_TOKEN=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'cat /home/compute/persist_token.txt')
 assert_eq "${UNIQUE_TOKEN}" "${READ_TOKEN}" "Persisted disk preserved data across reboot cycle"
 
 # -------------------------------------------------------------------------
@@ -182,14 +182,14 @@ assert_eq "${UNIQUE_TOKEN}" "${READ_TOKEN}" "Persisted disk preserved data acros
 echo
 echo "--> [Test 8] Testing microVM state snapshot..."
 # Write an in-memory marker
-"${COMPUTE_BIN}" ssh "${VM_ID}" -- "echo 'in-memory-state' > /home/compute/mem_marker.txt"
+"${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- "echo 'in-memory-state' > /home/compute/mem_marker.txt"
 
-SAVE_OUT=$("${COMPUTE_BIN}" save-state "${VM_ID}")
+SAVE_OUT=$("${COMPUTE_BIN}" sandbox save-state "${VM_ID}")
 echo "${SAVE_OUT}"
 assert_contains "${SAVE_OUT}" "Status=paused" "Status is updated to paused"
 assert_contains "${SAVE_OUT}" "Snapshot=" "Snapshot file created"
 
-PAUSED_LIST=$("${COMPUTE_BIN}" list)
+PAUSED_LIST=$("${COMPUTE_BIN}" sandbox list)
 assert_contains "${PAUSED_LIST}" "paused" "VM listed as paused"
 
 # -------------------------------------------------------------------------
@@ -197,12 +197,12 @@ assert_contains "${PAUSED_LIST}" "paused" "VM listed as paused"
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 9] Resuming microVM from snapshot..."
-RESUME_OUT=$("${COMPUTE_BIN}" resume "${VM_ID}")
+RESUME_OUT=$("${COMPUTE_BIN}" sandbox resume "${VM_ID}")
 echo "${RESUME_OUT}"
 assert_contains "${RESUME_OUT}" "Status=running" "VM resumed to running status"
 
 # Verify in-memory state remained intact
-MEM_READ=$("${COMPUTE_BIN}" ssh "${VM_ID}" -- 'cat /home/compute/mem_marker.txt')
+MEM_READ=$("${COMPUTE_BIN}" sandbox ssh "${VM_ID}" -- 'cat /home/compute/mem_marker.txt')
 assert_eq "in-memory-state" "${MEM_READ}" "In-memory state preserved across snapshot and resume"
 
 # -------------------------------------------------------------------------
@@ -210,12 +210,12 @@ assert_eq "in-memory-state" "${MEM_READ}" "In-memory state preserved across snap
 # -------------------------------------------------------------------------
 echo
 echo "--> [Test 10] Graceful stop and resource cleanup..."
-"${COMPUTE_BIN}" stop "${VM_ID}"
+"${COMPUTE_BIN}" sandbox stop "${VM_ID}"
 
-DEL_OUT=$("${COMPUTE_BIN}" delete "${VM_ID}")
-assert_contains "${DEL_OUT}" "VM Deleted" "VM deletion succeeded"
+DEL_OUT=$("${COMPUTE_BIN}" sandbox delete "${VM_ID}")
+assert_contains "${DEL_OUT}" "Sandbox Deleted" "Sandbox deletion succeeded"
 
-FINAL_LIST=$("${COMPUTE_BIN}" list)
+FINAL_LIST=$("${COMPUTE_BIN}" sandbox list)
 if [[ "${FINAL_LIST}" == *"${VM_ID}"* ]]; then
     echo "[-] FAILED: VM ID ${VM_ID} still present in database after delete!"
     exit 1

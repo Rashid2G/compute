@@ -114,17 +114,17 @@ const ENDPOINTS: Endpoint[] = [
 ];
 
 const CLI_COMMANDS = [
-  { command: 'compute create --name worker-1 --vcpus 2 --memory 1024', label: 'Provision' },
+  { command: 'compute sandbox create --name worker-1 --vcpus 2 --memory 1024', label: 'Provision' },
   { command: 'compute image build --name dev-tools --packages "git,curl,python3"', label: 'Build Image' },
   { command: 'compute image list', label: 'List Images' },
   { command: 'compute template create --vm <vm-id> --name dev-tmpl', label: 'Create Template' },
   { command: 'compute template launch <tmpl-id> --name worker-dev', label: 'Launch Template' },
-  { command: 'compute create --name worker-2 --template dev-tmpl', label: 'Create from Template' },
-  { command: 'compute run <vm-id>', label: 'Start' },
-  { command: 'compute stop <vm-id>', label: 'Stop' },
-  { command: 'compute snapshot <vm-id>', label: 'Snapshot' },
-  { command: 'compute resume <vm-id>', label: 'Resume' },
-  { command: 'compute exec <vm-id> "uname -a"', label: 'Exec' },
+  { command: 'compute sandbox create --name worker-2 --template dev-tmpl', label: 'Create from Template' },
+  { command: 'compute sandbox start <vm-id>', label: 'Start' },
+  { command: 'compute sandbox stop <vm-id>', label: 'Stop' },
+  { command: 'compute sandbox snapshot <vm-id>', label: 'Snapshot' },
+  { command: 'compute sandbox resume <vm-id>', label: 'Resume' },
+  { command: 'compute sandbox exec <vm-id> -- uname -a', label: 'Exec' },
   { command: 'compute gui --addr 0.0.0.0 --port 8080', label: 'Launch UI' },
 ];
 
