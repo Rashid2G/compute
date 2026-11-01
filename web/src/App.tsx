@@ -361,7 +361,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <TriangleAlert className="h-4 w-4" />
                 <span>
-                  The Compute daemon could not be reached. Ensure <code className="font-mono">microforged</code> is running.
+                  The Compute daemon could not be reached. Ensure <code className="font-mono">computed</code> is running.
                 </span>
               </div>
               <Button

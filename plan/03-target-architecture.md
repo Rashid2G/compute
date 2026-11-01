@@ -6,7 +6,7 @@
 CLI / GUI / CI integration
           |
           v
-  microforged control plane
+  computed control plane
   ├─ authentication and authorization
   ├─ worker registry
   ├─ scheduler and queue
@@ -54,7 +54,7 @@ trusted with worker credentials or control-plane administration.
 
 ### Single-host mode
 
-`microforged` and `compute-worker` run on the same machine. This preserves the
+`computed` and `compute-worker` run on the same machine. This preserves the
 current local deployment path while exercising the remote protocol.
 
 ### Private control plane

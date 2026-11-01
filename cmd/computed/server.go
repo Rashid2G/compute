@@ -50,7 +50,7 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 			jobRunner = jobs.NewRunner(vmMgr, cfg.Jobs.MaxConcurrent, time.Duration(cfg.Jobs.BootTimeoutSeconds)*time.Second)
 			sched.SetLocalExecutor(jobRunner)
 			if n, err := vmMgr.GetStore().FailStaleJobs(context.Background()); err == nil && n > 0 {
-				log.Printf("[microforged] marked %d interrupted job(s) as failed", n)
+				log.Printf("[computed] marked %d interrupted job(s) as failed", n)
 			}
 		}
 		sched.Start(context.Background())
@@ -123,7 +123,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	info := version.Get("microforged", "Compute Daemon")
+	info := version.Get("computed", "Compute Daemon")
 	_ = json.NewEncoder(w).Encode(info)
 }
 

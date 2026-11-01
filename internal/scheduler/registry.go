@@ -107,7 +107,6 @@ func (r *WorkerRegistry) ServeStream(ctx context.Context, w *Worker, handle func
 	}
 }
 
-
 // NewWorker constructs an active Worker stream object.
 func NewWorker(id, poolID string, capabilities map[string]interface{}, conn *websocket.Conn) *Worker {
 	return &Worker{

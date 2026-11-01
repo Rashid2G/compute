@@ -106,7 +106,7 @@ if [ "${CHECK_STATUS_ONLY}" = true ]; then
     printf "\n${BLUE}==>${NC} ${BOLD}Checking remote service status on %s...${NC}\n" "${TARGET_HOST}"
     ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
         echo \"=== Systemd Units ===\"
-        systemctl status microforged.service mforge-gui.service --no-pager || true
+        systemctl status computed.service compute-gui.service --no-pager || true
         echo \"\"
         echo \"=== API Health Check ===\"
         curl -s http://127.0.0.1:18080/api/v1/health || echo \"API Unreachable\"
@@ -114,8 +114,8 @@ if [ "${CHECK_STATUS_ONLY}" = true ]; then
         echo \"=== Web GUI Check ===\"
         curl -s -I http://127.0.0.1:8080 2>/dev/null | head -n 1 || echo \"GUI Unreachable\"
         echo \"\"
-        echo \"=== Recent microforged Logs ===\"
-        sudo journalctl -u microforged.service -n 15 --no-pager
+        echo \"=== Recent computed Logs ===\"
+        sudo journalctl -u computed.service -n 15 --no-pager
     '"
     exit 0
 fi
@@ -137,8 +137,8 @@ if [ "${BUILD_LOCAL}" = true ]; then
     printf "${BLUE}==>${NC} ${BOLD}Compiling Go binaries for linux/amd64...${NC}\n"
     mkdir -p "${REPO_ROOT}/bin"
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute" ./cmd/compute
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/mforge" ./cmd/compute
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/microforged" ./cmd/microforged
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute" ./cmd/compute
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/computed" ./cmd/computed
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute-bench" ./cmd/compute-bench
     printf "${GREEN}✓${NC} Successfully built binaries in bin/\n"
 fi
@@ -170,12 +170,13 @@ if [ "${RESTART_ONLY}" = false ]; then
 
     # Ensure executable permissions on remote binaries and scripts
     ssh -o BatchMode=yes "${TARGET_HOST}" "chmod +x '${TARGET_DIR}'/bin/* '${TARGET_DIR}'/scripts/* 2>/dev/null || true"
+    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo install -m 0644 '${TARGET_DIR}/config/systemd/computed.service' /etc/systemd/system/computed.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-gui.service' /etc/systemd/system/compute-gui.service && sudo systemctl daemon-reload && sudo systemctl enable computed.service compute-gui.service >/dev/null"
     printf "${GREEN}✓${NC} Files synchronized successfully.\n"
 fi
 
 # Step 3: Restart services
-printf "${BLUE}==>${NC} ${BOLD}Restarting services on %s (microforged.service, mforge-gui.service)...${NC}\n" "${TARGET_HOST}"
-ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl restart microforged.service mforge-gui.service"
+printf "${BLUE}==>${NC} ${BOLD}Restarting services on %s (computed.service, compute-gui.service)...${NC}\n" "${TARGET_HOST}"
+ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl restart computed.service compute-gui.service"
 
 # Step 4: Health Verification
 printf "${BLUE}==>${NC} ${BOLD}Verifying service health...${NC}\n"
@@ -184,10 +185,10 @@ for i in $(seq 1 12); do
     STATUS_OUT=$(ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
         DAEMON_OK=false
         GUI_OK=false
-        if systemctl is-active --quiet microforged.service && curl -s -f http://127.0.0.1:18080/api/v1/health >/dev/null 2>&1; then
+        if systemctl is-active --quiet computed.service && curl -s -f http://127.0.0.1:18080/api/v1/health >/dev/null 2>&1; then
             DAEMON_OK=true
         fi
-        if systemctl is-active --quiet mforge-gui.service && curl -s -f -I http://127.0.0.1:8080 >/dev/null 2>&1; then
+        if systemctl is-active --quiet compute-gui.service && curl -s -f -I http://127.0.0.1:8080 >/dev/null 2>&1; then
             GUI_OK=true
         fi
         echo \"daemon:\$DAEMON_OK gui:\$GUI_OK\"
@@ -217,6 +218,6 @@ if [ "$HEALTHY" = true ]; then
 else
     printf "${RED}Warning: Health check did not pass within 12 seconds.${NC}\n"
     printf "Checking logs from remote VM:\n"
-    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo journalctl -u microforged.service -u mforge-gui.service -n 25 --no-pager"
+    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo journalctl -u computed.service -u compute-gui.service -n 25 --no-pager"
     exit 1
 fi

@@ -11,7 +11,7 @@ RUN go mod download
 COPY . .
 
 # Build daemon and CLI
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/microforged ./cmd/microforged
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/computed ./cmd/computed
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute ./cmd/compute
 
 # Final minimal runtime image
@@ -21,12 +21,12 @@ RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables
 
 WORKDIR /var/lib/compute
 
-COPY --from=builder /bin/microforged /usr/local/bin/microforged
+COPY --from=builder /bin/computed /usr/local/bin/computed
 COPY --from=builder /bin/compute /usr/local/bin/compute
 
 EXPOSE 18080
 
 VOLUME ["/var/lib/compute"]
 
-ENTRYPOINT ["/usr/local/bin/microforged"]
+ENTRYPOINT ["/usr/local/bin/computed"]
 CMD ["--config", "/etc/compute/daemon.json"]

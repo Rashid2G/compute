@@ -19,7 +19,7 @@ make remote-status
 ```
 
 ## Build & Test Commands
-- `make build`: Compile binaries (`bin/compute`, `bin/microforged`, `bin/compute-bench`)
+- `make build`: Compile binaries (`bin/compute`, `bin/computed`, `bin/compute-bench`)
 - `make test`: Run all unit tests
 - `make test-coverage`: Run tests with coverage profile
 - `make build-ui`: Build React/Vite Web UI frontend to embedded assets

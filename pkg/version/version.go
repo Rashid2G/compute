@@ -26,7 +26,7 @@ var (
 // Info contains structured version information for a Compute component.
 type Info struct {
 	Name        string `json:"name"`                   // e.g. "Compute CLI" or "Compute Daemon"
-	Service     string `json:"service"`                // e.g. "compute" or "microforged"
+	Service     string `json:"service"`                // e.g. "compute" or "computed"
 	Project     string `json:"project"`                // e.g. "Compute"
 	Version     string `json:"version"`                // e.g. "2.0.0"
 	ReleaseName string `json:"release_name,omitempty"` // e.g. "Vulcan"

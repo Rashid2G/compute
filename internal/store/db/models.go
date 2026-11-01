@@ -137,7 +137,6 @@ type Operation struct {
 	UpdatedAt      int64   `json:"updated_at"`
 }
 
-
 // Image represents a bootable OS image or cached OCI container image.
 type Image struct {
 	ID            string  `json:"id"`

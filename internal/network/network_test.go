@@ -272,7 +272,7 @@ func TestResolveGuestIPDHCPFallback(t *testing.T) {
 	runner := &mockRunner{
 		output: map[string]string{
 			"link show": "1: eth0: <BROADCAST>",
-			"udhcpc": "DHCP_IP=192.168.1.99\nDHCP_MASK=255.255.255.0\nDHCP_ROUTER=192.168.1.1\nDHCP_SERVERID=192.168.1.1\nDHCP_LEASE=7200\n",
+			"udhcpc":    "DHCP_IP=192.168.1.99\nDHCP_MASK=255.255.255.0\nDHCP_ROUTER=192.168.1.1\nDHCP_SERVERID=192.168.1.1\nDHCP_LEASE=7200\n",
 		},
 	}
 	cfg := DefaultWiredConfig("eth0", "192.168.1.0/24", "192.168.1.1")

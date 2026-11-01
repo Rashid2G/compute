@@ -19,12 +19,12 @@ import (
 
 // Store provides access to SQLite with a dedicated single-writer pool and multi-connection reader pool.
 type Store struct {
-	writerDB   *sql.DB
-	readerDB   *sql.DB
-	dbPath     string
-	closed     bool
-	mu         sync.Mutex
-	stopCh     chan struct{}
+	writerDB *sql.DB
+	readerDB *sql.DB
+	dbPath   string
+	closed   bool
+	mu       sync.Mutex
+	stopCh   chan struct{}
 }
 
 // OpenOptions configures database connection options.

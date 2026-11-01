@@ -4,11 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/Rashid2G/on-demand-vms/internal/store/db"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
 )
 
 func TestStore_OpenAndMigrations(t *testing.T) {

@@ -456,8 +456,8 @@ Primary surfaces:
 - `internal/master/ws/operations.go`
 - `internal/master/ws/authorization.go`
 - `internal/master/ws/audit.go`
-- `cmd/microforged/server.go`
-- `cmd/microforged/commands.go`
+- `cmd/computed/server.go`
+- `cmd/computed/commands.go`
 - `pkg/api/*.go`
 - `internal/master/auth/*`
 - `internal/master/audit/*`

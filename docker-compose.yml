@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  microforged:
+  computed:
     build:
       context: .
       dockerfile: Dockerfile.daemon
-    container_name: microforged
+    container_name: computed
     ports:
       - "18080:18080"
     volumes:
@@ -26,17 +26,17 @@ services:
       dockerfile: Dockerfile.worker
     container_name: compute-worker
     depends_on:
-      microforged:
+      computed:
         condition: service_healthy
     privileged: true
     volumes:
       - /dev/kvm:/dev/kvm
       - worker-data:/var/lib/compute-worker
     environment:
-      - COMPUTE_CONTROL_PLANE=http://microforged:18080
+      - COMPUTE_CONTROL_PLANE=http://computed:18080
       - COMPUTE_WORKER_NAME=docker-worker-primary
       - COMPUTE_WORKER_POOL=default
-    command: ["run", "--control-plane", "http://microforged:18080", "--name", "docker-worker-primary", "--pool", "default"]
+    command: ["run", "--control-plane", "http://computed:18080", "--name", "docker-worker-primary", "--pool", "default"]
     restart: unless-stopped
 
 volumes:

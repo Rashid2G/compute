@@ -555,7 +555,7 @@ func TestVersionCLI(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"name":"Compute Daemon","service":"microforged","project":"Compute","version":"2.0.0","release_name":"Vulcan","go_version":"go1.23","os":"linux","arch":"amd64"}`)
+		fmt.Fprintln(w, `{"name":"Compute Daemon","service":"computed","project":"Compute","version":"2.0.0","release_name":"Vulcan","go_version":"go1.23","os":"linux","arch":"amd64"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

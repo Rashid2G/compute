@@ -93,7 +93,9 @@ func startMockVsockUDS(t *testing.T, udsPath string) func() {
 
 func TestGuestClient_Lifecycle(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("/tmp", "vsock-*")
-	if err != nil { t.Fatalf("temp dir: %v", err) }
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
 	defer os.RemoveAll(tmpDir)
 	udsPath := filepath.Join(tmpDir, "v.sock")
 

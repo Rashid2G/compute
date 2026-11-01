@@ -935,8 +935,8 @@ func TestVersionEndpoint(t *testing.T) {
 	if got["name"] != "Compute Daemon" {
 		t.Fatalf("name = %v, want Compute Daemon", got["name"])
 	}
-	if got["service"] != "microforged" {
-		t.Fatalf("service = %v, want microforged", got["service"])
+	if got["service"] != "computed" {
+		t.Fatalf("service = %v, want computed", got["service"])
 	}
 }
 

@@ -9,7 +9,7 @@ The repository already contains these foundations:
 | Firecracker runtime | `internal/node/runtime/firecracker`, `internal/firecracker` | Existing |
 | VM lifecycle | `internal/vm/manager.go` | Existing; needs remote orchestration |
 | Guest command agent | `cmd/compute-agent/main.go` | Existing; this is the guest agent |
-| REST daemon | `cmd/microforged/server.go` | Existing; needs control-plane APIs |
+| REST daemon | `cmd/computed/server.go` | Existing; needs control-plane APIs |
 | WebSocket RPC | `internal/master/ws`, `pkg/api/types.go` | Existing; needs worker protocol |
 | Auth and API keys | `internal/master/auth`, `api_keys` table | Existing; needs scopes and worker identity |
 | PKI | `internal/master/pki` | Existing; needs worker certificate lifecycle |

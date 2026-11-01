@@ -1,0 +1,15 @@
+[Unit]
+Description=Compute Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/rashid/on-demand-vms
+ExecStart=/home/rashid/on-demand-vms/bin/computed -listen 0.0.0.0:18080
+Restart=always
+RestartSec=3s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
