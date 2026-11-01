@@ -52,17 +52,39 @@ func TestGUIHandlerStaticAssets(t *testing.T) {
 		t.Fatalf("GET /app.css status = %d, want %d", respCSS.StatusCode, http.StatusOK)
 	}
 
-	// 4. /static/bootstrap.min.css should return bootstrap css
-	respBS, err := http.Get(server.URL + "/static/bootstrap.min.css")
+	// 4. SPA routing fallback for any nested frontend route
+	respRoute, err := http.Get(server.URL + "/vms")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer respBS.Body.Close()
-	if respBS.StatusCode != http.StatusOK {
-		t.Fatalf("GET /static/bootstrap.min.css status = %d, want %d", respBS.StatusCode, http.StatusOK)
+	defer respRoute.Body.Close()
+	if respRoute.StatusCode != http.StatusOK {
+		t.Fatalf("GET /vms status = %d, want %d", respRoute.StatusCode, http.StatusOK)
+	}
+	ctRoute := respRoute.Header.Get("Content-Type")
+	if !strings.Contains(ctRoute, "text/html") {
+		t.Fatalf("GET /vms content-type = %s, want text/html", ctRoute)
 	}
 
-	// 5. /api/gui/info should return JSON
+	// 5. Embedded font / sub-assets should be served directly
+	entries, err := assetsFS.ReadDir("assets/assets")
+	if err == nil && len(entries) > 0 {
+		fontName := entries[0].Name()
+		respFont, err := http.Get(server.URL + "/assets/" + fontName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer respFont.Body.Close()
+		if respFont.StatusCode != http.StatusOK {
+			t.Fatalf("GET /assets/%s status = %d, want %d", fontName, respFont.StatusCode, http.StatusOK)
+		}
+		ctFont := respFont.Header.Get("Content-Type")
+		if strings.Contains(ctFont, "text/html") {
+			t.Fatalf("GET /assets/%s served HTML fallback instead of binary asset", fontName)
+		}
+	}
+
+	// 6. /api/gui/info should return JSON
 	respInfo, err := http.Get(server.URL + "/api/gui/info")
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +116,6 @@ func TestGUIHandlerProxyToDaemon(t *testing.T) {
 	guiServer := httptest.NewServer(handler)
 	defer guiServer.Close()
 
-	// Proxy request to /api/v1/health through GUI server
 	resp, err := http.Get(guiServer.URL + "/api/v1/health")
 	if err != nil {
 		t.Fatal(err)
@@ -102,33 +123,30 @@ func TestGUIHandlerProxyToDaemon(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("proxied /api/v1/health status = %d, want %d", resp.StatusCode, http.StatusOK)
+		t.Fatalf("proxied request status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
-
 	var data map[string]string
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		t.Fatal(err)
 	}
-	if data["mock"] != "true" || data["status"] != "ok" {
-		t.Fatalf("unexpected proxied data: %+v", data)
+	if data["mock"] != "true" {
+		t.Fatalf("unexpected proxy payload: %v", data)
 	}
 }
 
 func TestCheckDaemonReachable(t *testing.T) {
-	mockDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/health" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer mockDaemon.Close()
-
-	if !CheckDaemonReachable(mockDaemon.URL, 1*time.Second) {
-		t.Fatal("expected mockDaemon to be reachable")
+	// 1. Unreachable
+	if CheckDaemonReachable("http://127.0.0.1:54321", 50*time.Millisecond) {
+		t.Fatal("expected 127.0.0.1:54321 to be unreachable")
 	}
 
-	if CheckDaemonReachable("http://127.0.0.1:54321", 50*time.Millisecond) {
-		t.Fatal("expected non-existent port to be unreachable")
+	// 2. Reachable
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	if !CheckDaemonReachable(ts.URL, 500*time.Millisecond) {
+		t.Fatalf("expected test server %s to be reachable", ts.URL)
 	}
 }

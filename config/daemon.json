@@ -1,0 +1,53 @@
+{
+  "server": {
+    "listen": "0.0.0.0:18080",
+    "db_path": "/var/lib/compute/data/compute.db",
+    "firecracker_bin": "/usr/local/bin/firecracker"
+  },
+  "network": {
+    "mode": "nat",
+    "bridge_name": "mft3br0",
+    "bridge_ip": "172.16.0.1/16",
+    "subnet": "172.16.0.0/16",
+    "gateway_ip": "172.16.0.1"
+  },
+  "defaults": {
+    "vcpus": 1,
+    "memory_mb": 2048,
+    "disk_size_mb": 51200,
+    "image": "ubuntu-24"
+  },
+  "images": {
+    "images_dir": "/var/lib/compute/images",
+    "vms_dir": "/var/lib/compute/vms",
+    "default_kernel": "vmlinux",
+    "default_rootfs": "ubuntu-24.04.ext4",
+    "ssh_key_path": "/var/lib/compute/images/ssh/id_ed25519",
+    "available": [
+      {
+        "name": "ubuntu-24",
+        "kernel": "vmlinux",
+        "rootfs": "ubuntu-24.04.ext4",
+        "description": "Standard Ubuntu 24.04 LTS (Noble Numbat) with Node.js, Python 3, and SSH"
+      },
+      {
+        "name": "alpine",
+        "kernel": "vmlinux",
+        "rootfs": "alpine-3.20.ext4",
+        "description": "Alpine Linux 3.20 (minimal, SSH enabled)"
+      }
+    ]
+  },
+  "resources": {
+    "max_running_vms": 0,
+    "max_total_vcpus": 0,
+    "max_total_memory_mb": 0,
+    "max_total_disk_mb": 0,
+    "min_free_disk_space_mb": 512
+  },
+  "jobs": {
+    "local_execution": true,
+    "max_concurrent": 2,
+    "boot_timeout_seconds": 90
+  }
+}

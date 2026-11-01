@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
@@ -19,7 +20,7 @@ func BenchmarkServerHealth(b *testing.B) {
 	netMgr, _ := network.NewManager(network.Config{BridgeName: "br0", BridgeIP: "172.16.0.1/16", SubnetCIDR: "172.16.0.0/16"}, nil)
 	storMgr, _ := storage.NewManager(storage.Config{BaseImagesDir: tmpDir, VMsDir: filepath.Join(tmpDir, "vms")})
 	vmMgr := vm.NewManager(vm.Config{}, store, netMgr, storMgr)
-	srv := NewServer(vmMgr)
+	srv := NewServer(vmMgr, config.DefaultConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 
@@ -40,7 +41,7 @@ func BenchmarkServerListVMs(b *testing.B) {
 	netMgr, _ := network.NewManager(network.Config{BridgeName: "br0", BridgeIP: "172.16.0.1/16", SubnetCIDR: "172.16.0.0/16"}, nil)
 	storMgr, _ := storage.NewManager(storage.Config{BaseImagesDir: tmpDir, VMsDir: filepath.Join(tmpDir, "vms")})
 	vmMgr := vm.NewManager(vm.Config{}, store, netMgr, storMgr)
-	srv := NewServer(vmMgr)
+	srv := NewServer(vmMgr, config.DefaultConfig())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/vms", nil)
 

@@ -1,8 +1,8 @@
 # Binaries
 bin/
-/mforge
+/compute
 /microforged
-/mforge-bench
+/compute-bench
 
 # Temporary files & sockets
 *.sock

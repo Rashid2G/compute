@@ -13,13 +13,73 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Rashid2G/on-demand-vms/pkg/version"
 )
 
 //go:embed assets
 var assetsFS embed.FS
 
+// NewStaticAssetHandler creates an http.Handler that serves embedded web GUI assets and SPA fallback
+// without reverse-proxying API requests (used when mounted directly on the daemon server).
+func NewStaticAssetHandler() (http.Handler, error) {
+	subFS, err := fs.Sub(assetsFS, "assets")
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract embedded assets filesystem: %w", err)
+	}
+
+	fileServer := http.FileServer(http.FS(subFS))
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/api/gui/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"daemon_url": "self",
+			"version":    version.Version,
+		})
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Never serve SPA index.html for unmatched API routes
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "route not found"})
+			return
+		}
+
+		path := strings.TrimPrefix(r.URL.Path, "/")
+		if path == "" || path == "index.html" {
+			indexContent, readErr := fs.ReadFile(subFS, "index.html")
+			if readErr != nil {
+				http.Error(w, "index.html not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(indexContent)
+			return
+		}
+
+		if f, openErr := subFS.Open(path); openErr == nil {
+			_ = f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		indexContent, readErr := fs.ReadFile(subFS, "index.html")
+		if readErr == nil {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write(indexContent)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	return mux, nil
+}
+
 // NewHandler creates an http.Handler that serves the embedded web GUI assets
-// and reverse-proxies /api/ requests to the running MicroForge daemon.
+// and reverse-proxies /api/ requests to the running Compute daemon.
 func NewHandler(daemonURL string) (http.Handler, error) {
 	if daemonURL == "" {
 		daemonURL = "http://127.0.0.1:18080"
@@ -52,8 +112,15 @@ func NewHandler(daemonURL string) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 
-	// 1. API Reverse Proxy
+	// 1. API Reverse Proxy with loop protection
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Compute-Proxy-Loop") != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusLoopDetected)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "proxy loop detected"})
+			return
+		}
+		r.Header.Set("X-Compute-Proxy-Loop", "1")
 		r.Host = targetURL.Host
 		proxy.ServeHTTP(w, r)
 	})
@@ -63,12 +130,20 @@ func NewHandler(daemonURL string) (http.Handler, error) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"daemon_url": daemonURL,
-			"version":    "1.0",
+			"version":    version.Version,
 		})
 	})
 
 	// 3. Static File Server & SPA Fallback
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Never serve SPA index.html for unmatched API routes
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "route not found"})
+			return
+		}
+
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" || path == "index.html" {
 			indexContent, readErr := fs.ReadFile(subFS, "index.html")
@@ -122,7 +197,7 @@ func StartServer(ctx context.Context, listenAddr, daemonURL string) error {
 	actualAddr := listener.Addr().String()
 
 	fmt.Println("==================================================")
-	fmt.Println("          MICROFORGE WEB GUI SERVER               ")
+	fmt.Println("          COMPUTE WEB GUI SERVER               ")
 	fmt.Println("==================================================")
 	fmt.Printf("Daemon Target: %s\n", daemonURL)
 	fmt.Printf("GUI Server:    http://%s\n", actualAddr)
@@ -146,11 +221,11 @@ func StartServer(ctx context.Context, listenAddr, daemonURL string) error {
 
 	select {
 	case <-ctx.Done():
-		log.Println("[mforge-gui] Shutting down GUI server...")
+		log.Println("[compute-gui] Shutting down GUI server...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
-		log.Println("[mforge-gui] GUI server stopped.")
+		log.Println("[compute-gui] GUI server stopped.")
 		return nil
 	case err := <-errChan:
 		return err

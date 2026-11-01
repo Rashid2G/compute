@@ -2,6 +2,7 @@
   "mode": "nic",
   "bridge_name": "mft3br0",
   "physical_nic": "eth0",
-  "bridge_ip": "172.16.0.1/16",
-  "subnet": "172.16.0.0/16"
+  "bridge_ip": "192.168.1.2/24",
+  "subnet": "192.168.1.0/24",
+  "gateway_ip": "192.168.1.1"
 }

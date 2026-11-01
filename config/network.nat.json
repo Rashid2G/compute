@@ -2,5 +2,6 @@
   "mode": "nat",
   "bridge_name": "mft3br0",
   "bridge_ip": "172.16.0.1/16",
-  "subnet": "172.16.0.0/16"
+  "subnet": "172.16.0.0/16",
+  "gateway_ip": "172.16.0.1"
 }
