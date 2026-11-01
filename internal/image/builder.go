@@ -21,7 +21,7 @@ type BuildRequest struct {
 	Description string   `json:"description,omitempty"`
 	BaseImage   string   `json:"base_image,omitempty"` // defaults to "ubuntu-24.04"
 	Packages    []string `json:"packages"`
-	SizeMB      int      `json:"size_mb,omitempty"`    // defaults to 2048 MB
+	SizeMB      int      `json:"size_mb,omitempty"` // defaults to 2048 MB
 }
 
 // BuildFunc defines the build runner function signature
@@ -258,7 +258,9 @@ RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
 	tarCmd := exec.CommandContext(ctx, "tar", "-x", "-C", workDir)
 
 	pipeR, pipeW, err := os.Pipe()
-	if err != nil { return fmt.Errorf("pipe failed: %w", err) }
+	if err != nil {
+		return fmt.Errorf("pipe failed: %w", err)
+	}
 	exportCmd.Stdout = pipeW
 	tarCmd.Stdin = pipeR
 

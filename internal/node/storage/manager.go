@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	ErrVolumeNotFound     = errors.New("volume not found")
+	ErrVolumeNotFound      = errors.New("volume not found")
 	ErrReflinkNotSupported = errors.New("reflink (FICLONE) not supported on this filesystem")
 )
 

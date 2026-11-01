@@ -11,7 +11,7 @@ Compute is a distributed compute platform for orchestrating lightning-fast Firec
    - Run distributed tasks with one command: `compute job run --image <img|env> --files <dir> -- <command>`.
    - Real-time live log streaming and automated workspace synchronization.
 
-2. **Central Daemon Relay (`microforged`)**
+2. **Central Daemon Relay (`computed`)**
    - Central control plane managing user state, worker registry, quotas, and scheduling.
    - Workers establish **outbound-only** WebSocket/mTLS streams (`/api/v1/worker/connect`), traversing NATs and corporate firewalls with **zero open inbound ports**.
    - Multiplexes job dispatch, log streaming, and relayed SSH/terminal tunnels into worker microVMs.
@@ -32,7 +32,7 @@ Compute is a distributed compute platform for orchestrating lightning-fast Firec
 ### 1. Launch Central Daemon & Worker via Docker Compose
 
 ```bash
-# Start both microforged and compute-worker
+# Start both computed and compute-worker
 docker compose up -d
 
 # Check cluster health

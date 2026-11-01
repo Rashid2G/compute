@@ -4,7 +4,7 @@ import "fmt"
 
 // Standard typed error codes
 const (
-	ErrCodeUnauthenticated = "unauthenticated"
+	ErrCodeUnauthenticated  = "unauthenticated"
 	ErrCodePermissionDenied = "permission_denied"
 	ErrCodeNotFound         = "not_found"
 	ErrCodeQuotaExceeded    = "quota_exceeded"

@@ -125,7 +125,7 @@ complete -F _compute_completion compute
 
 const zshCompletionScript = `#compdef compute
 
-_mforge() {
+_compute() {
     local -a commands
     commands=(
         'sandbox:Manage isolated compute sandboxes'
@@ -160,7 +160,7 @@ _mforge() {
     fi
 }
 
-_mforge "$@"
+_compute "$@"
 `
 
 const fishCompletionScript = `# fish completion for compute
@@ -215,11 +215,11 @@ func installShellCompletion() {
 	switch shell {
 	case "zsh":
 		dir := filepath.Join(home, ".zfunc")
-		if err := writeCompletionFile(dir, "_mforge", zshCompletionScript); err != nil {
+		if err := writeCompletionFile(dir, "_compute", zshCompletionScript); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to install zsh completion: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Zsh completion installed to %s\n", filepath.Join(dir, "_mforge"))
+		fmt.Printf("Zsh completion installed to %s\n", filepath.Join(dir, "_compute"))
 	case "fish":
 		dir := filepath.Join(home, ".config", "fish", "completions")
 		if err := writeCompletionFile(dir, "compute.fish", fishCompletionScript); err != nil {

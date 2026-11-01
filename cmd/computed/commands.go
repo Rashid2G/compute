@@ -84,9 +84,9 @@ func runInit(args []string) {
 	_ = logger.Close()
 	fmt.Printf("✓ Audit database initialized (%s)\n", auditDBPath)
 
-	fmt.Println("\nMicroForge initialization complete!")
+	fmt.Println("\nCompute initialization complete!")
 	fmt.Println("Create the initial administrator account with:")
-	fmt.Printf("  microforged admin user create --username admin --email admin@example.com --password <secret> --data-dir %s\n", *dataDir)
+	fmt.Printf("  computed admin user create --username admin --email admin@example.com --password <secret> --data-dir %s\n", *dataDir)
 }
 
 func runAdmin(args []string) {
@@ -109,7 +109,7 @@ func runAdmin(args []string) {
 }
 
 func printAdminUsage() {
-	fmt.Println("Usage: microforged admin <command> [arguments]")
+	fmt.Println("Usage: computed admin <command> [arguments]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  user create     Create a new user or administrator account")
 	fmt.Println("  apikey create   Generate an API key for a user")
@@ -118,7 +118,7 @@ func printAdminUsage() {
 
 func runAdminUser(args []string) {
 	if len(args) < 1 || args[0] != "create" {
-		fmt.Println("Usage: microforged admin user create --username <name> --email <email> --password <pass> [--role admin|user] [--data-dir <path>]")
+		fmt.Println("Usage: computed admin user create --username <name> --email <email> --password <pass> [--role admin|user] [--data-dir <path>]")
 		os.Exit(1)
 	}
 
@@ -196,7 +196,7 @@ func runAdminUser(args []string) {
 
 func runAdminAPIKey(args []string) {
 	if len(args) < 1 || args[0] != "create" {
-		fmt.Println("Usage: microforged admin apikey create --username <name> --name <key-name> [--data-dir <path>]")
+		fmt.Println("Usage: computed admin apikey create --username <name> --name <key-name> [--data-dir <path>]")
 		os.Exit(1)
 	}
 
@@ -250,7 +250,7 @@ func runAdminAPIKey(args []string) {
 
 func runAdminAudit(args []string) {
 	if len(args) < 1 || args[0] != "verify" {
-		fmt.Println("Usage: microforged admin audit verify [--data-dir <path>]")
+		fmt.Println("Usage: computed admin audit verify [--data-dir <path>]")
 		os.Exit(1)
 	}
 
@@ -290,7 +290,7 @@ func runVersion(args []string) {
 	fs.BoolVar(asJSON, "j", false, "Print version details as JSON")
 	_ = fs.Parse(args)
 
-	info := version.Get("microforged", "Compute Daemon")
+	info := version.Get("computed", "Compute Daemon")
 	if *short {
 		fmt.Println(info.Version)
 		return

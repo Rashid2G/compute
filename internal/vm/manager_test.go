@@ -24,7 +24,6 @@ func readDiskPrefix(path string, n int) string {
 	return string(buf[:nRead])
 }
 
-
 type testRunner struct{ calls [][]string }
 
 func (r *testRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -244,7 +243,6 @@ func TestReconcileAndPrune(t *testing.T) {
 		t.Fatalf("expected dead VM to be marked stopped, got: %+v", loaded)
 	}
 }
-
 
 func TestInspectNetworkAndStats(t *testing.T) {
 	ctx := context.Background()

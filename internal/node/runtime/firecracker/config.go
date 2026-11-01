@@ -6,12 +6,12 @@ import (
 
 // VMConfig defines the single-shot Firecracker JSON configuration file schema.
 type VMConfig struct {
-	BootSource        BootSource        `json:"boot-source"`
-	Drives            []Drive           `json:"drives"`
-	MachineConfig     MachineConfig     `json:"machine-config"`
+	BootSource        BootSource         `json:"boot-source"`
+	Drives            []Drive            `json:"drives"`
+	MachineConfig     MachineConfig      `json:"machine-config"`
 	NetworkInterfaces []NetworkInterface `json:"network-interfaces,omitempty"`
-	Vsock             *VsockConfig      `json:"vsock,omitempty"`
-	Balloon           *BalloonConfig    `json:"balloon,omitempty"`
+	Vsock             *VsockConfig       `json:"vsock,omitempty"`
+	Balloon           *BalloonConfig     `json:"balloon,omitempty"`
 }
 
 type BootSource struct {
@@ -33,9 +33,9 @@ type RateLimiter struct {
 }
 
 type TokenBucket struct {
-	Size       int64 `json:"size"`
+	Size         int64 `json:"size"`
 	OneTimeBurst int64 `json:"one_time_burst,omitempty"`
-	RefillTime int64 `json:"refill_time"` // milliseconds
+	RefillTime   int64 `json:"refill_time"` // milliseconds
 }
 
 type MachineConfig struct {

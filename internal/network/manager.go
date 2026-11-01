@@ -38,10 +38,10 @@ const (
 type Config struct {
 	Mode          Mode     `json:"mode"`
 	BridgeName    string   `json:"bridge_name"`
-	BridgeIP      string   `json:"bridge_ip"`               // e.g. "192.168.1.2/24"
-	SubnetCIDR    string   `json:"subnet"`                  // e.g. "192.168.1.0/24"
-	PhysicalNIC   string   `json:"physical_nic,omitempty"`  // e.g. "eth0"
-	GatewayIP     string   `json:"gateway_ip,omitempty"`    // e.g. "192.168.1.1" (main router)
+	BridgeIP      string   `json:"bridge_ip"`                // e.g. "192.168.1.2/24"
+	SubnetCIDR    string   `json:"subnet"`                   // e.g. "192.168.1.0/24"
+	PhysicalNIC   string   `json:"physical_nic,omitempty"`   // e.g. "eth0"
+	GatewayIP     string   `json:"gateway_ip,omitempty"`     // e.g. "192.168.1.1" (main router)
 	LinkedBridges []string `json:"linked_bridges,omitempty"` // Explicit list of bridges to link
 }
 

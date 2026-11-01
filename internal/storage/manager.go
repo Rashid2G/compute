@@ -430,14 +430,14 @@ func embedSSHKeyViaMount(diskPath string, keysContent string) error {
 	_ = os.WriteFile(filepath.Join(rootSSH, "authorized_keys"), []byte(keysContent), 0600)
 
 	// Inject into /home/compute/.ssh/authorized_keys
-	mforgeSSH := filepath.Join(tmpMount, "home", "compute", ".ssh")
-	_ = os.MkdirAll(mforgeSSH, 0700)
-	mforgeAuthKeys := filepath.Join(mforgeSSH, "authorized_keys")
-	_ = os.WriteFile(mforgeAuthKeys, []byte(keysContent), 0600)
+	computeSSH := filepath.Join(tmpMount, "home", "compute", ".ssh")
+	_ = os.MkdirAll(computeSSH, 0700)
+	computeAuthKeys := filepath.Join(computeSSH, "authorized_keys")
+	_ = os.WriteFile(computeAuthKeys, []byte(keysContent), 0600)
 
 	// Chown to UID 1000 GID 1000 (compute)
-	_ = os.Chown(mforgeSSH, 1000, 1000)
-	_ = os.Chown(mforgeAuthKeys, 1000, 1000)
+	_ = os.Chown(computeSSH, 1000, 1000)
+	_ = os.Chown(computeAuthKeys, 1000, 1000)
 
 	return nil
 }

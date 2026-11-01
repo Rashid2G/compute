@@ -47,7 +47,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		info := version.Get("microforged", "Compute Daemon")
+		info := version.Get("computed", "Compute Daemon")
 		fmt.Printf("%s\n\n", info.String())
 		fmt.Print(info.Detailed(""))
 		fmt.Println()
@@ -123,21 +123,21 @@ func main() {
 
 	isWired := globalCfg.Network.Mode == network.ModeNIC || globalCfg.Network.Mode == network.ModeWired
 
-	log.Printf("[microforged] Starting daemon...")
-	log.Printf("[microforged] Config file: %s", loadedPath)
-	log.Printf("[microforged] Listening on: %s", globalCfg.Server.ListenAddr)
-	log.Printf("[microforged] Database: %s", globalCfg.Server.DBPath)
-	log.Printf("[microforged] Images dir: %s", globalCfg.Images.ImagesDir)
-	log.Printf("[microforged] VMs dir: %s", globalCfg.Images.VMsDir)
-	log.Printf("[microforged] Default VM specs: %d vCPUs, %d MB RAM, %d MB Disk, Image: %s",
+	log.Printf("[computed] Starting daemon...")
+	log.Printf("[computed] Config file: %s", loadedPath)
+	log.Printf("[computed] Listening on: %s", globalCfg.Server.ListenAddr)
+	log.Printf("[computed] Database: %s", globalCfg.Server.DBPath)
+	log.Printf("[computed] Images dir: %s", globalCfg.Images.ImagesDir)
+	log.Printf("[computed] VMs dir: %s", globalCfg.Images.VMsDir)
+	log.Printf("[computed] Default VM specs: %d vCPUs, %d MB RAM, %d MB Disk, Image: %s",
 		globalCfg.Defaults.VCPUs, globalCfg.Defaults.MemoryMB, globalCfg.Defaults.DiskSizeMB, globalCfg.Defaults.Image)
-	log.Printf("[microforged] Resource limits: max_running_vms=%d max_vcpus=%d max_ram=%dMB max_disk=%dMB min_free_disk=%dMB",
+	log.Printf("[computed] Resource limits: max_running_vms=%d max_vcpus=%d max_ram=%dMB max_disk=%dMB min_free_disk=%dMB",
 		globalCfg.Resources.MaxRunningVMs, globalCfg.Resources.MaxTotalVCPUs, globalCfg.Resources.MaxTotalMemoryMB,
 		globalCfg.Resources.MaxTotalDiskMB, globalCfg.Resources.MinFreeDiskSpaceMB)
-	log.Printf("[microforged] Network: mode=%s bridge=%s ip=%s subnet=%s",
+	log.Printf("[computed] Network: mode=%s bridge=%s ip=%s subnet=%s",
 		globalCfg.Network.Mode, globalCfg.Network.BridgeName, globalCfg.Network.BridgeIP, globalCfg.Network.SubnetCIDR)
 	if isWired {
-		log.Printf("[microforged] Wired dedicated IPs enabled on physical interface: %s (gateway: %s)",
+		log.Printf("[computed] Wired dedicated IPs enabled on physical interface: %s (gateway: %s)",
 			globalCfg.Network.PhysicalNIC, globalCfg.Network.GatewayIP)
 	}
 
@@ -157,7 +157,7 @@ func main() {
 	// Ensure network topology is ready on startup
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := netMgr.EnsureNetwork(ctx); err != nil {
-		log.Printf("[microforged] Warning: could not initialize network (%v). Ensure running with appropriate permissions or sudo.", err)
+		log.Printf("[computed] Warning: could not initialize network (%v). Ensure running with appropriate permissions or sudo.", err)
 	}
 	cancel()
 
@@ -190,9 +190,9 @@ func main() {
 	// Reconcile and prune any leftover orphan TAPs from previous runs
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if pruned, err := vmMgr.ReconcileAndPrune(reconcileCtx); err != nil {
-		log.Printf("[microforged] Warning: reconciliation failed: %v", err)
+		log.Printf("[computed] Warning: reconciliation failed: %v", err)
 	} else if len(pruned) > 0 {
-		log.Printf("[microforged] Pruned %d orphaned TAP interface(s): %v", len(pruned), pruned)
+		log.Printf("[computed] Pruned %d orphaned TAP interface(s): %v", len(pruned), pruned)
 	}
 	_ = vmMgr.RecoverQueue(reconcileCtx)
 	reconcileCancel()
@@ -205,7 +205,7 @@ func main() {
 	if !strings.HasPrefix(daemonTarget, "unix://") {
 		if guiHandler, err := gui.NewStaticAssetHandler(); err == nil {
 			server.SetGUIHandler(guiHandler)
-			log.Printf("[microforged] Web GUI mounted and active at http://%s/", daemonTarget)
+			log.Printf("[computed] Web GUI mounted and active at http://%s/", daemonTarget)
 		}
 	}
 
@@ -237,16 +237,16 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("[microforged] Daemon is ready and serving requests on %s\n", globalCfg.Server.ListenAddr)
+	fmt.Printf("[computed] Daemon is ready and serving requests on %s\n", globalCfg.Server.ListenAddr)
 
 	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	<-sigChan
 
-	log.Printf("[microforged] Shutting down...")
+	log.Printf("[computed] Shutting down...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
-	log.Printf("[microforged] Stopped.")
+	log.Printf("[computed] Stopped.")
 }

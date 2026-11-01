@@ -147,15 +147,15 @@ func TestAuth_QuotaEnforcement(t *testing.T) {
 	queries := db.New(st.Writer())
 
 	user := &db.User{
-		ID:           store.NewUserID(),
-		Email:        "quota@example.com",
-		Username:     "quotauser",
-		Role:         "user",
-		Status:       "active",
-		QuotaJSON:    sql.NullString{String: `{"instances":2,"vcpus":4,"memory_mb":4096,"disk_gb":50,"vpcs":1,"api_keys":5}`, Valid: true},
-		CreatedAt:    db.NowMillis(),
-		UpdatedAt:    db.NowMillis(),
-		Revision:     1,
+		ID:        store.NewUserID(),
+		Email:     "quota@example.com",
+		Username:  "quotauser",
+		Role:      "user",
+		Status:    "active",
+		QuotaJSON: sql.NullString{String: `{"instances":2,"vcpus":4,"memory_mb":4096,"disk_gb":50,"vpcs":1,"api_keys":5}`, Valid: true},
+		CreatedAt: db.NowMillis(),
+		UpdatedAt: db.NowMillis(),
+		Revision:  1,
 	}
 	_ = queries.CreateUser(ctx, user)
 

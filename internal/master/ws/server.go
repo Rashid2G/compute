@@ -125,7 +125,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Upgrade connection with compute.v1 subprotocol
 	opts := &websocket.AcceptOptions{
-		Subprotocols: []string{api.Subprotocol},
+		Subprotocols:   []string{api.Subprotocol},
 		OriginPatterns: []string{"*"}, // Handled explicitly above
 	}
 	wsConn, err := websocket.Accept(w, r, opts)

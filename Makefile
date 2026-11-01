@@ -18,8 +18,7 @@ LDFLAGS = -ldflags "-X '$(PKG_VERSION).Version=$(VERSION)' -X '$(PKG_VERSION).Re
 build:
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/compute ./cmd/compute
-	go build $(LDFLAGS) -o bin/mforge ./cmd/compute
-	go build $(LDFLAGS) -o bin/microforged ./cmd/microforged
+	go build $(LDFLAGS) -o bin/computed ./cmd/computed
 	go build $(LDFLAGS) -o bin/compute-worker ./cmd/compute-worker
 	go build $(LDFLAGS) -o bin/compute-bench ./cmd/compute-bench
 
@@ -58,7 +57,7 @@ remote-status:
 	./scripts/deploy-t3-runner.sh --status
 
 remote-logs:
-	ssh t3-runner "sudo journalctl -u microforged.service -u mforge-gui.service -n 50 -f --no-pager"
+	ssh t3-runner "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"
 
 clean:
 	rm -rf bin/ coverage.out benchmark-results.json

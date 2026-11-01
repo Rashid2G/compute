@@ -80,7 +80,7 @@ udhcpc: lease of 192.168.1.77 obtained from 192.168.1.1, lease time 86400
 func TestAcquireDHCPLeaseMockRunner(t *testing.T) {
 	mockOut := map[string]string{
 		"ip link show": "1: eth0: <BROADCAST,MULTICAST,UP> mtu 1500",
-		"udhcpc": "DHCP_IP=192.168.1.88\nDHCP_MASK=255.255.255.0\nDHCP_ROUTER=192.168.1.1\nDHCP_SERVERID=192.168.1.1\nDHCP_LEASE=3600\n",
+		"udhcpc":       "DHCP_IP=192.168.1.88\nDHCP_MASK=255.255.255.0\nDHCP_ROUTER=192.168.1.1\nDHCP_SERVERID=192.168.1.1\nDHCP_LEASE=3600\n",
 	}
 	runner := &mockRunner{output: mockOut}
 	ctx := context.Background()
