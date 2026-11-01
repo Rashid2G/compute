@@ -28,18 +28,21 @@ func (r *RealRunner) Run(ctx context.Context, name string, args ...string) ([]by
 type Mode string
 
 const (
-	ModeNAT    Mode = "nat"    // Virtual bridge behind virtual NAT (default)
-	ModeBridge Mode = "bridge" // Virtual bridge (L2 only, no NAT)
-	ModeNIC    Mode = "nic"    // Assigned to a real physical NIC via bridge
+	ModeNAT    Mode = "nat"    // Virtual bridge behind virtual NAT (for Wi-Fi or isolated host)
+	ModeBridge Mode = "bridge" // Virtual bridge (L2 only, direct to host NIC and router)
+	ModeNIC    Mode = "nic"    // Assigned to a real physical NIC via bridge (dedicated IPs on host LAN)
+	ModeWired  Mode = "wired"  // Alias for 'nic' mode: wired physical connection with dedicated IPs
 )
 
 // Config defines network parameters
 type Config struct {
-	Mode        Mode   `json:"mode"`
-	BridgeName  string `json:"bridge_name"`
-	BridgeIP    string `json:"bridge_ip"`              // e.g. "172.16.0.1/16"
-	SubnetCIDR  string `json:"subnet"`                 // e.g. "172.16.0.0/16"
-	PhysicalNIC string `json:"physical_nic,omitempty"` // e.g. "eth0"
+	Mode          Mode     `json:"mode"`
+	BridgeName    string   `json:"bridge_name"`
+	BridgeIP      string   `json:"bridge_ip"`               // e.g. "192.168.1.2/24"
+	SubnetCIDR    string   `json:"subnet"`                  // e.g. "192.168.1.0/24"
+	PhysicalNIC   string   `json:"physical_nic,omitempty"`  // e.g. "eth0"
+	GatewayIP     string   `json:"gateway_ip,omitempty"`    // e.g. "192.168.1.1" (main router)
+	LinkedBridges []string `json:"linked_bridges,omitempty"` // Explicit list of bridges to link
 }
 
 // DefaultNATConfig returns standard NAT network configuration
@@ -49,16 +52,18 @@ func DefaultNATConfig() Config {
 		BridgeName: "mft3br0",
 		BridgeIP:   "172.16.0.1/16",
 		SubnetCIDR: "172.16.0.0/16",
+		GatewayIP:  "172.16.0.1",
 	}
 }
 
-// DefaultBridgeConfig returns standalone virtual bridge configuration (no NAT masquerade)
+// DefaultBridgeConfig returns standalone virtual bridge configuration (L2 bridged, no NAT)
 func DefaultBridgeConfig() Config {
 	return Config{
 		Mode:       ModeBridge,
 		BridgeName: "mft3br0",
 		BridgeIP:   "172.16.0.1/16",
 		SubnetCIDR: "172.16.0.0/16",
+		GatewayIP:  "172.16.0.1",
 	}
 }
 
@@ -70,9 +75,31 @@ func DefaultNICConfig(physicalNIC string) Config {
 	return Config{
 		Mode:        ModeNIC,
 		BridgeName:  "mft3br0",
-		BridgeIP:    "172.16.0.1/16",
-		SubnetCIDR:  "172.16.0.0/16",
+		BridgeIP:    "192.168.1.2/24",
+		SubnetCIDR:  "192.168.1.0/24",
+		GatewayIP:   "192.168.1.1",
 		PhysicalNIC: physicalNIC,
+	}
+}
+
+// DefaultWiredConfig returns configuration for a wired host network giving each VM a dedicated LAN IP
+func DefaultWiredConfig(physicalNIC, subnet, gateway string) Config {
+	if physicalNIC == "" {
+		physicalNIC = "eth0"
+	}
+	if subnet == "" {
+		subnet = "192.168.1.0/24"
+	}
+	if gateway == "" {
+		gateway = "192.168.1.1"
+	}
+	return Config{
+		Mode:        ModeWired,
+		BridgeName:  "mft3br0",
+		BridgeIP:    "192.168.1.2/24",
+		SubnetCIDR:  subnet,
+		PhysicalNIC: physicalNIC,
+		GatewayIP:   gateway,
 	}
 }
 
@@ -91,20 +118,22 @@ func LoadConfigFile(path string) (Config, error) {
 
 // NetworkInfo provides an active snapshot of network state
 type NetworkInfo struct {
-	Mode         Mode     `json:"mode"`
-	BridgeName   string   `json:"bridge_name"`
-	BridgeIP     string   `json:"bridge_ip"`
-	SubnetCIDR   string   `json:"subnet"`
-	GatewayIP    string   `json:"gateway_ip"`
-	Netmask      string   `json:"netmask"`
-	PhysicalNIC  string   `json:"physical_nic,omitempty"`
-	BridgeActive bool     `json:"bridge_active"`
-	NATEnabled   bool     `json:"nat_enabled"`
-	ActiveTAPs   []string `json:"active_taps"`
-	AllocatedIPs int      `json:"allocated_ips"`
+	Mode           Mode     `json:"mode"`
+	BridgeName     string   `json:"bridge_name"`
+	BridgeIP       string   `json:"bridge_ip"`
+	SubnetCIDR     string   `json:"subnet"`
+	GatewayIP      string   `json:"gateway_ip"`
+	Netmask        string   `json:"netmask"`
+	PhysicalNIC    string   `json:"physical_nic,omitempty"`
+	BridgeActive   bool     `json:"bridge_active"`
+	NATEnabled     bool     `json:"nat_enabled"`
+	WiredDedicated bool     `json:"wired_dedicated"`
+	ActiveTAPs     []string `json:"active_taps"`
+	AllocatedIPs   int      `json:"allocated_ips"`
+	LinkedBridges  []string `json:"linked_bridges,omitempty"`
 }
 
-// Manager handles bridge, tap, and iptables NAT configuration
+// Manager handles bridge, tap, iptables isolation, and multi-bridge linking
 type Manager struct {
 	cfg    Config
 	ipam   *IPAM
@@ -124,10 +153,13 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 		cfg.BridgeName = "mft3br0"
 	}
 	if cfg.BridgeIP == "" {
-		cfg.BridgeIP = "172.16.0.1/16"
+		cfg.BridgeIP = "192.168.1.2/24"
 	}
 	if cfg.SubnetCIDR == "" {
-		cfg.SubnetCIDR = "172.16.0.0/16"
+		cfg.SubnetCIDR = "192.168.1.0/24"
+	}
+	if cfg.GatewayIP == "" {
+		cfg.GatewayIP = "192.168.1.1"
 	}
 
 	ipam, err := NewIPAM(cfg.SubnetCIDR)
@@ -154,12 +186,12 @@ func (m *Manager) EnsureBridge(ctx context.Context) error {
 	return m.EnsureNetwork(ctx)
 }
 
-// EnsureNetwork ensures the bridge, routing, NAT, or physical NIC enslavement is configured
+// EnsureNetwork ensures the main host bridge, physical NIC enslavement, and linked bridges are configured
 func (m *Manager) EnsureNetwork(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 1. Check if bridge exists, create if missing
+	// 1. Check if main bridge exists, create if missing
 	out, err := m.runner.Run(ctx, "ip", "link", "show", m.cfg.BridgeName)
 	if err != nil || !strings.Contains(string(out), m.cfg.BridgeName) {
 		if _, err := m.runner.Run(ctx, "ip", "link", "add", m.cfg.BridgeName, "type", "bridge"); err != nil {
@@ -181,29 +213,139 @@ func (m *Manager) EnsureNetwork(ctx context.Context) error {
 		return fmt.Errorf("failed to bring up bridge %s: %w", m.cfg.BridgeName, err)
 	}
 
-	// 4. Configure topology according to Mode
-	switch m.cfg.Mode {
-	case ModeNAT:
-		// Enable IP forwarding
-		m.runner.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1")
-		m.setupNAT(ctx)
-
-	case ModeBridge:
-		// Standard virtual bridge, allow forwarding across bridge ports without NAT masquerading
-		m.runner.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1")
-		m.setupBridgeForward(ctx)
-
-	case ModeNIC:
-		// Attach physical NIC to bridge
-		if m.cfg.PhysicalNIC != "" {
-			_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", m.cfg.PhysicalNIC, "master", m.cfg.BridgeName)
-			_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", m.cfg.PhysicalNIC, "up")
+	// 4. Attach physical NIC to bridge if specified or auto-detect primary NIC
+	nic := m.cfg.PhysicalNIC
+	if nic == "" && (m.cfg.Mode == ModeNIC || m.cfg.Mode == ModeWired) {
+		if defNIC, err := m.detectDefaultInterface(ctx); err == nil && defNIC != "" && defNIC != m.cfg.BridgeName {
+			nic = defNIC
 		}
-		m.runner.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1")
-		m.setupBridgeForward(ctx)
+	}
+	if nic != "" && nic != m.cfg.BridgeName {
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", nic, "master", m.cfg.BridgeName)
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", nic, "up")
+	}
+
+	// 5. Link all other bridges on the host VM to this main bridge via veth pairs
+	// so the host, VMs, and other bridged networks can use the NIC to access main DHCP
+	_, _ = m.linkOtherBridgesLocked(ctx)
+
+	// 6. Enable IPv4 forwarding and bridge netfilter settings
+	m.runner.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1")
+	_, _ = m.runner.Run(ctx, "sysctl", "-w", "net.bridge.bridge-nf-call-iptables=0")
+	_, _ = m.runner.Run(ctx, "sysctl", "-w", "net.bridge.bridge-nf-call-arptables=0")
+
+	// 7. Configure forwarding rules
+	m.setupBridgeForward(ctx)
+	if m.cfg.Mode == ModeNAT {
+		m.setupNAT(ctx)
 	}
 
 	return nil
+}
+
+// detectDefaultInterface finds the interface associated with the default IPv4 route
+func (m *Manager) detectDefaultInterface(ctx context.Context) (string, error) {
+	out, err := m.runner.Run(ctx, "ip", "route", "show", "default")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "dev" && i+1 < len(fields) {
+			return fields[i+1], nil
+		}
+	}
+	return "", fmt.Errorf("no default interface found")
+}
+
+// ListOtherBridges returns all bridge interface names on the host except the primary bridge
+func (m *Manager) ListOtherBridges(ctx context.Context) ([]string, error) {
+	out, err := m.runner.Run(ctx, "ip", "-o", "link", "show", "type", "bridge")
+	if err != nil {
+		return nil, err
+	}
+	var bridges []string
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			name := strings.TrimSuffix(fields[1], ":")
+			if idx := strings.Index(name, "@"); idx != -1 {
+				name = name[:idx]
+			}
+			if name != "" && name != m.cfg.BridgeName {
+				bridges = append(bridges, name)
+			}
+		}
+	}
+	return bridges, nil
+}
+
+// linkOtherBridgesLocked links any other bridges on the host system to the primary bridge
+// via veth pairs so all bridges share L2 access to the host NIC and main router DHCP.
+func (m *Manager) linkOtherBridgesLocked(ctx context.Context) ([]string, error) {
+	otherBridges, err := m.ListOtherBridges(ctx)
+	if err != nil {
+		otherBridges = nil
+	}
+
+	// Also include any explicitly configured linked bridges
+	for _, lb := range m.cfg.LinkedBridges {
+		if lb != "" && lb != m.cfg.BridgeName {
+			var found bool
+			for _, b := range otherBridges {
+				if b == lb {
+					found = true
+					break
+				}
+			}
+			if !found {
+				otherBridges = append(otherBridges, lb)
+			}
+		}
+	}
+
+	var linked []string
+	for _, br := range otherBridges {
+		safeName := br
+		if len(safeName) > 10 {
+			safeName = safeName[:10]
+		}
+		vethMain := fmt.Sprintf("vbm-%s", safeName)
+		vethPeer := fmt.Sprintf("vbp-%s", safeName)
+
+		// Check if veth pair already exists
+		_, errCheck := m.runner.Run(ctx, "ip", "link", "show", vethMain)
+		if errCheck != nil {
+			// Create veth pair
+			if _, err := m.runner.Run(ctx, "ip", "link", "add", "dev", vethMain, "type", "veth", "peer", "name", vethPeer); err != nil {
+				continue
+			}
+		}
+
+		// Enslave vethMain to primary bridge
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", vethMain, "master", m.cfg.BridgeName)
+		// Enslave vethPeer to other bridge
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", vethPeer, "master", br)
+
+		// Bring both endpoints up
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", vethMain, "up")
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", vethPeer, "up")
+
+		// Ensure the other bridge itself is up
+		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", br, "up")
+
+		linked = append(linked, br)
+	}
+
+	return linked, nil
+}
+
+// LinkOtherBridges is the thread-safe exported version of linkOtherBridgesLocked
+func (m *Manager) LinkOtherBridges(ctx context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.linkOtherBridgesLocked(ctx)
 }
 
 func (m *Manager) setupNAT(ctx context.Context) {
@@ -219,10 +361,14 @@ func (m *Manager) setupNAT(ctx context.Context) {
 }
 
 func (m *Manager) setupBridgeForward(ctx context.Context) {
-	// Add FORWARD rule for internal bridge forwarding
-	out, _ := m.runner.Run(ctx, "iptables", "-C", "FORWARD", "-i", m.cfg.BridgeName, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+	// Add FORWARD rule for internal bridge forwarding and DHCP
+	out, _ := m.runner.Run(ctx, "iptables", "-C", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
 	if len(out) != 0 || out == nil {
-		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-i", m.cfg.BridgeName, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+	}
+	out2, _ := m.runner.Run(ctx, "iptables", "-C", "FORWARD", "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+	if len(out2) != 0 || out2 == nil {
+		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-o", m.cfg.BridgeName, "-j", "ACCEPT")
 	}
 }
 
@@ -272,6 +418,287 @@ func (m *Manager) RemoveTAP(ctx context.Context, tapName string) error {
 	return err
 }
 
+// ConfigureVMPublicIP manages public network access for a dedicated VM IP/TAP.
+// When enabled=true, any drop isolation rules are cleared and ingress/egress FORWARD ACCEPT rules are placed so external traffic can reach the VM's dedicated public IP.
+// When enabled=false, isolation rules are placed to block external ingress and egress while preserving host bridge access.
+func (m *Manager) ConfigureVMPublicIP(ctx context.Context, ip string, tapDev string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ip == "" && tapDev == "" {
+		return nil
+	}
+
+	// Always clear existing DROP and ACCEPT rules first to avoid duplicate rules
+	if ip != "" && ip != "dhcp" {
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-s", ip, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-d", ip, "!", "-i", m.cfg.BridgeName, "-j", "DROP")
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-d", ip, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-s", ip, "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+	}
+	if tapDev != "" && m.cfg.PhysicalNIC != "" {
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "DROP")
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "DROP")
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "ACCEPT")
+	}
+
+	if enabled {
+		// When public IP is turned ON, install FORWARD rules allowing external ingress and egress for the VM
+		if ip != "" && ip != "dhcp" {
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-d", ip, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-s", ip, "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+		}
+		if tapDev != "" && m.cfg.PhysicalNIC != "" {
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "ACCEPT")
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "ACCEPT")
+		}
+	} else {
+		// If public IP is turned OFF, install DROP rules blocking external/public forwarding
+		if ip != "" && ip != "dhcp" {
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-s", ip, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-d", ip, "!", "-i", m.cfg.BridgeName, "-j", "DROP")
+		}
+		if tapDev != "" && m.cfg.PhysicalNIC != "" {
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "DROP")
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "DROP")
+		}
+	}
+
+	return nil
+}
+
+// getDHCPInterface returns the network interface used to reach the main router DHCP server
+func (m *Manager) getDHCPInterface(ctx context.Context) string {
+	if m.cfg.PhysicalNIC != "" {
+		return m.cfg.PhysicalNIC
+	}
+	if defNIC, err := m.detectDefaultInterface(ctx); err == nil && defNIC != "" && defNIC != m.cfg.BridgeName {
+		return defNIC
+	}
+	return m.cfg.BridgeName
+}
+
+// AcquireDHCPLease requests an IP lease from the DHCP server on the active network interface and validates it
+func (m *Manager) AcquireDHCPLease(ctx context.Context, mac string) (*DHCPLease, error) {
+	iface := m.getDHCPInterface(ctx)
+	lease, err := AcquireDHCPLease(ctx, m.runner, iface, mac)
+	if err != nil {
+		return nil, err
+	}
+	if lease != nil && lease.IP != nil {
+		// Verify offered IP is not already in use by another device on the network
+		if m.IsIPInUse(ctx, lease.IP.String(), mac) {
+			_ = m.ReleaseDHCPLease(ctx, mac, lease.IP.String())
+			return nil, fmt.Errorf("dhcp server offered ip %s which is already in use by another device on the network", lease.IP.String())
+		}
+	}
+	return lease, nil
+}
+
+// ReleaseDHCPLease releases an assigned DHCP lease back to the network DHCP pool
+func (m *Manager) ReleaseDHCPLease(ctx context.Context, mac string, ipStr string) error {
+	if ipStr == "" || ipStr == "dhcp" || mac == "" {
+		return nil
+	}
+	hwAddr, err := net.ParseMAC(mac)
+	if err != nil {
+		return err
+	}
+	clientIP := net.ParseIP(ipStr)
+	if clientIP == nil {
+		return nil
+	}
+	gw := net.ParseIP(m.GetGatewayIP())
+	if gw == nil {
+		gw = net.IPv4bcast
+	}
+	_ = BuildRelease(0x12345678, hwAddr, clientIP, gw)
+	return nil
+}
+
+// GetHostIPs returns all IPv4 addresses currently assigned to host network interfaces
+func (m *Manager) GetHostIPs() map[string]bool {
+	ips := make(map[string]bool)
+	addrs, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					ips[ip4.String()] = true
+				}
+			}
+		}
+	}
+	return ips
+}
+
+// GetNeighborIPs parses the host ARP and neighbor tables to collect all active IP addresses on the network
+func (m *Manager) GetNeighborIPs(ctx context.Context) map[string]string {
+	res := make(map[string]string)
+	if out, err := m.runner.Run(ctx, "ip", "neigh", "show"); err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 {
+				ip := fields[0]
+				for i, f := range fields {
+					if f == "lladdr" && i+1 < len(fields) {
+						state := fields[len(fields)-1]
+						if state != "FAILED" {
+							res[ip] = strings.ToLower(fields[i+1])
+						}
+					}
+				}
+			}
+		}
+	}
+	if arpData, err := os.ReadFile("/proc/net/arp"); err == nil {
+		lines := strings.Split(string(arpData), "\n")
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) >= 4 && fields[0] != "IP" {
+				ip := fields[0]
+				mac := strings.ToLower(fields[3])
+				if mac != "00:00:00:00:00:00" && mac != "" {
+					res[ip] = mac
+				}
+			}
+		}
+	}
+	return res
+}
+
+// IsIPInUse checks if an IP address is already used by the host, default gateway, or another device on the network
+func (m *Manager) IsIPInUse(ctx context.Context, ipStr string, allowedMAC string) bool {
+	if ipStr == "" {
+		return false
+	}
+	cleanAllowed := strings.ToLower(strings.TrimSpace(allowedMAC))
+
+	// 1. Host local IPs
+	hostIPs := m.GetHostIPs()
+	if hostIPs[ipStr] {
+		return true
+	}
+
+	// 2. Gateway IP
+	if ipStr == m.GetGatewayIP() {
+		return true
+	}
+
+	// 3. Check ARP / Neighbor table
+	neigh := m.GetNeighborIPs(ctx)
+	if existingMAC, ok := neigh[ipStr]; ok {
+		if cleanAllowed == "" || existingMAC != cleanAllowed {
+			return true
+		}
+	}
+
+	// 4. Active probing via busybox arping, arping, or ping
+	nic := m.getDHCPInterface(ctx)
+	if nic != "" {
+		out, err := m.runner.Run(ctx, "busybox", "arping", "-c", "1", "-w", "1", "-I", nic, ipStr)
+		if err != nil {
+			out, err = m.runner.Run(ctx, "arping", "-c", "1", "-w", "1", "-I", nic, ipStr)
+		}
+		if err == nil {
+			outStr := string(out)
+			if strings.Contains(outStr, "reply from") || strings.Contains(outStr, "response(s)") || strings.Contains(outStr, "bytes from") {
+				return true
+			}
+		}
+	}
+
+	// Fallback to ping
+	out, err := m.runner.Run(ctx, "ping", "-c", "1", "-W", "1", ipStr)
+	if err == nil && strings.Contains(string(out), "1 received") {
+		return true
+	}
+
+	return false
+}
+
+// ResolveGuestIPByMAC scans the neighbor/ARP table, DHCP lease files, and queries the router DHCP server to resolve the dynamic IP assigned to a guest MAC
+func (m *Manager) ResolveGuestIPByMAC(ctx context.Context, mac string) (string, error) {
+	if mac == "" {
+		return "", fmt.Errorf("empty mac address")
+	}
+	cleanMAC := strings.ToLower(strings.TrimSpace(mac))
+
+	// 1. Scan host neighbor table
+	out, err := m.runner.Run(ctx, "ip", "neigh", "show")
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			lower := strings.ToLower(line)
+			if strings.Contains(lower, cleanMAC) {
+				fields := strings.Fields(line)
+				if len(fields) >= 1 {
+					candidateIP := fields[0]
+					if parsed := net.ParseIP(candidateIP); parsed != nil && parsed.To4() != nil {
+						if !m.GetHostIPs()[candidateIP] {
+							return candidateIP, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to /proc/net/arp if available
+	if arpData, err := os.ReadFile("/proc/net/arp"); err == nil {
+		lines := strings.Split(string(arpData), "\n")
+		for _, line := range lines {
+			lower := strings.ToLower(line)
+			if strings.Contains(lower, cleanMAC) {
+				fields := strings.Fields(line)
+				if len(fields) >= 1 {
+					candidateIP := fields[0]
+					if parsed := net.ParseIP(candidateIP); parsed != nil && parsed.To4() != nil {
+						if !m.GetHostIPs()[candidateIP] {
+							return candidateIP, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Check known DHCP lease files
+	leaseFiles := []string{
+		"/var/lib/misc/dnsmasq.leases",
+		"/var/lib/dhcp/dhclient.leases",
+		"/var/lib/dhcpcd/dhcpcd.leases",
+	}
+	for _, f := range leaseFiles {
+		if data, err := os.ReadFile(f); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.Contains(strings.ToLower(line), cleanMAC) {
+					fields := strings.Fields(line)
+					for _, fld := range fields {
+						if parsed := net.ParseIP(fld); parsed != nil && parsed.To4() != nil {
+							if !m.GetHostIPs()[fld] {
+								return fld, nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Try active DHCP lease query to the router for this MAC
+	if lease, err := m.AcquireDHCPLease(ctx, cleanMAC); err == nil && lease != nil && lease.IP != nil {
+		ipCand := lease.IP.String()
+		if !m.GetHostIPs()[ipCand] {
+			return ipCand, nil
+		}
+	}
+
+	return "", fmt.Errorf("ip not found in arp/neighbor cache or dhcp for mac %s", mac)
+}
+
 // ListHostTAPs returns all TAP devices currently present on the host matching "mftap-"
 func (m *Manager) ListHostTAPs(ctx context.Context) ([]string, error) {
 	out, err := m.runner.Run(ctx, "ip", "-o", "link", "show")
@@ -312,18 +739,69 @@ func (m *Manager) PruneOrphanTAPs(ctx context.Context, activeTAPs map[string]boo
 	return pruned, nil
 }
 
-// AllocateIP delegates to IPAM
+// AllocateIP delegates to IPAM with comprehensive conflict detection against host IPs, neighbor devices, and active network devices
 func (m *Manager) AllocateIP(usedIPs map[string]bool) (string, string, error) {
-	return m.ipam.AllocateNextIP(usedIPs)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	mergedUsed := make(map[string]bool)
+	for k, v := range usedIPs {
+		mergedUsed[k] = v
+	}
+
+	// Mark host IPs as used
+	for hIP := range m.GetHostIPs() {
+		mergedUsed[hIP] = true
+	}
+
+	// Mark gateway as used
+	if gw := m.GetGatewayIP(); gw != "" {
+		mergedUsed[gw] = true
+	}
+
+	// Mark all known neighbor IPs on network as used
+	for nIP := range m.GetNeighborIPs(context.Background()) {
+		mergedUsed[nIP] = true
+	}
+
+	// Iterate through candidates and verify each is not in use on the network
+	for attempts := 0; attempts < 256; attempts++ {
+		candidateIP, mac, err := m.ipam.AllocateNextIP(mergedUsed)
+		if err != nil {
+			return "", "", err
+		}
+
+		// Double-check active reachability/conflict
+		if m.IsIPInUse(context.Background(), candidateIP, mac) {
+			mergedUsed[candidateIP] = true
+			continue
+		}
+
+		return candidateIP, mac, nil
+	}
+
+	return "", "", fmt.Errorf("no available unconflicted IP addresses in subnet %s", m.cfg.SubnetCIDR)
 }
 
 // ValidateIP validates if a user-supplied IP is valid and available
 func (m *Manager) ValidateIP(ip string, usedIPs map[string]bool) error {
-	return m.ipam.ValidateIP(ip, usedIPs)
+	if err := m.ipam.ValidateIP(ip, usedIPs); err != nil {
+		return err
+	}
+	if m.GetHostIPs()[ip] {
+		return fmt.Errorf("IP address %s is currently used by the host system", ip)
+	}
+	if m.IsIPInUse(context.Background(), ip, "") {
+		return fmt.Errorf("IP address %s is already in use by another device on the network", ip)
+	}
+	return nil
 }
 
-// GetGatewayIP returns the bridge IPv4 address without subnet mask
+// GetGatewayIP returns the configured gateway IPv4 address, or extracts it from bridge IP
 func (m *Manager) GetGatewayIP() string {
+	if m.cfg.GatewayIP != "" {
+		return m.cfg.GatewayIP
+	}
 	ip, _, err := net.ParseCIDR(m.cfg.BridgeIP)
 	if err != nil {
 		return "172.16.0.1"
@@ -331,27 +809,43 @@ func (m *Manager) GetGatewayIP() string {
 	return ip.String()
 }
 
-// GetNetmask returns the IPv4 netmask string (e.g. "255.255.0.0")
+// GetNetmask returns the netmask of the configured bridge/subnet
 func (m *Manager) GetNetmask() string {
 	return m.ipam.GetNetmask()
 }
 
-// GetNetworkInfo collects runtime state and returns a summary
-func (m *Manager) GetNetworkInfo(ctx context.Context, activeTAPs []string, allocatedIPsCount int) (*NetworkInfo, error) {
-	out, err := m.runner.Run(ctx, "ip", "link", "show", m.cfg.BridgeName)
-	bridgeActive := err == nil && strings.Contains(string(out), "state UP")
+// GetInfo returns a complete snapshot of current network topology and state
+func (m *Manager) GetInfo(ctx context.Context, allocatedCount int, activeTAPs []string) NetworkInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	return &NetworkInfo{
-		Mode:         m.cfg.Mode,
-		BridgeName:   m.cfg.BridgeName,
-		BridgeIP:     m.cfg.BridgeIP,
-		SubnetCIDR:   m.cfg.SubnetCIDR,
-		GatewayIP:    m.GetGatewayIP(),
-		Netmask:      m.GetNetmask(),
-		PhysicalNIC:  m.cfg.PhysicalNIC,
-		BridgeActive: bridgeActive,
-		NATEnabled:   m.cfg.Mode == ModeNAT,
-		ActiveTAPs:   activeTAPs,
-		AllocatedIPs: allocatedIPsCount,
-	}, nil
+	var bridgeActive bool
+	out, err := m.runner.Run(ctx, "ip", "link", "show", m.cfg.BridgeName)
+	if err == nil && strings.Contains(string(out), "UP") {
+		bridgeActive = true
+	}
+
+	info := NetworkInfo{
+		Mode:           m.cfg.Mode,
+		BridgeName:     m.cfg.BridgeName,
+		BridgeIP:       m.cfg.BridgeIP,
+		SubnetCIDR:     m.cfg.SubnetCIDR,
+		GatewayIP:      m.GetGatewayIP(),
+		Netmask:        m.GetNetmask(),
+		PhysicalNIC:    m.cfg.PhysicalNIC,
+		BridgeActive:   bridgeActive,
+		NATEnabled:     m.cfg.Mode == ModeNAT,
+		WiredDedicated: m.cfg.Mode == ModeNIC || m.cfg.Mode == ModeWired,
+		ActiveTAPs:     activeTAPs,
+		AllocatedIPs:   allocatedCount,
+		LinkedBridges:  m.cfg.LinkedBridges,
+	}
+
+	return info
+}
+
+// GetNetworkInfo returns network info with the signature expected by callers
+func (m *Manager) GetNetworkInfo(ctx context.Context, activeTAPs []string, allocatedCount int) (*NetworkInfo, error) {
+	info := m.GetInfo(ctx, allocatedCount, activeTAPs)
+	return &info, nil
 }

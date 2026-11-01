@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,18 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
 )
+
+func readDiskPrefix(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	nRead, _ := f.Read(buf)
+	return string(buf[:nRead])
+}
+
 
 type testRunner struct{ calls [][]string }
 
@@ -35,10 +48,10 @@ func testManager(t *testing.T) (*Manager, *db.Store, *storage.Manager, *testRunn
 	if err := os.MkdirAll(base, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(base, "rootfs.ext4"), []byte("rootfs"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(base, "ubuntu-24.04.ext4"), []byte("rootfs"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	stor, err := storage.NewManager(storage.Config{BaseImagesDir: base, VMsDir: vms, DefaultRootfs: "rootfs.ext4", DefaultKernel: "vmlinux", SSHKeyPath: filepath.Join(base, "key")})
+	stor, err := storage.NewManager(storage.Config{BaseImagesDir: base, VMsDir: vms, DefaultRootfs: "ubuntu-24.04.ext4", DefaultKernel: "vmlinux", SSHKeyPath: filepath.Join(base, "key")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,5 +275,455 @@ func TestInspectNetworkAndStats(t *testing.T) {
 	_, err = m.ExecVM(ctx, vm1.ID, ExecRequest{Command: "echo hello"})
 	if err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Fatalf("ExecVM on stopped VM expected error, got %v", err)
+	}
+}
+
+func TestImageBuildAndLaunchVM(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, _ := testManager(t)
+
+	// Mock builder to simulate building rootfs with packages
+	builder := m.GetImageBuilder()
+	builder.SetBuildFunc(func(ctx context.Context, req BuildImageRequest, outputPath string, sshPubKey string) error {
+		return os.WriteFile(outputPath, []byte("custom-image-with-packages"), 0644)
+	})
+
+	// 1. Build image with packages
+	imgReq := BuildImageRequest{
+		Name:        "python-stack",
+		Description: "Python stack image",
+		BaseImage:   "ubuntu-24.04",
+		Packages:    []string{"python3", "python3-pip", "curl"},
+	}
+
+	builtImg, err := m.BuildImage(ctx, imgReq)
+	if err != nil {
+		t.Fatalf("BuildImage failed: %v", err)
+	}
+	if builtImg.Status != db.ImageStatusReady || len(builtImg.Packages) != 3 {
+		t.Fatalf("unexpected built image: %+v", builtImg)
+	}
+
+	// 2. List images
+	imgs, err := m.ListImages(ctx)
+	if err != nil || len(imgs) != 1 {
+		t.Fatalf("expected 1 image in list, got %d", len(imgs))
+	}
+
+	// 3. Launch a VM using this custom image
+	vm, err := m.CreateVM(ctx, CreateRequest{
+		Name:  "python-worker",
+		Image: "python-stack",
+		Tier:  "1vcpu",
+	})
+	if err != nil {
+		t.Fatalf("CreateVM with custom image failed: %v", err)
+	}
+
+	data := readDiskPrefix(vm.DiskPath, 26)
+	if data != "custom-image-with-packages" {
+		t.Fatalf("expected VM disk to contain custom image rootfs, got: %s", string(data))
+	}
+
+	// 4. Delete image
+	if err := m.DeleteImage(ctx, "python-stack"); err != nil {
+		t.Fatalf("DeleteImage failed: %v", err)
+	}
+	imgsAfter, _ := m.ListImages(ctx)
+	if len(imgsAfter) != 0 {
+		t.Fatalf("expected 0 images after deletion")
+	}
+}
+
+func TestTemplateFromVMAndLaunch(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, _ := testManager(t)
+
+	// 1. Create a VM to modify
+	vm1, err := m.CreateVM(ctx, CreateRequest{
+		Name: "dev-box",
+		Tier: "2vcpu",
+	})
+	if err != nil {
+		t.Fatalf("CreateVM failed: %v", err)
+	}
+
+	// Simulate user shell modification directly on the VM's disk
+	modifiedContent := "custom-shell-installed-tools-and-files"
+	if err := os.WriteFile(vm1.DiskPath, []byte(modifiedContent), 0644); err != nil {
+		t.Fatalf("failed to modify VM disk: %v", err)
+	}
+
+	// 2. Create a template from the modified VM disk
+	tpl, err := m.CreateTemplate(ctx, CreateTemplateRequest{
+		Name:        "golang-dev-template",
+		Description: "Ubuntu configured with Go toolchain and custom scripts",
+		VMID:        vm1.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate failed: %v", err)
+	}
+	if tpl.Name != "golang-dev-template" || tpl.SourceVMID != vm1.ID || tpl.VCPUs != 2 {
+		t.Fatalf("unexpected template details: %+v", tpl)
+	}
+
+	// Check template disk content
+	tplData, err := os.ReadFile(tpl.DiskPath)
+	if err != nil || string(tplData) != modifiedContent {
+		t.Fatalf("expected template disk to contain shell modifications, got: %s", string(tplData))
+	}
+
+	// 3. List templates
+	tpls, err := m.ListTemplates(ctx)
+	if err != nil || len(tpls) != 1 {
+		t.Fatalf("expected 1 template in list, got %d", len(tpls))
+	}
+
+	// 4. Create new VM from template via CreateRequest.Template
+	vm2, err := m.CreateVM(ctx, CreateRequest{
+		Name:     "worker-from-tpl",
+		Template: "golang-dev-template",
+	})
+	if err != nil {
+		t.Fatalf("CreateVM from template failed: %v", err)
+	}
+	// Verify it inherited vCPUs from template
+	if vm2.VCPUs != 2 {
+		t.Fatalf("expected vcpus=2 from template, got %d", vm2.VCPUs)
+	}
+	vm2Data := readDiskPrefix(vm2.DiskPath, len(modifiedContent))
+	if vm2Data != modifiedContent {
+		t.Fatalf("expected cloned VM disk to contain template modifications, got: %s", string(vm2Data))
+	}
+
+	// 5. Also test launching via --image <template_name>
+	vm3, err := m.CreateVM(ctx, CreateRequest{
+		Name:  "worker-via-image-flag",
+		Image: "golang-dev-template",
+		Tier:  "1vcpu",
+	})
+	if err != nil {
+		t.Fatalf("CreateVM with image=template failed: %v", err)
+	}
+	vm3Data := readDiskPrefix(vm3.DiskPath, len(modifiedContent))
+	if vm3Data != modifiedContent {
+		t.Fatalf("expected VM from template image to contain modifications, got: %s", string(vm3Data))
+	}
+
+	// 6. Delete template
+	if err := m.DeleteTemplate(ctx, "golang-dev-template"); err != nil {
+		t.Fatalf("DeleteTemplate failed: %v", err)
+	}
+	tplsAfter, _ := m.ListTemplates(ctx)
+	if len(tplsAfter) != 0 {
+		t.Fatalf("expected 0 templates after deletion")
+	}
+	if _, err := os.Stat(tpl.DiskPath); !os.IsNotExist(err) {
+		t.Fatalf("expected template disk to be removed from disk")
+	}
+}
+
+func TestVMOpsByNameAndDistinctInternalIDs(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+	m.SetLauncher(func(ctx context.Context, vm *db.VM) error {
+		vm.PID = 43210
+		return nil
+	})
+	m.SetProcessChecker(func(pid int) bool {
+		return pid == 43210
+	})
+
+	// 1. Create VM with explicit name: external ID should be the name, internal ID should be distinct
+	vm, err := m.CreateVM(ctx, CreateRequest{
+		Name:     "web-prod",
+		Tier:     "2vcpu",
+		MemoryMB: 2048,
+	})
+	if err != nil {
+		t.Fatalf("CreateVM failed: %v", err)
+	}
+
+	if vm.Name != "web-prod" {
+		t.Fatalf("expected vm.Name to be web-prod, got %q", vm.Name)
+	}
+	if vm.ID != "web-prod" {
+		t.Fatalf("expected vm.ID (external ID) to be web-prod, got %q", vm.ID)
+	}
+	if vm.InternalID == "" {
+		t.Fatalf("expected non-empty distinct internal ID")
+	}
+	if vm.InternalID == vm.ID {
+		t.Fatalf("expected external ID to be different from internal ID, got internal=%q, external=%q", vm.InternalID, vm.ID)
+	}
+
+	// 2. Perform operations using NAME only
+	// Get by name
+	byName, err := m.GetVM(ctx, "web-prod")
+	if err != nil || byName == nil || byName.ID != "web-prod" {
+		t.Fatalf("GetVM by name failed: %+v, err=%v", byName, err)
+	}
+
+	// Get by internal ID
+	byInt, err := m.GetVM(ctx, vm.InternalID)
+	if err != nil || byInt == nil || byInt.ID != "web-prod" {
+		t.Fatalf("GetVM by internal ID failed: %+v, err=%v", byInt, err)
+	}
+
+	// Run using name only
+	if err := m.RunVM(ctx, "web-prod"); err != nil {
+		t.Fatalf("RunVM by name failed: %v", err)
+	}
+	runningVM, _ := m.GetVM(ctx, "web-prod")
+	if runningVM.Status != db.StatusRunning {
+		t.Fatalf("expected running status, got %s", runningVM.Status)
+	}
+
+	// Inspect network using name only
+	inspectRes, err := m.InspectNetwork(ctx, "web-prod")
+	if err != nil || inspectRes == nil || inspectRes.VMName != "web-prod" {
+		t.Fatalf("InspectNetwork by name failed: %+v, err=%v", inspectRes, err)
+	}
+
+	// Stop using name only
+	if err := m.StopVM(ctx, "web-prod"); err != nil {
+		t.Fatalf("StopVM by name failed: %v", err)
+	}
+	stoppedVM, _ := m.GetVM(ctx, "web-prod")
+	if stoppedVM.Status != db.StatusStopped {
+		t.Fatalf("expected stopped status, got %s", stoppedVM.Status)
+	}
+
+	// Re-start using internal ID
+	if err := m.RunVM(ctx, vm.InternalID); err != nil {
+		t.Fatalf("RunVM by internal ID failed: %v", err)
+	}
+
+	// Stop using name only
+	if err := m.StopVM(ctx, "web-prod"); err != nil {
+		t.Fatalf("StopVM by name failed: %v", err)
+	}
+
+	// Delete using name only
+	if err := m.DeleteVM(ctx, "web-prod"); err != nil {
+		t.Fatalf("DeleteVM by name failed: %v", err)
+	}
+	deletedVM, _ := m.GetVM(ctx, "web-prod")
+	if deletedVM != nil {
+		t.Fatalf("expected VM to be deleted, found %+v", deletedVM)
+	}
+
+	// 3. Multi-tenant isolation: distinct users can have the same VM name
+	user1VM, err := m.CreateVM(ctx, CreateRequest{
+		Name:    "worker",
+		OwnerID: "tenant-1",
+		Tier:    "1vcpu",
+	})
+	if err != nil {
+		t.Fatalf("failed to create tenant-1 worker: %v", err)
+	}
+
+	user2VM, err := m.CreateVM(ctx, CreateRequest{
+		Name:    "worker",
+		OwnerID: "tenant-2",
+		Tier:    "1vcpu",
+	})
+	if err != nil {
+		t.Fatalf("failed to create tenant-2 worker: %v", err)
+	}
+
+	if user1VM.InternalID == user2VM.InternalID {
+		t.Fatalf("distinct users should have distinct internal IDs in global store: %q vs %q", user1VM.InternalID, user2VM.InternalID)
+	}
+
+	// Verify lookups scoped by owner in store
+	t1Got, err := store.GetVMByOwner(ctx, "tenant-1", "worker")
+	if err != nil || t1Got.InternalID != user1VM.InternalID {
+		t.Fatalf("expected tenant-1 worker, got %+v", t1Got)
+	}
+	t2Got, err := store.GetVMByOwner(ctx, "tenant-2", "worker")
+	if err != nil || t2Got.InternalID != user2VM.InternalID {
+		t.Fatalf("expected tenant-2 worker, got %+v", t2Got)
+	}
+}
+
+func TestVMDedicatedPublicIPOnOff(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, runner := testManager(t)
+
+	// 1. Create VM with public IP ON by default
+	vmDefault, err := m.CreateVM(ctx, CreateRequest{Name: "vm-public-default", VCPUs: 1, MemoryMB: 512})
+	if err != nil {
+		t.Fatalf("failed to create default VM: %v", err)
+	}
+	if !vmDefault.PublicIPEnabled {
+		t.Fatalf("expected public IP to be enabled by default")
+	}
+	if vmDefault.PublicIP != vmDefault.IPAddress || vmDefault.PublicIP == "" {
+		t.Fatalf("expected public IP to match dedicated IP %s, got %s", vmDefault.IPAddress, vmDefault.PublicIP)
+	}
+
+	// 2. Create VM with public IP defined as OFF
+	fals := false
+	vmPrivate, err := m.CreateVM(ctx, CreateRequest{
+		Name:     "vm-private",
+		VCPUs:    1,
+		MemoryMB: 512,
+		PublicIP: &fals,
+	})
+	if err != nil {
+		t.Fatalf("failed to create private VM: %v", err)
+	}
+	if vmPrivate.PublicIPEnabled {
+		t.Fatalf("expected public IP to be disabled")
+	}
+	if vmPrivate.PublicIP != "" {
+		t.Fatalf("expected public IP to be empty when disabled, got %s", vmPrivate.PublicIP)
+	}
+	if vmPrivate.IPAddress == "" {
+		t.Fatalf("expected dedicated IP to still be assigned for internal TAP/management")
+	}
+
+	// 3. Test UpdateVMConfig: Turn public IP ON for private VM
+	trueVal := true
+	updated, err := m.UpdateVMConfig(ctx, vmPrivate.ID, UpdateVMConfigRequest{PublicIP: &trueVal})
+	if err != nil {
+		t.Fatalf("failed to update VM config to ON: %v", err)
+	}
+	if !updated.PublicIPEnabled {
+		t.Fatalf("expected PublicIPEnabled to be true after toggle")
+	}
+	if updated.PublicIP != updated.IPAddress {
+		t.Fatalf("expected PublicIP to equal %s, got %s", updated.IPAddress, updated.PublicIP)
+	}
+
+	// Verify persistence in store
+	persisted, err := store.GetVM(ctx, vmPrivate.ID)
+	if err != nil || persisted == nil {
+		t.Fatalf("failed to retrieve persisted VM: %v", err)
+	}
+	if !persisted.PublicIPEnabled || persisted.PublicIP != persisted.IPAddress {
+		t.Fatalf("persisted VM mismatch: enabled=%v publicIP=%s", persisted.PublicIPEnabled, persisted.PublicIP)
+	}
+
+	// 4. Test UpdateVMConfig: Turn public IP OFF
+	falseVal := false
+	updatedOff, err := m.UpdateVMConfig(ctx, vmPrivate.ID, UpdateVMConfigRequest{PublicIP: &falseVal})
+	if err != nil {
+		t.Fatalf("failed to update VM config to OFF: %v", err)
+	}
+	if updatedOff.PublicIPEnabled {
+		t.Fatalf("expected PublicIPEnabled to be false after toggle off")
+	}
+	if updatedOff.PublicIP != "" {
+		t.Fatalf("expected PublicIP to be empty after toggle off, got %s", updatedOff.PublicIP)
+	}
+
+	// 5. Test JSON string unmarshaling ("on" / "off")
+	var req CreateRequest
+	if err := json.Unmarshal([]byte(`{"name":"json-vm","public_ip":"off"}`), &req); err != nil {
+		t.Fatalf("failed to unmarshal JSON with public_ip off: %v", err)
+	}
+	if req.PublicIP == nil || *req.PublicIP != false {
+		t.Fatalf("expected unmarshaled public_ip to be false")
+	}
+
+	var reqOn CreateRequest
+	if err := json.Unmarshal([]byte(`{"name":"json-vm-on","public_ip":"on"}`), &reqOn); err != nil {
+		t.Fatalf("failed to unmarshal JSON with public_ip on: %v", err)
+	}
+	if reqOn.PublicIP == nil || *reqOn.PublicIP != true {
+		t.Fatalf("expected unmarshaled public_ip to be true")
+	}
+
+	_ = runner
+}
+
+func TestVMDHCPMode(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, _ := testManager(t)
+
+	dhcpTrue := true
+	vmDHCP, err := m.CreateVM(ctx, CreateRequest{
+		Name: "vm-dhcp-test",
+		DHCP: &dhcpTrue,
+	})
+	if err != nil {
+		t.Fatalf("failed to create DHCP VM: %v", err)
+	}
+	if vmDHCP.IPAddress != "dhcp" {
+		t.Fatalf("expected VM IP to be 'dhcp', got %s", vmDHCP.IPAddress)
+	}
+	if !vmDHCP.PublicIPEnabled {
+		t.Fatalf("expected public IP enabled by default")
+	}
+	if vmDHCP.MACAddress == "" {
+		t.Fatalf("expected MAC address to be generated for DHCP VM")
+	}
+}
+
+type dhcpMockRunner struct {
+	testRunner
+}
+
+func (r *dhcpMockRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmdStr := strings.Join(append([]string{name}, args...), " ")
+	if strings.Contains(cmdStr, "ip link show") {
+		return []byte("1: eth0: <BROADCAST>"), nil
+	}
+	if strings.Contains(cmdStr, "udhcpc") {
+		return []byte("DHCP_IP=192.168.1.155\nDHCP_MASK=255.255.255.0\nDHCP_ROUTER=192.168.1.1\nDHCP_LEASE=86400\n"), nil
+	}
+	return r.testRunner.Run(ctx, name, args...)
+}
+
+func TestVMDHCPModeWithLease(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := db.NewStore(filepath.Join(dir, "db", "vms.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	base, vms := filepath.Join(dir, "images"), filepath.Join(dir, "vms")
+	_ = os.MkdirAll(base, 0755)
+	_ = os.MkdirAll(vms, 0755)
+	_ = os.WriteFile(filepath.Join(base, "vmlinux"), []byte("k"), 0644)
+	_ = os.WriteFile(filepath.Join(base, "ubuntu-24.04.ext4"), []byte("r"), 0644)
+
+	runner := &dhcpMockRunner{}
+	netMgr, err := network.NewManager(network.DefaultWiredConfig("eth0", "192.168.1.0/24", "192.168.1.1"), runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storMgr, err := storage.NewManager(storage.Config{
+		BaseImagesDir: base,
+		VMsDir:        vms,
+		AvailableImages: []storage.ImageProfile{
+			{Name: "default", Kernel: "vmlinux", Rootfs: "ubuntu-24.04.ext4"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(Config{FirecrackerBinary: "firecracker"}, store, netMgr, storMgr)
+
+	dhcpTrue := true
+	vmDHCP, err := m.CreateVM(ctx, CreateRequest{
+		Name: "vm-dhcp-leased",
+		DHCP: &dhcpTrue,
+	})
+	if err != nil {
+		t.Fatalf("failed to create DHCP VM with lease: %v", err)
+	}
+	if vmDHCP.IPAddress != "192.168.1.155" {
+		t.Fatalf("expected VM IP to be leased 192.168.1.155, got %s", vmDHCP.IPAddress)
+	}
+	if vmDHCP.PublicIP != "192.168.1.155" {
+		t.Fatalf("expected VM Public IP to be leased 192.168.1.155, got %s", vmDHCP.PublicIP)
+	}
+	if !vmDHCP.PublicIPEnabled {
+		t.Fatalf("expected public IP enabled")
 	}
 }

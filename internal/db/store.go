@@ -3,12 +3,15 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
@@ -47,15 +50,107 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// SaveWorkerPool persists a pool.
+func (s *Store) SaveWorkerPool(ctx context.Context, p *WorkerPool) error {
+	now := time.Now().UTC()
+	if p.ID == "" {
+		p.ID = uuid.NewString()
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	p.UpdatedAt = now
+	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_pools VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,labels_json=excluded.labels_json,policy_json=excluded.policy_json,updated_at=excluded.updated_at`, p.ID, p.Name, p.LabelsJSON, p.PolicyJSON, p.CreatedAt, p.UpdatedAt)
+	return e
+}
+func (s *Store) ListWorkerPools(ctx context.Context) ([]*WorkerPool, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT id,name,labels_json,policy_json,created_at,updated_at FROM worker_pools ORDER BY name`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []*WorkerPool{}
+	for rows.Next() {
+		p := new(WorkerPool)
+		if e = rows.Scan(&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &p.CreatedAt, &p.UpdatedAt); e != nil {
+			return nil, e
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+func (s *Store) SaveWorkerToken(ctx context.Context, t *WorkerToken) error {
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = time.Now().UTC()
+	}
+	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_tokens VALUES(?,?,?,?,?,?)`, t.Token, t.PoolID, t.LabelsJSON, t.ExpiresAt, t.UsedAt, t.CreatedAt)
+	return e
+}
+func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerToken, error) {
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return nil, e
+	}
+	defer tx.Rollback()
+	t := new(WorkerToken)
+	e = tx.QueryRowContext(ctx, `SELECT token,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).Scan(&t.Token, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if e != nil {
+		return nil, e
+	}
+	if t.UsedAt != nil || time.Now().After(t.ExpiresAt) {
+		return nil, fmt.Errorf("token invalid or expired")
+	}
+	now := time.Now().UTC()
+	if _, e = tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=? WHERE token=? AND used_at IS NULL`, now, token); e != nil {
+		return nil, e
+	}
+	return t, tx.Commit()
+}
+func (s *Store) SaveJob(ctx context.Context, j *Job) error {
+	now := time.Now().UTC()
+	if j.ID == "" {
+		j.ID = uuid.NewString()
+	}
+	if j.CreatedAt.IsZero() {
+		j.CreatedAt = now
+	}
+	if j.QueuedAt.IsZero() {
+		j.QueuedAt = now
+	}
+	j.UpdatedAt = now
+	_, e := s.db.ExecContext(ctx, `INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,result_json=excluded.result_json,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`, j.ID, j.OwnerID, j.PoolID, j.Type, j.State, j.Priority, j.SpecJSON, j.ResultJSON, j.QueuedAt, j.StartedAt, j.FinishedAt, j.DeadlineAt, j.CreatedAt, j.UpdatedAt)
+	return e
+}
+func (s *Store) ListQueuedJobs(ctx context.Context) ([]*Job, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []*Job{}
+	for rows.Next() {
+		j := new(Job)
+		if e = rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); e != nil {
+			return nil, e
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) initSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS vms (
-		id TEXT PRIMARY KEY,
+		id TEXT NOT NULL,
+		internal_id TEXT NOT NULL DEFAULT '',
+		owner_id TEXT NOT NULL DEFAULT 'default',
 		name TEXT NOT NULL,
 		status TEXT NOT NULL,
 		vcpus INTEGER NOT NULL,
 		memory_mb INTEGER NOT NULL,
 		ip_address TEXT NOT NULL,
+		public_ip TEXT NOT NULL DEFAULT '',
+		public_ip_enabled INTEGER NOT NULL DEFAULT 1,
 		mac_address TEXT NOT NULL,
 		tap_device TEXT NOT NULL,
 		rootfs_path TEXT NOT NULL,
@@ -70,11 +165,126 @@ func (s *Store) initSchema() error {
 		updated_at TIMESTAMP NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS images (
+		id TEXT NOT NULL,
+		internal_id TEXT NOT NULL DEFAULT '',
+		owner_id TEXT NOT NULL DEFAULT 'default',
+		name TEXT NOT NULL,
+		description TEXT DEFAULT '',
+		base_image TEXT NOT NULL,
+		packages TEXT NOT NULL,
+		rootfs_path TEXT NOT NULL,
+		kernel_path TEXT NOT NULL,
+		size_mb INTEGER NOT NULL,
+		status TEXT NOT NULL,
+		error_message TEXT DEFAULT '',
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS templates (
+		id TEXT NOT NULL,
+		internal_id TEXT NOT NULL DEFAULT '',
+		owner_id TEXT NOT NULL DEFAULT 'default',
+		name TEXT NOT NULL,
+		description TEXT DEFAULT '',
+		source_vm_id TEXT DEFAULT '',
+		disk_path TEXT NOT NULL,
+		kernel_path TEXT NOT NULL,
+		vcpus INTEGER NOT NULL,
+		memory_mb INTEGER NOT NULL,
+		disk_mb INTEGER NOT NULL,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS ssh_keys (
+		id TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT 'default',
+		name TEXT NOT NULL,
+		public_key TEXT NOT NULL,
+		fingerprint TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS worker_pools(id TEXT PRIMARY KEY,name TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',policy_json TEXT NOT NULL DEFAULT '{}',created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS worker_tokens(token TEXT PRIMARY KEY,pool_id TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',expires_at TIMESTAMP NOT NULL,used_at TIMESTAMP,created_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS worker_nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,pool_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',status TEXT NOT NULL,underlay_ip TEXT NOT NULL DEFAULT '',arch TEXT NOT NULL DEFAULT '',total_vcpus INTEGER NOT NULL DEFAULT 0,total_mem_mb INTEGER NOT NULL DEFAULT 0,total_disk_mb INTEGER NOT NULL DEFAULT 0,labels_json TEXT NOT NULL DEFAULT '{}',capabilities_json TEXT NOT NULL DEFAULT '{}',agent_version TEXT NOT NULL DEFAULT '',fc_version TEXT NOT NULL DEFAULT '',last_heartbeat TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS job_attempts(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,worker_id TEXT NOT NULL,state TEXT NOT NULL,created_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS worker_leases(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,attempt_id TEXT NOT NULL,worker_id TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,state TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS job_logs(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,attempt_id TEXT NOT NULL,stream TEXT NOT NULL,seq INTEGER NOT NULL,data TEXT NOT NULL,created_at TIMESTAMP NOT NULL);
+	`
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_key_name TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_public_key TEXT DEFAULT ''")
+
+	// Migrate existing tables to ensure internal_id, owner_id, public_ip, and public_ip_enabled columns exist
+	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled"})
+	_ = s.migrateTableColumns("images", []string{"internal_id", "owner_id"})
+	_ = s.migrateTableColumns("templates", []string{"internal_id", "owner_id"})
+
+	indexes := `
+	CREATE INDEX IF NOT EXISTS idx_vms_internal_id ON vms(internal_id);
+	CREATE INDEX IF NOT EXISTS idx_vms_id ON vms(id);
+	CREATE INDEX IF NOT EXISTS idx_vms_name ON vms(name);
+	CREATE INDEX IF NOT EXISTS idx_vms_owner ON vms(owner_id);
+	CREATE INDEX IF NOT EXISTS idx_vms_owner_name ON vms(owner_id, name);
 	CREATE INDEX IF NOT EXISTS idx_vms_status ON vms(status);
 	CREATE INDEX IF NOT EXISTS idx_vms_ip ON vms(ip_address);
+	CREATE INDEX IF NOT EXISTS idx_vms_public_ip ON vms(public_ip);
+
+	CREATE INDEX IF NOT EXISTS idx_images_internal_id ON images(internal_id);
+	CREATE INDEX IF NOT EXISTS idx_images_id ON images(id);
+	CREATE INDEX IF NOT EXISTS idx_images_name ON images(name);
+	CREATE INDEX IF NOT EXISTS idx_images_owner ON images(owner_id);
+
+	CREATE INDEX IF NOT EXISTS idx_templates_internal_id ON templates(internal_id);
+	CREATE INDEX IF NOT EXISTS idx_templates_id ON templates(id);
+	CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name);
+	CREATE INDEX IF NOT EXISTS idx_templates_owner ON templates(owner_id);
+	CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(state,priority,queued_at);
+	CREATE INDEX IF NOT EXISTS idx_workers_pool_status ON worker_nodes(pool_id,status);
+	CREATE INDEX IF NOT EXISTS idx_job_logs_job_seq ON job_logs(job_id,seq);
 	`
-	_, err := s.db.Exec(schema)
+	_, err := s.db.Exec(indexes)
 	return err
+}
+
+func (s *Store) migrateTableColumns(tableName string, cols []string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s);", tableName))
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltValue interface{}
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil {
+			existing[name] = true
+		}
+	}
+	rows.Close()
+
+	for _, col := range cols {
+		if !existing[col] {
+			if col == "owner_id" {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT 'default';", tableName, col))
+			} else if col == "public_ip_enabled" {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 1;", tableName, col))
+			} else if col == "public_ip" {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT '';", tableName, col))
+				_, _ = s.db.Exec(fmt.Sprintf("UPDATE %s SET %s = ip_address WHERE %s = '' OR %s IS NULL;", tableName, col, col, col))
+			} else {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT '';", tableName, col))
+				_, _ = s.db.Exec(fmt.Sprintf("UPDATE %s SET %s = id WHERE %s = '' OR %s IS NULL;", tableName, col, col, col))
+			}
+		}
+	}
+	return nil
 }
 
 // SaveVM inserts or updates a VM record
@@ -88,60 +298,115 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	}
 	vm.UpdatedAt = now
 
-	query := `
-	INSERT INTO vms (
-		id, name, status, vcpus, memory_mb, ip_address, mac_address, tap_device,
-		rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path,
-		pid, socket_path, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		name = excluded.name,
-		status = excluded.status,
-		vcpus = excluded.vcpus,
-		memory_mb = excluded.memory_mb,
-		ip_address = excluded.ip_address,
-		mac_address = excluded.mac_address,
-		tap_device = excluded.tap_device,
-		rootfs_path = excluded.rootfs_path,
-		kernel_path = excluded.kernel_path,
-		disk_path = excluded.disk_path,
-		snapshot_path = excluded.snapshot_path,
-		mem_file_path = excluded.mem_file_path,
-		ssh_key_path = excluded.ssh_key_path,
-		pid = excluded.pid,
-		socket_path = excluded.socket_path,
-		updated_at = excluded.updated_at;
-	`
+	if vm.InternalID == "" {
+		if vm.ID != "" && strings.HasPrefix(vm.ID, "ins_") {
+			vm.InternalID = vm.ID
+		} else {
+			uid := uuid.New().String()
+			cleanU := strings.ReplaceAll(uid, "-", "")
+			vm.InternalID = fmt.Sprintf("ins_%s", cleanU[:16])
+		}
+	}
+	if vm.ID == "" {
+		if vm.Name != "" {
+			vm.ID = vm.Name
+		} else {
+			vm.ID = vm.InternalID
+		}
+	}
+	if vm.Name == "" {
+		vm.Name = vm.ID
+	}
+	if vm.OwnerID == "" {
+		vm.OwnerID = "default"
+	}
 
-	_, err := s.db.ExecContext(ctx, query,
+	pubEnabledInt := 0
+	if vm.PublicIPEnabled {
+		pubEnabledInt = 1
+	}
+
+	updateQuery := `
+	UPDATE vms SET
+		id = ?, name = ?, status = ?, vcpus = ?, memory_mb = ?,
+		ip_address = ?, public_ip = ?, public_ip_enabled = ?,
+		mac_address = ?, tap_device = ?, rootfs_path = ?,
+		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
+		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, pid = ?, socket_path = ?, owner_id = ?, updated_at = ?
+	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
+	`
+	res, err := s.db.ExecContext(ctx, updateQuery,
 		vm.ID, vm.Name, string(vm.Status), vm.VCPUs, vm.MemoryMB,
-		vm.IPAddress, vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
+		vm.IPAddress, vm.PublicIP, pubEnabledInt,
+		vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.PID, vm.SocketPath, vm.CreatedAt, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, vm.OwnerID, vm.UpdatedAt,
+		vm.InternalID, vm.OwnerID, vm.ID, vm.Name,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	insertQuery := `
+	INSERT INTO vms (
+		id, internal_id, owner_id, name, status, vcpus, memory_mb,
+		ip_address, public_ip, public_ip_enabled, mac_address, tap_device, rootfs_path, kernel_path,
+		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
+		pid, socket_path, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`
+	_, err = s.db.ExecContext(ctx, insertQuery,
+		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), vm.VCPUs, vm.MemoryMB,
+		vm.IPAddress, vm.PublicIP, pubEnabledInt, vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
+		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, vm.CreatedAt, vm.UpdatedAt,
 	)
 	return err
 }
 
-// GetVM retrieves a single VM by ID
-func (s *Store) GetVM(ctx context.Context, id string) (*VM, error) {
+// GetVM retrieves a single VM by internal ID, external ID, or Name
+func (s *Store) GetVM(ctx context.Context, idOrName string) (*VM, error) {
+	return s.GetVMByOwner(ctx, "", idOrName)
+}
+
+// GetVMByOwner retrieves a single VM for a specific owner by internal ID, external ID, Name, IPAddress, or PublicIP
+func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, name, status, vcpus, memory_mb, ip_address, mac_address, tap_device,
-	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path,
+	SELECT id, internal_id, owner_id, name, status, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 	       pid, socket_path, created_at, updated_at
-	FROM vms WHERE id = ?;
+	FROM vms
+	WHERE (internal_id = ? OR id = ? OR name = ? OR ip_address = ? OR public_ip = ?)
+	  AND (? = '' OR owner_id = ? OR owner_id = '')
+	ORDER BY CASE
+		WHEN internal_id = ? THEN 1
+		WHEN id = ? THEN 2
+		WHEN name = ? THEN 3
+		WHEN public_ip = ? AND status = 'running' THEN 4
+		WHEN ip_address = ? AND status = 'running' THEN 5
+		WHEN public_ip = ? THEN 6
+		WHEN ip_address = ? THEN 7
+		ELSE 8
+	END, updated_at DESC
+	LIMIT 1;
 	`
 
-	row := s.db.QueryRowContext(ctx, query, id)
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName, idOrName, idOrName, idOrName, idOrName, idOrName)
 	vm := &VM{}
 	var status string
+	var pubEnabledInt int
 	err := row.Scan(
-		&vm.ID, &vm.Name, &status, &vm.VCPUs, &vm.MemoryMB,
-		&vm.IPAddress, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
+		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &vm.VCPUs, &vm.MemoryMB,
+		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-		&vm.SSHKeyPath, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
+		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -150,22 +415,33 @@ func (s *Store) GetVM(ctx context.Context, id string) (*VM, error) {
 		return nil, err
 	}
 	vm.Status = VMStatus(status)
+	vm.PublicIPEnabled = pubEnabledInt != 0
+	if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
+		vm.PublicIP = vm.IPAddress
+	}
 	return vm, nil
 }
 
 // ListVMs returns all stored VMs
 func (s *Store) ListVMs(ctx context.Context) ([]*VM, error) {
+	return s.ListVMsByOwner(ctx, "")
+}
+
+// ListVMsByOwner returns all stored VMs for a given owner
+func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, name, status, vcpus, memory_mb, ip_address, mac_address, tap_device,
-	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path,
+	SELECT id, internal_id, owner_id, name, status, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 	       pid, socket_path, created_at, updated_at
-	FROM vms ORDER BY created_at DESC;
+	FROM vms
+	WHERE (? = '' OR owner_id = ?)
+	ORDER BY created_at DESC;
 	`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -175,27 +451,38 @@ func (s *Store) ListVMs(ctx context.Context) ([]*VM, error) {
 	for rows.Next() {
 		vm := &VM{}
 		var status string
+		var pubEnabledInt int
 		err := rows.Scan(
-			&vm.ID, &vm.Name, &status, &vm.VCPUs, &vm.MemoryMB,
-			&vm.IPAddress, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
+			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &vm.VCPUs, &vm.MemoryMB,
+			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-			&vm.SSHKeyPath, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
+			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
 		}
 		vm.Status = VMStatus(status)
+		vm.PublicIPEnabled = pubEnabledInt != 0
+		if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
+			vm.PublicIP = vm.IPAddress
+		}
 		vms = append(vms, vm)
 	}
 	return vms, rows.Err()
 }
 
-// DeleteVM removes a VM record by ID
-func (s *Store) DeleteVM(ctx context.Context, id string) error {
+// DeleteVM removes a VM record by internal ID, external ID, or Name
+func (s *Store) DeleteVM(ctx context.Context, idOrName string) error {
+	return s.DeleteVMByOwner(ctx, "", idOrName)
+}
+
+// DeleteVMByOwner removes a VM record for a specific owner by internal ID, external ID, or Name
+func (s *Store) DeleteVMByOwner(ctx context.Context, ownerID, idOrName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, "DELETE FROM vms WHERE id = ?", id)
+	query := `DELETE FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?);`
+	_, err := s.db.ExecContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID)
 	return err
 }
 
@@ -226,7 +513,7 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, name, status, ip_address, mac_address, tap_device, updated_at
+	SELECT id, name, status, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, updated_at
 	FROM vms WHERE ip_address != '' ORDER BY ip_address ASC;
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -239,10 +526,631 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 	for rows.Next() {
 		var a NetworkAllocation
 		var status string
-		if err := rows.Scan(&a.VMID, &a.VMName, &status, &a.IPAddress, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
+		var pubEnabledInt int
+		if err := rows.Scan(&a.VMID, &a.VMName, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
 			a.Status = VMStatus(status)
+			a.PublicIPEnabled = pubEnabledInt != 0
+			if a.PublicIPEnabled && a.PublicIP == "" && a.IPAddress != "" {
+				a.PublicIP = a.IPAddress
+			}
 			allocs = append(allocs, &a)
 		}
 	}
 	return allocs, rows.Err()
+}
+
+// SaveImage inserts or updates a CustomImage record
+func (s *Store) SaveImage(ctx context.Context, img *CustomImage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	if img.CreatedAt.IsZero() {
+		img.CreatedAt = now
+	}
+	img.UpdatedAt = now
+
+	if img.InternalID == "" {
+		cleanU := strings.ReplaceAll(uuid.New().String(), "-", "")
+		img.InternalID = fmt.Sprintf("img_%s", cleanU[:16])
+	}
+	if img.ID == "" {
+		if img.Name != "" {
+			img.ID = img.Name
+		} else {
+			img.ID = img.InternalID
+		}
+	}
+	if img.Name == "" {
+		img.Name = img.ID
+	}
+	if img.OwnerID == "" {
+		img.OwnerID = "default"
+	}
+
+	pkgsJSON, err := json.Marshal(img.Packages)
+	if err != nil {
+		pkgsJSON = []byte("[]")
+	}
+
+	updateQuery := `
+	UPDATE images SET
+		id = ?, name = ?, description = ?, base_image = ?, packages = ?,
+		rootfs_path = ?, kernel_path = ?, size_mb = ?, status = ?,
+		error_message = ?, owner_id = ?, updated_at = ?
+	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
+	`
+	res, err := s.db.ExecContext(ctx, updateQuery,
+		img.ID, img.Name, img.Description, img.BaseImage, string(pkgsJSON),
+		img.RootfsPath, img.KernelPath, img.SizeMB, string(img.Status),
+		img.ErrorMessage, img.OwnerID, img.UpdatedAt,
+		img.InternalID, img.OwnerID, img.ID, img.Name,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	insertQuery := `
+	INSERT INTO images (
+		id, internal_id, owner_id, name, description, base_image, packages,
+		rootfs_path, kernel_path, size_mb, status, error_message, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`
+	_, err = s.db.ExecContext(ctx, insertQuery,
+		img.ID, img.InternalID, img.OwnerID, img.Name, img.Description, img.BaseImage, string(pkgsJSON),
+		img.RootfsPath, img.KernelPath, img.SizeMB, string(img.Status),
+		img.ErrorMessage, img.CreatedAt, img.UpdatedAt,
+	)
+	return err
+}
+
+// GetImage retrieves a custom image by internal ID, external ID, or Name
+func (s *Store) GetImage(ctx context.Context, idOrName string) (*CustomImage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, internal_id, owner_id, name, description, base_image, packages, rootfs_path, kernel_path,
+	       size_mb, status, error_message, created_at, updated_at
+	FROM images WHERE internal_id = ? OR id = ? OR name = ?
+	ORDER BY CASE WHEN internal_id = ? THEN 1 WHEN id = ? THEN 2 ELSE 3 END
+	LIMIT 1;
+	`
+
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName)
+	img := &CustomImage{}
+	var pkgsStr, statusStr string
+	err := row.Scan(
+		&img.ID, &img.InternalID, &img.OwnerID, &img.Name, &img.Description, &img.BaseImage, &pkgsStr,
+		&img.RootfsPath, &img.KernelPath, &img.SizeMB, &statusStr,
+		&img.ErrorMessage, &img.CreatedAt, &img.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	img.Status = ImageStatus(statusStr)
+	_ = json.Unmarshal([]byte(pkgsStr), &img.Packages)
+	if img.Packages == nil {
+		img.Packages = []string{}
+	}
+	return img, nil
+}
+
+// ListImages returns all custom images
+func (s *Store) ListImages(ctx context.Context) ([]*CustomImage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, internal_id, owner_id, name, description, base_image, packages, rootfs_path, kernel_path,
+	       size_mb, status, error_message, created_at, updated_at
+	FROM images ORDER BY created_at DESC;
+	`
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var images []*CustomImage
+	for rows.Next() {
+		img := &CustomImage{}
+		var pkgsStr, statusStr string
+		err := rows.Scan(
+			&img.ID, &img.InternalID, &img.OwnerID, &img.Name, &img.Description, &img.BaseImage, &pkgsStr,
+			&img.RootfsPath, &img.KernelPath, &img.SizeMB, &statusStr,
+			&img.ErrorMessage, &img.CreatedAt, &img.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		img.Status = ImageStatus(statusStr)
+		_ = json.Unmarshal([]byte(pkgsStr), &img.Packages)
+		if img.Packages == nil {
+			img.Packages = []string{}
+		}
+		images = append(images, img)
+	}
+	return images, rows.Err()
+}
+
+// DeleteImage removes an image record by internal ID, external ID, or Name
+func (s *Store) DeleteImage(ctx context.Context, idOrName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, "DELETE FROM images WHERE internal_id = ? OR id = ? OR name = ?", idOrName, idOrName, idOrName)
+	return err
+}
+
+// SaveTemplate inserts or updates a Template record
+func (s *Store) SaveTemplate(ctx context.Context, tpl *Template) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	if tpl.CreatedAt.IsZero() {
+		tpl.CreatedAt = now
+	}
+	tpl.UpdatedAt = now
+
+	if tpl.InternalID == "" {
+		cleanU := strings.ReplaceAll(uuid.New().String(), "-", "")
+		tpl.InternalID = fmt.Sprintf("tpl_%s", cleanU[:16])
+	}
+	if tpl.ID == "" {
+		if tpl.Name != "" {
+			tpl.ID = tpl.Name
+		} else {
+			tpl.ID = tpl.InternalID
+		}
+	}
+	if tpl.Name == "" {
+		tpl.Name = tpl.ID
+	}
+	if tpl.OwnerID == "" {
+		tpl.OwnerID = "default"
+	}
+
+	updateQuery := `
+	UPDATE templates SET
+		id = ?, name = ?, description = ?, source_vm_id = ?, disk_path = ?,
+		kernel_path = ?, vcpus = ?, memory_mb = ?, disk_mb = ?, owner_id = ?, updated_at = ?
+	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
+	`
+	res, err := s.db.ExecContext(ctx, updateQuery,
+		tpl.ID, tpl.Name, tpl.Description, tpl.SourceVMID, tpl.DiskPath,
+		tpl.KernelPath, tpl.VCPUs, tpl.MemoryMB, tpl.DiskMB, tpl.OwnerID, tpl.UpdatedAt,
+		tpl.InternalID, tpl.OwnerID, tpl.ID, tpl.Name,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	insertQuery := `
+	INSERT INTO templates (
+		id, internal_id, owner_id, name, description, source_vm_id, disk_path, kernel_path,
+		vcpus, memory_mb, disk_mb, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	`
+	_, err = s.db.ExecContext(ctx, insertQuery,
+		tpl.ID, tpl.InternalID, tpl.OwnerID, tpl.Name, tpl.Description, tpl.SourceVMID, tpl.DiskPath, tpl.KernelPath,
+		tpl.VCPUs, tpl.MemoryMB, tpl.DiskMB, tpl.CreatedAt, tpl.UpdatedAt,
+	)
+	return err
+}
+
+// GetTemplate retrieves a template by internal ID, external ID, or Name
+func (s *Store) GetTemplate(ctx context.Context, idOrName string) (*Template, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, internal_id, owner_id, name, description, source_vm_id, disk_path, kernel_path,
+	       vcpus, memory_mb, disk_mb, created_at, updated_at
+	FROM templates WHERE internal_id = ? OR id = ? OR name = ?
+	ORDER BY CASE WHEN internal_id = ? THEN 1 WHEN id = ? THEN 2 ELSE 3 END
+	LIMIT 1;
+	`
+
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName)
+	tpl := &Template{}
+	err := row.Scan(
+		&tpl.ID, &tpl.InternalID, &tpl.OwnerID, &tpl.Name, &tpl.Description, &tpl.SourceVMID, &tpl.DiskPath,
+		&tpl.KernelPath, &tpl.VCPUs, &tpl.MemoryMB, &tpl.DiskMB, &tpl.CreatedAt, &tpl.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return tpl, nil
+}
+
+// ListTemplates returns all templates
+func (s *Store) ListTemplates(ctx context.Context) ([]*Template, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, internal_id, owner_id, name, description, source_vm_id, disk_path, kernel_path,
+	       vcpus, memory_mb, disk_mb, created_at, updated_at
+	FROM templates ORDER BY created_at DESC;
+	`
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var templates []*Template
+	for rows.Next() {
+		tpl := &Template{}
+		err := rows.Scan(
+			&tpl.ID, &tpl.InternalID, &tpl.OwnerID, &tpl.Name, &tpl.Description, &tpl.SourceVMID, &tpl.DiskPath,
+			&tpl.KernelPath, &tpl.VCPUs, &tpl.MemoryMB, &tpl.DiskMB, &tpl.CreatedAt, &tpl.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		templates = append(templates, tpl)
+	}
+	return templates, rows.Err()
+}
+
+// DeleteTemplate removes a template record by internal ID, external ID, or Name
+func (s *Store) DeleteTemplate(ctx context.Context, idOrName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, "DELETE FROM templates WHERE internal_id = ? OR id = ? OR name = ?", idOrName, idOrName, idOrName)
+	return err
+}
+
+// SaveSSHKey saves or updates an SSH public key
+func (s *Store) SaveSSHKey(ctx context.Context, key *SSHKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if key.OwnerID == "" {
+		key.OwnerID = "default"
+	}
+	if key.CreatedAt.IsZero() {
+		key.CreatedAt = time.Now().UTC()
+	}
+
+	query := `
+	INSERT INTO ssh_keys (id, owner_id, name, public_key, fingerprint, created_at)
+	VALUES (?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name,
+		public_key = excluded.public_key,
+		fingerprint = excluded.fingerprint;
+	`
+	_, err := s.db.ExecContext(ctx, query,
+		key.ID, key.OwnerID, key.Name, key.PublicKey, key.Fingerprint, key.CreatedAt,
+	)
+	return err
+}
+
+// ListSSHKeys returns all stored SSH public keys for an owner
+func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, owner_id, name, public_key, fingerprint, created_at
+	FROM ssh_keys
+	WHERE (? = "" OR owner_id = ? OR owner_id = "default")
+	ORDER BY created_at DESC;
+	`
+	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*SSHKey
+	for rows.Next() {
+		k := &SSHKey{}
+		if err := rows.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// GetSSHKey retrieves an SSH key by ID or Name
+func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, owner_id, name, public_key, fingerprint, created_at
+	FROM ssh_keys
+	WHERE id = ? OR name = ?
+	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END
+	LIMIT 1;
+	`
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName)
+	k := &SSHKey{}
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+// DeleteSSHKey removes an SSH key by ID or Name
+func (s *Store) DeleteSSHKey(ctx context.Context, idOrName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	query := `DELETE FROM ssh_keys WHERE id = ? OR name = ?;`
+	_, err := s.db.ExecContext(ctx, query, idOrName, idOrName)
+	return err
+}
+
+// GetWorkerPool retrieves a pool by ID
+func (s *Store) GetWorkerPool(ctx context.Context, id string) (*WorkerPool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p := new(WorkerPool)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, labels_json, policy_json, created_at, updated_at FROM worker_pools WHERE id = ?`, id).Scan(
+		&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &p.CreatedAt, &p.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// DeleteWorkerPool deletes a worker pool
+func (s *Store) DeleteWorkerPool(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM worker_pools WHERE id = ?`, id)
+	return err
+}
+
+// SaveWorkerNode inserts or updates a worker node
+func (s *Store) SaveWorkerNode(ctx context.Context, n *WorkerNode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if n.CreatedAt.IsZero() {
+		n.CreatedAt = now
+	}
+	n.UpdatedAt = now
+	query := `INSERT INTO worker_nodes (
+		id, name, pool_id, role, status, underlay_ip, arch,
+		total_vcpus, total_mem_mb, total_disk_mb, labels_json, capabilities_json,
+		agent_version, fc_version, last_heartbeat, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name,
+		pool_id = excluded.pool_id,
+		role = excluded.role,
+		status = excluded.status,
+		underlay_ip = excluded.underlay_ip,
+		arch = excluded.arch,
+		total_vcpus = excluded.total_vcpus,
+		total_mem_mb = excluded.total_mem_mb,
+		total_disk_mb = excluded.total_disk_mb,
+		labels_json = excluded.labels_json,
+		capabilities_json = excluded.capabilities_json,
+		agent_version = excluded.agent_version,
+		fc_version = excluded.fc_version,
+		last_heartbeat = excluded.last_heartbeat,
+		updated_at = excluded.updated_at`
+	_, err := s.db.ExecContext(ctx, query,
+		n.ID, n.Name, n.PoolID, n.Role, n.Status, n.UnderlayIP, n.Arch,
+		n.TotalVCPUs, n.TotalMemMB, n.TotalDiskMB, n.LabelsJSON, n.CapabilitiesJSON,
+		n.AgentVersion, n.FCVersion, n.LastHeartbeat, n.CreatedAt, n.UpdatedAt,
+	)
+	return err
+}
+
+// GetWorkerNode retrieves a worker node by ID
+func (s *Store) GetWorkerNode(ctx context.Context, id string) (*WorkerNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := new(WorkerNode)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
+		&n.ID, &n.Name, &n.PoolID, &n.Role, &n.Status, &n.UnderlayIP, &n.Arch,
+		&n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB, &n.LabelsJSON, &n.CapabilitiesJSON,
+		&n.AgentVersion, &n.FCVersion, &n.LastHeartbeat, &n.CreatedAt, &n.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// ListWorkerNodes returns all worker nodes
+func (s *Store) ListWorkerNodes(ctx context.Context) ([]*WorkerNode, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*WorkerNode
+	for rows.Next() {
+		n := new(WorkerNode)
+		if err := rows.Scan(&n.ID, &n.Name, &n.PoolID, &n.Role, &n.Status, &n.UnderlayIP, &n.Arch, &n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB, &n.LabelsJSON, &n.CapabilitiesJSON, &n.AgentVersion, &n.FCVersion, &n.LastHeartbeat, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// UpdateWorkerNodeStatus updates worker status
+func (s *Store) UpdateWorkerNodeStatus(ctx context.Context, id, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE worker_nodes SET status = ?, updated_at = ? WHERE id = ? OR name = ?`, status, time.Now().UTC(), id, id)
+	return err
+}
+
+// DeleteWorkerNode removes a worker node
+func (s *Store) DeleteWorkerNode(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM worker_nodes WHERE id = ? OR name = ?`, id, id)
+	return err
+}
+
+// GetJob retrieves a job by ID
+func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j := new(Job)
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
+		&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+// ListJobs retrieves jobs, optionally filtered by owner
+func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	query := `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE (? = "" OR owner_id = ? OR owner_id = "default") ORDER BY queued_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Job
+	for rows.Next() {
+		j := new(Job)
+		if err := rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// UpdateJobState updates state, result, and completion times
+func (s *Store) UpdateJobState(ctx context.Context, id, state, resultJSON string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if state == "running" {
+		_, err := s.db.ExecContext(ctx, `UPDATE jobs SET state = ?, started_at = coalesce(started_at, ?), updated_at = ? WHERE id = ?`, state, now, now, id)
+		return err
+	}
+	if state == "succeeded" || state == "failed" || state == "canceled" || state == "lost" {
+		_, err := s.db.ExecContext(ctx, `UPDATE jobs SET state = ?, result_json = ?, finished_at = coalesce(finished_at, ?), updated_at = ? WHERE id = ?`, state, resultJSON, now, now, id)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ? WHERE id = ?`, state, now, id)
+	return err
+}
+
+// FailStaleJobs marks jobs left in a running state by a previous daemon
+// process as failed, so they do not stay stuck forever after a restart.
+func (s *Store) FailStaleJobs(ctx context.Context) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET state = 'failed', result_json = ?, finished_at = coalesce(finished_at, ?), updated_at = ? WHERE state IN ('running', 'assigned')`,
+		`{"error":"daemon restarted before the job finished"}`, now, now)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// SaveJobAttempt records an attempt
+func (s *Store) SaveJobAttempt(ctx context.Context, a *JobAttempt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a.ID == "" {
+		a.ID = uuid.NewString()
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO job_attempts (id, job_id, worker_id, state, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state = excluded.state`, a.ID, a.JobID, a.WorkerID, a.State, a.CreatedAt)
+	return err
+}
+
+// SaveWorkerLease records a lease
+func (s *Store) SaveWorkerLease(ctx context.Context, l *WorkerLease) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l.ID == "" {
+		l.ID = uuid.NewString()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO worker_leases (id, job_id, attempt_id, worker_id, expires_at, state) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET expires_at = excluded.expires_at, state = excluded.state`, l.ID, l.JobID, l.AttemptID, l.WorkerID, l.ExpiresAt, l.State)
+	return err
+}
+
+// AppendJobLog appends a log entry
+func (s *Store) AppendJobLog(ctx context.Context, l *JobLog) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l.ID == "" {
+		l.ID = uuid.NewString()
+	}
+	if l.CreatedAt.IsZero() {
+		l.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO job_logs (id, job_id, attempt_id, stream, seq, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, l.ID, l.JobID, l.AttemptID, l.Stream, l.Seq, l.Data, l.CreatedAt)
+	return err
+}
+
+// GetJobLogs retrieves all logs for a job
+func (s *Store) GetJobLogs(ctx context.Context, jobID string) ([]*JobLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, attempt_id, stream, seq, data, created_at FROM job_logs WHERE job_id = ? ORDER BY seq ASC, created_at ASC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*JobLog
+	for rows.Next() {
+		l := new(JobLog)
+		if err := rows.Scan(&l.ID, &l.JobID, &l.AttemptID, &l.Stream, &l.Seq, &l.Data, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }

@@ -13,83 +13,143 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/on-demand-vms/pkg/version"
 )
 
 func main() {
-	listenAddr := flag.String("listen", "0.0.0.0:18080", "Address to listen on (e.g. 0.0.0.0:18080 or unix:///run/mforge.sock)")
-	dbPath := flag.String("db-path", "/var/lib/microforge/data/microforge.db", "Path to SQLite database file")
-	imagesDir := flag.String("images-dir", "/var/lib/microforge/images", "Base images directory")
-	vmsDir := flag.String("vms-dir", "/var/lib/microforge/vms", "VM workspace directory")
-	netConfigFile := flag.String("network-config", "", "Path to network configuration JSON file")
-	networkMode := flag.String("network-mode", "", "Network mode: 'nat', 'bridge', or 'nic' (overrides config file)")
+	if handleSubcommands() {
+		return
+	}
+
+	configFile := flag.String("config", "", "Path to global daemon configuration JSON file (e.g. config/daemon.json)")
+	configPathFlag := flag.Bool("config-path", false, "Display the path to the resolved configuration file and exit")
+	flag.BoolVar(configPathFlag, "show-config-path", false, "Display the path to the resolved configuration file and exit")
+	listenAddr := flag.String("listen", "", "Address to listen on (e.g. 0.0.0.0:18080 or unix:///run/compute.sock)")
+	dbPath := flag.String("db-path", "", "Path to SQLite database file")
+	imagesDir := flag.String("images-dir", "", "Base images directory")
+	vmsDir := flag.String("vms-dir", "", "VM workspace directory")
+	netConfigFile := flag.String("network-config", "", "Path to network configuration JSON file (legacy)")
+	networkMode := flag.String("network-mode", "", "Network mode: 'nat', 'wired', 'nic', or 'bridge' (overrides config file)")
 	bridgeName := flag.String("bridge", "", "Bridge interface name (overrides config file)")
 	bridgeIP := flag.String("bridge-ip", "", "Bridge IPv4 CIDR (overrides config file)")
 	subnet := flag.String("subnet", "", "Internal VM subnet CIDR (overrides config file)")
-	physicalNIC := flag.String("physical-nic", "", "Host physical NIC name for 'nic' mode (e.g. eth0)")
-	firecrackerBin := flag.String("firecracker-bin", "/usr/local/bin/firecracker", "Path to firecracker executable")
+	physicalNIC := flag.String("physical-nic", "", "Host physical NIC name for 'wired'/'nic' mode (e.g. eth0)")
+	gatewayIP := flag.String("gateway-ip", "", "Default IPv4 gateway for wired microVMs (overrides config file)")
+	firecrackerBin := flag.String("firecracker-bin", "", "Path to firecracker executable")
+	versionFlag := flag.Bool("version", false, "Display version information and exit")
+	flag.BoolVar(versionFlag, "v", false, "Display version information and exit")
 	flag.Parse()
 
-	// 1. Resolve network configuration
-	netCfg := network.DefaultNATConfig()
-	// Try loading from explicit config path or default locations
-	cfgLoaded := false
+	if *versionFlag {
+		info := version.Get("microforged", "Compute Daemon")
+		fmt.Printf("%s\n\n", info.String())
+		fmt.Print(info.Detailed(""))
+		fmt.Println()
+		return
+	}
+
+	if *configPathFlag {
+		_, loadedPath, err := config.ResolveConfig(*configFile)
+		if err != nil && *configFile != "" {
+			fmt.Fprintf(os.Stderr, "Error loading specified configuration from %s: %v\n", *configFile, err)
+			os.Exit(1)
+		}
+		if loadedPath != "" {
+			fmt.Println(loadedPath)
+		} else {
+			fmt.Println("No configuration file found (using default configuration)")
+		}
+		return
+	}
+
+	// 1. Resolve master configuration file
+	globalCfg, loadedPath, err := config.ResolveConfig(*configFile)
+	if err != nil && *configFile != "" {
+		log.Fatalf("Failed to load specified configuration from %s: %v", *configFile, err)
+	}
+	globalCfg.ConfigPath = loadedPath
+
+	// Legacy network config flag override
 	if *netConfigFile != "" {
-		if loaded, err := network.LoadConfigFile(*netConfigFile); err == nil {
-			netCfg = loaded
-			cfgLoaded = true
+		if netCfg, err := network.LoadConfigFile(*netConfigFile); err == nil {
+			globalCfg.Network = netCfg
+			loadedPath = *netConfigFile
+			globalCfg.ConfigPath = loadedPath
 		} else {
 			log.Fatalf("Failed to load specified network config from %s: %v", *netConfigFile, err)
 		}
-	} else if loaded, err := network.LoadConfigFile("config/network.json"); err == nil {
-		netCfg = loaded
-		cfgLoaded = true
-	} else if loaded, err := network.LoadConfigFile("/etc/microforge/network.json"); err == nil {
-		netCfg = loaded
-		cfgLoaded = true
 	}
 
-	// Apply CLI flag overrides if provided
+	// Apply CLI overrides if explicitly passed
+	if *listenAddr != "" {
+		globalCfg.Server.ListenAddr = *listenAddr
+	}
+	if *dbPath != "" {
+		globalCfg.Server.DBPath = *dbPath
+	}
+	if *imagesDir != "" {
+		globalCfg.Images.ImagesDir = *imagesDir
+	}
+	if *vmsDir != "" {
+		globalCfg.Images.VMsDir = *vmsDir
+	}
+	if *firecrackerBin != "" {
+		globalCfg.Server.FirecrackerBin = *firecrackerBin
+	}
 	if *networkMode != "" {
-		netCfg.Mode = network.Mode(*networkMode)
+		globalCfg.Network.Mode = network.Mode(*networkMode)
 	}
 	if *bridgeName != "" {
-		netCfg.BridgeName = *bridgeName
+		globalCfg.Network.BridgeName = *bridgeName
 	}
 	if *bridgeIP != "" {
-		netCfg.BridgeIP = *bridgeIP
+		globalCfg.Network.BridgeIP = *bridgeIP
 	}
 	if *subnet != "" {
-		netCfg.SubnetCIDR = *subnet
+		globalCfg.Network.SubnetCIDR = *subnet
 	}
 	if *physicalNIC != "" {
-		netCfg.PhysicalNIC = *physicalNIC
+		globalCfg.Network.PhysicalNIC = *physicalNIC
+	}
+	if *gatewayIP != "" {
+		globalCfg.Network.GatewayIP = *gatewayIP
 	}
 
+	isWired := globalCfg.Network.Mode == network.ModeNIC || globalCfg.Network.Mode == network.ModeWired
+
 	log.Printf("[microforged] Starting daemon...")
-	log.Printf("[microforged] Listening on: %s", *listenAddr)
-	log.Printf("[microforged] Database: %s", *dbPath)
-	log.Printf("[microforged] Images: %s", *imagesDir)
-	log.Printf("[microforged] VMs directory: %s", *vmsDir)
-	log.Printf("[microforged] Network: mode=%s bridge=%s ip=%s subnet=%s (from_file=%v)",
-		netCfg.Mode, netCfg.BridgeName, netCfg.BridgeIP, netCfg.SubnetCIDR, cfgLoaded)
-	if netCfg.Mode == network.ModeNIC {
-		log.Printf("[microforged] Enslaved Physical NIC: %s", netCfg.PhysicalNIC)
+	log.Printf("[microforged] Config file: %s", loadedPath)
+	log.Printf("[microforged] Listening on: %s", globalCfg.Server.ListenAddr)
+	log.Printf("[microforged] Database: %s", globalCfg.Server.DBPath)
+	log.Printf("[microforged] Images dir: %s", globalCfg.Images.ImagesDir)
+	log.Printf("[microforged] VMs dir: %s", globalCfg.Images.VMsDir)
+	log.Printf("[microforged] Default VM specs: %d vCPUs, %d MB RAM, %d MB Disk, Image: %s",
+		globalCfg.Defaults.VCPUs, globalCfg.Defaults.MemoryMB, globalCfg.Defaults.DiskSizeMB, globalCfg.Defaults.Image)
+	log.Printf("[microforged] Resource limits: max_running_vms=%d max_vcpus=%d max_ram=%dMB max_disk=%dMB min_free_disk=%dMB",
+		globalCfg.Resources.MaxRunningVMs, globalCfg.Resources.MaxTotalVCPUs, globalCfg.Resources.MaxTotalMemoryMB,
+		globalCfg.Resources.MaxTotalDiskMB, globalCfg.Resources.MinFreeDiskSpaceMB)
+	log.Printf("[microforged] Network: mode=%s bridge=%s ip=%s subnet=%s",
+		globalCfg.Network.Mode, globalCfg.Network.BridgeName, globalCfg.Network.BridgeIP, globalCfg.Network.SubnetCIDR)
+	if isWired {
+		log.Printf("[microforged] Wired dedicated IPs enabled on physical interface: %s (gateway: %s)",
+			globalCfg.Network.PhysicalNIC, globalCfg.Network.GatewayIP)
 	}
 
 	// 2. Initialize SQLite Store
-	store, err := db.NewStore(*dbPath)
+	store, err := db.NewStore(globalCfg.Server.DBPath)
 	if err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer store.Close()
 
 	// 3. Initialize Network Manager
-	netMgr, err := network.NewManager(netCfg, nil)
+	netMgr, err := network.NewManager(globalCfg.Network, nil)
 	if err != nil {
 		log.Fatalf("Failed to initialize network manager: %v", err)
 	}
@@ -102,17 +162,29 @@ func main() {
 	cancel()
 
 	// 4. Initialize Storage Manager
+	var imageProfiles []storage.ImageProfile
+	for _, img := range globalCfg.Images.Available {
+		imageProfiles = append(imageProfiles, storage.ImageProfile{
+			Name:        img.Name,
+			Kernel:      img.Kernel,
+			Rootfs:      img.Rootfs,
+			Description: img.Description,
+		})
+	}
 	storMgr, err := storage.NewManager(storage.Config{
-		BaseImagesDir: *imagesDir,
-		VMsDir:        *vmsDir,
+		BaseImagesDir:   globalCfg.Images.ImagesDir,
+		VMsDir:          globalCfg.Images.VMsDir,
+		AvailableImages: imageProfiles,
 	})
 	if err != nil {
 		log.Fatalf("Failed to initialize storage manager: %v", err)
 	}
 
-	// 5. Initialize VM Manager
+	// 5. Initialize VM Manager with Defaults and Resource Limits
 	vmMgr := vm.NewManager(vm.Config{
-		FirecrackerBinary: *firecrackerBin,
+		FirecrackerBinary: globalCfg.Server.FirecrackerBin,
+		Defaults:          globalCfg.Defaults,
+		Resources:         globalCfg.Resources,
 	}, store, netMgr, storMgr)
 
 	// Reconcile and prune any leftover orphan TAPs from previous runs
@@ -122,24 +194,24 @@ func main() {
 	} else if len(pruned) > 0 {
 		log.Printf("[microforged] Pruned %d orphaned TAP interface(s): %v", len(pruned), pruned)
 	}
+	_ = vmMgr.RecoverQueue(reconcileCtx)
 	reconcileCancel()
 
 	// 6. Setup Server
-	server := NewServer(vmMgr)
+	server := NewServer(vmMgr, globalCfg)
 
 	// Mount embedded Web GUI
-	daemonTarget := *listenAddr
+	daemonTarget := globalCfg.Server.ListenAddr
 	if !strings.HasPrefix(daemonTarget, "unix://") {
-		if guiHandler, err := gui.NewHandler("http://" + daemonTarget); err == nil {
+		if guiHandler, err := gui.NewStaticAssetHandler(); err == nil {
 			server.SetGUIHandler(guiHandler)
 			log.Printf("[microforged] Web GUI mounted and active at http://%s/", daemonTarget)
 		}
 	}
 
-
 	var listener net.Listener
-	if strings.HasPrefix(*listenAddr, "unix://") {
-		sockPath := strings.TrimPrefix(*listenAddr, "unix://")
+	if strings.HasPrefix(globalCfg.Server.ListenAddr, "unix://") {
+		sockPath := strings.TrimPrefix(globalCfg.Server.ListenAddr, "unix://")
 		_ = os.Remove(sockPath)
 		listener, err = net.Listen("unix", sockPath)
 		if err != nil {
@@ -148,9 +220,9 @@ func main() {
 		defer os.Remove(sockPath)
 		_ = os.Chmod(sockPath, 0666)
 	} else {
-		listener, err = net.Listen("tcp", *listenAddr)
+		listener, err = net.Listen("tcp", globalCfg.Server.ListenAddr)
 		if err != nil {
-			log.Fatalf("Failed to listen on TCP %s: %v", *listenAddr, err)
+			log.Fatalf("Failed to listen on TCP %s: %v", globalCfg.Server.ListenAddr, err)
 		}
 	}
 	defer listener.Close()
@@ -165,7 +237,7 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("[microforged] Daemon is ready and serving requests on %s\n", *listenAddr)
+	fmt.Printf("[microforged] Daemon is ready and serving requests on %s\n", globalCfg.Server.ListenAddr)
 
 	// Graceful shutdown
 	sigChan := make(chan os.Signal, 1)

@@ -118,6 +118,48 @@ func TestNetworkManagerModes(t *testing.T) {
 	}
 }
 
+func TestWiredDedicatedIP(t *testing.T) {
+	ctx := context.Background()
+
+	runnerWired := &mockRunner{}
+	cfgWired := DefaultWiredConfig("enp3s0", "192.168.1.0/24", "192.168.1.1")
+	mgrWired, err := NewManager(cfgWired, runnerWired)
+	if err != nil {
+		t.Fatalf("failed to create Wired manager: %v", err)
+	}
+
+	if mgrWired.GetGatewayIP() != "192.168.1.1" {
+		t.Fatalf("expected custom gateway 192.168.1.1, got %s", mgrWired.GetGatewayIP())
+	}
+
+	if err := mgrWired.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("Wired EnsureNetwork failed: %v", err)
+	}
+
+	var enslaved bool
+	for _, cmd := range runnerWired.commands {
+		str := strings.Join(cmd, " ")
+		if strings.Contains(str, "ip link set dev enp3s0 master") {
+			enslaved = true
+			break
+		}
+	}
+	if !enslaved {
+		t.Fatalf("expected physical NIC enp3s0 to be enslaved to bridge")
+	}
+
+	info, err := mgrWired.GetNetworkInfo(ctx, []string{"mftap-1"}, 1)
+	if err != nil {
+		t.Fatalf("GetNetworkInfo error: %v", err)
+	}
+	if !info.WiredDedicated {
+		t.Fatalf("expected WiredDedicated to be true")
+	}
+	if info.GatewayIP != "192.168.1.1" {
+		t.Fatalf("expected GatewayIP 192.168.1.1, got %s", info.GatewayIP)
+	}
+}
+
 func TestNetworkManagerTAPAndPrune(t *testing.T) {
 	runner := &mockRunner{
 		output: map[string]string{
@@ -147,5 +189,104 @@ func TestNetworkManagerTAPAndPrune(t *testing.T) {
 	}
 	if len(pruned) != 1 || pruned[0] != "mftap-orphan" {
 		t.Fatalf("expected pruned [mftap-orphan], got %v", pruned)
+	}
+}
+
+func TestLinkOtherBridgesAndDHCP(t *testing.T) {
+	runner := &mockRunner{
+		output: map[string]string{
+			"link show type bridge": "1: br0: <BROADCAST>\n2: virbr0: <BROADCAST>\n3: mft3br0: <BROADCAST>\n",
+			"route show default":    "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.50\n",
+			"ip neigh show":         "192.168.1.120 dev mft3br0 lladdr 06:00:c0:a8:01:78 REACHABLE\n",
+		},
+	}
+	cfg := DefaultNATConfig()
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := mgr.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	linked, err := mgr.LinkOtherBridges(ctx)
+	if err != nil {
+		t.Fatalf("LinkOtherBridges error: %v", err)
+	}
+	if len(linked) != 2 {
+		t.Fatalf("expected 2 linked bridges (br0, virbr0), got %v", linked)
+	}
+
+	ip, err := mgr.ResolveGuestIPByMAC(ctx, "06:00:c0:a8:01:78")
+	if err != nil {
+		t.Fatalf("ResolveGuestIPByMAC failed: %v", err)
+	}
+	if ip != "192.168.1.120" {
+		t.Fatalf("expected IP 192.168.1.120, got %s", ip)
+	}
+
+	if mgr.GetGatewayIP() != "172.16.0.1" {
+		t.Fatalf("expected gateway 172.16.0.1, got %s", mgr.GetGatewayIP())
+	}
+}
+
+func TestConflictDetectionAndNeighborUsed(t *testing.T) {
+	runner := &mockRunner{
+		output: map[string]string{
+			"ip neigh show": "192.168.1.3 dev eth0 lladdr 00:11:22:33:44:55 REACHABLE\n192.168.1.4 dev eth0 lladdr 00:aa:bb:cc:dd:ee STALE\n",
+		},
+	}
+	cfg := DefaultWiredConfig("eth0", "192.168.1.0/24", "192.168.1.1")
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	// 192.168.1.3 and 192.168.1.4 are active devices on the physical network.
+	// AllocateIP should automatically skip them!
+	used := map[string]bool{}
+	allocatedIP, _, err := mgr.AllocateIP(used)
+	if err != nil {
+		t.Fatalf("AllocateIP failed: %v", err)
+	}
+
+	// Offset 2 is 192.168.1.2. If 192.168.1.2 was used, it would try .3 (skipped), .4 (skipped), .5.
+	// Since 192.168.1.2 is bridge IP, allocatedIP should be .5 or .2 if .2 wasn't used.
+	if allocatedIP == "192.168.1.3" || allocatedIP == "192.168.1.4" {
+		t.Fatalf("allocated IP %s collided with active network device in neighbor table!", allocatedIP)
+	}
+
+	// ValidateIP should reject 192.168.1.3
+	ctx := context.Background()
+	if !mgr.IsIPInUse(ctx, "192.168.1.3", "") {
+		t.Fatalf("expected 192.168.1.3 to be reported as in use")
+	}
+	if err := mgr.ValidateIP("192.168.1.3", used); err == nil {
+		t.Fatalf("expected ValidateIP to reject 192.168.1.3 due to network conflict")
+	}
+}
+
+func TestResolveGuestIPDHCPFallback(t *testing.T) {
+	runner := &mockRunner{
+		output: map[string]string{
+			"link show": "1: eth0: <BROADCAST>",
+			"udhcpc": "DHCP_IP=192.168.1.99\nDHCP_MASK=255.255.255.0\nDHCP_ROUTER=192.168.1.1\nDHCP_SERVERID=192.168.1.1\nDHCP_LEASE=7200\n",
+		},
+	}
+	cfg := DefaultWiredConfig("eth0", "192.168.1.0/24", "192.168.1.1")
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	ctx := context.Background()
+	ip, err := mgr.ResolveGuestIPByMAC(ctx, "06:00:55:66:77:88")
+	if err != nil {
+		t.Fatalf("ResolveGuestIPByMAC failed: %v", err)
+	}
+	if ip != "192.168.1.99" {
+		t.Fatalf("expected leased IP 192.168.1.99, got %s", ip)
 	}
 }

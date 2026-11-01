@@ -1,0 +1,32 @@
+# Multi-stage Dockerfile for Compute Central Daemon
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /src
+
+RUN apk add --no-cache git make gcc musl-dev
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Build daemon and CLI
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/microforged ./cmd/microforged
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute ./cmd/compute
+
+# Final minimal runtime image
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables
+
+WORKDIR /var/lib/compute
+
+COPY --from=builder /bin/microforged /usr/local/bin/microforged
+COPY --from=builder /bin/compute /usr/local/bin/compute
+
+EXPOSE 18080
+
+VOLUME ["/var/lib/compute"]
+
+ENTRYPOINT ["/usr/local/bin/microforged"]
+CMD ["--config", "/etc/compute/daemon.json"]

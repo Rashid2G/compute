@@ -1,6 +1,7 @@
 package network
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -14,7 +15,7 @@ type IPAM struct {
 	mu     sync.Mutex
 }
 
-// NewIPAM creates an IPAM instance for the given CIDR (e.g. "172.16.0.0/16")
+// NewIPAM creates an IPAM instance for the given CIDR (e.g. "192.168.1.0/24")
 func NewIPAM(cidr string) (*IPAM, error) {
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -87,13 +88,13 @@ func (ipam *IPAM) ValidateIP(ipStr string, usedIPs map[string]bool) error {
 	return nil
 }
 
-// GetNetmask returns the dotted decimal netmask (e.g. "255.255.0.0")
+// GetNetmask returns the dotted decimal netmask (e.g. "255.255.255.0")
 func (ipam *IPAM) GetNetmask() string {
 	mask := ipam.subnet.Mask
 	if len(mask) == 4 {
 		return fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
 	}
-	return "255.255.0.0"
+	return "255.255.255.0"
 }
 
 // GetSubnetCIDR returns the subnet CIDR representation
@@ -101,12 +102,14 @@ func (ipam *IPAM) GetSubnetCIDR() string {
 	return ipam.subnet.String()
 }
 
-// GenerateMAC creates a locally administered unicast MAC address from an IPv4 address
+// GenerateMAC creates a locally administered unicast MAC address from an IPv4 address or random entropy
 // Prefix: 06:00: (02 bit set for locally administered, 01 bit clear for unicast)
 func GenerateMAC(ip net.IP) string {
 	ipv4 := ip.To4()
 	if ipv4 == nil {
-		return "06:00:ac:10:00:02"
+		buf := make([]byte, 4)
+		_, _ = rand.Read(buf)
+		return fmt.Sprintf("06:00:%02x:%02x:%02x:%02x", buf[0], buf[1], buf[2], buf[3])
 	}
 	return fmt.Sprintf("06:00:%02x:%02x:%02x:%02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
 }

@@ -1,0 +1,537 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/Rashid2G/on-demand-vms/internal/config"
+	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/network"
+	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/on-demand-vms/pkg/version"
+)
+
+type DaemonClient struct {
+	baseURL      string
+	httpClient   *http.Client
+	streamClient *http.Client
+}
+
+type QueueResponse struct {
+	QueuedVMs      []*vm.QueueItem       `json:"queued_vms"`
+	Count          int                   `json:"count"`
+	RunningVMs     int                   `json:"running_vms"`
+	RunningVCPUs   int                   `json:"running_vcpus"`
+	RunningMemMB   int                   `json:"running_mem_mb"`
+	ResourceLimits config.ResourceLimits `json:"resource_limits"`
+}
+
+func NewDaemonClient(endpoint string) *DaemonClient {
+	var transport *http.Transport
+	if strings.HasPrefix(endpoint, "unix://") {
+		sockPath := strings.TrimPrefix(endpoint, "unix://")
+		transport = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sockPath)
+			},
+		}
+		endpoint = "http://unix"
+	} else {
+		if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
+			endpoint = "http://" + endpoint
+		}
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	}
+
+	return &DaemonClient{
+		baseURL:    strings.TrimSuffix(endpoint, "/"),
+		httpClient: &http.Client{Transport: transport, Timeout: 120 * time.Second},
+		// Streaming responses are long-lived, so they must not inherit the
+		// default request timeout.
+		streamClient: &http.Client{Transport: transport},
+	}
+}
+
+func (c *DaemonClient) doRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection to daemon failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errObj struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(respBytes, &errObj) == nil && errObj.Error != "" {
+			return fmt.Errorf("daemon error: %s", errObj.Error)
+		}
+		return fmt.Errorf("daemon error (status %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	if result != nil && len(respBytes) > 0 {
+		return json.Unmarshal(respBytes, result)
+	}
+	return nil
+}
+
+func (c *DaemonClient) CreateVM(ctx context.Context, req vm.CreateRequest) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms", req, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) CloneVM(ctx context.Context, id string, req vm.CreateRequest) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/clone", req, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) GetTiers(ctx context.Context) ([]config.VMTier, error) {
+	var tiers []config.VMTier
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/tiers", nil, &tiers)
+	return tiers, err
+}
+
+func (c *DaemonClient) ListVMs(ctx context.Context) ([]*db.VM, error) {
+	var vms []*db.VM
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/vms", nil, &vms)
+	return vms, err
+}
+
+func (c *DaemonClient) GetVM(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/vms/"+id, nil, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) RunVM(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/run", nil, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) SaveState(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/save-state", nil, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) ResumeVM(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/resume", nil, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) StopVM(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/stop", nil, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) DeleteVM(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/vms/"+id, nil, nil)
+}
+
+func (c *DaemonClient) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, error) {
+	var info network.NetworkInfo
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network", nil, &info)
+	return &info, err
+}
+
+func (c *DaemonClient) GetNetworkAllocations(ctx context.Context) ([]*db.NetworkAllocation, error) {
+	var allocs []*db.NetworkAllocation
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/allocations", nil, &allocs)
+	return allocs, err
+}
+
+func (c *DaemonClient) PruneNetwork(ctx context.Context) ([]string, error) {
+	var res struct {
+		Status     string   `json:"status"`
+		PrunedTAPs []string `json:"pruned_taps"`
+	}
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/network/prune", nil, &res)
+	return res.PrunedTAPs, err
+}
+
+func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, error) {
+	var cfg network.Config
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/config", nil, &cfg)
+	return &cfg, err
+}
+
+func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {
+	var cfg config.GlobalConfig
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/config", nil, &cfg)
+	return &cfg, err
+}
+
+func (c *DaemonClient) GetQueue(ctx context.Context) (*QueueResponse, error) {
+	var res QueueResponse
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/queue", nil, &res)
+	return &res, err
+}
+
+func (c *DaemonClient) ExecVM(ctx context.Context, id string, req vm.ExecRequest) (*vm.ExecResponse, error) {
+	var res vm.ExecResponse
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/exec", req, &res)
+	return &res, err
+}
+
+// ExecVMStream executes a command and calls emit for each output chunk as it
+// arrives over server-sent events. The final event carries the exit code.
+func (c *DaemonClient) ExecVMStream(ctx context.Context, id string, req vm.ExecRequest, emit func(vm.ExecStreamEvent) error) error {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/vms/"+id+"/exec-stream", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.streamClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("connection to daemon failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		var errObj struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &errObj) == nil && errObj.Error != "" {
+			return fmt.Errorf("daemon error: %s", errObj.Error)
+		}
+		return fmt.Errorf("daemon error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var ev vm.ExecStreamEvent
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &ev); err != nil {
+			continue
+		}
+		if err := emit(ev); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func (c *DaemonClient) InspectNetwork(ctx context.Context, id string) (*vm.NetworkInspectResult, error) {
+	var res vm.NetworkInspectResult
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/inspect/"+id, nil, &res)
+	return &res, err
+}
+
+func (c *DaemonClient) GetStats(ctx context.Context) (*vm.StatsResult, error) {
+	var stats vm.StatsResult
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/stats", nil, &stats)
+	return &stats, err
+}
+func (c *DaemonClient) SetVMPublicIP(ctx context.Context, id string, enabled bool) (*db.VM, error) {
+	reqBody := vm.UpdateVMConfigRequest{
+		PublicIP:        &enabled,
+		PublicIPEnabled: &enabled,
+	}
+	var res db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/public-ip", reqBody, &res)
+	return &res, err
+}
+
+type ImageItem struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	BaseImage   string   `json:"base_image,omitempty"`
+	Packages    []string `json:"packages,omitempty"`
+	SizeMB      int      `json:"size_mb"`
+	Status      string   `json:"status"`
+	Kind        string   `json:"kind"`
+	CreatedAt   string   `json:"created_at,omitempty"`
+}
+
+func (c *DaemonClient) ListImages(ctx context.Context) ([]ImageItem, error) {
+	var images []ImageItem
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/images", nil, &images)
+	return images, err
+}
+
+func (c *DaemonClient) BuildImage(ctx context.Context, req vm.BuildImageRequest) (*db.CustomImage, error) {
+	var img db.CustomImage
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/images", req, &img)
+	return &img, err
+}
+
+func (c *DaemonClient) GetImage(ctx context.Context, idOrName string) (*ImageItem, error) {
+	var img ImageItem
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/images/"+idOrName, nil, &img)
+	return &img, err
+}
+
+func (c *DaemonClient) DeleteImage(ctx context.Context, idOrName string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/images/"+idOrName, nil, nil)
+}
+
+func (c *DaemonClient) ListTemplates(ctx context.Context) ([]*db.Template, error) {
+	var templates []*db.Template
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/templates", nil, &templates)
+	return templates, err
+}
+
+func (c *DaemonClient) CreateTemplate(ctx context.Context, req vm.CreateTemplateRequest) (*db.Template, error) {
+	var tpl db.Template
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/templates", req, &tpl)
+	return &tpl, err
+}
+
+func (c *DaemonClient) GetTemplate(ctx context.Context, idOrName string) (*db.Template, error) {
+	var tpl db.Template
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/templates/"+idOrName, nil, &tpl)
+	return &tpl, err
+}
+
+func (c *DaemonClient) DeleteTemplate(ctx context.Context, idOrName string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/templates/"+idOrName, nil, nil)
+}
+
+func (c *DaemonClient) LaunchTemplate(ctx context.Context, idOrName string, req vm.CreateRequest) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/templates/"+idOrName+"/launch", req, &vm)
+	return &vm, err
+}
+
+type CreateKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"public_key"`
+}
+
+type KeysResponse struct {
+	Keys []*db.SSHKey `json:"keys"`
+}
+
+func (c *DaemonClient) Host() string {
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func (c *DaemonClient) ListKeys(ctx context.Context) ([]*db.SSHKey, error) {
+	var resp KeysResponse
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/keys", nil, &resp); err != nil {
+		var list []*db.SSHKey
+		if err2 := c.doRequest(ctx, http.MethodGet, "/api/v1/keys", nil, &list); err2 == nil {
+			return list, nil
+		}
+		return nil, err
+	}
+	return resp.Keys, nil
+}
+
+func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string) (*db.SSHKey, error) {
+	req := CreateKeyRequest{Name: name, PublicKey: pubKey}
+	var key db.SSHKey
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys", req, &key); err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
+func (c *DaemonClient) GetKey(ctx context.Context, idOrName string) (*db.SSHKey, error) {
+	var key db.SSHKey
+	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/keys/"+idOrName, nil, &key); err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
+func (c *DaemonClient) DeleteKey(ctx context.Context, idOrName string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/keys/"+idOrName, nil, nil)
+}
+
+// ResourceRequest exposes the job, worker, and pool control-plane API.
+func (c *DaemonClient) ResourceRequest(ctx context.Context, method, path string, body, result interface{}) error {
+	return c.doRequest(ctx, method, path, body, result)
+}
+
+// Worker, Pool, and Job client methods
+
+func (c *DaemonClient) CreateWorkerToken(ctx context.Context, req api.WorkerTokenCreateRequest) (*api.WorkerTokenResponse, error) {
+	var resp api.WorkerTokenResponse
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/worker-tokens", req, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+func (c *DaemonClient) ListWorkers(ctx context.Context) ([]*db.WorkerNode, error) {
+	var workers []*db.WorkerNode
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/workers", nil, &workers)
+	if err != nil {
+		return nil, err
+	}
+	return workers, nil
+}
+
+func (c *DaemonClient) GetWorker(ctx context.Context, id string) (*db.WorkerNode, error) {
+	var worker db.WorkerNode
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/workers/"+id, nil, &worker)
+	if err != nil {
+		return nil, err
+	}
+	return &worker, nil
+}
+
+func (c *DaemonClient) CordonWorker(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/workers/"+id+"/cordon", nil, nil)
+}
+
+func (c *DaemonClient) DrainWorker(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/workers/"+id+"/drain", nil, nil)
+}
+
+func (c *DaemonClient) DeleteWorker(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/workers/"+id, nil, nil)
+}
+
+func (c *DaemonClient) ListPools(ctx context.Context) ([]*db.WorkerPool, error) {
+	var pools []*db.WorkerPool
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/pools", nil, &pools)
+	if err != nil {
+		return nil, err
+	}
+	return pools, nil
+}
+
+func (c *DaemonClient) CreatePool(ctx context.Context, name string) (*db.WorkerPool, error) {
+	var pool db.WorkerPool
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/pools", api.PoolCreateRequest{Name: name}, &pool)
+	if err != nil {
+		return nil, err
+	}
+	return &pool, nil
+}
+
+func (c *DaemonClient) DeletePool(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/pools/"+id, nil, nil)
+}
+
+func (c *DaemonClient) CreateJob(ctx context.Context, req api.JobCreateRequest) (*db.Job, error) {
+	var job db.Job
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/jobs", req, &job)
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (c *DaemonClient) GetJob(ctx context.Context, id string) (*db.Job, error) {
+	var job db.Job
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/jobs/"+id, nil, &job)
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (c *DaemonClient) ListJobs(ctx context.Context) ([]*db.Job, error) {
+	var jobs []*db.Job
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/jobs", nil, &jobs)
+	if err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+func (c *DaemonClient) CancelJob(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/jobs/"+id+"/cancel", nil, nil)
+}
+
+func (c *DaemonClient) GetJobLogs(ctx context.Context, id string) ([]*db.JobLog, error) {
+	var logs []*db.JobLog
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/jobs/"+id+"/logs", nil, &logs)
+	if err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
+func (c *DaemonClient) GetVersion(ctx context.Context) (*version.Info, error) {
+	var info version.Info
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/version", nil, &info)
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+func (c *DaemonClient) SSHWebSocketURL(vmID string, query url.Values) string {
+	base := c.baseURL
+	var wsScheme string
+	var hostAndPath string
+	if strings.HasPrefix(base, "https://") {
+		wsScheme = "wss://"
+		hostAndPath = strings.TrimPrefix(base, "https://")
+	} else {
+		wsScheme = "ws://"
+		hostAndPath = strings.TrimPrefix(base, "http://")
+	}
+	u := fmt.Sprintf("%s%s/api/v1/vms/%s/ssh", wsScheme, hostAndPath, url.PathEscape(vmID))
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	return u
+}
+
+func (c *DaemonClient) DialSSHWebSocket(ctx context.Context, vmID string, query url.Values) (*websocket.Conn, error) {
+	wsURL := c.SSHWebSocketURL(vmID, query)
+	opts := &websocket.DialOptions{
+		HTTPClient: c.httpClient,
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, opts)
+	return conn, err
+}
