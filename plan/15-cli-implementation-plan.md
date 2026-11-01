@@ -114,7 +114,7 @@ compute [global flags] <command>
 | `compute stop` | `compute sandbox stop` |
 | `compute resume` | `compute sandbox resume` |
 | `compute clone` | `compute sandbox fork` |
-| `compute save-state`, `compute snapshot` | `compute snapshot create` |
+| `compute save-state`, `compute snapshot` | `compute sandbox snapshot` |
 | `compute ssh` | `compute sandbox ssh` |
 | `compute exec` | `compute sandbox exec` |
 | `compute delete`, `compute rm` | `compute sandbox delete` |
