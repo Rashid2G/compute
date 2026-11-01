@@ -14,7 +14,7 @@ var commandHelp = map[string]string{
 Usage:
   compute sandbox list
   compute sandbox create [flags]
-  compute sandbox start|stop|delete <name|id|pattern>...
+  compute sandbox start|stop|save-state|resume|delete <name|id|pattern>...
   compute sandbox info <name|id>
   compute sandbox exec [flags] [user@]<name|id> -- <command...>
   compute sandbox ssh [user@]<name|id> [<command...>]
@@ -24,6 +24,8 @@ Commands:
   create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
+  save-state, snapshot     Save a running sandbox snapshot.
+  resume                   Resume a sandbox from its snapshot.
   delete, rm               Delete one or more sandboxes.
   info, inspect, show      Display sandbox details.
   exec                     Execute a command inside a sandbox, streaming output live.

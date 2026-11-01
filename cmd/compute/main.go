@@ -273,6 +273,39 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Printf("Sandbox Stopped: ID=%s Name=%s Status=%s\n", v.ID, v.Name, v.Status)
 		}
 
+	case "save-state", "snapshot":
+		if len(subArgs) < 1 {
+			printCommandError("missing required argument for 'sandbox save-state'.", "Usage: compute sandbox save-state <name|id>", "sandbox")
+		}
+		targets, err := resolveSandboxTargets(ctx, client, subArgs[:1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving sandbox target: %v\n", err)
+			os.Exit(1)
+		}
+		v, err := client.SaveState(ctx, targets[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving sandbox state: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Sandbox Snapshot Saved: ID=%s Name=%s Status=%s Snapshot=%s\n",
+			v.ID, v.Name, v.Status, v.SnapshotPath)
+
+	case "resume":
+		if len(subArgs) < 1 {
+			printCommandError("missing required argument for 'sandbox resume'.", "Usage: compute sandbox resume <name|id>", "sandbox")
+		}
+		targets, err := resolveSandboxTargets(ctx, client, subArgs[:1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving sandbox target: %v\n", err)
+			os.Exit(1)
+		}
+		v, err := client.ResumeVM(ctx, targets[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resuming sandbox: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Sandbox Resumed: ID=%s Name=%s Status=%s\n", v.ID, v.Name, v.Status)
+
 	case "delete", "rm":
 		if len(subArgs) < 1 {
 			printCommandError("missing required argument for 'sandbox delete'.", "Usage: compute sandbox delete <name|id|pattern>...", "sandbox")

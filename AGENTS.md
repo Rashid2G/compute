@@ -39,7 +39,7 @@ make deploy-ui
    - Ensures `computed.service` and `compute-gui.service` are active.
    - Polls `http://127.0.0.1:18080/api/v1/health` for `{"status":"ok"}`.
    - Validates that the Web GUI on port `8080` responds with `HTTP 200 OK`.
-   - Confirms CLI responsiveness via `compute list`.
+   - Confirms CLI responsiveness via `compute sandbox list`.
 
 ---
 
@@ -52,7 +52,7 @@ make deploy-ui
 | Quick restart without rebuilding | `make deploy-restart` |
 | Check remote service status & health | `make remote-status` |
 | Inspect remote service logs | `ssh t3-runner "sudo journalctl -u computed -u compute-gui -n 50 --no-pager"` |
-| Test remote CLI directly | `ssh t3-runner "COMPUTE_DAEMON=127.0.0.1:18080 /home/rashid/on-demand-vms/bin/compute list"` |
+| Test remote CLI directly | `ssh t3-runner "COMPUTE_DAEMON=127.0.0.1:18080 /home/rashid/on-demand-vms/bin/compute sandbox list"` |
 
 ---
 
