@@ -122,6 +122,7 @@ type WorkerPool struct {
 }
 type WorkerToken struct {
 	Token      string     `json:"token"`
+	Name       string     `json:"name"`
 	PoolID     string     `json:"pool_id"`
 	LabelsJSON string     `json:"labels_json"`
 	ExpiresAt  time.Time  `json:"expires_at"`
@@ -185,5 +186,124 @@ type JobLog struct {
 	Stream    string    `json:"stream"`
 	Seq       int64     `json:"seq"`
 	Data      string    `json:"data"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Volume represents a persistent block storage volume
+type Volume struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Pool       string    `json:"pool"`
+	SizeGB     int       `json:"size_gb"`
+	UsedGB     float64   `json:"used_gb"`
+	Status     string    `json:"status"` // "attached" | "available" | "snapshotting"
+	AttachedVM string    `json:"attached_vm"`
+	DevicePath string    `json:"device_path"`
+	MountPoint string    `json:"mount_point"`
+	Filesystem string    `json:"filesystem"`
+	IOPS       int       `json:"iops"`
+	Throughput string    `json:"throughput"`
+	Snapshots  int       `json:"snapshots"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// WebhookEndpoint represents a destination for outbound event notifications
+type WebhookEndpoint struct {
+	ID              string    `json:"id"`
+	URL             string    `json:"url"`
+	Description     string    `json:"description"`
+	Secret          string    `json:"secret"`
+	Events          []string  `json:"events"` // stored as JSON in SQLite
+	Active          bool      `json:"active"`
+	LastDelivery    string    `json:"last_delivery"`
+	SuccessRate     string    `json:"success_rate"`
+	DeliveriesCount int       `json:"deliveries_count"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// OTelConfig represents OpenTelemetry exporter configuration
+type OTelConfig struct {
+	Enabled        bool   `json:"enabled"`
+	Endpoint       string `json:"endpoint"`
+	Protocol       string `json:"protocol"`
+	AuthHeader     string `json:"auth_header"`
+	ServiceName    string `json:"service_name"`
+	SampleRate     string `json:"sample_rate"`
+	ExportInterval string `json:"export_interval"`
+	MetricsEnabled bool   `json:"metrics_enabled"`
+	TracesEnabled  bool   `json:"traces_enabled"`
+	LogsEnabled    bool   `json:"logs_enabled"`
+	SpansExported  int64  `json:"spans_exported"`
+	LastExportAt   string `json:"last_export_at"`
+}
+
+// AuditEvent represents an auditable control-plane event
+type AuditEvent struct {
+	ID         string    `json:"id"`
+	Timestamp  time.Time `json:"timestamp"`
+	Event      string    `json:"event"`
+	Actor      string    `json:"actor"`
+	Target     string    `json:"target"`
+	Status     string    `json:"status"` // "delivered" | "recorded" | "failed" | "retrying"
+	DurationMs int       `json:"duration_ms"`
+	Payload    string    `json:"payload"`
+}
+
+// AccessAPIKey represents a persistent scoped API access token
+type AccessAPIKey struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Prefix    string    `json:"prefix"`
+	Token     string    `json:"token,omitempty"`
+	Scope     string    `json:"scope"`
+	LastUsed  string    `json:"last_used"`
+	ExpiresAt string    `json:"expires_at"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// AgentProfile represents an AI agent upstream LLM proxy configuration
+type AgentProfile struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Provider        string    `json:"provider"`
+	UpstreamURL     string    `json:"upstream_url"`
+	InjectHeader    string    `json:"inject_header"`
+	SecretRef       string    `json:"secret_ref"`
+	SandboxesLinked int       `json:"sandboxes_linked"`
+	Status          string    `json:"status"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// EnvironmentProfile represents reusable environment configurations
+type EnvironmentProfile struct {
+	Name               string    `json:"name"`
+	IsDefault          bool      `json:"is_default"`
+	SafeForThirdParty  bool      `json:"safe_for_third_parties"`
+	GitHubReposEnabled bool      `json:"github_repos_enabled"`
+	GitHubRepos        []string  `json:"github_repos"`
+	SecretsEnabled     bool      `json:"secrets_enabled"`
+	Secrets            string    `json:"secrets"`
+	BoatCredsEnabled   bool      `json:"boat_credentials_enabled"`
+	AgentCredsEnabled  bool      `json:"agent_credentials_enabled"`
+	CredentialProfile  string    `json:"credential_profile"`
+	Version            int       `json:"version"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// PortForward represents a port forwarding mapping
+type PortForward struct {
+	ID        string    `json:"id"`
+	HostPort  int       `json:"host_port"`
+	VMID      string    `json:"vm_id"`
+	VMName    string    `json:"vm_name"`
+	GuestPort int       `json:"guest_port"`
+	Protocol  string    `json:"protocol"`
+	Subdomain string    `json:"subdomain"`
+	PublicURL string    `json:"public_url"`
+	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 }

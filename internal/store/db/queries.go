@@ -730,3 +730,169 @@ func (q *Queries) GetAPIKeyByNameOrID(ctx context.Context, userID, idOrName stri
 	}
 	return &k, nil
 }
+
+func (q *Queries) ListAPIKeysByUser(ctx context.Context, userID string) ([]*APIKey, error) {
+	query := `
+		SELECT id, user_id, name, secret_hash, prefix, scopes, expires_at, last_used_at, last_used_ip, created_at, revoked_at
+		FROM api_keys
+		WHERE user_id = ?
+		ORDER BY created_at DESC;
+	`
+	rows, err := q.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*APIKey
+	for rows.Next() {
+		var k APIKey
+		var expiresAt, lastUsedAt, revokedAt sql.NullInt64
+		var lastUsedIP sql.NullString
+		if err := rows.Scan(
+			&k.ID, &k.UserID, &k.Name, &k.SecretHash, &k.Prefix, &k.Scopes,
+			&expiresAt, &lastUsedAt, &lastUsedIP, &k.CreatedAt, &revokedAt,
+		); err != nil {
+			return nil, err
+		}
+		if expiresAt.Valid {
+			k.ExpiresAt = &expiresAt.Int64
+		}
+		if lastUsedAt.Valid {
+			k.LastUsedAt = &lastUsedAt.Int64
+		}
+		if lastUsedIP.Valid {
+			k.LastUsedIP = &lastUsedIP.String
+		}
+		if revokedAt.Valid {
+			k.RevokedAt = &revokedAt.Int64
+		}
+		keys = append(keys, &k)
+	}
+	return keys, rows.Err()
+}
+
+func (q *Queries) ListUsers(ctx context.Context) ([]*User, error) {
+	query := `SELECT id, email, username, display_name, password_hash, role, status, must_change_pw, failed_logins, locked_until, quota_json, created_at, updated_at, revision FROM users ORDER BY created_at ASC;`
+	rows, err := q.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		var u User
+		var lockedUntil sql.NullInt64
+		if err := rows.Scan(
+			&u.ID, &u.Email, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Role, &u.Status,
+			&u.MustChangePW, &u.FailedLogins, &lockedUntil, &u.QuotaJSON, &u.CreatedAt, &u.UpdatedAt, &u.Revision,
+		); err != nil {
+			return nil, err
+		}
+		if lockedUntil.Valid {
+			u.LockedUntil = &lockedUntil.Int64
+		}
+		users = append(users, &u)
+	}
+	return users, rows.Err()
+}
+
+// ===== Organizations =====
+
+func (q *Queries) CreateOrganization(ctx context.Context, org *Organization) error {
+	query := `
+		INSERT INTO organizations (id, name, slug, status, quota_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?);
+	`
+	_, err := q.db.ExecContext(ctx, query,
+		org.ID, org.Name, org.Slug, org.Status, org.QuotaJSON, org.CreatedAt, org.UpdatedAt,
+	)
+	return err
+}
+
+func (q *Queries) GetOrganizationByID(ctx context.Context, id string) (*Organization, error) {
+	query := `SELECT id, name, slug, status, quota_json, created_at, updated_at FROM organizations WHERE id = ?;`
+	row := q.db.QueryRowContext(ctx, query, id)
+	var o Organization
+	var quotaJSON sql.NullString
+	if err := row.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &quotaJSON, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if quotaJSON.Valid {
+		o.QuotaJSON = &quotaJSON.String
+	}
+	return &o, nil
+}
+
+func (q *Queries) GetOrganizationBySlug(ctx context.Context, slug string) (*Organization, error) {
+	query := `SELECT id, name, slug, status, quota_json, created_at, updated_at FROM organizations WHERE slug = ?;`
+	row := q.db.QueryRowContext(ctx, query, slug)
+	var o Organization
+	var quotaJSON sql.NullString
+	if err := row.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &quotaJSON, &o.CreatedAt, &o.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if quotaJSON.Valid {
+		o.QuotaJSON = &quotaJSON.String
+	}
+	return &o, nil
+}
+
+func (q *Queries) ListOrganizationsForUser(ctx context.Context, userID string) ([]*Organization, error) {
+	query := `
+		SELECT o.id, o.name, o.slug, o.status, o.quota_json, o.created_at, o.updated_at
+		FROM organizations o
+		JOIN organization_members m ON o.id = m.organization_id
+		WHERE m.user_id = ?
+		ORDER BY o.created_at ASC;
+	`
+	rows, err := q.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orgs []*Organization
+	for rows.Next() {
+		var o Organization
+		var quotaJSON sql.NullString
+		if err := rows.Scan(&o.ID, &o.Name, &o.Slug, &o.Status, &quotaJSON, &o.CreatedAt, &o.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if quotaJSON.Valid {
+			o.QuotaJSON = &quotaJSON.String
+		}
+		orgs = append(orgs, &o)
+	}
+	return orgs, rows.Err()
+}
+
+func (q *Queries) AddOrganizationMember(ctx context.Context, member *OrganizationMember) error {
+	query := `
+		INSERT INTO organization_members (organization_id, user_id, role, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(organization_id, user_id) DO UPDATE SET role = excluded.role;
+	`
+	_, err := q.db.ExecContext(ctx, query, member.OrganizationID, member.UserID, member.Role, member.CreatedAt)
+	return err
+}
+
+func (q *Queries) GetOrganizationMember(ctx context.Context, orgID, userID string) (*OrganizationMember, error) {
+	query := `SELECT organization_id, user_id, role, created_at FROM organization_members WHERE organization_id = ? AND user_id = ?;`
+	row := q.db.QueryRowContext(ctx, query, orgID, userID)
+	var m OrganizationMember
+	if err := row.Scan(&m.OrganizationID, &m.UserID, &m.Role, &m.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &m, nil
+}

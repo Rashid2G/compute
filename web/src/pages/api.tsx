@@ -1,240 +1,346 @@
-import { Braces, Copy, Database, Terminal } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Plus, RefreshCw, Shield, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 
-import { CopyButton } from '@/components/copy-button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import type { DaemonConfig } from '@/lib/types';
-import { cn } from '@/lib/utils';
+import { api, errorMessage } from '@/lib/api';
+import type { AgentProfileRecord, DaemonConfig, VMTier } from '@/lib/types';
 
-interface Endpoint {
-  method: 'GET' | 'POST' | 'DELETE';
-  path: string;
-  description: string;
-  example: string;
+interface ApiPageProps {
+  config: DaemonConfig | null;
 }
 
-const ENDPOINTS: Endpoint[] = [
-  {
-    method: 'GET',
-    path: '/api/v1/health',
-    description: 'Daemon liveness check.',
-    example: 'curl -s http://127.0.0.1:18080/api/v1/health',
-  },
-  {
-    method: 'GET',
-    path: '/api/v1/stats',
-    description: 'Fleet and capacity summary.',
-    example: 'curl -s http://127.0.0.1:18080/api/v1/stats',
-  },
-  {
-    method: 'GET',
-    path: '/api/v1/vms',
-    description: 'List every registered instance.',
-    example: 'curl -s http://127.0.0.1:18080/api/v1/vms',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/vms',
-    description: 'Provision a new microVM.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/vms \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"worker-1","vcpus":2,"memory_mb":1024}\'',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/vms/:id/run',
-    description: 'Boot a stopped or created instance.',
-    example: 'curl -s -X POST http://127.0.0.1:18080/api/v1/vms/vm-1234/run',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/vms/:id/save-state',
-    description: 'Snapshot guest memory to disk.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/vms/vm-1234/save-state',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/vms/:id/exec',
-    description: 'Run a command inside the guest.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/vms/vm-1234/exec \\\n  -H "Content-Type: application/json" \\\n  -d \'{"command":"uname -a"}\'',
-  },
-  {
-    method: 'GET',
-    path: '/api/v1/images',
-    description: 'List custom pre-baked rootfs images.',
-    example: 'curl -s http://127.0.0.1:18080/api/v1/images',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/images',
-    description: 'Build a custom image with pre-installed packages.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/images \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"python-tools","packages":["python3","git","curl"]}\'',
-  },
-  {
-    method: 'GET',
-    path: '/api/v1/templates',
-    description: 'List reusable VM disk templates.',
-    example: 'curl -s http://127.0.0.1:18080/api/v1/templates',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/templates',
-    description: 'Create a reusable disk template from an existing VM.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/templates \\\n  -H "Content-Type: application/json" \\\n  -d \'{"vm_id":"vm-1234","name":"node20-env"}\'',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/templates/:id/launch',
-    description: 'Launch a new VM instance from a disk template.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/templates/node20-env/launch \\\n  -H "Content-Type: application/json" \\\n  -d \'{"name":"worker-node"}\'',
-  },
-  {
-    method: 'GET',
-    path: '/api/v1/network/allocations',
-    description: 'Inspect the IPAM lease table.',
-    example:
-      'curl -s http://127.0.0.1:18080/api/v1/network/allocations',
-  },
-  {
-    method: 'POST',
-    path: '/api/v1/network/prune',
-    description: 'Remove orphaned TAP interfaces.',
-    example:
-      'curl -s -X POST http://127.0.0.1:18080/api/v1/network/prune',
-  },
-];
+export function ApiPage({ config }: ApiPageProps) {
+  const [profiles, setProfiles] = useState<AgentProfileRecord[]>([]);
+  const [tiers, setTiers] = useState<VMTier[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [provider, setProvider] = useState('Anthropic Claude');
+  const [upstreamUrl, setUpstreamUrl] = useState(
+    'https://api.anthropic.com/v1',
+  );
+  const [injectHeader, setInjectHeader] = useState('x-api-key');
+  const [secretRef, setSecretRef] = useState('ANTHROPIC_API_KEY');
 
-const CLI_COMMANDS = [
-  { command: 'compute sandbox create --name worker-1 --vcpus 2 --memory 1024', label: 'Provision' },
-  { command: 'compute image build --name dev-tools --packages "git,curl,python3"', label: 'Build Image' },
-  { command: 'compute image list', label: 'List Images' },
-  { command: 'compute template create --vm <vm-id> --name dev-tmpl', label: 'Create Template' },
-  { command: 'compute template launch <tmpl-id> --name worker-dev', label: 'Launch Template' },
-  { command: 'compute sandbox create --name worker-2 --template dev-tmpl', label: 'Create from Template' },
-  { command: 'compute sandbox start <vm-id>', label: 'Start' },
-  { command: 'compute sandbox stop <vm-id>', label: 'Stop' },
-  { command: 'compute sandbox snapshot <vm-id>', label: 'Snapshot' },
-  { command: 'compute sandbox resume <vm-id>', label: 'Resume' },
-  { command: 'compute sandbox exec <vm-id> -- uname -a', label: 'Exec' },
-  { command: 'compute gui --addr 0.0.0.0 --port 8080', label: 'Launch UI' },
-];
+  const loadData = useCallback(async () => {
+    const [pRes, tRes] = await Promise.allSettled([
+      api.listAgentProfiles(),
+      api.tiers(),
+    ]);
+    if (pRes.status === 'fulfilled') setProfiles(pRes.value || []);
+    if (tRes.status === 'fulfilled') setTiers(tRes.value || []);
+  }, []);
 
-export function ApiPage({ config }: { config: DaemonConfig | null }) {
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  async function handleCreateProfile(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    try {
+      await api.createAgentProfile({
+        name: name.trim(),
+        provider,
+        upstream_url: upstreamUrl,
+        inject_header: injectHeader,
+        secret_ref: secretRef,
+      });
+      toast.success(`Created agent proxy profile "${name.trim()}"`);
+      setName('');
+      setAddOpen(false);
+      await loadData();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  const endpoints = [
+    {
+      method: 'GET',
+      path: '/api/v1/vms',
+      desc: 'List all Firecracker microVM sandboxes across worker nodes',
+    },
+    {
+      method: 'POST',
+      path: '/api/v1/vms',
+      desc: 'Provision a new sandbox from base image, template, or clone source',
+    },
+    {
+      method: 'POST',
+      path: '/api/v1/vms/:id/save-state',
+      desc: 'Pause & snapshot guest memory and disk overlay',
+    },
+    {
+      method: 'POST',
+      path: '/api/v1/vms/:id/resume',
+      desc: 'Resume a snapshotted microVM',
+    },
+    {
+      method: 'POST',
+      path: '/api/v1/vms/:id/exec',
+      desc: 'Execute non-interactive command inside guest over SSH',
+    },
+    {
+      method: 'GET',
+      path: '/api/v1/workers',
+      desc: 'List enrolled bare-metal KVM workers, heartbeats, and pool capacity',
+    },
+    {
+      method: 'POST',
+      path: '/api/v1/jobs',
+      desc: 'Dispatch an ephemeral CI job on the compute scheduler',
+    },
+    {
+      method: 'GET',
+      path: '/api/v1/volumes',
+      desc: 'List persistent block storage volumes and attachments',
+    },
+    {
+      method: 'GET',
+      path: '/api/v1/environments',
+      desc: 'List sandbox environment profiles, secrets, and versions',
+    },
+  ];
+
   return (
-    <div className="grid items-start gap-4 animate-fade-in lg:grid-cols-2">
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0 border-b pb-4">
-          <div className="flex items-center gap-2">
-            <Braces className="h-4 w-4 text-muted-foreground" />
-            <CardTitle>REST API</CardTitle>
-          </div>
-          <span className="font-mono text-xs text-muted-foreground">
-            {ENDPOINTS.length} endpoints
-          </span>
-        </CardHeader>
-        <CardContent className="space-y-4 pt-4">
-          <p className="text-xs text-muted-foreground">
-            The daemon exposes an HTTP/JSON API on{' '}
-            <code className="font-mono text-foreground">
-              {config?.server.listen || '127.0.0.1:18080'}
-            </code>
-            . All mutating requests accept and return JSON.
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+            Agents &amp; Proxying
+          </h1>
+          <p className="text-[12px] text-muted-foreground">
+            Zero-trust agent credential injection proxy, supported VM tiers, and
+            live REST control-plane reference.
           </p>
-          <div className="space-y-2">
-            {ENDPOINTS.map((endpoint) => (
-              <div
-                key={`${endpoint.method}-${endpoint.path}`}
-                className="rounded-md border p-3 text-xs"
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void loadData()}
+            className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>Refresh</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setAddOpen((v) => !v)}
+            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            <span>New Proxy Profile</span>
+          </button>
+        </div>
+      </div>
+
+      {addOpen && (
+        <form
+          onSubmit={handleCreateProfile}
+          className="border border-border bg-muted/15 p-4 space-y-3"
+        >
+          <div className="text-[13px] font-medium text-foreground">
+            Create Agent Credential Proxy Profile (/api/v1/agent-profiles)
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+            <div>
+              <label className="block text-[11px] text-muted-foreground mb-1">
+                Profile Name
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="claude-code-default"
+                required
+                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-muted-foreground mb-1">
+                Provider
+              </label>
+              <select
+                value={provider}
+                onChange={(e) => setProvider(e.target.value)}
+                className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 font-mono">
-                    <span
-                      className={cn(
-                        'rounded px-1.5 py-0.5 text-[10px] font-semibold',
-                        endpoint.method === 'GET' &&
-                          'bg-info/10 text-info',
-                        endpoint.method === 'POST' &&
-                          'bg-success/10 text-success',
-                        endpoint.method === 'DELETE' &&
-                          'bg-destructive/10 text-destructive',
-                      )}
-                    >
-                      {endpoint.method}
-                    </span>
-                    <span className="font-medium text-foreground">
-                      {endpoint.path}
-                    </span>
+                <option value="Anthropic Claude">Anthropic Claude</option>
+                <option value="OpenAI Codex">OpenAI Codex</option>
+                <option value="Google Gemini">Google Gemini</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-[11px] text-muted-foreground mb-1">
+                Upstream URL
+              </label>
+              <input
+                type="text"
+                value={upstreamUrl}
+                onChange={(e) => setUpstreamUrl(e.target.value)}
+                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] text-muted-foreground mb-1">
+                Injected Header / Secret Ref
+              </label>
+              <div className="flex gap-1">
+                <input
+                  type="text"
+                  value={injectHeader}
+                  onChange={(e) => setInjectHeader(e.target.value)}
+                  className="h-8 w-1/2 border border-border bg-background px-2 font-mono text-[11px] text-foreground"
+                />
+                <input
+                  type="text"
+                  value={secretRef}
+                  onChange={(e) => setSecretRef(e.target.value)}
+                  className="h-8 w-1/2 border border-border bg-background px-2 font-mono text-[11px] text-foreground"
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setAddOpen(false)}
+              className="h-8 border border-border px-3 text-[12px] text-muted-foreground"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+            >
+              Save Proxy Profile
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Agent Credential Proxy Profiles Table */}
+      <div className="border border-border bg-background overflow-x-auto">
+        <div className="border-b border-border px-4 py-2.5 text-[12.5px] font-medium text-foreground">
+          Zero-Trust Agent Credential Proxy Profiles ({profiles.length})
+        </div>
+        <table className="w-full border-collapse text-left text-[12px]">
+          <thead>
+            <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
+              <th className="py-2 px-3 font-normal">Profile</th>
+              <th className="py-2 px-3 font-normal">Provider</th>
+              <th className="py-2 px-3 font-normal">Upstream Target</th>
+              <th className="py-2 px-3 font-normal">Header Injection</th>
+              <th className="py-2 px-3 font-normal">Status</th>
+              <th className="py-2 px-3 text-right font-normal">Actions</th>
+            </tr>
+          </thead>
+          {profiles.length === 0 ? (
+            <tbody>
+              <tr>
+                <td
+                  colSpan={6}
+                  className="py-12 text-center text-muted-foreground"
+                >
+                  <Shield className="mx-auto h-6 w-6 text-muted-foreground/50 mb-1.5" />
+                  <div className="text-[12px]">
+                    No agent proxy profiles configured yet. Click &ldquo;New
+                    Proxy Profile&rdquo; to keep real API keys on the host proxy.
                   </div>
-                  <CopyButton value={endpoint.example} label="Copy example curl" />
+                </td>
+              </tr>
+            </tbody>
+          ) : (
+            <tbody className="divide-y divide-border font-mono text-[11.5px]">
+              {profiles.map((p) => (
+                <tr key={p.id} className="hover:bg-muted/30">
+                  <td className="py-2.5 px-3 font-sans font-medium text-foreground">
+                    {p.name}
+                  </td>
+                  <td className="py-2.5 px-3 text-muted-foreground">
+                    {p.provider}
+                  </td>
+                  <td className="py-2.5 px-3 text-foreground">
+                    {p.upstream_url}
+                  </td>
+                  <td className="py-2.5 px-3 text-muted-foreground">
+                    {p.inject_header}: ${p.secret_ref}
+                  </td>
+                  <td className="py-2.5 px-3">
+                    <span className="border border-success/40 bg-success/10 px-1.5 py-0.5 text-[10px] uppercase text-success">
+                      {p.status || 'active'}
+                    </span>
+                  </td>
+                  <td className="py-2.5 px-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void api
+                          .deleteAgentProfile(p.id)
+                          .then(() => {
+                            toast.success('Deleted proxy profile');
+                            void loadData();
+                          })
+                          .catch((err) => toast.error(errorMessage(err)));
+                      }}
+                      className="border border-border p-1 text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          )}
+        </table>
+      </div>
+
+      {/* Live Daemon Supported Tiers */}
+      {tiers.length > 0 && (
+        <div className="border border-border bg-background">
+          <div className="border-b border-border px-4 py-2.5 text-[12.5px] font-medium text-foreground">
+            Supported Hardware Tiers (/api/v1/tiers)
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-border font-mono text-xs">
+            {tiers.map((t) => (
+              <div key={t.id} className="p-3.5 space-y-1">
+                <div className="text-foreground font-medium">{t.name}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  {t.vcpus} vCPU · {Math.round(t.default_ram_mb / 1024)} GB RAM
                 </div>
-                <p className="mt-1 text-muted-foreground">
-                  {endpoint.description}
-                </p>
-                <pre className="mt-2 overflow-x-auto rounded bg-secondary/50 p-2 font-mono text-[11px] text-foreground">
-                  {endpoint.example}
-                </pre>
+                <div className="text-[10.5px] text-muted-foreground font-sans">
+                  {t.description}
+                </div>
               </div>
             ))}
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      )}
 
-      <div className="space-y-4">
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0 border-b pb-4">
-            <div className="flex items-center gap-2">
-              <Terminal className="h-4 w-4 text-muted-foreground" />
-              <CardTitle>CLI reference</CardTitle>
-            </div>
-            <span className="font-mono text-xs text-muted-foreground">
-              compute
-            </span>
-          </CardHeader>
-          <CardContent className="space-y-2 pt-4">
-            {CLI_COMMANDS.map((item) => (
-              <div
-                key={item.command}
-                className="flex items-center justify-between rounded-md border p-2.5 text-xs"
-              >
-                <div className="min-w-0 pr-2">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                    {item.label}
-                  </div>
-                  <code className="block truncate font-mono text-foreground">
-                    {item.command}
-                  </code>
-                </div>
-                <CopyButton value={item.command} label="Copy command" />
+      {/* Control Plane REST API */}
+      <div className="border border-border bg-background">
+        <div className="border-b border-border px-4 py-2.5 text-[12.5px] font-medium text-foreground">
+          Control Plane REST API ({config?.server?.listen || '0.0.0.0:18080'})
+        </div>
+        <div className="divide-y divide-border font-mono text-xs">
+          {endpoints.map((ep, idx) => (
+            <div
+              key={idx}
+              className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5"
+            >
+              <div className="flex items-center gap-3">
+                <span className="border border-[#263fa9] bg-[#0f1634] px-2 py-0.5 text-[10px] text-white">
+                  {ep.method}
+                </span>
+                <span className="text-foreground">{ep.path}</span>
               </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0 border-b pb-4">
-            <div className="flex items-center gap-2">
-              <Database className="h-4 w-4 text-muted-foreground" />
-              <CardTitle>Runtime configuration</CardTitle>
+              <span className="font-sans text-muted-foreground text-xs">
+                {ep.desc}
+              </span>
             </div>
-            <span className="font-mono text-xs text-muted-foreground">
-              active
-            </span>
-          </CardHeader>
-          <CardContent className="pt-4">
-            <pre className="max-h-96 overflow-auto rounded bg-secondary/50 p-3 font-mono text-xs">
-              {JSON.stringify(config, null, 2)}
-            </pre>
-          </CardContent>
-        </Card>
+          ))}
+        </div>
       </div>
     </div>
   );

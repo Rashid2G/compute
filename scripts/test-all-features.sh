@@ -54,7 +54,7 @@ CREATE_OUT=$("${COMPUTE_BIN}" sandbox create --name feat-test-runner --vcpus 2 -
 echo "${CREATE_OUT}"
 assert_contains "${CREATE_OUT}" "Sandbox Created" "CLI reports sandbox created"
 
-VM_ID=$(echo "${CREATE_OUT}" | grep -o 'ID=vm-[a-zA-Z0-9]*' | cut -d= -f2)
+VM_ID=$(echo "${CREATE_OUT}" | grep -o 'ID=[a-zA-Z0-9._-]*' | cut -d= -f2)
 VM_IP=$(echo "${CREATE_OUT}" | grep -o 'IP=[0-9.]*' | cut -d= -f2)
 echo "    Allocated VM ID: ${VM_ID}, IP: ${VM_IP}"
 

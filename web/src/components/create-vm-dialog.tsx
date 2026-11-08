@@ -1,575 +1,429 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Copy, Disc, Key, Layers, Loader2, Plus } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ChevronDown, Play, X } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { Slider } from '@/components/ui/slider';
 import { api } from '@/lib/api';
-import { formatMemory } from '@/lib/format';
-import type { CreateVMRequest, CustomImage, DaemonConfig, SSHKey, Template } from '@/lib/types';
+import type {
+  CreateVMRequest,
+  CustomImage,
+  DaemonConfig,
+  EnvironmentProfileRecord,
+  Template,
+} from '@/lib/types';
 import { cn } from '@/lib/utils';
 
-type Preset = '1vcpu' | '2vcpu' | '4vcpu' | 'custom';
-
-const PRESETS: Array<{ id: Preset; label: string; detail: string; vcpus: number; memory: number }> = [
-  { id: '1vcpu', label: '1 vCPU', detail: 'Micro · 2 GiB RAM', vcpus: 1, memory: 2048 },
-  { id: '2vcpu', label: '2 vCPU', detail: 'Small · 4 GiB RAM', vcpus: 2, memory: 4096 },
-  { id: '4vcpu', label: '4 vCPU', detail: 'Medium · 8 GiB RAM', vcpus: 4, memory: 8192 },
-  { id: 'custom', label: 'Custom RAM', detail: 'Fixed vCPU · custom RAM', vcpus: 2, memory: 4096 },
-];
-
-function randomName() {
-  return `vm-${Math.random().toString(36).slice(2, 7)}`;
+interface CreateVMDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  config: DaemonConfig | null;
+  onCreate: (payload: CreateVMRequest, autoStart: boolean) => Promise<void>;
 }
+
+interface BoatTier {
+  id: 'small' | 'default' | 'large' | 'xlarge';
+  label: string;
+  vcpus: number;
+  ramGb: number;
+  memoryMb: number;
+  diskGb: number;
+  pricePerHour: string;
+}
+
+const BOAT_TIERS: BoatTier[] = [
+  {
+    id: 'small',
+    label: 'small',
+    vcpus: 2,
+    ramGb: 4,
+    memoryMb: 4096,
+    diskGb: 25,
+    pricePerHour: '$0.018/h',
+  },
+  {
+    id: 'default',
+    label: 'default',
+    vcpus: 4,
+    ramGb: 8,
+    memoryMb: 8192,
+    diskGb: 51,
+    pricePerHour: '$0.036/h',
+  },
+  {
+    id: 'large',
+    label: 'large',
+    vcpus: 8,
+    ramGb: 16,
+    memoryMb: 16384,
+    diskGb: 102,
+    pricePerHour: '$0.072/h',
+  },
+  {
+    id: 'xlarge',
+    label: 'xlarge',
+    vcpus: 16,
+    ramGb: 32,
+    memoryMb: 32768,
+    diskGb: 204,
+    pricePerHour: '$0.144/h',
+  },
+];
 
 export function CreateVMDialog({
   open,
   onOpenChange,
   config,
   onCreate,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  config: DaemonConfig | null;
-  onCreate: (payload: CreateVMRequest, autoStart: boolean) => Promise<void>;
-}) {
-  const [name, setName] = useState(randomName);
-  const [preset, setPreset] = useState<Preset>('2vcpu');
-  const [vcpus, setVcpus] = useState(2);
-  const [memory, setMemory] = useState(4096);
-  const [diskGB, setDiskGB] = useState<number>(50);
-  const [sourceType, setSourceType] = useState<'standard' | 'custom-image' | 'template'>('standard');
-  const [selectedImage, setSelectedImage] = useState('ubuntu-24');
-  const [selectedTemplate, setSelectedTemplate] = useState('');
-  const [availableImages, setAvailableImages] = useState<CustomImage[]>([]);
-  const [availableTemplates, setAvailableTemplates] = useState<Template[]>([]);
-  const [availableKeys, setAvailableKeys] = useState<SSHKey[]>([]);
-  const [keyChoice, setKeyChoice] = useState<string>('default');
-  const [customKey, setCustomKey] = useState<string>('');
-  const [cloneFrom, setCloneFrom] = useState('');
-  const [ipAddress, setIPAddress] = useState('');
-  const [macAddress, setMACAddress] = useState('');
-  const [publicIP, setPublicIP] = useState(true);
-  const [autoStart, setAutoStart] = useState(true);
-  const [advanced, setAdvanced] = useState(false);
+}: CreateVMDialogProps) {
+  const [selectedTierId, setSelectedTierId] = useState<BoatTier['id']>('default');
+  const [sandboxName, setSandboxName] = useState('');
+  const [fromSource, setFromSource] = useState('fresh');
+  const [shareCode, setShareCode] = useState('');
+  const [environment, setEnvironment] = useState('Default');
+  const [autoStopHours, setAutoStopHours] = useState('1');
+  const [showAllSizes, setShowAllSizes] = useState(false);
+
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [images, setImages] = useState<CustomImage[]>([]);
+  const [environments, setEnvironments] = useState<EnvironmentProfileRecord[]>([]);
+
+  // Exact 4 toggles from boat.dev/dashboard Advanced create modal
+  const [neverAutoStop, setNeverAutoStop] = useState(false);
+  const [noEnv, setNoEnv] = useState(false);
+  const [snapshotsOff, setSnapshotsOff] = useState(false);
+  const [monitoringOff, setMonitoringOff] = useState(false);
+
+  const [setupScript, setSetupScript] = useState('#!/bin/bash\nnpm install');
   const [submitting, setSubmitting] = useState(false);
-  const [touched, setTouched] = useState(false);
-  const initialized = useRef(false);
 
   useEffect(() => {
-    if (!open) {
-      initialized.current = false;
-      return;
-    }
-    if (initialized.current) return;
-    initialized.current = true;
+    if (!open) return;
+    void api
+      .listTemplates()
+      .then((res) => setTemplates(res || []))
+      .catch(() => setTemplates([]));
+    void api
+      .listImages()
+      .then((res) => setImages(res || []))
+      .catch(() => setImages([]));
+    void api
+      .listEnvironments()
+      .then((res) => setEnvironments(res || []))
+      .catch(() => setEnvironments([]));
+  }, [open]);
 
-    setName(randomName());
-    setPreset('2vcpu');
-    setVcpus(config?.defaults.vcpus || 2);
-    setMemory(config?.defaults.memory_mb || 4096);
-    setDiskGB(50);
-    setSourceType('standard');
-    setSelectedImage('ubuntu-24');
-    setSelectedTemplate('');
-    setCloneFrom('');
-    setIPAddress('');
-    setMACAddress('');
-    setPublicIP(true);
-    setAutoStart(true);
-    setAdvanced(false);
-    setSubmitting(false);
-    setTouched(false);
-    setKeyChoice('default');
-    setCustomKey('');
+  if (!open) return null;
 
-    // Fetch images, templates, and keys
-    void Promise.allSettled([api.listImages(), api.listTemplates(), api.listKeys()]).then(
-      ([imgs, tmpls, keys]) => {
-        if (imgs.status === 'fulfilled') setAvailableImages(imgs.value.filter((i) => i.status === 'ready'));
-        if (tmpls.status === 'fulfilled') setAvailableTemplates(tmpls.value);
-        if (keys.status === 'fulfilled') {
-          setAvailableKeys(keys.value);
-          if (keys.value.length > 0) {
-            setKeyChoice(keys.value[0].id);
-          }
-        }
-      },
-    );
-  }, [open, config]);
+  const activeTier =
+    BOAT_TIERS.find((t) => t.id === selectedTierId) ?? BOAT_TIERS[1];
 
-  const ipValid =
-    !ipAddress.trim() ||
-    ipAddress.trim().toLowerCase() === 'dhcp' ||
-    /^(\d{1,3}\.){3}\d{1,3}$/.test(ipAddress.trim());
-  const macValid =
-    !macAddress.trim() ||
-    /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(macAddress.trim());
-  const nameValid = name.trim().length > 0;
-  const vcpuValid = vcpus === 1 || vcpus === 2 || vcpus === 4;
-  const diskValid = diskGB === 50 || diskGB === 100;
-  const customKeyValid =
-    keyChoice !== 'custom' ||
-    customKey.trim().startsWith('ssh-') ||
-    customKey.trim().startsWith('ecdsa-');
-  const valid = nameValid && ipValid && macValid && vcpuValid && diskValid && memory >= 128 && customKeyValid;
-
-  function choosePreset(next: Preset) {
-    setPreset(next);
-    const item = PRESETS.find((entry) => entry.id === next);
-    if (item && next !== 'custom') {
-      setVcpus(item.vcpus);
-      setMemory(item.memory);
-    }
-  }
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setTouched(true);
-    if (!valid || submitting) return;
-
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setSubmitting(true);
     try {
+      const generatedName =
+        sandboxName.trim() ||
+        `sbx-${activeTier.id}-${Math.random().toString(36).slice(2, 6)}`;
+
       const payload: CreateVMRequest = {
-        name: name.trim(),
-        tier: preset !== 'custom' ? preset : `${vcpus}vcpu`,
-        vcpus,
-        memory_mb: memory,
-        disk_mb: diskGB * 1024,
-        clone_from: cloneFrom.trim() || undefined,
-        ip_address: ipAddress.trim() || undefined,
-        mac_address: macAddress.trim() || undefined,
-        public_ip: publicIP,
+        name: generatedName,
+        vcpus: activeTier.vcpus,
+        memory_mb: activeTier.memoryMb,
+        public_ip_enabled: true,
       };
 
-      if (sourceType === 'template' && selectedTemplate) {
-        payload.template = selectedTemplate;
-      } else if (sourceType === 'custom-image' && selectedImage) {
-        payload.image = selectedImage;
-      } else if (!cloneFrom.trim()) {
-        payload.image = 'ubuntu-24';
+      if (shareCode.trim()) {
+        payload.clone_from = shareCode.trim();
+      } else if (fromSource.startsWith('tpl:')) {
+        payload.template = fromSource.slice(4);
+      } else if (fromSource.startsWith('img:')) {
+        payload.image = fromSource.slice(4);
       }
 
-      if (keyChoice === 'custom' && customKey.trim()) {
-        payload.ssh_public_key = customKey.trim();
-      } else if (keyChoice !== 'default' && keyChoice !== 'custom') {
-        payload.ssh_key_id = keyChoice;
-      }
-
-      await onCreate(payload, autoStart);
+      await onCreate(payload, true);
       onOpenChange(false);
-    } catch {
-      // The caller surfaces the error; keep the dialog open for correction.
+      setSandboxName('');
+      setShareCode('');
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92vh] max-w-2xl overflow-hidden p-0">
-        <form onSubmit={submit} className="flex max-h-[92vh] flex-col">
-          <DialogHeader className="border-b p-6 pb-4">
-            <DialogTitle>New instance</DialogTitle>
-            <DialogDescription>
-              Provision a Firecracker microVM from standard Ubuntu, custom packages, or disk template.
-            </DialogDescription>
-          </DialogHeader>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 overflow-y-auto"
+      onClick={() => onOpenChange(false)}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="advanced-create-title"
+        className="w-full max-w-[440px] border border-border bg-background p-6 text-foreground my-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header matching dashboard-02-advanced-create-modal.png */}
+        <div className="flex items-center justify-between mb-5">
+          <h2
+            id="advanced-create-title"
+            className="text-[15px] font-medium text-foreground"
+          >
+            Advanced create
+          </h2>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            aria-label="Close modal"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
 
-          <div className="flex-1 space-y-5 overflow-y-auto p-6">
-            <div className="space-y-1.5">
-              <Label htmlFor="vm-name">Name</Label>
-              <Input
-                id="vm-name"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="e.g. api-worker-1"
-                autoFocus
-                className="font-mono"
-              />
-              {touched && !nameValid ? (
-                <p className="text-xs text-destructive">A name is required.</p>
-              ) : null}
-            </div>
-
-            <div className="space-y-2">
-              <Label>Fixed tiers (vCPU & RAM)</Label>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                {PRESETS.map((item) => {
-                  const selected = preset === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => choosePreset(item.id)}
-                      className={cn(
-                        'rounded-md border px-2.5 py-2 text-left transition-colors',
-                        selected
-                          ? 'border-primary bg-accent text-accent-foreground'
-                          : 'bg-card hover:bg-secondary',
-                      )}
-                    >
-                      <div className="text-xs font-medium">{item.label}</div>
-                      <div
-                        className={cn(
-                          'mt-0.5 font-mono text-[10px]',
-                          selected ? 'text-accent-foreground/80' : 'text-muted-foreground',
-                        )}
-                      >
-                        {item.detail}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {preset === 'custom' ? (
-              <div className="space-y-4 rounded-md border bg-secondary/30 p-4">
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <Label htmlFor="vcpus" className="font-normal text-muted-foreground">
-                      vCPUs (Fixed: 1, 2, or 4)
-                    </Label>
-                    <span className="font-mono">{vcpus} vCPU</span>
-                  </div>
-                  <div className="flex gap-2">
-                    {[1, 2, 4].map((v) => (
-                      <button
-                        key={v}
-                        type="button"
-                        onClick={() => setVcpus(v)}
-                        className={cn(
-                          'flex-1 rounded border py-1.5 text-xs font-mono',
-                          vcpus === v
-                            ? 'border-primary bg-primary text-primary-foreground'
-                            : 'bg-card hover:bg-secondary',
-                        )}
-                      >
-                        {v} vCPU
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <Label htmlFor="memory" className="font-normal text-muted-foreground">
-                      RAM (Optional custom size)
-                    </Label>
-                    <span className="font-mono">{formatMemory(memory)}</span>
-                  </div>
-                  <Slider
-                    id="memory"
-                    min={512}
-                    max={16384}
-                    step={256}
-                    value={[memory]}
-                    onValueChange={([value]) => setMemory(value)}
-                  />
-                </div>
-              </div>
-            ) : null}
-
-            <div className="space-y-2">
-              <Label>Persistent disk size</Label>
-              <div className="grid grid-cols-2 gap-3">
-                {[50, 100].map((size) => (
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Type: 4-column rectangular tier cards matching dashboard-02 */}
+          <div className="space-y-2">
+            <label className="block text-[12px] text-muted-foreground">
+              Type
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {BOAT_TIERS.map((tier) => {
+                const selected = tier.id === selectedTierId;
+                return (
                   <button
-                    key={size}
+                    key={tier.id}
                     type="button"
-                    onClick={() => setDiskGB(size)}
+                    onClick={() => setSelectedTierId(tier.id)}
                     className={cn(
-                      'flex items-center justify-between rounded-md border p-3 text-left transition-colors',
-                      diskGB === size
-                        ? 'border-primary bg-accent text-accent-foreground'
-                        : 'bg-card hover:bg-secondary',
+                      'flex flex-col items-center justify-center border py-2.5 px-1.5 text-center transition-colors',
+                      selected
+                        ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                        : 'border-border bg-background text-foreground hover:border-foreground/40',
                     )}
                   >
-                    <div>
-                      <div className="text-sm font-semibold">{size} GB</div>
-                      <div className="text-xs text-muted-foreground">
-                        {size === 50 ? 'Standard Boat.dev baseline' : 'High capacity storage'}
-                      </div>
-                    </div>
-                    <div className="font-mono text-xs text-muted-foreground">
-                      {size * 1024} MB
-                    </div>
+                    <span className="text-[12px] font-medium leading-tight">
+                      {tier.label}
+                    </span>
+                    <span className="mt-1 text-[10px] text-muted-foreground leading-tight">
+                      {tier.vcpus} vCPU · {tier.ramGb} GB
+                    </span>
                   </button>
-                ))}
-              </div>
+                );
+              })}
             </div>
-
-            <div className="space-y-2">
-              <Label>Boot Image / Disk Template</Label>
-              <Select
-                value={
-                  sourceType === 'standard'
-                    ? 'standard:ubuntu-24'
-                    : sourceType === 'custom-image'
-                    ? `image:${selectedImage}`
-                    : `template:${selectedTemplate}`
-                }
-                onValueChange={(val) => {
-                  const [type, id] = val.split(':');
-                  if (type === 'standard') {
-                    setSourceType('standard');
-                    setSelectedImage('ubuntu-24');
-                  } else if (type === 'image') {
-                    setSourceType('custom-image');
-                    setSelectedImage(id);
-                  } else if (type === 'template') {
-                    setSourceType('template');
-                    setSelectedTemplate(id);
-                  }
-                }}
-              >
-                <SelectTrigger className="text-xs">
-                  <SelectValue placeholder="Select base image or template" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectLabel>Official Base Images</SelectLabel>
-                    <SelectItem value="standard:ubuntu-24">
-                      ubuntu-24 · Ubuntu 24.04 LTS (Noble Numbat)
-                    </SelectItem>
-                  </SelectGroup>
-
-                  {availableImages.length > 0 ? (
-                    <SelectGroup>
-                      <SelectLabel>Pre-baked Custom Images</SelectLabel>
-                      {availableImages.map((img) => (
-                        <SelectItem key={img.id} value={`image:${img.name}`}>
-                          {img.name} · {img.packages?.join(', ') || 'No extra packages'}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ) : null}
-
-                  {availableTemplates.length > 0 ? (
-                    <SelectGroup>
-                      <SelectLabel>Disk Templates</SelectLabel>
-                      {availableTemplates.map((tmpl) => (
-                        <SelectItem key={tmpl.id} value={`template:${tmpl.name}`}>
-                          {tmpl.name} {tmpl.description ? `· ${tmpl.description}` : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ) : null}
-                </SelectContent>
-              </Select>
-              <p className="text-[11px] text-muted-foreground">
-                Choose the standard Ubuntu image, a custom pre-baked image with packages, or a frozen disk template.
-              </p>
-            </div>
-
-            {/* SSH Key Selection */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="ssh-key-select">SSH Public Key</Label>
-                <span className="text-[11px] text-muted-foreground">Embedded into authorized_keys</span>
-              </div>
-              <Select value={keyChoice} onValueChange={setKeyChoice}>
-                <SelectTrigger id="ssh-key-select" className="text-xs">
-                  <SelectValue placeholder="Select SSH public key" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableKeys.length > 0 ? (
-                    <SelectGroup>
-                      <SelectLabel>Account Saved Keys</SelectLabel>
-                      {availableKeys.map((k) => (
-                        <SelectItem key={k.id} value={k.id}>
-                          {k.name} ({k.fingerprint.slice(0, 16)}…)
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  ) : null}
-                  <SelectGroup>
-                    <SelectLabel>Other</SelectLabel>
-                    <SelectItem value="default">
-                      Default Daemon Key (internal access only)
-                    </SelectItem>
-                    <SelectItem value="custom">
-                      Paste custom public key…
-                    </SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-
-              {keyChoice === 'custom' ? (
-                <div className="space-y-1.5 pt-1">
-                  <textarea
-                    value={customKey}
-                    onChange={(e) => setCustomKey(e.target.value)}
-                    placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@machine"
-                    rows={2}
-                    className="w-full resize-none rounded-md border bg-background px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  />
-                  {!customKeyValid && (
-                    <p className="text-[11px] text-destructive">Key must start with ssh-ed25519, ssh-rsa, or ecdsa-.</p>
-                  )}
-                  <p className="text-[10px] text-muted-foreground">
-                    Key will be injected into /home/compute/.ssh/authorized_keys and /root/.ssh/authorized_keys.
-                  </p>
-                </div>
-              ) : (
-                <p className="text-[11px] text-muted-foreground">
-                  Allows immediate passwordless SSH to the microVM using <code className="font-mono text-[10px]">ssh compute@&lt;ip&gt;</code> or <code className="font-mono text-[10px]">compute ssh</code>.
-                </p>
-              )}
-            </div>
-
-            <div className="rounded-md border">
+            <p className="text-[11.5px] text-muted-foreground pt-0.5">
+              {activeTier.vcpus} vCPU · {activeTier.ramGb} GB RAM ·{' '}
+              {activeTier.diskGb} GB disk · {activeTier.pricePerHour}.{' '}
               <button
                 type="button"
-                onClick={() => setAdvanced((value) => !value)}
-                className="flex w-full items-center justify-between px-3 py-2.5 text-left text-xs font-medium"
+                onClick={() => setShowAllSizes((v) => !v)}
+                className="underline underline-offset-2 text-muted-foreground hover:text-foreground"
               >
-                Disk clone & Advanced networking
-                <ChevronDown
-                  className={cn(
-                    'h-4 w-4 text-muted-foreground transition-transform',
-                    advanced && 'rotate-180',
-                  )}
-                />
+                All sizes
               </button>
+            </p>
+          </div>
 
-              {advanced ? (
-                <div className="space-y-3 border-t p-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="clone-from" className="text-[11px] font-normal text-muted-foreground">
-                      Clone disk from existing VM (Optional)
-                    </Label>
-                    <div className="relative">
-                      <Input
-                        id="clone-from"
-                        value={cloneFrom}
-                        onChange={(event) => setCloneFrom(event.target.value)}
-                        placeholder="e.g. vm-a1b2c3d4"
-                        className="font-mono text-xs pl-8"
-                      />
-                      <Copy className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
-                    </div>
-                    <p className="text-[10px] text-muted-foreground">
-                      Clones the exact persistent disk state of an existing VM to run this new VM.
-                    </p>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="ip" className="text-[11px] font-normal text-muted-foreground">
-                        Static IPv4
-                      </Label>
-                      <Input
-                        id="ip"
-                        value={ipAddress}
-                        onChange={(event) => setIPAddress(event.target.value)}
-                        placeholder="Auto-assign or 'dhcp'"
-                        className="font-mono text-xs"
-                      />
-                      {!ipValid ? (
-                        <p className="text-[11px] text-destructive">Enter a valid IPv4 address or 'dhcp'.</p>
-                      ) : null}
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="mac" className="text-[11px] font-normal text-muted-foreground">
-                        MAC address
-                      </Label>
-                      <Input
-                        id="mac"
-                        value={macAddress}
-                        onChange={(event) => setMACAddress(event.target.value)}
-                        placeholder="Auto-assign"
-                        className="font-mono text-xs"
-                      />
-                      {!macValid ? (
-                        <p className="text-[11px] text-destructive">
-                          Use the form aa:bb:cc:dd:ee:ff.
-                        </p>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="flex items-start gap-2.5 rounded-md border p-3 bg-secondary/15">
-              <Checkbox
-                id="public-ip"
-                checked={publicIP}
-                onCheckedChange={(value) => setPublicIP(value === true)}
-                className="mt-0.5"
+          {showAllSizes && (
+            <div className="border border-border bg-muted/20 p-2.5 text-[11px]">
+              <label className="block text-muted-foreground mb-1">
+                Sandbox Name (optional)
+              </label>
+              <input
+                type="text"
+                value={sandboxName}
+                onChange={(e) => setSandboxName(e.target.value)}
+                placeholder="sbx-prod-api-01"
+                className="h-8 w-full border border-border bg-background px-2 font-mono text-xs text-foreground focus:border-[#263fa9] focus:outline-none"
               />
-              <div>
-                <Label htmlFor="public-ip" className="cursor-pointer font-medium text-xs">
-                  Dedicated Public IP (Main Network)
-                </Label>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  Assigns a dedicated IP on the main network considered as the VM's public IP. Can be defined on or off.
-                </p>
-              </div>
             </div>
+          )}
 
-            <div className="flex items-start gap-2.5 rounded-md border p-3 bg-secondary/15">
-              <Checkbox
-                id="auto-start"
-                checked={autoStart}
-                onCheckedChange={(value) => setAutoStart(value === true)}
-                className="mt-0.5"
-              />
-              <div>
-                <Label htmlFor="auto-start" className="cursor-pointer font-medium text-xs">
-                  Start instance immediately
-                </Label>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  Boot the Firecracker microVM immediately after provisioning.
-                </p>
+          {/* From: 2-column row [ Fresh sandbox ⌄ ] [ or paste bsh_... share code ] */}
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              From
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="relative">
+                <select
+                  value={fromSource}
+                  onChange={(e) => setFromSource(e.target.value)}
+                  className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                >
+                  <option value="fresh">Fresh sandbox</option>
+                  {config?.images?.available?.map((img) => (
+                    <option key={`avail-${img.name}`} value={`img:${img.name}`}>
+                      Image: {img.name}
+                    </option>
+                  ))}
+                  {images
+                    .filter((i) => i.status === 'ready')
+                    .map((img) => (
+                      <option key={`custom-${img.id}`} value={`img:${img.name}`}>
+                        Custom: {img.name}
+                      </option>
+                    ))}
+                  {templates.map((tpl) => (
+                    <option key={`tpl-${tpl.id}`} value={`tpl:${tpl.name}`}>
+                      Snapshot: {tpl.name}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               </div>
+              <input
+                type="text"
+                value={shareCode}
+                onChange={(e) => setShareCode(e.target.value)}
+                placeholder="or paste bsh_... share co"
+                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[11.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              />
             </div>
           </div>
 
-          <DialogFooter className="border-t p-4">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => onOpenChange(false)}
+          {/* Environment dropdown */}
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Environment
+            </label>
+            <div className="relative">
+              <select
+                value={environment}
+                onChange={(e) => setEnvironment(e.target.value)}
+                disabled={noEnv}
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none disabled:opacity-50"
+              >
+                <option value="Default">Default</option>
+                {environments.map((env) => (
+                  <option key={env.name} value={env.name}>
+                    {env.name} (v{env.version})
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            </div>
+          </div>
+
+          {/* Auto-stop after [ 1 ] hours */}
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Auto-stop after
+            </label>
+            <div className="flex items-center gap-2.5">
+              <input
+                type="number"
+                min={1}
+                max={720}
+                value={autoStopHours}
+                disabled={neverAutoStop}
+                onChange={(e) => setAutoStopHours(e.target.value)}
+                className="h-9 w-24 border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none disabled:opacity-50"
+              />
+              <span className="text-[12px] text-muted-foreground">hours</span>
+            </div>
+          </div>
+
+          {/* 4 Rectangular Toggle Switch Rows matching dashboard-02 1:1 */}
+          <div className="divide-y divide-border border-t border-border pt-1">
+            <ToggleRow
+              title="Never auto-stop"
+              description="The sandbox runs until you stop it."
+              checked={neverAutoStop}
+              onChange={setNeverAutoStop}
+            />
+            <ToggleRow
+              title="No env"
+              description="No secret or login of yours reaches the sandbox."
+              checked={noEnv}
+              onChange={setNoEnv}
+            />
+            <ToggleRow
+              title="Snapshots off"
+              description="Never saved. A stop erases the sandbox."
+              checked={snapshotsOff}
+              onChange={setSnapshotsOff}
+            />
+            <ToggleRow
+              title="Monitoring off"
+              description="No command or process output, process list or CPU/RAM graphs kept."
+              checked={monitoringOff}
+              onChange={setMonitoringOff}
+            />
+          </div>
+
+          {/* Setup script monospace textarea */}
+          <div className="space-y-1.5 pt-1">
+            <label className="block text-[12px] text-muted-foreground">
+              Setup script
+            </label>
+            <textarea
+              rows={3}
+              value={setupScript}
+              onChange={(e) => setSetupScript(e.target.value)}
+              className="w-full border border-border bg-[#1a1a1a] p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            />
+          </div>
+
+          {/* Bottom-right [ ▷ Create ] cobalt button */}
+          <div className="flex justify-end pt-2">
+            <button
+              type="submit"
               disabled={submitting}
+              className="flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
             >
-              Cancel
-            </Button>
-            <Button type="submit" size="sm" disabled={!valid || submitting}>
-              {submitting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Provisioning…
-                </>
-              ) : (
-                'Provision instance'
-              )}
-            </Button>
-          </DialogFooter>
+              <Play className="h-3 w-3 fill-current" />
+              <span>{submitting ? 'Creating…' : 'Create'}</span>
+            </button>
+          </div>
         </form>
-      </DialogContent>
-    </Dialog>
+      </div>
+    </div>
+  );
+}
+
+function ToggleRow({
+  title,
+  description,
+  checked,
+  onChange,
+}: {
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-3">
+      <div className="space-y-0.5">
+        <div className="text-[12.5px] font-medium text-foreground">{title}</div>
+        <div className="text-[11.5px] text-muted-foreground leading-snug">
+          {description}
+        </div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className="flex items-center gap-2 shrink-0 focus:outline-none"
+      >
+        <span
+          className={cn(
+            'relative inline-flex h-5 w-9 items-center border transition-colors p-0.5',
+            checked
+              ? 'border-[#263fa9] bg-[#263fa9]'
+              : 'border-border bg-[#2e2e2e]',
+          )}
+        >
+          <span
+            className={cn(
+              'inline-block h-3.5 w-3.5 bg-white transition-transform',
+              checked ? 'translate-x-3.5' : 'translate-x-0',
+            )}
+          />
+        </span>
+        <span className="w-6 text-left text-[11.5px] text-muted-foreground font-mono">
+          {checked ? 'On' : 'Off'}
+        </span>
+      </button>
+    </div>
   );
 }

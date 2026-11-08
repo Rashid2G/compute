@@ -80,20 +80,24 @@ func (s *Store) ListWorkerPools(ctx context.Context) ([]*WorkerPool, error) {
 	return out, rows.Err()
 }
 func (s *Store) SaveWorkerToken(ctx context.Context, t *WorkerToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now().UTC()
 	}
-	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_tokens VALUES(?,?,?,?,?,?)`, t.Token, t.PoolID, t.LabelsJSON, t.ExpiresAt, t.UsedAt, t.CreatedAt)
+	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_tokens(token,name,pool_id,labels_json,expires_at,used_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(token) DO UPDATE SET name=excluded.name,pool_id=excluded.pool_id,labels_json=excluded.labels_json,expires_at=excluded.expires_at,used_at=excluded.used_at`, t.Token, t.Name, t.PoolID, t.LabelsJSON, t.ExpiresAt, t.UsedAt, t.CreatedAt)
 	return e
 }
 func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerToken, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return nil, e
 	}
 	defer tx.Rollback()
 	t := new(WorkerToken)
-	e = tx.QueryRowContext(ctx, `SELECT token,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).Scan(&t.Token, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	e = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if e != nil {
 		return nil, e
 	}
@@ -105,6 +109,30 @@ func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerTo
 		return nil, e
 	}
 	return t, tx.Commit()
+}
+func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, e := s.db.QueryContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens ORDER BY created_at DESC`)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	out := []*WorkerToken{}
+	for rows.Next() {
+		t := new(WorkerToken)
+		if e = rows.Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt); e != nil {
+			return nil, e
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+func (s *Store) DeleteWorkerToken(ctx context.Context, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, e := s.db.ExecContext(ctx, `DELETE FROM worker_tokens WHERE token=?`, token)
+	return e
 }
 func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	now := time.Now().UTC()
@@ -207,18 +235,131 @@ func (s *Store) initSchema() error {
 		created_at TIMESTAMP NOT NULL
 	);
 	CREATE TABLE IF NOT EXISTS worker_pools(id TEXT PRIMARY KEY,name TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',policy_json TEXT NOT NULL DEFAULT '{}',created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
-	CREATE TABLE IF NOT EXISTS worker_tokens(token TEXT PRIMARY KEY,pool_id TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',expires_at TIMESTAMP NOT NULL,used_at TIMESTAMP,created_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS worker_tokens(token TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',expires_at TIMESTAMP NOT NULL,used_at TIMESTAMP,created_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,pool_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',status TEXT NOT NULL,underlay_ip TEXT NOT NULL DEFAULT '',arch TEXT NOT NULL DEFAULT '',total_vcpus INTEGER NOT NULL DEFAULT 0,total_mem_mb INTEGER NOT NULL DEFAULT 0,total_disk_mb INTEGER NOT NULL DEFAULT 0,labels_json TEXT NOT NULL DEFAULT '{}',capabilities_json TEXT NOT NULL DEFAULT '{}',agent_version TEXT NOT NULL DEFAULT '',fc_version TEXT NOT NULL DEFAULT '',last_heartbeat TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS job_attempts(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,worker_id TEXT NOT NULL,state TEXT NOT NULL,created_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_leases(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,attempt_id TEXT NOT NULL,worker_id TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,state TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS job_logs(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,attempt_id TEXT NOT NULL,stream TEXT NOT NULL,seq INTEGER NOT NULL,data TEXT NOT NULL,created_at TIMESTAMP NOT NULL);
+
+	CREATE TABLE IF NOT EXISTS volumes (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		pool TEXT NOT NULL DEFAULT 'default',
+		size_gb INTEGER NOT NULL,
+		used_gb REAL NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'available',
+		attached_vm TEXT NOT NULL DEFAULT '',
+		device_path TEXT NOT NULL DEFAULT '',
+		mount_point TEXT NOT NULL DEFAULT '',
+		filesystem TEXT NOT NULL DEFAULT 'ext4',
+		iops INTEGER NOT NULL DEFAULT 0,
+		throughput TEXT NOT NULL DEFAULT '',
+		snapshots INTEGER NOT NULL DEFAULT 0,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS webhooks (
+		id TEXT PRIMARY KEY,
+		url TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		secret TEXT NOT NULL DEFAULT '',
+		events TEXT NOT NULL DEFAULT '[]',
+		active INTEGER NOT NULL DEFAULT 1,
+		last_delivery TEXT NOT NULL DEFAULT '',
+		success_rate TEXT NOT NULL DEFAULT '100%',
+		deliveries_count INTEGER NOT NULL DEFAULT 0,
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS otel_config (
+		id INTEGER PRIMARY KEY CHECK (id = 1),
+		enabled INTEGER NOT NULL DEFAULT 0,
+		endpoint TEXT NOT NULL DEFAULT '',
+		protocol TEXT NOT NULL DEFAULT 'http/protobuf',
+		auth_header TEXT NOT NULL DEFAULT '',
+		service_name TEXT NOT NULL DEFAULT 'on-demand-vms',
+		sample_rate TEXT NOT NULL DEFAULT '1.0',
+		export_interval TEXT NOT NULL DEFAULT '10s',
+		metrics_enabled INTEGER NOT NULL DEFAULT 1,
+		traces_enabled INTEGER NOT NULL DEFAULT 1,
+		logs_enabled INTEGER NOT NULL DEFAULT 1,
+		spans_exported INTEGER NOT NULL DEFAULT 0,
+		last_export_at TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE TABLE IF NOT EXISTS audit_events (
+		id TEXT PRIMARY KEY,
+		timestamp TIMESTAMP NOT NULL,
+		event TEXT NOT NULL,
+		actor TEXT NOT NULL,
+		target TEXT NOT NULL,
+		status TEXT NOT NULL,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		payload TEXT NOT NULL DEFAULT '{}'
+	);
+
+	CREATE TABLE IF NOT EXISTS access_api_keys (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		prefix TEXT NOT NULL,
+		token TEXT NOT NULL DEFAULT '',
+		scope TEXT NOT NULL DEFAULT '',
+		last_used TEXT NOT NULL DEFAULT 'Never',
+		expires_at TEXT NOT NULL DEFAULT '',
+		created_by TEXT NOT NULL DEFAULT 'admin',
+		created_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS agent_profiles (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		upstream_url TEXT NOT NULL DEFAULT '',
+		inject_header TEXT NOT NULL DEFAULT '',
+		secret_ref TEXT NOT NULL DEFAULT '',
+		sandboxes_linked INTEGER NOT NULL DEFAULT 0,
+		status TEXT NOT NULL DEFAULT 'active',
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS environments (
+		name TEXT PRIMARY KEY,
+		is_default INTEGER NOT NULL DEFAULT 0,
+		safe_for_third_party INTEGER NOT NULL DEFAULT 0,
+		github_repos_enabled INTEGER NOT NULL DEFAULT 0,
+		github_repos TEXT NOT NULL DEFAULT '[]',
+		secrets_enabled INTEGER NOT NULL DEFAULT 0,
+		secrets TEXT NOT NULL DEFAULT '',
+		boat_creds_enabled INTEGER NOT NULL DEFAULT 0,
+		agent_creds_enabled INTEGER NOT NULL DEFAULT 0,
+		credential_profile TEXT NOT NULL DEFAULT '',
+		version INTEGER NOT NULL DEFAULT 1,
+		updated_at TIMESTAMP NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS port_forwards (
+		id TEXT PRIMARY KEY,
+		host_port INTEGER NOT NULL,
+		vm_id TEXT NOT NULL,
+		vm_name TEXT NOT NULL DEFAULT '',
+		guest_port INTEGER NOT NULL,
+		protocol TEXT NOT NULL DEFAULT 'tcp',
+		subdomain TEXT NOT NULL DEFAULT '',
+		public_url TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'active',
+		created_at TIMESTAMP NOT NULL
+	);
 	`
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_key_name TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_public_key TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, and public_ip_enabled columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled"})
@@ -247,6 +388,9 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(state,priority,queued_at);
 	CREATE INDEX IF NOT EXISTS idx_workers_pool_status ON worker_nodes(pool_id,status);
 	CREATE INDEX IF NOT EXISTS idx_job_logs_job_seq ON job_logs(job_id,seq);
+	CREATE INDEX IF NOT EXISTS idx_volumes_status ON volumes(status);
+	CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(timestamp DESC);
+	CREATE INDEX IF NOT EXISTS idx_port_forwards_vm ON port_forwards(vm_id);
 	`
 	_, err := s.db.Exec(indexes)
 	return err
@@ -1153,4 +1297,686 @@ func (s *Store) GetJobLogs(ctx context.Context, jobID string) ([]*JobLog, error)
 		out = append(out, l)
 	}
 	return out, rows.Err()
+}
+
+// SaveVolume inserts or updates a volume
+func (s *Store) SaveVolume(ctx context.Context, v *Volume) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if v.ID == "" {
+		v.ID = "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	}
+	if v.CreatedAt.IsZero() {
+		v.CreatedAt = now
+	}
+	v.UpdatedAt = now
+	if v.Pool == "" {
+		v.Pool = "default"
+	}
+	if v.Status == "" {
+		v.Status = "available"
+	}
+	if v.Filesystem == "" {
+		v.Filesystem = "ext4"
+	}
+	query := `INSERT INTO volumes (
+		id, name, pool, size_gb, used_gb, status, attached_vm,
+		device_path, mount_point, filesystem, iops, throughput, snapshots, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name,
+		pool = excluded.pool,
+		size_gb = excluded.size_gb,
+		used_gb = excluded.used_gb,
+		status = excluded.status,
+		attached_vm = excluded.attached_vm,
+		device_path = excluded.device_path,
+		mount_point = excluded.mount_point,
+		filesystem = excluded.filesystem,
+		iops = excluded.iops,
+		throughput = excluded.throughput,
+		snapshots = excluded.snapshots,
+		updated_at = excluded.updated_at`
+	_, err := s.db.ExecContext(ctx, query,
+		v.ID, v.Name, v.Pool, v.SizeGB, v.UsedGB, v.Status, v.AttachedVM,
+		v.DevicePath, v.MountPoint, v.Filesystem, v.IOPS, v.Throughput, v.Snapshots, v.CreatedAt, v.UpdatedAt,
+	)
+	return err
+}
+
+// GetVolume retrieves a volume by ID or name
+func (s *Store) GetVolume(ctx context.Context, id string) (*Volume, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v := new(Volume)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
+		&v.ID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
+		&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// ListVolumes returns all persistent volumes
+func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, iops, throughput, snapshots, created_at, updated_at FROM volumes ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Volume
+	for rows.Next() {
+		v := new(Volume)
+		if err := rows.Scan(
+			&v.ID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
+			&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// DeleteVolume deletes a volume by ID or name
+func (s *Store) DeleteVolume(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM volumes WHERE id = ? OR name = ?`, id, id)
+	return err
+}
+
+// SaveWebhook inserts or updates a webhook endpoint
+func (s *Store) SaveWebhook(ctx context.Context, w *WebhookEndpoint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if w.ID == "" {
+		w.ID = "whk_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	}
+	if w.CreatedAt.IsZero() {
+		w.CreatedAt = now
+	}
+	w.UpdatedAt = now
+	if w.Events == nil {
+		w.Events = []string{}
+	}
+	eventsJSON, _ := json.Marshal(w.Events)
+	query := `INSERT INTO webhooks (
+		id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		url = excluded.url,
+		description = excluded.description,
+		secret = excluded.secret,
+		events = excluded.events,
+		active = excluded.active,
+		last_delivery = excluded.last_delivery,
+		success_rate = excluded.success_rate,
+		deliveries_count = excluded.deliveries_count,
+		updated_at = excluded.updated_at`
+	activeInt := 0
+	if w.Active {
+		activeInt = 1
+	}
+	_, err := s.db.ExecContext(ctx, query,
+		w.ID, w.URL, w.Description, w.Secret, string(eventsJSON), activeInt, w.LastDelivery, w.SuccessRate, w.DeliveriesCount, w.CreatedAt, w.UpdatedAt,
+	)
+	return err
+}
+
+// GetWebhook retrieves a webhook by ID
+func (s *Store) GetWebhook(ctx context.Context, id string) (*WebhookEndpoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	w := new(WebhookEndpoint)
+	var eventsJSON string
+	var activeInt int
+	err := s.db.QueryRowContext(ctx, `SELECT id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at FROM webhooks WHERE id = ? LIMIT 1`, id).Scan(
+		&w.ID, &w.URL, &w.Description, &w.Secret, &eventsJSON, &activeInt, &w.LastDelivery, &w.SuccessRate, &w.DeliveriesCount, &w.CreatedAt, &w.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	w.Active = activeInt == 1
+	_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
+	if w.Events == nil {
+		w.Events = []string{}
+	}
+	return w, nil
+}
+
+// ListWebhooks returns all registered webhooks
+func (s *Store) ListWebhooks(ctx context.Context) ([]*WebhookEndpoint, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at FROM webhooks ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*WebhookEndpoint
+	for rows.Next() {
+		w := new(WebhookEndpoint)
+		var eventsJSON string
+		var activeInt int
+		if err := rows.Scan(
+			&w.ID, &w.URL, &w.Description, &w.Secret, &eventsJSON, &activeInt, &w.LastDelivery, &w.SuccessRate, &w.DeliveriesCount, &w.CreatedAt, &w.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		w.Active = activeInt == 1
+		_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
+		if w.Events == nil {
+			w.Events = []string{}
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// DeleteWebhook removes a webhook by ID
+func (s *Store) DeleteWebhook(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM webhooks WHERE id = ?`, id)
+	return err
+}
+
+// GetOTelConfig retrieves the global OpenTelemetry configuration
+func (s *Store) GetOTelConfig(ctx context.Context) (*OTelConfig, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	c := new(OTelConfig)
+	var enabledInt, metricsInt, tracesInt, logsInt int
+	err := s.db.QueryRowContext(ctx, `SELECT enabled, endpoint, protocol, auth_header, service_name, sample_rate, export_interval, metrics_enabled, traces_enabled, logs_enabled, spans_exported, last_export_at FROM otel_config WHERE id = 1 LIMIT 1`).Scan(
+		&enabledInt, &c.Endpoint, &c.Protocol, &c.AuthHeader, &c.ServiceName, &c.SampleRate, &c.ExportInterval, &metricsInt, &tracesInt, &logsInt, &c.SpansExported, &c.LastExportAt,
+	)
+	if err == sql.ErrNoRows {
+		return &OTelConfig{
+			Enabled:        false,
+			Endpoint:       "http://localhost:4318",
+			Protocol:       "http/protobuf",
+			ServiceName:    "on-demand-vms",
+			SampleRate:     "1.0",
+			ExportInterval: "10s",
+			MetricsEnabled: true,
+			TracesEnabled:  true,
+			LogsEnabled:    true,
+			SpansExported:  0,
+			LastExportAt:   "Never",
+		}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.Enabled = enabledInt == 1
+	c.MetricsEnabled = metricsInt == 1
+	c.TracesEnabled = tracesInt == 1
+	c.LogsEnabled = logsInt == 1
+	return c, nil
+}
+
+// SaveOTelConfig saves or updates the singleton OpenTelemetry configuration
+func (s *Store) SaveOTelConfig(ctx context.Context, c *OTelConfig) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	enabledInt, metricsInt, tracesInt, logsInt := 0, 0, 0, 0
+	if c.Enabled {
+		enabledInt = 1
+	}
+	if c.MetricsEnabled {
+		metricsInt = 1
+	}
+	if c.TracesEnabled {
+		tracesInt = 1
+	}
+	if c.LogsEnabled {
+		logsInt = 1
+	}
+	query := `INSERT INTO otel_config (
+		id, enabled, endpoint, protocol, auth_header, service_name, sample_rate,
+		export_interval, metrics_enabled, traces_enabled, logs_enabled, spans_exported, last_export_at
+	) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		enabled = excluded.enabled,
+		endpoint = excluded.endpoint,
+		protocol = excluded.protocol,
+		auth_header = excluded.auth_header,
+		service_name = excluded.service_name,
+		sample_rate = excluded.sample_rate,
+		export_interval = excluded.export_interval,
+		metrics_enabled = excluded.metrics_enabled,
+		traces_enabled = excluded.traces_enabled,
+		logs_enabled = excluded.logs_enabled,
+		spans_exported = excluded.spans_exported,
+		last_export_at = excluded.last_export_at`
+	_, err := s.db.ExecContext(ctx, query,
+		enabledInt, c.Endpoint, c.Protocol, c.AuthHeader, c.ServiceName, c.SampleRate,
+		c.ExportInterval, metricsInt, tracesInt, logsInt, c.SpansExported, c.LastExportAt,
+	)
+	return err
+}
+
+// SaveAuditEvent records an auditable event
+func (s *Store) SaveAuditEvent(ctx context.Context, e *AuditEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e.ID == "" {
+		e.ID = "evt_" + strings.ReplaceAll(uuid.NewString()[:12], "-", "")
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.Payload == "" {
+		e.Payload = "{}"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_events (
+		id, timestamp, event, actor, target, status, duration_ms, payload
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, e.Timestamp, e.Event, e.Actor, e.Target, e.Status, e.DurationMs, e.Payload,
+	)
+	return err
+}
+
+// ListAuditEvents retrieves audit events ordered by timestamp descending
+func (s *Store) ListAuditEvents(ctx context.Context, limit int) ([]*AuditEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, timestamp, event, actor, target, status, duration_ms, payload FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AuditEvent
+	for rows.Next() {
+		e := new(AuditEvent)
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Event, &e.Actor, &e.Target, &e.Status, &e.DurationMs, &e.Payload); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// SaveAccessAPIKey persists a scoped API access key
+func (s *Store) SaveAccessAPIKey(ctx context.Context, k *AccessAPIKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if k.ID == "" {
+		k.ID = "key_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	}
+	if k.CreatedAt.IsZero() {
+		k.CreatedAt = time.Now().UTC()
+	}
+	if k.LastUsed == "" {
+		k.LastUsed = "Never"
+	}
+	if k.CreatedBy == "" {
+		k.CreatedBy = "admin"
+	}
+	query := `INSERT INTO access_api_keys (
+		id, name, prefix, token, scope, last_used, expires_at, created_by, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name,
+		prefix = excluded.prefix,
+		token = excluded.token,
+		scope = excluded.scope,
+		last_used = excluded.last_used,
+		expires_at = excluded.expires_at,
+		created_by = excluded.created_by`
+	_, err := s.db.ExecContext(ctx, query,
+		k.ID, k.Name, k.Prefix, k.Token, k.Scope, k.LastUsed, k.ExpiresAt, k.CreatedBy, k.CreatedAt,
+	)
+	return err
+}
+
+// GetAccessAPIKey retrieves an API access key by ID
+func (s *Store) GetAccessAPIKey(ctx context.Context, id string) (*AccessAPIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k := new(AccessAPIKey)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE id = ? LIMIT 1`, id).Scan(
+		&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+// ListAccessAPIKeys lists all API access keys
+func (s *Store) ListAccessAPIKeys(ctx context.Context) ([]*AccessAPIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AccessAPIKey
+	for rows.Next() {
+		k := new(AccessAPIKey)
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAccessAPIKey deletes an API key by ID
+func (s *Store) DeleteAccessAPIKey(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM access_api_keys WHERE id = ?`, id)
+	return err
+}
+
+// SaveAgentProfile persists an agent proxy configuration
+func (s *Store) SaveAgentProfile(ctx context.Context, p *AgentProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if p.ID == "" {
+		p.ID = "prof_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	p.UpdatedAt = now
+	if p.Status == "" {
+		p.Status = "active"
+	}
+	query := `INSERT INTO agent_profiles (
+		id, name, provider, upstream_url, inject_header, secret_ref, sandboxes_linked, status, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name,
+		provider = excluded.provider,
+		upstream_url = excluded.upstream_url,
+		inject_header = excluded.inject_header,
+		secret_ref = excluded.secret_ref,
+		sandboxes_linked = excluded.sandboxes_linked,
+		status = excluded.status,
+		updated_at = excluded.updated_at`
+	_, err := s.db.ExecContext(ctx, query,
+		p.ID, p.Name, p.Provider, p.UpstreamURL, p.InjectHeader, p.SecretRef, p.SandboxesLinked, p.Status, p.CreatedAt, p.UpdatedAt,
+	)
+	return err
+}
+
+// GetAgentProfile retrieves an agent profile by ID
+func (s *Store) GetAgentProfile(ctx context.Context, id string) (*AgentProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p := new(AgentProfile)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, provider, upstream_url, inject_header, secret_ref, sandboxes_linked, status, created_at, updated_at FROM agent_profiles WHERE id = ? LIMIT 1`, id).Scan(
+		&p.ID, &p.Name, &p.Provider, &p.UpstreamURL, &p.InjectHeader, &p.SecretRef, &p.SandboxesLinked, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// ListAgentProfiles lists all agent profiles
+func (s *Store) ListAgentProfiles(ctx context.Context) ([]*AgentProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, provider, upstream_url, inject_header, secret_ref, sandboxes_linked, status, created_at, updated_at FROM agent_profiles ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AgentProfile
+	for rows.Next() {
+		p := new(AgentProfile)
+		if err := rows.Scan(
+			&p.ID, &p.Name, &p.Provider, &p.UpstreamURL, &p.InjectHeader, &p.SecretRef, &p.SandboxesLinked, &p.Status, &p.CreatedAt, &p.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAgentProfile deletes an agent profile by ID
+func (s *Store) DeleteAgentProfile(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM agent_profiles WHERE id = ?`, id)
+	return err
+}
+
+// SaveEnvironment persists an environment profile
+func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e.UpdatedAt = time.Now().UTC()
+	if e.Version == 0 {
+		e.Version = 1
+	}
+	if e.GitHubRepos == nil {
+		e.GitHubRepos = []string{}
+	}
+	reposJSON, _ := json.Marshal(e.GitHubRepos)
+	if e.IsDefault {
+		_, _ = s.db.ExecContext(ctx, `UPDATE environments SET is_default = 0 WHERE name != ?`, e.Name)
+	}
+	isDefInt, safeInt, ghInt, secInt, boatInt, agInt := 0, 0, 0, 0, 0, 0
+	if e.IsDefault {
+		isDefInt = 1
+	}
+	if e.SafeForThirdParty {
+		safeInt = 1
+	}
+	if e.GitHubReposEnabled {
+		ghInt = 1
+	}
+	if e.SecretsEnabled {
+		secInt = 1
+	}
+	if e.BoatCredsEnabled {
+		boatInt = 1
+	}
+	if e.AgentCredsEnabled {
+		agInt = 1
+	}
+
+	query := `INSERT INTO environments (
+		name, is_default, safe_for_third_party, github_repos_enabled, github_repos,
+		secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(name) DO UPDATE SET
+		is_default = excluded.is_default,
+		safe_for_third_party = excluded.safe_for_third_party,
+		github_repos_enabled = excluded.github_repos_enabled,
+		github_repos = excluded.github_repos,
+		secrets_enabled = excluded.secrets_enabled,
+		secrets = excluded.secrets,
+		boat_creds_enabled = excluded.boat_creds_enabled,
+		agent_creds_enabled = excluded.agent_creds_enabled,
+		credential_profile = excluded.credential_profile,
+		version = excluded.version,
+		updated_at = excluded.updated_at`
+	_, err := s.db.ExecContext(ctx, query,
+		e.Name, isDefInt, safeInt, ghInt, string(reposJSON),
+		secInt, e.Secrets, boatInt, agInt, e.CredentialProfile, e.Version, e.UpdatedAt,
+	)
+	return err
+}
+
+// GetEnvironment retrieves an environment profile by name
+func (s *Store) GetEnvironment(ctx context.Context, name string) (*EnvironmentProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e := new(EnvironmentProfile)
+	var reposJSON string
+	var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
+	err := s.db.QueryRowContext(ctx, `SELECT name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments WHERE name = ? LIMIT 1`, name).Scan(
+		&e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	e.IsDefault = isDefInt == 1
+	e.SafeForThirdParty = safeInt == 1
+	e.GitHubReposEnabled = ghInt == 1
+	e.SecretsEnabled = secInt == 1
+	e.BoatCredsEnabled = boatInt == 1
+	e.AgentCredsEnabled = agInt == 1
+	_ = json.Unmarshal([]byte(reposJSON), &e.GitHubRepos)
+	if e.GitHubRepos == nil {
+		e.GitHubRepos = []string{}
+	}
+	return e, nil
+}
+
+// ListEnvironments returns all environment profiles
+func (s *Store) ListEnvironments(ctx context.Context) ([]*EnvironmentProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments ORDER BY is_default DESC, name ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*EnvironmentProfile
+	for rows.Next() {
+		e := new(EnvironmentProfile)
+		var reposJSON string
+		var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
+		if err := rows.Scan(
+			&e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		e.IsDefault = isDefInt == 1
+		e.SafeForThirdParty = safeInt == 1
+		e.GitHubReposEnabled = ghInt == 1
+		e.SecretsEnabled = secInt == 1
+		e.BoatCredsEnabled = boatInt == 1
+		e.AgentCredsEnabled = agInt == 1
+		_ = json.Unmarshal([]byte(reposJSON), &e.GitHubRepos)
+		if e.GitHubRepos == nil {
+			e.GitHubRepos = []string{}
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// DeleteEnvironment deletes an environment profile by name
+func (s *Store) DeleteEnvironment(ctx context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE name = ?`, name)
+	return err
+}
+
+// SavePortForward persists a port forwarding record
+func (s *Store) SavePortForward(ctx context.Context, pf *PortForward) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pf.ID == "" {
+		pf.ID = "pf_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	}
+	if pf.CreatedAt.IsZero() {
+		pf.CreatedAt = time.Now().UTC()
+	}
+	if pf.Protocol == "" {
+		pf.Protocol = "tcp"
+	}
+	if pf.Status == "" {
+		pf.Status = "active"
+	}
+	query := `INSERT INTO port_forwards (
+		id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		host_port = excluded.host_port,
+		vm_id = excluded.vm_id,
+		vm_name = excluded.vm_name,
+		guest_port = excluded.guest_port,
+		protocol = excluded.protocol,
+		subdomain = excluded.subdomain,
+		public_url = excluded.public_url,
+		status = excluded.status`
+	_, err := s.db.ExecContext(ctx, query,
+		pf.ID, pf.HostPort, pf.VMID, pf.VMName, pf.GuestPort, pf.Protocol, pf.Subdomain, pf.PublicURL, pf.Status, pf.CreatedAt,
+	)
+	return err
+}
+
+// GetPortForward retrieves a port forward by ID
+func (s *Store) GetPortForward(ctx context.Context, id string) (*PortForward, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	pf := new(PortForward)
+	err := s.db.QueryRowContext(ctx, `SELECT id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, created_at FROM port_forwards WHERE id = ? LIMIT 1`, id).Scan(
+		&pf.ID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &pf.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return pf, nil
+}
+
+// ListPortForwards returns all port forwarding mappings
+func (s *Store) ListPortForwards(ctx context.Context) ([]*PortForward, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, created_at FROM port_forwards ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*PortForward
+	for rows.Next() {
+		pf := new(PortForward)
+		if err := rows.Scan(
+			&pf.ID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &pf.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, pf)
+	}
+	return out, rows.Err()
+}
+
+// DeletePortForward deletes a port forward mapping by ID
+func (s *Store) DeletePortForward(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM port_forwards WHERE id = ?`, id)
+	return err
 }

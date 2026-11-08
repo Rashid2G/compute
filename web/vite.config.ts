@@ -11,10 +11,12 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: process.env.VITE_DAEMON_URL || 'http://127.0.0.1:18080',
         changeOrigin: true,
+        ws: true,
       },
     },
   },

@@ -1,12 +1,3 @@
-function withOpacity(variableName) {
-  return ({ opacityValue }) => {
-    if (opacityValue !== undefined) {
-      return `color-mix(in oklch, var(${variableName}) calc(${opacityValue} * 100%), transparent)`;
-    }
-    return `var(${variableName})`;
-  };
-}
-
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ['class'],
@@ -19,80 +10,94 @@ export default {
     },
     extend: {
       colors: {
-        border: withOpacity('--border'),
-        input: withOpacity('--input'),
-        ring: withOpacity('--ring'),
-        background: withOpacity('--background'),
-        foreground: withOpacity('--foreground'),
+        border: 'var(--border)',
+        input: 'var(--input)',
+        ring: 'var(--ring)',
+        background: {
+          DEFAULT: 'var(--background)',
+          2: 'var(--background-2)',
+          3: 'var(--background-3)',
+        },
+        foreground: {
+          DEFAULT: 'var(--foreground)',
+          muted: 'var(--foreground-muted)',
+        },
+        ocean: '#263fa9',
+        wash: '#fefefe',
+        deep: '#060606',
+        selected: {
+          DEFAULT: 'var(--selected)',
+          foreground: 'var(--selected-foreground)',
+        },
         primary: {
-          DEFAULT: withOpacity('--primary'),
-          foreground: withOpacity('--primary-foreground'),
+          DEFAULT: 'var(--primary)',
+          foreground: 'var(--primary-foreground)',
         },
         secondary: {
-          DEFAULT: withOpacity('--secondary'),
-          foreground: withOpacity('--secondary-foreground'),
+          DEFAULT: 'var(--secondary)',
+          foreground: 'var(--secondary-foreground)',
         },
         destructive: {
-          DEFAULT: withOpacity('--destructive'),
-          foreground: withOpacity('--destructive-foreground'),
+          DEFAULT: 'var(--destructive)',
+          foreground: 'var(--destructive-foreground)',
         },
         muted: {
-          DEFAULT: withOpacity('--muted'),
-          foreground: withOpacity('--muted-foreground'),
+          DEFAULT: 'var(--muted)',
+          foreground: 'var(--muted-foreground)',
         },
         accent: {
-          DEFAULT: withOpacity('--accent'),
-          foreground: withOpacity('--accent-foreground'),
+          DEFAULT: 'var(--accent)',
+          foreground: 'var(--accent-foreground)',
         },
         popover: {
-          DEFAULT: withOpacity('--popover'),
-          foreground: withOpacity('--popover-foreground'),
+          DEFAULT: 'var(--popover)',
+          foreground: 'var(--popover-foreground)',
         },
         card: {
-          DEFAULT: withOpacity('--card'),
-          foreground: withOpacity('--card-foreground'),
+          DEFAULT: 'var(--card)',
+          foreground: 'var(--card-foreground)',
         },
         sidebar: {
-          DEFAULT: withOpacity('--sidebar'),
-          foreground: withOpacity('--sidebar-foreground'),
-          primary: withOpacity('--sidebar-primary'),
-          'primary-foreground': withOpacity('--sidebar-primary-foreground'),
-          accent: withOpacity('--sidebar-accent'),
-          'accent-foreground': withOpacity('--sidebar-accent-foreground'),
-          border: withOpacity('--sidebar-border'),
-          ring: withOpacity('--sidebar-ring'),
+          DEFAULT: 'var(--sidebar)',
+          foreground: 'var(--sidebar-foreground)',
+          primary: 'var(--sidebar-primary)',
+          'primary-foreground': 'var(--sidebar-primary-foreground)',
+          accent: 'var(--sidebar-accent)',
+          'accent-foreground': 'var(--sidebar-accent-foreground)',
+          border: 'var(--sidebar-border)',
+          ring: 'var(--sidebar-ring)',
         },
         success: {
-          DEFAULT: withOpacity('--success'),
-          foreground: withOpacity('--success-foreground'),
+          DEFAULT: 'var(--success)',
+          foreground: 'var(--success-foreground)',
         },
         warning: {
-          DEFAULT: withOpacity('--warning'),
-          foreground: withOpacity('--warning-foreground'),
+          DEFAULT: 'var(--warning)',
+          foreground: 'var(--warning-foreground)',
         },
         info: {
-          DEFAULT: withOpacity('--info'),
-          foreground: withOpacity('--info-foreground'),
-        },
-        chart: {
-          1: withOpacity('--chart-1'),
-          2: withOpacity('--chart-2'),
-          3: withOpacity('--chart-3'),
-          4: withOpacity('--chart-4'),
-          5: withOpacity('--chart-5'),
+          DEFAULT: 'var(--info)',
+          foreground: 'var(--info-foreground)',
         },
       },
       borderRadius: {
-        lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        lg: '0px',
+        md: '0px',
+        sm: '0px',
+        DEFAULT: '0px',
+        none: '0px',
       },
       fontFamily: {
-        sans: [
-          'Inter Variable',
+        display: [
+          'Funnel Display',
           'Inter',
-          'Geist Variable',
-          'Geist',
+          'Inter Variable',
+          'system-ui',
+          'sans-serif',
+        ],
+        sans: [
+          'Inter',
+          'Inter Variable',
           '-apple-system',
           'BlinkMacSystemFont',
           'Segoe UI',
@@ -101,10 +106,7 @@ export default {
           'sans-serif',
         ],
         mono: [
-          'Geist Mono Variable',
-          'Geist Mono',
-          'JetBrains Mono Variable',
-          'JetBrains Mono',
+          'IBM Plex Mono',
           'ui-monospace',
           'SFMono-Regular',
           'SF Mono',
@@ -113,15 +115,6 @@ export default {
           'Liberation Mono',
           'monospace',
         ],
-      },
-      keyframes: {
-        'fade-in': {
-          from: { opacity: '0', transform: 'translateY(4px)' },
-          to: { opacity: '1', transform: 'translateY(0)' },
-        },
-      },
-      animation: {
-        'fade-in': 'fade-in 160ms ease-out',
       },
     },
   },

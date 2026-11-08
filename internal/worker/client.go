@@ -1,33 +1,27 @@
 package worker
 
 import (
-	"archive/tar"
-	"bufio"
-	"compress/gzip"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
-	"github.com/coder/websocket"
-	"io"
 	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/coder/websocket"
 )
 
 type Client struct {
-	Config   Config
-	mu       sync.Mutex
-	conn     *websocket.Conn
-	workerID string
-	seq      int64
+	Config     Config
+	Supervisor WorkloadSupervisor
+	mu         sync.Mutex
+	conn       *websocket.Conn
+	workerID   string
+	seq        int64
 }
 
 func (c *Client) send(ctx context.Context, v interface{}) error {
@@ -57,7 +51,11 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	c.conn = conn
 	defer conn.Close(websocket.StatusNormalClosure, "")
-	hello := api.WorkerHello{WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.hello", ID: "hello"}, Token: c.Config.Token, Name: c.Config.Name, Architecture: runtimeArch(), Capabilities: DetectCapabilities()}
+	workerMsgID := c.Config.Name
+	if workerMsgID == "" {
+		workerMsgID = "hello"
+	}
+	hello := api.WorkerHello{WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.hello", ID: workerMsgID}, Token: c.Config.Token, Name: c.Config.Name, Architecture: runtimeArch(), Capabilities: DetectCapabilities()}
 	if e = c.send(ctx, hello); e != nil {
 		return e
 	}
@@ -121,7 +119,17 @@ func activeCancel(id string) context.CancelFunc {
 	return cancels[id]
 }
 func (c *Client) assignment(parent context.Context, a api.WorkerAssignment) {
-	_ = c.send(parent, api.WorkerAssignmentAck{WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.assignment_ack", WorkerID: c.workerID, JobID: a.JobID}, LeaseID: a.LeaseID, Accepted: true})
+	_ = c.send(parent, api.WorkerAssignmentAck{
+		WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.assignment_ack", WorkerID: c.workerID, JobID: a.JobID},
+		LeaseID:       a.LeaseID,
+		Accepted:      true,
+	})
+
+	supervisor := c.Supervisor
+	if supervisor == nil {
+		supervisor = NewLocalSandboxSupervisor(c.Config.StateDir)
+	}
+
 	go func() {
 		ctx, cancel := context.WithCancel(parent)
 		defer cancel()
@@ -129,148 +137,48 @@ func (c *Client) assignment(parent context.Context, a api.WorkerAssignment) {
 		cancels[a.AttemptID] = cancel
 		cancelMu.Unlock()
 		defer func() { cancelMu.Lock(); delete(cancels, a.AttemptID); cancelMu.Unlock() }()
-		if len(a.Spec.Command) == 0 {
-			return
-		}
-		cmd := exec.CommandContext(ctx, a.Spec.Command[0], a.Spec.Command[1:]...)
-		cmd.Dir = a.Spec.CWD
-		if len(a.Spec.Env) > 0 {
-			cmd.Env = os.Environ()
-			for k, v := range a.Spec.Env {
-				cmd.Env = append(cmd.Env, k+"="+v)
-			}
-		}
-		if a.Spec.Files != "" {
-			if err := extractFiles(a.Spec.Files, a.Spec.CWD); err != nil {
-				_ = c.send(parent, api.WorkerWorkloadEvent{WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.workload_event", WorkerID: c.workerID, JobID: a.JobID}, AttemptID: a.AttemptID, Event: "job.failed", Data: map[string]interface{}{"exit_code": 1, "error": err.Error()}})
-				return
-			}
-		}
-
-		stdoutPipe, _ := cmd.StdoutPipe()
-		stderrPipe, _ := cmd.StderrPipe()
-
-		if err := cmd.Start(); err != nil {
-			_ = c.send(parent, api.WorkerWorkloadEvent{
-				WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.workload_event", WorkerID: c.workerID, JobID: a.JobID},
-				AttemptID:     a.AttemptID,
-				Event:         "job.failed",
-				Data:          map[string]interface{}{"exit_code": 1, "error": err.Error()},
-			})
-			return
-		}
 
 		var seq int64
-		var wg sync.WaitGroup
-		streamOutput := func(r io.Reader, streamName string) {
-			defer wg.Done()
-			if r == nil {
-				return
-			}
-			scanner := bufio.NewScanner(r)
-			for scanner.Scan() {
-				line := scanner.Text()
-				atomic.AddInt64(&seq, 1)
-				_ = c.send(parent, api.WorkerLogChunk{
-					WorkerMessage: api.WorkerMessage{
-						Version:  1,
-						Type:     "worker.log_chunk",
-						WorkerID: c.workerID,
-						JobID:    a.JobID,
-						Seq:      seq,
-					},
-					AttemptID: a.AttemptID,
-					Stream:    streamName,
-					Data:      line,
-				})
-			}
+		streamLog := func(streamName, data string) {
+			atomic.AddInt64(&seq, 1)
+			_ = c.send(parent, api.WorkerLogChunk{
+				WorkerMessage: api.WorkerMessage{
+					Version:  1,
+					Type:     "worker.log_chunk",
+					WorkerID: c.workerID,
+					JobID:    a.JobID,
+					Seq:      seq,
+				},
+				AttemptID: a.AttemptID,
+				Stream:    streamName,
+				Data:      data,
+			})
 		}
 
-		if stdoutPipe != nil {
-			wg.Add(1)
-			go streamOutput(stdoutPipe, "stdout")
-		}
-		if stderrPipe != nil {
-			wg.Add(1)
-			go streamOutput(stderrPipe, "stderr")
-		}
-
-		wg.Wait()
-		err := cmd.Wait()
+		exitCode, err := supervisor.Execute(ctx, a, streamLog)
 
 		event := "job.succeeded"
-		code := 0
-		if err != nil {
+		if err != nil || exitCode != 0 {
 			event = "job.failed"
-			code = 1
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				code = exitErr.ExitCode()
-			}
 		}
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+
 		_ = c.send(parent, api.WorkerWorkloadEvent{
-			WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.workload_event", WorkerID: c.workerID, JobID: a.JobID},
-			AttemptID:     a.AttemptID,
-			Event:         event,
-			Data:          map[string]interface{}{"exit_code": code, "error": fmt.Sprint(err)},
+			WorkerMessage: api.WorkerMessage{
+				Version:  1,
+				Type:     "worker.workload_event",
+				WorkerID: c.workerID,
+				JobID:    a.JobID,
+			},
+			AttemptID: a.AttemptID,
+			Event:     event,
+			Data: map[string]interface{}{
+				"exit_code": exitCode,
+				"error":     errMsg,
+			},
 		})
 	}()
-}
-
-func extractFiles(encoded, cwd string) error {
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return err
-	}
-	if cwd == "" {
-		cwd = "."
-	}
-	if err = os.MkdirAll(cwd, 0755); err != nil {
-		return err
-	}
-	gz, err := gzip.NewReader(strings.NewReader(string(data)))
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	root, err := filepath.Abs(cwd)
-	if err != nil {
-		return err
-	}
-	for {
-		h, e := tr.Next()
-		if e == io.EOF {
-			break
-		}
-		if e != nil {
-			return e
-		}
-		dest := filepath.Join(root, filepath.Clean(h.Name))
-		rel, e := filepath.Rel(root, dest)
-		if e != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("archive path escapes working directory")
-		}
-		switch h.Typeflag {
-		case tar.TypeDir:
-			e = os.MkdirAll(dest, os.FileMode(h.Mode))
-		case tar.TypeReg, tar.TypeRegA:
-			if e = os.MkdirAll(filepath.Dir(dest), 0755); e == nil {
-				var f *os.File
-				f, e = os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(h.Mode))
-				if e == nil {
-					_, e = io.Copy(f, tr)
-					ce := f.Close()
-					if e == nil {
-						e = ce
-					}
-				}
-			}
-		default:
-			continue
-		}
-		if e != nil {
-			return e
-		}
-	}
-	return nil
 }

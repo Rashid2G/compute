@@ -167,6 +167,25 @@ type Template struct {
 	UpdatedAt   int64   `json:"updated_at"`
 }
 
+// Organization represents a multi-user tenant workspace.
+type Organization struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Slug      string  `json:"slug"`
+	Status    string  `json:"status"`
+	QuotaJSON *string `json:"quota_json,omitempty"`
+	CreatedAt int64   `json:"created_at"`
+	UpdatedAt int64   `json:"updated_at"`
+}
+
+// OrganizationMember represents a user's membership and role in an organization.
+type OrganizationMember struct {
+	OrganizationID string `json:"organization_id"`
+	UserID         string `json:"user_id"`
+	Role           string `json:"role"` // 'owner', 'admin', 'member', 'viewer'
+	CreatedAt      int64  `json:"created_at"`
+}
+
 func NowMillis() int64 {
 	return time.Now().UTC().UnixMilli()
 }

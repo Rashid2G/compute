@@ -64,12 +64,20 @@ func main() {
 		handleSandboxSSH(context.Background(), client, os.Args[2:])
 		return
 
+	case "auth":
+		handleAuthCommand(ctx, client, os.Args[2:])
+		return
+
 	case "sandbox", "vm":
 		handleSandboxCommand(ctx, client, os.Args[2:])
 		return
 
 	case "job", "jobs":
 		handleJobCommand(ctx, client, os.Args[2:])
+		return
+
+	case "network", "net":
+		handleNetworkCommand(ctx, client, os.Args[2:])
 		return
 
 	case "worker", "workers":
@@ -158,6 +166,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "Usage: compute <command> [subcommand] [options]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Core Commands (Boat.dev Style):")
+	fmt.Fprintln(w, "  auth               User accounts, authentication and API keys (login, signup, whoami, keys, logout)")
 	fmt.Fprintln(w, "  sandbox, vm        Manage isolated compute sandboxes (list, create, start, stop, exec, ssh, delete, info)")
 	fmt.Fprintln(w, "  job, jobs          Run and monitor distributed compute jobs (run, list, info, logs, cancel)")
 	fmt.Fprintln(w, "  worker, workers    Manage worker nodes and enrollments (token create, list, info, cordon, drain, delete)")
@@ -252,7 +261,11 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 				fmt.Fprintf(os.Stderr, "Error starting sandbox %s: %v\n", id, err)
 				os.Exit(1)
 			}
-			fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s\n", v.ID, v.Name, v.IPAddress, v.Status)
+			fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s", v.ID, v.Name, v.IPAddress, v.Status)
+			if v.PID > 0 {
+				fmt.Printf(" PID=%d", v.PID)
+			}
+			fmt.Println()
 		}
 
 	case "stop":
@@ -1317,6 +1330,100 @@ func packageFilesToTarGzBase64(srcPath string) (string, error) {
 	}
 
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+}
+
+func handleNetworkCommand(ctx context.Context, client *DaemonClient, args []string) {
+	if len(args) == 0 {
+		args = []string{"status"}
+	}
+	switch args[0] {
+	case "status", "info", "show":
+		info, err := client.GetNetworkInfo(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching network status: %v\n", err)
+			os.Exit(1)
+		}
+		nat := "disabled"
+		if info.NATEnabled {
+			nat = "enabled"
+		}
+		fmt.Printf("Mode:             %s\n", info.Mode)
+		fmt.Printf("Bridge Interface: %s\n", info.BridgeName)
+		fmt.Printf("Bridge IP:        %s\n", info.BridgeIP)
+		fmt.Printf("Subnet:           %s\n", info.SubnetCIDR)
+		fmt.Printf("Gateway:          %s\n", info.GatewayIP)
+		fmt.Printf("Netmask:          %s\n", info.Netmask)
+		fmt.Printf("NAT Masquerading: %s\n", nat)
+		fmt.Printf("Bridge Active:    %t\n", info.BridgeActive)
+		fmt.Printf("Allocated IPs:    %d\n", info.AllocatedIPs)
+		if len(info.ActiveTAPs) > 0 {
+			fmt.Printf("Active TAPs:      %s\n", strings.Join(info.ActiveTAPs, ", "))
+		}
+
+	case "list", "ls":
+		allocs, err := client.GetNetworkAllocations(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing network allocations: %v\n", err)
+			os.Exit(1)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "VM ID\tNAME\tSTATUS\tIP ADDRESS\tPUBLIC IP\tMAC\tTAP")
+		for _, a := range allocs {
+			pub := a.PublicIP
+			if pub == "" {
+				pub = "-"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.VMID, a.VMName, a.Status, a.IPAddress, pub, a.MACAddress, a.TAPDevice)
+		}
+		_ = w.Flush()
+
+	case "inspect":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: compute network inspect <sandbox-id|name>")
+			os.Exit(1)
+		}
+		res, err := client.InspectNetwork(ctx, args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error inspecting network: %v\n", err)
+			os.Exit(1)
+		}
+		reach := "Unreachable"
+		if res.Reachable {
+			reach = "Reachable"
+		}
+		fmt.Printf("VM:             %s (%s)\n", res.VMName, res.VMID)
+		fmt.Printf("Status:         %s\n", res.Status)
+		fmt.Printf("IPv4 Address:  %s\n", res.IPAddress)
+		fmt.Printf("Public IP:      %s\n", res.PublicIP)
+		fmt.Printf("MAC Address:    %s\n", res.MACAddress)
+		fmt.Printf("TAP Device:     %s\n", res.TAPDevice)
+		fmt.Printf("Bridge:         %s\n", res.BridgeName)
+		fmt.Printf("Gateway:        %s\n", res.Gateway)
+		fmt.Printf("Connectivity:   %s\n", reach)
+		if res.Connectivity != "" {
+			fmt.Printf("Details:        %s\n", res.Connectivity)
+		}
+
+	case "prune":
+		pruned, err := client.PruneNetwork(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error pruning network: %v\n", err)
+			os.Exit(1)
+		}
+		if len(pruned) == 0 {
+			fmt.Println("Network is clean; no orphaned TAP devices or stale allocations found.")
+		} else {
+			for _, item := range pruned {
+				fmt.Printf("Pruned: %s\n", item)
+			}
+			fmt.Printf("Network is clean; pruned %d orphaned item(s).\n", len(pruned))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown network command %q.\n\n", args[0])
+		fmt.Fprintln(os.Stderr, "Usage: compute network status|list|inspect <id>|prune")
+		os.Exit(1)
+	}
 }
 
 func handleVersionCommand(ctx context.Context, client *DaemonClient, args []string) {

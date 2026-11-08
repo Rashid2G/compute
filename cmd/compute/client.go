@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 
 type DaemonClient struct {
 	baseURL      string
+	apiKey       string
 	httpClient   *http.Client
 	streamClient *http.Client
 }
@@ -55,13 +58,35 @@ func NewDaemonClient(endpoint string) *DaemonClient {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
 
+	key := os.Getenv("COMPUTE_API_KEY")
+	if key == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cfgFile := filepath.Join(home, ".compute", "config.json")
+			if data, err := os.ReadFile(cfgFile); err == nil {
+				var conf struct {
+					APIKey string `json:"api_key"`
+				}
+				if json.Unmarshal(data, &conf) == nil && conf.APIKey != "" {
+					key = conf.APIKey
+				}
+			}
+		}
+	}
+
 	return &DaemonClient{
-		baseURL:    strings.TrimSuffix(endpoint, "/"),
-		httpClient: &http.Client{Transport: transport, Timeout: 120 * time.Second},
-		// Streaming responses are long-lived, so they must not inherit the
-		// default request timeout.
+		baseURL:      strings.TrimSuffix(endpoint, "/"),
+		apiKey:       key,
+		httpClient:   &http.Client{Transport: transport, Timeout: 120 * time.Second},
 		streamClient: &http.Client{Transport: transport},
 	}
+}
+
+func (c *DaemonClient) SetAPIKey(key string) {
+	c.apiKey = key
+}
+
+func (c *DaemonClient) GetAPIKey() string {
+	return c.apiKey
 }
 
 func (c *DaemonClient) doRequest(ctx context.Context, method, path string, body interface{}, result interface{}) error {
@@ -79,6 +104,10 @@ func (c *DaemonClient) doRequest(ctx context.Context, method, path string, body 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -223,6 +252,10 @@ func (c *DaemonClient) ExecVMStream(ctx context.Context, id string, req vm.ExecR
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	if c.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+		httpReq.Header.Set("X-API-Key", c.apiKey)
+	}
 
 	resp, err := c.streamClient.Do(httpReq)
 	if err != nil {
@@ -529,9 +562,177 @@ func (c *DaemonClient) SSHWebSocketURL(vmID string, query url.Values) string {
 
 func (c *DaemonClient) DialSSHWebSocket(ctx context.Context, vmID string, query url.Values) (*websocket.Conn, error) {
 	wsURL := c.SSHWebSocketURL(vmID, query)
+	header := make(http.Header)
+	if c.apiKey != "" {
+		header.Set("Authorization", "Bearer "+c.apiKey)
+		header.Set("X-API-Key", c.apiKey)
+	}
 	opts := &websocket.DialOptions{
 		HTTPClient: c.httpClient,
+		HTTPHeader: header,
 	}
 	conn, _, err := websocket.Dial(ctx, wsURL, opts)
 	return conn, err
+}
+
+// Auth API methods
+
+func (c *DaemonClient) Signup(ctx context.Context, email, username, displayName, password string) error {
+	req := map[string]string{
+		"email":        email,
+		"username":     username,
+		"display_name": displayName,
+		"password":     password,
+	}
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/auth/signup", req, nil)
+}
+
+func (c *DaemonClient) Login(ctx context.Context, username, password string) (string, map[string]interface{}, error) {
+	req := map[string]string{
+		"username": username,
+		"password": password,
+	}
+	var res struct {
+		Token string                 `json:"token"`
+		User  map[string]interface{} `json:"user"`
+	}
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/auth/login", req, &res)
+	if err != nil {
+		return "", nil, err
+	}
+	return res.Token, res.User, nil
+}
+
+func (c *DaemonClient) GetMe(ctx context.Context) (map[string]interface{}, error) {
+	var res map[string]interface{}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/auth/me", nil, &res)
+	return res, err
+}
+
+func (c *DaemonClient) CreateAPIKey(ctx context.Context, name string, expiresInSec int64) (string, error) {
+	req := map[string]interface{}{
+		"name": name,
+	}
+	if expiresInSec > 0 {
+		req["expires_in_seconds"] = expiresInSec
+	}
+	var res struct {
+		Key string `json:"key"`
+	}
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/auth/keys", req, &res)
+	if err != nil {
+		return "", err
+	}
+	return res.Key, nil
+}
+
+func (c *DaemonClient) ListAPIKeys(ctx context.Context) ([]map[string]interface{}, error) {
+	var res []map[string]interface{}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/auth/keys", nil, &res)
+	return res, err
+}
+
+func (c *DaemonClient) RevokeAPIKey(ctx context.Context, id string) error {
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/auth/keys/"+id, nil, nil)
+}
+
+func (c *DaemonClient) ListOrgs(ctx context.Context) ([]map[string]interface{}, error) {
+	var res []map[string]interface{}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/orgs", nil, &res)
+	return res, err
+}
+
+func (c *DaemonClient) CreateOrg(ctx context.Context, name, slug string) (map[string]interface{}, error) {
+	req := map[string]string{
+		"name": name,
+		"slug": slug,
+	}
+	var res map[string]interface{}
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/orgs", req, &res)
+	return res, err
+}
+
+// Filesystem API methods
+
+func (c *DaemonClient) WriteFile(ctx context.Context, sandboxID, path, content, format string) error {
+	req := map[string]string{
+		"path":    path,
+		"content": content,
+		"format":  format,
+	}
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/files/write", req, nil)
+}
+
+func (c *DaemonClient) ReadFile(ctx context.Context, sandboxID, path, format string) (string, error) {
+	q := url.Values{}
+	q.Set("path", path)
+	if format != "" {
+		q.Set("format", format)
+	}
+	var res struct {
+		Content string `json:"content"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/read?"+q.Encode(), nil, &res)
+	if err != nil {
+		return "", err
+	}
+	return res.Content, nil
+}
+
+func (c *DaemonClient) ListFiles(ctx context.Context, sandboxID, path string) ([]map[string]interface{}, error) {
+	q := url.Values{}
+	if path != "" {
+		q.Set("path", path)
+	}
+	var res struct {
+		Entries []map[string]interface{} `json:"entries"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/list?"+q.Encode(), nil, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Entries, nil
+}
+
+func (c *DaemonClient) RemoveFile(ctx context.Context, sandboxID, path string) error {
+	q := url.Values{}
+	q.Set("path", path)
+	return c.doRequest(ctx, http.MethodDelete, "/api/v1/sandboxes/"+sandboxID+"/files?"+q.Encode(), nil, nil)
+}
+
+// Process API methods
+
+func (c *DaemonClient) ListProcesses(ctx context.Context, sandboxID string) ([]map[string]interface{}, error) {
+	var res struct {
+		Processes []map[string]interface{} `json:"processes"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/processes", nil, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Processes, nil
+}
+
+func (c *DaemonClient) StartProcess(ctx context.Context, sandboxID, command, cwd string, env map[string]string) (int, error) {
+	req := map[string]interface{}{
+		"command": command,
+		"cwd":     cwd,
+		"env":     env,
+	}
+	var res struct {
+		PID int `json:"pid"`
+	}
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/processes", req, &res)
+	if err != nil {
+		return 0, err
+	}
+	return res.PID, nil
+}
+
+func (c *DaemonClient) KillProcess(ctx context.Context, sandboxID string, pid int, signal string) error {
+	req := map[string]interface{}{
+		"pid":    pid,
+		"signal": signal,
+	}
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/processes/kill", req, nil)
 }

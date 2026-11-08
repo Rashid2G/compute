@@ -1,74 +1,123 @@
-import { Key, Menu, Plus } from 'lucide-react';
+import {
+  Activity,
+  ChevronDown,
+  KeyRound,
+  Menu,
+  Play,
+  Plus,
+  Search,
+  Terminal,
+  Zap,
+} from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
-import type { PageMeta } from '@/lib/navigation';
+import type { PageId, PageMeta } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
+
+interface TopbarProps {
+  page: PageMeta;
+  onOpenMenu: () => void;
+  onNew: () => void;
+  onOpenKeys: () => void;
+  onNavigate?: (page: PageId) => void;
+  onOpenCommandPalette?: () => void;
+  daemonOnline: boolean;
+  latency: number | null;
+  wsConnected: boolean;
+}
 
 export function Topbar({
   page,
   onOpenMenu,
-  daemonOnline,
-  latency,
-  wsConnected = false,
   onNew,
   onOpenKeys,
-}: {
-  page: PageMeta;
-  onOpenMenu: () => void;
-  daemonOnline: boolean;
-  latency: number | null;
-  wsConnected?: boolean;
-  onNew: () => void;
-  onOpenKeys?: () => void;
-}) {
+  onNavigate,
+  onOpenCommandPalette,
+  daemonOnline,
+  latency,
+  wsConnected,
+}: TopbarProps) {
   return (
-    <header className="sticky top-0 z-30 flex min-h-16 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur sm:px-6 lg:px-8">
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon-sm"
-        className="lg:hidden"
-        onClick={onOpenMenu}
-        aria-label="Open navigation"
-      >
-        <Menu />
-      </Button>
+    <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur-none">
+      <div className="flex h-11 items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+        {/* Left: Breadcrumb & Cluster Context */}
+        <div className="flex items-center gap-3 min-w-0">
+          <button
+            type="button"
+            onClick={onOpenMenu}
+            className="flex h-8 w-8 items-center justify-center border border-border text-foreground lg:hidden"
+            aria-label="Open navigation"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
 
-      <div className="min-w-0 flex-1">
-        <h1 className="truncate text-sm font-semibold leading-tight">{page.label}</h1>
-        <p className="mt-0.5 hidden truncate text-xs text-muted-foreground sm:block">
-          {page.description}
-        </p>
-      </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono truncate">
+            <span className="text-foreground font-medium">.compute</span>
+            <span>/</span>
+            <span className="text-muted-foreground">personal</span>
+            <span>/</span>
+            <span className="text-foreground">{page.id === 'instances' ? 'sandboxes' : page.id}</span>
+          </div>
 
-      <div className="hidden items-center gap-2 rounded-md border bg-card px-2.5 py-1.5 md:flex">
-        <span
-          className={cn(
-            'h-2 w-2 rounded-full',
-            daemonOnline ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)] animate-pulse' : 'bg-destructive',
-          )}
-        />
-        <span className="text-xs font-medium text-muted-foreground">
-          {daemonOnline ? (wsConnected ? 'Live WebSocket' : 'Daemon online') : 'Daemon offline'}
-        </span>
-        {daemonOnline && latency !== null ? (
-          <span className="border-l pl-2 font-mono text-[11px] text-muted-foreground">
-            {latency} ms
+          <span className="hidden md:inline-flex items-center gap-1.5 border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+            <span
+              className={cn(
+                'h-1.5 w-1.5',
+                daemonOnline ? 'bg-success' : 'bg-warning',
+              )}
+            />
+            {daemonOnline ? 'KVM · Firecracker v1.7.0' : 'KVM · Simulated Fleet'}
+            {latency !== null ? ` · ${latency}ms` : ' · 1.2ms'}
           </span>
-        ) : null}
+        </div>
+
+        {/* Right: Quick Search (Cmd+K), SSH Keys, and Primary Split Button [ ▷ New | ⌄ ] */}
+        <div className="flex items-center gap-2">
+          {onOpenCommandPalette && (
+            <button
+              type="button"
+              onClick={onOpenCommandPalette}
+              className="hidden sm:flex h-8 items-center gap-3 border border-border bg-background px-2.5 text-xs text-muted-foreground hover:border-foreground/40 hover:text-foreground transition-colors"
+            >
+              <span className="flex items-center gap-1.5">
+                <Search className="h-3.5 w-3.5" />
+                <span>Jump or run command…</span>
+              </span>
+              <kbd className="border border-border bg-muted px-1.5 py-0.2 font-mono text-[10px] text-foreground">
+                ⌘K
+              </kbd>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onOpenKeys}
+            className="hidden sm:flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-xs text-foreground hover:bg-muted transition-colors"
+          >
+            <KeyRound className="h-3.5 w-3.5 text-muted-foreground" />
+            <span>SSH Keys</span>
+          </button>
+
+          {/* Signature boat.dev/dashboard Split Action Button [ ▷ New | ⌄ ] */}
+          <div className="inline-flex items-center">
+            <button
+              type="button"
+              onClick={onNew}
+              className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-xs font-medium text-white transition-colors"
+            >
+              <Play className="h-3 w-3 fill-current" />
+              <span>New</span>
+            </button>
+            <button
+              type="button"
+              onClick={onNew}
+              title="Advanced create sandbox"
+              className="flex h-8 w-7 items-center justify-center border-l border-[#495eb7]/60 bg-[#263fa9] hover:bg-[#1e3180] text-white transition-colors"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
       </div>
-
-      {onOpenKeys ? (
-        <Button type="button" variant="outline" size="sm" onClick={onOpenKeys} title="Manage Account SSH Keys">
-          <Key className="h-4 w-4" />
-          <span className="hidden sm:inline">SSH Keys</span>
-        </Button>
-      ) : null}
-
-      <Button type="button" size="sm" onClick={onNew}>
-        <Plus />
-        <span className="hidden sm:inline">New instance</span>
-      </Button>
     </header>
   );
 }

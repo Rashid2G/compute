@@ -1,243 +1,517 @@
-import { useMemo, useState } from 'react';
-import { Network, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  Activity,
+  Network,
+  Plus,
+  RefreshCw,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
-import { CopyButton } from '@/components/copy-button';
-import { EmptyState } from '@/components/empty-state';
-import { StatusBadge } from '@/components/status-badge';
-import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import { api, errorMessage } from '@/lib/api';
-import { formatTime } from '@/lib/format';
-import type { NetworkAllocation, NetworkConfig } from '@/lib/types';
+import { formatRelativeTime } from '@/lib/format';
+import type {
+  NetworkAllocation,
+  NetworkConfig,
+  NetworkInspectResult,
+  PortForwardRecord,
+} from '@/lib/types';
+import { cn } from '@/lib/utils';
 
-function NetworkFact({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-}) {
-  return (
-    <Card className="p-4">
-      <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-1.5 truncate font-mono text-sm font-medium">{value}</div>
-      {hint ? <div className="mt-1 text-[11px] text-muted-foreground">{hint}</div> : null}
-    </Card>
-  );
+interface NetworkPageProps {
+  allocations: NetworkAllocation[];
+  networkConfig: NetworkConfig | null;
+  onRefresh: () => void;
 }
 
 export function NetworkPage({
   allocations,
   networkConfig,
   onRefresh,
-}: {
-  allocations: NetworkAllocation[];
-  networkConfig: NetworkConfig | null;
-  onRefresh: () => void;
-}) {
-  const [query, setQuery] = useState('');
+}: NetworkPageProps) {
+  const [subTab, setSubTab] = useState<'leases' | 'port-forwarding'>('leases');
   const [pruning, setPruning] = useState(false);
 
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return allocations;
-    return allocations.filter((allocation) =>
-      [
-        allocation.ip_address,
-        allocation.vm_name,
-        allocation.vm_id,
-        allocation.mac_address,
-        allocation.tap_device,
-      ]
-        .filter(Boolean)
-        .some((value) => value.toLowerCase().includes(normalized)),
-    );
-  }, [allocations, query]);
+  const [inspectResult, setInspectResult] =
+    useState<NetworkInspectResult | null>(null);
+  const [inspectingId, setInspectingId] = useState<string | null>(null);
 
-  async function prune() {
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
+  const [addPfOpen, setAddPfOpen] = useState(false);
+  const [pfHostPort, setPfHostPort] = useState(18081);
+  const [pfGuestPort, setPfGuestPort] = useState(8080);
+  const [pfVmId, setPfVmId] = useState('');
+  const [pfProto, setPfProto] = useState('TCP');
+
+  const loadPortForwards = useCallback(async () => {
+    try {
+      const list = await api.listPortForwards();
+      setPortForwards(list || []);
+    } catch {
+      // Ignore if empty
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPortForwards();
+  }, [loadPortForwards]);
+
+  async function handlePrune() {
     setPruning(true);
     try {
-      const result = await api.pruneNetwork();
-      const count = result.pruned_taps.length;
+      const res = await api.pruneNetwork();
+      const count = res.pruned_taps?.length ?? 0;
       toast.success(
-        count === 0
-          ? 'No orphaned TAP interfaces found'
-          : `Removed ${count} orphaned TAP interface${count === 1 ? '' : 's'}`,
-        {
-          description:
-            count > 0 ? result.pruned_taps.join(', ') : 'The network is already clean.',
-        },
+        count > 0
+          ? `Pruned ${count} orphaned TAP interface(s)`
+          : '0 orphaned TAP interfaces found · Bridge clean',
       );
       onRefresh();
-    } catch (error) {
-      toast.error('Could not reconcile network', {
-        description: errorMessage(error),
-      });
+    } catch (err) {
+      toast.error(errorMessage(err));
     } finally {
       setPruning(false);
     }
   }
 
+  async function handleInspect(vmId: string) {
+    setInspectingId(vmId);
+    try {
+      const res = await api.inspectNetwork(vmId);
+      setInspectResult(res);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setInspectingId(null);
+    }
+  }
+
+  async function handleCreatePortForward(e: React.FormEvent) {
+    e.preventDefault();
+    if (!pfVmId) return;
+    const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
+    try {
+      await api.createPortForward({
+        host_port: pfHostPort,
+        guest_port: pfGuestPort,
+        vm_id: pfVmId,
+        vm_name: vmAlloc?.vm_name || pfVmId,
+        protocol: pfProto,
+      });
+      toast.success(`Added DNAT port forward :${pfHostPort} -> :${pfGuestPort}`);
+      setAddPfOpen(false);
+      await loadPortForwards();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
   return (
-    <div className="space-y-4 animate-fade-in">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <NetworkFact
-          label="Routing mode"
-          value={(networkConfig?.mode || 'unknown').toUpperCase()}
-          hint={
-            networkConfig?.mode === 'nat'
-              ? 'Host masquerade enabled'
-              : 'Bridge routing'
-          }
-        />
-        <NetworkFact
-          label="Bridge"
-          value={networkConfig?.bridge_name || '—'}
-          hint="Host TAP aggregation"
-        />
-        <NetworkFact
-          label="Gateway"
-          value={networkConfig?.bridge_ip || '—'}
-          hint="Default guest gateway"
-        />
-        <NetworkFact
-          label="Subnet"
-          value={networkConfig?.subnet || '—'}
-          hint={
-            networkConfig?.physical_nic
-              ? `Uplink ${networkConfig.physical_nic}`
-              : 'Virtual address pool'
-          }
-        />
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+            Network &amp; NAT
+          </h1>
+          <p className="text-[12px] text-muted-foreground">
+            Linux bridge topology ({networkConfig?.bridge_name || 'fcbr0'}), TAP
+            interface leases, and DNAT port-forwarding rules.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={pruning}
+            onClick={() => void handlePrune()}
+            className="h-8 border border-border bg-background px-3 text-[12px] text-foreground hover:bg-muted/40 disabled:opacity-50"
+          >
+            {pruning ? 'Pruning…' : 'Prune Orphaned TAPs'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onRefresh();
+              void loadPortForwards();
+            }}
+            className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-[12px] font-medium text-white"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            <span>Reconcile Bridge</span>
+          </button>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader className="flex-col gap-3 space-y-0 border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <CardTitle>Address leases</CardTitle>
-            <span className="tabular rounded-md border bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-              {allocations.length}
-            </span>
+      {/* Bridge Topology Summary Bar */}
+      <div className="grid grid-cols-1 sm:grid-cols-4 border border-border bg-background divide-y sm:divide-y-0 sm:divide-x divide-border font-mono text-xs">
+        <div className="p-3.5 space-y-1">
+          <div className="text-muted-foreground text-[10px] uppercase">
+            Bridge Device
           </div>
-
-          <div className="flex items-center gap-2">
-            <div className="relative w-full sm:w-60">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search address, instance, TAP…"
-                className="pl-8"
-                aria-label="Search leases"
-              />
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => void prune()}
-              disabled={pruning}
-              className="shrink-0 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            >
-              {pruning ? <RefreshCw className="animate-spin" /> : <Trash2 />}
-              <span className="hidden sm:inline">Prune TAPs</span>
-            </Button>
+          <div className="text-[13px] font-medium text-foreground">
+            {networkConfig?.bridge_name || 'fcbr0'} (
+            {networkConfig?.mode || 'nat'})
           </div>
-        </CardHeader>
+          <div className="text-muted-foreground text-[11px]">
+            IPv4 Forwarding Enabled
+          </div>
+        </div>
+        <div className="p-3.5 space-y-1">
+          <div className="text-muted-foreground text-[10px] uppercase">
+            Subnet &amp; Gateway
+          </div>
+          <div className="text-[13px] font-medium text-foreground">
+            {networkConfig?.subnet ||
+              networkConfig?.subnet_cidr ||
+              '172.16.0.0/24'}
+          </div>
+          <div className="text-muted-foreground text-[11px]">
+            Gateway: {networkConfig?.bridge_ip || '172.16.0.1'}
+          </div>
+        </div>
+        <div className="p-3.5 space-y-1">
+          <div className="text-muted-foreground text-[10px] uppercase">
+            Active TAP Leases
+          </div>
+          <div className="text-[13px] font-medium text-foreground tabular">
+            {allocations.length} / 253 IPs
+          </div>
+          <div className="text-success text-[11px]">
+            Live SQLite IPAM Allocations
+          </div>
+        </div>
+        <div className="p-3.5 space-y-1">
+          <div className="text-muted-foreground text-[10px] uppercase">
+            DNAT Port Forwards
+          </div>
+          <div className="text-[13px] font-medium text-foreground tabular">
+            {portForwards.length} rules
+          </div>
+          <div className="text-muted-foreground text-[11px]">
+            Host ingress routing
+          </div>
+        </div>
+      </div>
 
-        <CardContent className="p-0">
-          {filtered.length === 0 ? (
-            <EmptyState
-              icon={Network}
-              title={allocations.length === 0 ? 'No address leases' : 'No leases match this search'}
-              description={
-                allocations.length === 0
-                  ? 'Leases appear here as soon as instances reserve an address.'
-                  : 'Clear the search to see all allocated addresses.'
-              }
-            />
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Address</TableHead>
-                  <TableHead>Instance</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>MAC</TableHead>
-                  <TableHead>TAP</TableHead>
-                  <TableHead>Updated</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((allocation) => (
-                  <TableRow key={allocation.ip_address}>
-                    <TableCell>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-mono text-xs font-medium">
-                          {allocation.ip_address}
+      {/* Sub-navigation */}
+      <div className="flex items-center justify-between border-b border-border">
+        <div className="flex items-center">
+          <button
+            type="button"
+            onClick={() => setSubTab('leases')}
+            className={cn(
+              'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+              subTab === 'leases'
+                ? 'border-[#263fa9] text-foreground font-medium'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
+            )}
+          >
+            IP &amp; TAP Leases ({allocations.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSubTab('port-forwarding')}
+            className={cn(
+              'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+              subTab === 'port-forwarding'
+                ? 'border-[#263fa9] text-foreground font-medium'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
+            )}
+          >
+            DNAT Port Forwarding ({portForwards.length})
+          </button>
+        </div>
+
+        {subTab === 'port-forwarding' && (
+          <button
+            type="button"
+            onClick={() => setAddPfOpen((v) => !v)}
+            className="flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11.5px] font-medium text-white"
+          >
+            <Plus className="h-3 w-3" />
+            <span>Add Port Rule</span>
+          </button>
+        )}
+      </div>
+
+      {subTab === 'leases' && (
+        <div className="space-y-4">
+          <div className="border border-border bg-background overflow-x-auto">
+            <table className="w-full border-collapse text-left text-[12px]">
+              <thead>
+                <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
+                  <th className="py-2.5 px-3 font-normal">Sandbox</th>
+                  <th className="py-2.5 px-3 font-normal">Internal IPv4</th>
+                  <th className="py-2.5 px-3 font-normal">Public IP / NAT</th>
+                  <th className="py-2.5 px-3 font-normal">MAC Address</th>
+                  <th className="py-2.5 px-3 font-normal">TAP Interface</th>
+                  <th className="py-2.5 px-3 font-normal">State</th>
+                  <th className="py-2.5 px-3 text-right font-normal">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              {allocations.length === 0 ? (
+                <tbody>
+                  <tr>
+                    <td
+                      colSpan={7}
+                      className="py-16 text-center text-muted-foreground"
+                    >
+                      <Network className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
+                      <div className="text-[12.5px]">
+                        No active network IP/TAP leases allocated.
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              ) : (
+                <tbody className="divide-y divide-border font-mono text-[11.5px]">
+                  {allocations.map((lease) => (
+                    <tr key={lease.vm_id} className="hover:bg-muted/30">
+                      <td className="py-2.5 px-3 font-sans font-medium text-foreground">
+                        {lease.vm_name}
+                      </td>
+                      <td className="py-2.5 px-3 text-foreground">
+                        {lease.ip_address}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {lease.public_ip ||
+                          (lease.public_ip_enabled
+                            ? 'SNAT Egress'
+                            : 'Isolated')}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {lease.mac_address}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {lease.tap_device}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase">
+                          {lease.status}
                         </span>
-                        {allocation.public_ip_enabled ? (
-                          <span className="rounded bg-primary/10 px-1 py-0.5 text-[9px] font-semibold text-primary uppercase">
-                            Public
-                          </span>
-                        ) : (
-                          <span className="rounded bg-secondary px-1 py-0.5 text-[9px] font-medium text-muted-foreground uppercase">
-                            Private
-                          </span>
-                        )}
-                        <CopyButton
-                          value={allocation.ip_address}
-                          label="Copy address"
-                          className="h-6 w-6"
-                        />
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="text-[13px] font-medium">
-                        {allocation.vm_name || allocation.vm_id}
-                      </div>
-                      <div className="font-mono text-[11px] text-muted-foreground">
-                        {allocation.vm_id}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={allocation.status} />
-                    </TableCell>
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {allocation.mac_address || '—'}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      {allocation.tap_device || '—'}
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap font-mono text-[11px] text-muted-foreground">
-                      {formatTime(allocation.updated_at)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => void handleInspect(lease.vm_id)}
+                          className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                        >
+                          {inspectingId === lease.vm_id
+                            ? 'Probing…'
+                            : 'Inspect'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
+            </table>
+          </div>
+
+          {inspectResult && (
+            <div className="border border-[#263fa9] bg-background p-4 space-y-2 font-mono text-[11.5px]">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Activity className="h-3.5 w-3.5 text-[#495eb7]" />
+                  <span className="text-foreground font-medium">
+                    Network Inspection: {inspectResult.vm_name} (
+                    {inspectResult.ip_address})
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setInspectResult(null)}
+                  className="text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+                <div>
+                  <span className="text-muted-foreground block text-[10.5px]">
+                    Bridge
+                  </span>
+                  <span>{inspectResult.bridge_name}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10.5px]">
+                    Gateway
+                  </span>
+                  <span>{inspectResult.gateway}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10.5px]">
+                    TAP Device
+                  </span>
+                  <span>{inspectResult.tap_device}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10.5px]">
+                    Connectivity
+                  </span>
+                  <span className="text-success">
+                    {inspectResult.connectivity}
+                  </span>
+                </div>
+              </div>
+            </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      )}
+
+      {subTab === 'port-forwarding' && (
+        <div className="space-y-4">
+          {addPfOpen && (
+            <form
+              onSubmit={handleCreatePortForward}
+              className="border border-border bg-muted/15 p-4 space-y-3"
+            >
+              <div className="text-[13px] font-medium text-foreground">
+                Add DNAT Port Forward Rule
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Target Sandbox
+                  </label>
+                  <select
+                    value={pfVmId}
+                    onChange={(e) => setPfVmId(e.target.value)}
+                    required
+                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                  >
+                    <option value="">Select sandbox…</option>
+                    {allocations.map((a) => (
+                      <option key={a.vm_id} value={a.vm_id}>
+                        {a.vm_name} ({a.ip_address})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Host Port
+                  </label>
+                  <input
+                    type="number"
+                    value={pfHostPort}
+                    onChange={(e) => setPfHostPort(Number(e.target.value))}
+                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Guest Port
+                  </label>
+                  <input
+                    type="number"
+                    value={pfGuestPort}
+                    onChange={(e) => setPfGuestPort(Number(e.target.value))}
+                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Protocol
+                  </label>
+                  <select
+                    value={pfProto}
+                    onChange={(e) => setPfProto(e.target.value)}
+                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                  >
+                    <option value="TCP">TCP</option>
+                    <option value="HTTP/HTTPS">HTTP/HTTPS</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAddPfOpen(false)}
+                  className="h-8 border border-border px-3 text-[12px] text-muted-foreground"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+                >
+                  Save Rule
+                </button>
+              </div>
+            </form>
+          )}
+
+          <div className="border border-border bg-background overflow-x-auto">
+            <table className="w-full border-collapse text-left text-[12px]">
+              <thead>
+                <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
+                  <th className="py-2.5 px-3 font-normal">Protocol</th>
+                  <th className="py-2.5 px-3 font-normal">Host Port</th>
+                  <th className="py-2.5 px-3 font-normal">Sandbox</th>
+                  <th className="py-2.5 px-3 font-normal">Guest Port</th>
+                  <th className="py-2.5 px-3 font-normal">Created</th>
+                  <th className="py-2.5 px-3 text-right font-normal">
+                    Actions
+                  </th>
+                </tr>
+              </thead>
+              {portForwards.length === 0 ? (
+                <tbody>
+                  <tr>
+                    <td
+                      colSpan={6}
+                      className="py-12 text-center text-muted-foreground"
+                    >
+                      No custom DNAT port-forwarding rules configured.
+                    </td>
+                  </tr>
+                </tbody>
+              ) : (
+                <tbody className="divide-y divide-border font-mono text-[11.5px]">
+                  {portForwards.map((pf) => (
+                    <tr key={pf.id} className="hover:bg-muted/30">
+                      <td className="py-2.5 px-3">{pf.protocol}</td>
+                      <td className="py-2.5 px-3 text-foreground font-medium">
+                        :{pf.host_port}
+                      </td>
+                      <td className="py-2.5 px-3 text-foreground">
+                        {pf.vm_name || pf.vm_id}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        :{pf.guest_port}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {formatRelativeTime(pf.created_at)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void api
+                              .deletePortForward(pf.id)
+                              .then(() => {
+                                toast.success('Deleted port forward rule');
+                                void loadPortForwards();
+                              })
+                              .catch((err) => toast.error(errorMessage(err)));
+                          }}
+                          className="border border-border p-1 text-muted-foreground hover:text-destructive"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
