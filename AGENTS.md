@@ -57,7 +57,6 @@ make deploy-ui
 ---
 
 ## Remote Architecture Reference (`t3-runner`)
-
 - **Host Alias**: `t3-runner` (defined in `~/.ssh/config`, user `rashid`, passwordless sudo enabled).
 - **Remote Repo Path**: `/home/rashid/on-demand-vms`
 - **Systemd Services**:
@@ -67,3 +66,24 @@ make deploy-ui
   - `/var/lib/compute/data/compute.db`: SQLite database
   - `/var/lib/compute/images`: Rootfs images (e.g. `ubuntu-24.04.ext4`)
   - `/var/lib/compute/vms`: VM workspaces and disks
+
+## Local Lab VM (`compute-lab`)
+
+A dedicated lab VM now serves the complete application on the local network:
+
+- **Host**: `compute-lab` / `192.168.1.70` (Libvirt on the `debian` hypervisor, LAN bridge `br0`)
+- **Web GUI**: http://192.168.1.70:8080
+- **Daemon API**: http://192.168.1.70:18080/api/v1/health
+- **Remote CLI**: `COMPUTE_DAEMON=192.168.1.70:18080 ./bin/compute sandbox list`
+- **Repository/state on VM**: `/home/rashid/on-demand-vms` (`data/` holds SQLite, images, volumes, templates, VM workspaces)
+- **Systemd services**: `computed.service`, `compute-gui.service`, `compute-net.service` (bridge/NAT), `docker.service` (custom image builds)
+
+Use the lab targets when deploying to the new VM instead of `t3-runner`:
+
+| Task | Command |
+|---|---|
+| Deploy code to compute-lab | `make deploy-lab` |
+| Deploy code + rebuild Web UI | `make deploy-lab-ui` |
+| Check lab service status | `make remote-status-lab` |
+| SSH into the lab | `ssh compute-lab` |
+| Run the feature suite on the lab | `ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"` |

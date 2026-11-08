@@ -194,9 +194,9 @@ export function SSHTerminal({
         <span
           className={cn(
             'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium tracking-wide backdrop-blur-md',
-            status === 'connected' && 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25',
-            status === 'connecting' && 'bg-amber-500/15 text-amber-400 border border-amber-500/25',
-            (status === 'disconnected' || status === 'error') && 'bg-rose-500/15 text-rose-400 border border-rose-500/25',
+            status === 'connected' && 'bg-emerald-500/15 text-[#6ee7b7] border border-emerald-500/25',
+            status === 'connecting' && 'bg-amber-500/15 text-[#fcd34d] border border-amber-500/25',
+            (status === 'disconnected' || status === 'error') && 'bg-rose-500/15 text-[#fda4af] border border-rose-500/25',
           )}
         >
           {status === 'connected' && <Wifi className="h-2.5 w-2.5" />}

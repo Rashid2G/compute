@@ -42,7 +42,7 @@ export function NetworkPage({
   const [pfHostPort, setPfHostPort] = useState(18081);
   const [pfGuestPort, setPfGuestPort] = useState(8080);
   const [pfVmId, setPfVmId] = useState('');
-  const [pfProto, setPfProto] = useState('TCP');
+  const [pfProto, setPfProto] = useState('tcp');
 
   const loadPortForwards = useCallback(async () => {
     try {
@@ -172,7 +172,7 @@ export function NetworkPage({
         </div>
         <div className="p-3.5 space-y-1">
           <div className="text-muted-foreground text-[10px] uppercase">
-            Active TAP Leases
+            IP Leases
           </div>
           <div className="text-[13px] font-medium text-foreground tabular">
             {allocations.length} / 253 IPs
@@ -186,7 +186,7 @@ export function NetworkPage({
             DNAT Port Forwards
           </div>
           <div className="text-[13px] font-medium text-foreground tabular">
-            {portForwards.length} rules
+            {portForwards.length} {portForwards.length === 1 ? 'rule' : 'rules'}
           </div>
           <div className="text-muted-foreground text-[11px]">
             Host ingress routing
@@ -315,7 +315,7 @@ export function NetworkPage({
             <div className="border border-[#263fa9] bg-background p-4 space-y-2 font-mono text-[11.5px]">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Activity className="h-3.5 w-3.5 text-[#495eb7]" />
+                  <Activity className="h-3.5 w-3.5 text-[color:var(--link)]" />
                   <span className="text-foreground font-medium">
                     Network Inspection: {inspectResult.vm_name} (
                     {inspectResult.ip_address})
@@ -378,6 +378,7 @@ export function NetworkPage({
                     Target Sandbox
                   </label>
                   <select
+                    aria-label="Sandbox to forward"
                     value={pfVmId}
                     onChange={(e) => setPfVmId(e.target.value)}
                     required
@@ -397,6 +398,7 @@ export function NetworkPage({
                   </label>
                   <input
                     type="number"
+                    aria-label="Host port"
                     value={pfHostPort}
                     onChange={(e) => setPfHostPort(Number(e.target.value))}
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
@@ -408,6 +410,7 @@ export function NetworkPage({
                   </label>
                   <input
                     type="number"
+                    aria-label="Guest port"
                     value={pfGuestPort}
                     onChange={(e) => setPfGuestPort(Number(e.target.value))}
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
@@ -418,12 +421,13 @@ export function NetworkPage({
                     Protocol
                   </label>
                   <select
+                    aria-label="Forwarding protocol"
                     value={pfProto}
                     onChange={(e) => setPfProto(e.target.value)}
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
                   >
-                    <option value="TCP">TCP</option>
-                    <option value="HTTP/HTTPS">HTTP/HTTPS</option>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
                   </select>
                 </div>
               </div>
@@ -490,6 +494,8 @@ export function NetworkPage({
                       <td className="py-2.5 px-3 text-right">
                         <button
                           type="button"
+                          title="Delete port-forward rule"
+                          aria-label="Delete port-forward rule"
                           onClick={() => {
                             void api
                               .deletePortForward(pf.id)

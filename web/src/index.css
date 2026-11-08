@@ -134,14 +134,15 @@
     --destructive: #b42318;
     --destructive-foreground: var(--wash);
 
-    --success: #1d6f48;
+    --success: #4ade80;
     --success-foreground: var(--wash);
 
-    --warning: #8a5300;
+    --warning: #fbbf24;
     --warning-foreground: var(--wash);
 
-    --info: #263fa9;
+    --info: #9aabf7;
     --info-foreground: var(--wash);
+    --destructive: #f87171;
 
     --border: var(--background-3);
     --input: var(--background-3);

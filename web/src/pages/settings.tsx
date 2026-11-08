@@ -80,7 +80,8 @@ export function SettingsPage({
             {volumeGB} GB
           </div>
           <div className="font-mono text-[11px] text-muted-foreground">
-            {volumes.length} volumes · {snapshottedCount} paused snapshots
+            {volumes.length} volumes · {snapshottedCount}{' '}
+            {snapshottedCount === 1 ? 'paused snapshot' : 'paused snapshots'}
           </div>
         </div>
         <div className="p-4 space-y-1">

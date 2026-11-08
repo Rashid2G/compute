@@ -191,7 +191,11 @@ export default function App() {
     }
   }
 
-  async function createVM(payload: CreateVMRequest, autoStart: boolean) {
+  async function createVM(
+    payload: CreateVMRequest,
+    autoStart: boolean,
+    options?: { setupScript?: string },
+  ) {
     const toastID = toast.loading(`Provisioning ${payload.name}…`);
     try {
       const created = await api.createVM(payload);
@@ -211,6 +215,30 @@ export default function App() {
         } catch (error) {
           toast.error(`Could not boot ${created.name}`, {
             id: bootID,
+            description: errorMessage(error),
+          });
+        }
+      }
+
+      const script = options?.setupScript?.trim();
+      if (script && autoStart) {
+        const scriptID = toast.loading(`Running setup script in ${created.name}…`);
+        try {
+          const res = await api.execVM(created.id, {
+            command: script,
+            timeout_seconds: 300,
+          });
+          if (res.exit_code === 0) {
+            toast.success('Setup script finished', { id: scriptID });
+          } else {
+            toast.error('Setup script failed', {
+              id: scriptID,
+              description: (res.stderr || `Exit code ${res.exit_code}`).slice(0, 240),
+            });
+          }
+        } catch (error) {
+          toast.error('Setup script failed', {
+            id: scriptID,
             description: errorMessage(error),
           });
         }

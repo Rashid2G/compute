@@ -67,41 +67,55 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// Sync running / existing VMs into volumes store so rootfs volumes are reflected
-		if vms, err := s.vmMgr.ListVMs(ctx); err == nil {
-			for _, v := range vms {
-				volID := "vol_root_" + v.Name
-				existing, _ := st.GetVolume(ctx, volID)
-				status := "available"
-				attachedVM := ""
-				if v.Status == db.StatusRunning {
-					status = "attached"
-					attachedVM = v.Name
+		vms, _ := s.vmMgr.ListVMs(ctx)
+		liveVMs := map[string]bool{}
+		for _, v := range vms {
+			liveVMs[v.Name] = true
+			volID := "vol_root_" + v.Name
+			existing, _ := st.GetVolume(ctx, volID)
+			status := "available"
+			attachedVM := ""
+			if v.Status == db.StatusRunning {
+				status = "attached"
+				attachedVM = v.Name
+			}
+			sizeGB := v.MemoryMB / 1024
+			if sizeGB < 10 {
+				sizeGB = 10
+			}
+			if existing == nil {
+				_ = st.SaveVolume(ctx, &db.Volume{
+					ID:         volID,
+					Name:       v.Name + "-rootfs",
+					Pool:       "default",
+					SizeGB:     sizeGB,
+					UsedGB:     1.8,
+					Status:     status,
+					AttachedVM: attachedVM,
+					DevicePath: "/dev/vda",
+					MountPoint: "/",
+					Filesystem: "ext4",
+					IOPS:       4500,
+					Throughput: "180 MB/s",
+					Snapshots:  0,
+				})
+			} else {
+				if existing.Status != status || existing.AttachedVM != attachedVM {
+					existing.Status = status
+					existing.AttachedVM = attachedVM
+					_ = st.SaveVolume(ctx, existing)
 				}
-				sizeGB := v.MemoryMB / 1024
-				if sizeGB < 10 {
-					sizeGB = 10
-				}
-				if existing == nil {
-					_ = st.SaveVolume(ctx, &db.Volume{
-						ID:         volID,
-						Name:       v.Name + "-rootfs",
-						Pool:       "default",
-						SizeGB:     sizeGB,
-						UsedGB:     1.8,
-						Status:     status,
-						AttachedVM: attachedVM,
-						DevicePath: "/dev/vda",
-						MountPoint: "/",
-						Filesystem: "ext4",
-						IOPS:       4500,
-						Throughput: "180 MB/s",
-						Snapshots:  0,
-					})
-				} else {
-					if existing.Status != status || existing.AttachedVM != attachedVM {
-						existing.Status = status
-						existing.AttachedVM = attachedVM
-						_ = st.SaveVolume(ctx, existing)
+			}
+		}
+
+		// Drop synthetic rootfs volumes whose sandbox no longer exists so the
+		// storage view never shows attachments to deleted VMs.
+		if allVols, err := st.ListVolumes(ctx); err == nil {
+			for _, vol := range allVols {
+				if strings.HasPrefix(vol.ID, "vol_root_") {
+					name := strings.TrimPrefix(vol.ID, "vol_root_")
+					if !liveVMs[name] {
+						_ = st.DeleteVolume(ctx, vol.ID)
 					}
 				}
 			}
@@ -142,6 +156,22 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 		if req.Filesystem == "" {
 			req.Filesystem = "ext4"
 		}
+		if req.Filesystem != "ext4" && req.Filesystem != "xfs" {
+			httpError(w, "filesystem must be ext4 or xfs", http.StatusBadRequest)
+			return
+		}
+		if req.AttachedVM != "" {
+			vm, _ := s.vmMgr.GetVM(ctx, req.AttachedVM)
+			if vm == nil {
+				httpError(w, "sandbox not found: "+req.AttachedVM, http.StatusNotFound)
+				return
+			}
+			if vm.Status == db.StatusRunning || vm.Status == db.StatusPaused {
+				httpError(w, "stop the sandbox before attaching a volume", http.StatusConflict)
+				return
+			}
+			req.AttachedVM = vm.Name
+		}
 		status := "available"
 		mountPoint := ""
 		devicePath := ""
@@ -151,8 +181,15 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			devicePath = "/dev/vdb"
 		}
 
+		volID := "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+		path, err := s.vmMgr.GetStorageManager().CreateDataVolume(volID, req.SizeGB, req.Filesystem)
+		if err != nil {
+			httpError(w, "failed to allocate volume: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
 		vol := &db.Volume{
-			ID:         "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
+			ID:         volID,
 			Name:       req.Name,
 			Pool:       req.Pool,
 			SizeGB:     req.SizeGB,
@@ -162,6 +199,7 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			DevicePath: devicePath,
 			MountPoint: mountPoint,
 			Filesystem: req.Filesystem,
+			Path:       path,
 			IOPS:       3200,
 			Throughput: "250 MB/s",
 			Snapshots:  0,
@@ -169,6 +207,7 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:  time.Now().UTC(),
 		}
 		if err := st.SaveVolume(ctx, vol); err != nil {
+			_ = s.vmMgr.GetStorageManager().DeleteDataVolume(path)
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -213,6 +252,16 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(vol)
 
 		case http.MethodDelete:
+			if strings.HasPrefix(id, "vol_root_") {
+				httpError(w, "rootfs volumes are managed automatically by their sandbox", http.StatusConflict)
+				return
+			}
+			if vol, _ := st.GetVolume(ctx, id); vol != nil && vol.Path != "" {
+				if err := s.vmMgr.GetStorageManager().DeleteDataVolume(vol.Path); err != nil {
+					httpError(w, "failed to delete volume image: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
 			if err := st.DeleteVolume(ctx, id); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -237,6 +286,10 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "volume not found", http.StatusNotFound)
 		return
 	}
+	if strings.HasPrefix(vol.ID, "vol_root_") {
+		httpError(w, "rootfs volumes are managed automatically by their sandbox", http.StatusConflict)
+		return
+	}
 
 	switch action {
 	case "attach":
@@ -248,18 +301,37 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "vm_id is required", http.StatusBadRequest)
 			return
 		}
+		vm, _ := s.vmMgr.GetVM(ctx, req.VMID)
+		if vm == nil {
+			httpError(w, "sandbox not found: "+req.VMID, http.StatusNotFound)
+			return
+		}
+		if vm.Status == db.StatusRunning || vm.Status == db.StatusPaused {
+			httpError(w, "stop the sandbox before attaching a volume", http.StatusConflict)
+			return
+		}
+		if vol.Path == "" {
+			httpError(w, "volume has no backing image", http.StatusBadRequest)
+			return
+		}
 		vol.Status = "attached"
-		vol.AttachedVM = req.VMID
+		vol.AttachedVM = vm.Name
 		vol.MountPoint = "/mnt/data"
 		vol.DevicePath = "/dev/vdb"
 		if err := st.SaveVolume(ctx, vol); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("volume.attached", getActor(r), vol.Name, "delivered", 30, map[string]string{"vm_id": req.VMID})
+		s.recordEvent("volume.attached", getActor(r), vol.Name, "delivered", 30, map[string]string{"vm_id": vm.Name})
 		json.NewEncoder(w).Encode(vol)
 
 	case "detach":
+		if vol.AttachedVM != "" {
+			if vm, _ := s.vmMgr.GetVM(ctx, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
+				httpError(w, "stop the sandbox before detaching this volume", http.StatusConflict)
+				return
+			}
+		}
 		vol.Status = "available"
 		vol.AttachedVM = ""
 		vol.MountPoint = ""
@@ -279,6 +351,16 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 		if req.AddGB <= 0 {
 			req.AddGB = 10
 		}
+		if vol.AttachedVM != "" {
+			if vm, _ := s.vmMgr.GetVM(ctx, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
+				httpError(w, "stop the sandbox before expanding this volume", http.StatusConflict)
+				return
+			}
+		}
+		if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
+			httpError(w, "failed to expand volume: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		vol.SizeGB += req.AddGB
 		if err := st.SaveVolume(ctx, vol); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
@@ -288,6 +370,16 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(vol)
 
 	case "snapshot":
+		if vol.AttachedVM != "" {
+			if vm, _ := s.vmMgr.GetVM(ctx, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
+				httpError(w, "stop the sandbox before snapshotting this volume", http.StatusConflict)
+				return
+			}
+		}
+		if _, err := s.vmMgr.GetStorageManager().SnapshotDataVolume(vol.Path, vol.Snapshots+1); err != nil {
+			httpError(w, "failed to snapshot volume: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		vol.Snapshots++
 		if err := st.SaveVolume(ctx, vol); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
@@ -679,8 +771,8 @@ func (s *Server) handleAccessAPIKeys(w http.ResponseWriter, r *http.Request) {
 		b := make([]byte, 16)
 		_, _ = rand.Read(b)
 		tokenHex := hex.EncodeToString(b)
-		fullToken := "bsh_live_" + tokenHex
-		prefix := "bsh_live_" + tokenHex[:4] + "..." + tokenHex[len(tokenHex)-4:]
+		fullToken := "cmp_live_" + tokenHex
+		prefix := "cmp_live_" + tokenHex[:4] + "..." + tokenHex[len(tokenHex)-4:]
 		id := "key_live_" + tokenHex[:8]
 
 		key := &db.AccessAPIKey{
@@ -1056,10 +1148,14 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		vmName := req.VMName
-		if vmName == "" && req.VMID != "" {
+		var targetVM *db.VM
+		if req.VMID != "" {
 			if v, _ := s.vmMgr.GetVM(ctx, req.VMID); v != nil {
-				vmName = v.Name
-			} else {
+				targetVM = v
+				if vmName == "" {
+					vmName = v.Name
+				}
+			} else if vmName == "" {
 				vmName = req.VMID
 			}
 		}
@@ -1074,6 +1170,15 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			publicURL = fmt.Sprintf("http://localhost:%d", req.HostPort)
 		}
 
+		status := "pending"
+		if targetVM != nil && targetVM.IPAddress != "" {
+			if err := s.vmMgr.NetManager().AddPortForward(ctx, protocol, req.HostPort, targetVM.IPAddress, req.GuestPort); err != nil {
+				httpError(w, "failed to install host forwarding rule: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			status = "active"
+		}
+
 		pf := &db.PortForward{
 			ID:        "pf_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
 			HostPort:  req.HostPort,
@@ -1083,7 +1188,7 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			Protocol:  protocol,
 			Subdomain: req.Subdomain,
 			PublicURL: publicURL,
-			Status:    "active",
+			Status:    status,
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := st.SavePortForward(ctx, pf); err != nil {
@@ -1125,6 +1230,11 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(pf)
 
 	case http.MethodDelete:
+		if pf, _ := st.GetPortForward(ctx, id); pf != nil {
+			if v, _ := s.vmMgr.GetVM(ctx, pf.VMID); v != nil && v.IPAddress != "" {
+				_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
+			}
+		}
 		if err := st.DeletePortForward(ctx, id); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return

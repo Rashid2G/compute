@@ -314,6 +314,7 @@ export function WorkersPage({
           </span>
           <input
             type="text"
+            aria-label="New pool name"
             value={newPoolName}
             onChange={(e) => setNewPoolName(e.target.value)}
             placeholder="e.g. nvme-high-iops"
@@ -328,6 +329,7 @@ export function WorkersPage({
           </button>
           <button
             type="button"
+            aria-label="Close pool form"
             onClick={() => setCreatePoolOpen(false)}
             className="text-muted-foreground hover:text-foreground"
           >
@@ -347,13 +349,14 @@ export function WorkersPage({
               <p className="text-[11.5px] text-muted-foreground">
                 Generate a one-time bootstrap token to join a host via{' '}
                 <code className="font-mono text-foreground">
-                  computed worker join
+                  compute-worker run
                 </code>
                 .
               </p>
             </div>
             <button
               type="button"
+              aria-label="Close worker enrollment form"
               onClick={() => setEnrollOpen(false)}
               className="text-muted-foreground hover:text-foreground"
             >
@@ -382,6 +385,7 @@ export function WorkersPage({
                 Target Pool
               </label>
               <select
+                aria-label="Worker pool"
                 value={newTokenPool}
                 onChange={(e) => setNewTokenPool(e.target.value)}
                 className="h-8 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
@@ -414,7 +418,7 @@ export function WorkersPage({
                   type="button"
                   onClick={() => {
                     void navigator.clipboard.writeText(
-                      `sudo computed worker join --master ${window.location.host} --token ${generatedToken}`,
+                      `sudo compute-worker run --control-plane http://${window.location.hostname}:18080 --token ${generatedToken} --pool ${newTokenPool}`,
                     );
                     setCopiedToken(true);
                     setTimeout(() => setCopiedToken(false), 1500);
@@ -430,8 +434,9 @@ export function WorkersPage({
                 </button>
               </div>
               <pre className="overflow-x-auto bg-[#060606] p-2.5 font-mono text-[11.5px] text-white">
-                sudo computed worker join --master {window.location.host}{' '}
-                --token {generatedToken}
+                sudo compute-worker run --control-plane http://
+                {window.location.hostname}:18080 --token {generatedToken} --pool{' '}
+                {newTokenPool}
               </pre>
             </div>
           )}

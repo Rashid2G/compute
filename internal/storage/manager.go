@@ -335,6 +335,137 @@ func (m *Manager) GetTotalVMsDiskUsageMB() (int64, error) {
 	return totalBytes / (1024 * 1024), nil
 }
 
+// GetVolumesDir returns the directory that holds attachable data volume images.
+func (m *Manager) GetVolumesDir() string {
+	return filepath.Join(filepath.Dir(m.cfg.VMsDir), "volumes")
+}
+
+func volumeFileName(id, filesystem string) string {
+	ext := "ext4"
+	if strings.EqualFold(filesystem, "xfs") {
+		ext = "xfs"
+	}
+	return filepath.Base(id) + "." + ext
+}
+
+// fsTool resolves a filesystem utility, which commonly lives in /sbin rather
+// than in the daemon's inherited PATH.
+func fsTool(name string) string {
+	for _, candidate := range []string{name, "/sbin/" + name, "/usr/sbin/" + name} {
+		if _, err := exec.LookPath(candidate); err == nil {
+			return candidate
+		}
+	}
+	return name
+}
+
+// CreateDataVolume allocates a sparse, formatted volume image for a sandbox to
+// attach as a secondary block device.
+func (m *Manager) CreateDataVolume(id string, sizeGB int, filesystem string) (string, error) {
+	if sizeGB <= 0 {
+		return "", fmt.Errorf("volume size must be positive")
+	}
+	dir := m.GetVolumesDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create volumes dir: %w", err)
+	}
+	path := filepath.Join(dir, volumeFileName(id, filesystem))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return "", err
+	}
+	if err := f.Truncate(int64(sizeGB) * 1024 * 1024 * 1024); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	if strings.EqualFold(filesystem, "xfs") {
+		_, err = exec.Command(fsTool("mkfs.xfs"), "-f", "-q", path).CombinedOutput()
+	} else {
+		_, err = exec.Command(fsTool("mkfs.ext4"), "-F", "-q", path).CombinedOutput()
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("format volume: %w", err)
+	}
+	return path, nil
+}
+
+// ExpandDataVolume grows a sparse volume image and resizes its filesystem.
+func (m *Manager) ExpandDataVolume(path string, newSizeGB int, filesystem string) error {
+	if path == "" {
+		return fmt.Errorf("volume has no backing image")
+	}
+	if newSizeGB <= 0 {
+		return fmt.Errorf("new size must be positive")
+	}
+	if strings.EqualFold(filesystem, "xfs") {
+		// Offline XFS growth is not supported; xfs_growfs needs the fs mounted.
+		return fmt.Errorf("xfs volumes cannot be expanded offline; recreate or expand from inside the guest")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	oldSize := info.Size()
+	if err := os.Truncate(path, int64(newSizeGB)*1024*1024*1024); err != nil {
+		return err
+	}
+	// A sandbox that was just powered off can leave the journal dirty; repair
+	// first so resize2fs accepts the filesystem. e2fsck exit 1 means "errors
+	// corrected", which is a successful repair for our purposes.
+	fsckCmd := exec.Command(fsTool("e2fsck"), "-f", "-y", path)
+	if out, err := fsckCmd.CombinedOutput(); err != nil {
+		corrected := false
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			corrected = true
+		}
+		if !corrected {
+			_ = os.Truncate(path, oldSize)
+			return fmt.Errorf("e2fsck: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+	}
+	if out, err := exec.Command(fsTool("resize2fs"), path).CombinedOutput(); err != nil {
+		_ = os.Truncate(path, oldSize)
+		return fmt.Errorf("resize2fs: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// SnapshotDataVolume clones a volume image with a reflink when the filesystem
+// supports it and falls back to a sparse copy otherwise.
+func (m *Manager) SnapshotDataVolume(path string, index int) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("volume has no backing image")
+	}
+	dest := fmt.Sprintf("%s.snap-%d", path, index)
+	_ = os.Remove(dest)
+	if out, err := exec.Command("cp", "--reflink=auto", "--sparse=always", path, dest).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("snapshot volume: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return dest, nil
+}
+
+// DeleteDataVolume removes a volume image and any snapshots taken from it.
+func (m *Manager) DeleteDataVolume(path string) error {
+	if path == "" {
+		return nil
+	}
+	if matches, err := filepath.Glob(path + ".snap-*"); err == nil {
+		for _, snapshot := range matches {
+			_ = os.Remove(snapshot)
+		}
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // GetSnapshotPaths returns the paths where VM state and memory dumps will be saved
 func (m *Manager) GetSnapshotPaths(vmID string) (snapshotPath, memPath string) {
 	vmDir := m.GetVMDir(vmID)

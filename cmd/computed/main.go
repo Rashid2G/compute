@@ -200,6 +200,11 @@ func main() {
 	// 6. Setup Server
 	server := NewServer(vmMgr, globalCfg)
 
+	// Re-apply stored host port-forwarding rules now that VMs are reconciled.
+	pfCtx, pfCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	server.ReconcilePortForwards(pfCtx)
+	pfCancel()
+
 	// Mount embedded Web GUI
 	daemonTarget := globalCfg.Server.ListenAddr
 	if !strings.HasPrefix(daemonTarget, "unix://") {

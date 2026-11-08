@@ -1,12 +1,16 @@
 [Unit]
 Description=Compute Daemon
-After=network.target
+After=network.target compute-net.service
+Wants=compute-net.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/home/rashid/on-demand-vms
 ExecStart=/home/rashid/on-demand-vms/bin/computed -listen 0.0.0.0:18080
+# Keep Firecracker microVM processes alive across daemon restarts/upgrades.
+# Reconciliation re-adopts them by PID when the daemon comes back.
+KillMode=process
 Restart=always
 RestartSec=3s
 LimitNOFILE=65536

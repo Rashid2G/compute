@@ -59,6 +59,8 @@ export interface StatsResult {
   running_vcpus: number;
   running_memory_mb: number;
   allocated_ips: number;
+  host_cpus?: number;
+  host_memory_available_mb?: number;
   resource_limits?: ResourceLimits;
 }
 

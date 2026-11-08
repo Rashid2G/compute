@@ -78,6 +78,8 @@ chroot "${MNT}" /bin/bash -c '
     echo "compute:compute" | chpasswd
     mkdir -p /root/.ssh /home/compute/.ssh /run/sshd
     chmod 700 /root/.ssh /home/compute/.ssh
+    chmod 1777 /tmp /var/tmp
+    chmod 1777 /run/lock /dev/shm 2>/dev/null || true
     chown -R compute:compute /home/compute
     sed -i "s/^#\?PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
     sed -i "s/^#\?PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
@@ -98,6 +100,7 @@ mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || tr
 mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /run/sshd /run/lock
+chmod 1777 /dev/shm /run/lock 2>/dev/null || true
 ip link set lo up 2>/dev/null || true
 ip link set eth0 up 2>/dev/null || true
 IP_SPEC=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^ip=//p' | head -n1)

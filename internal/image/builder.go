@@ -175,7 +175,7 @@ func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outp
 
 	baseDockerImage := "ubuntu:24.04"
 	if strings.Contains(req.BaseImage, "alpine") {
-		baseDockerImage = "alpine:3.20"
+		return fmt.Errorf("alpine base images are not supported by the custom image builder; use ubuntu or debian")
 	} else if strings.Contains(req.BaseImage, "debian") {
 		baseDockerImage = "debian:12"
 	}
@@ -287,7 +287,15 @@ RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
 		_ = os.MkdirAll(filepath.Join(workDir, "root", ".ssh"), 0700)
 		_ = os.MkdirAll(filepath.Join(workDir, "home", "compute", ".ssh"), 0700)
 		_ = os.WriteFile(filepath.Join(workDir, "root", ".ssh", "authorized_keys"), []byte(sshPubKey+"\n"), 0600)
-		_ = os.WriteFile(filepath.Join(workDir, "home", "compute", ".ssh", "authorized_keys"), []byte(sshPubKey+"\n"), 0600)
+		computeKey := filepath.Join(workDir, "home", "compute", ".ssh", "authorized_keys")
+		_ = os.WriteFile(computeKey, []byte(sshPubKey+"\n"), 0600)
+		// The guest runs sshd as root but the target user must own its key file;
+		// otherwise OpenSSH rejects the key ("bad ownership or modes").
+		_ = os.Chown(filepath.Join(workDir, "home", "compute"), 1000, 1000)
+		_ = os.Chown(filepath.Join(workDir, "home", "compute", ".ssh"), 1000, 1000)
+		_ = os.Chown(computeKey, 1000, 1000)
+		_ = os.Chmod(filepath.Join(workDir, "home", "compute", ".ssh"), 0700)
+		_ = os.Chmod(computeKey, 0600)
 	}
 
 	// Write Firecracker /sbin/init

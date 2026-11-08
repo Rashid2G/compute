@@ -155,10 +155,11 @@ export const api = {
     });
   },
 
-  listVMFiles(id: string, path = '/'): Promise<FileEntry[]> {
-    return request<FileEntry[]>(
+  async listVMFiles(id: string, path = '/'): Promise<FileEntry[]> {
+    const res = await request<{ entries: FileEntry[]; path: string }>(
       `/vms/${encodeURIComponent(id)}/files/list?path=${encodeURIComponent(path)}`,
     );
+    return res.entries || [];
   },
 
   readVMFile(id: string, path: string): Promise<FileReadResponse> {
@@ -180,8 +181,11 @@ export const api = {
     );
   },
 
-  listVMProcesses(id: string): Promise<ProcessInfo[]> {
-    return request<ProcessInfo[]>(`/vms/${encodeURIComponent(id)}/processes`);
+  async listVMProcesses(id: string): Promise<ProcessInfo[]> {
+    const res = await request<{ processes: ProcessInfo[] }>(
+      `/vms/${encodeURIComponent(id)}/processes`,
+    );
+    return res.processes || [];
   },
 
   killVMProcess(id: string, pid: number, signal = 'SIGTERM'): Promise<{ status: string }> {

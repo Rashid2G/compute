@@ -181,7 +181,7 @@ export function ConsolePage({
                 onSubmit={handleRunExec}
                 className="flex items-center border-b border-[#2e2e2e] bg-[#141414] px-3 py-2 gap-2 font-mono text-[12px]"
               >
-                <span className="text-[#495eb7] shrink-0">
+                <span className="text-[color:var(--link)] shrink-0">
                   compute@{selectedVM.name}:~$
                 </span>
                 <input
