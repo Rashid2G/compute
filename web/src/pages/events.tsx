@@ -288,6 +288,7 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                 </span>
                 <button
                   type="button"
+                  aria-label="Close webhook form"
                   onClick={() => setAddWhOpen(false)}
                   className="text-muted-foreground hover:text-foreground"
                 >
@@ -451,6 +452,8 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                             </span>
                             <button
                               type="button"
+                              aria-label={revealed ? 'Hide signing secret' : 'Reveal signing secret'}
+                              title={revealed ? 'Hide signing secret' : 'Reveal signing secret'}
                               onClick={() =>
                                 setRevealedSecrets((prev) => ({
                                   ...prev,
@@ -467,6 +470,8 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                             </button>
                             <button
                               type="button"
+                              aria-label="Copy signing secret"
+                              title="Copy signing secret"
                               onClick={() => {
                                 void navigator.clipboard.writeText(wh.secret);
                                 setCopiedId(wh.id);
@@ -521,6 +526,8 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                             </button>
                             <button
                               type="button"
+                              aria-label="Delete webhook"
+                              title="Delete webhook"
                               onClick={() => {
                                 void api
                                   .deleteWebhook(wh.id)
@@ -589,6 +596,7 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                 Transport Protocol
               </label>
               <select
+                aria-label="OTLP protocol"
                 value={otel.protocol}
                 onChange={(e) =>
                   setOtel((prev) => ({ ...prev, protocol: e.target.value }))

@@ -91,7 +91,6 @@ compute sandbox delete dev-box
 ---
 
 ## Deployment & Testing on `t3-runner`
-
 ```bash
 # Standard deploy (compiles Go binaries, syncs files, restarts services)
 make deploy
@@ -104,3 +103,14 @@ make remote-status
 ```
 
 See [AGENTS.md](file:///home/rashid/Projects/Repos/on-demand-vms/AGENTS.md) for automated workflows and agent guidance.
+
+## Local Lab Deployment (`compute-lab`)
+
+A dedicated VM serves the full stack on the LAN:
+
+- Web GUI: http://192.168.1.70:8080
+- Daemon API: http://192.168.1.70:18080/api/v1/health
+- Remote CLI: `COMPUTE_DAEMON=192.168.1.70:18080 ./bin/compute sandbox list`
+
+Deploy with `make deploy-lab` (or `make deploy-lab-ui` when the frontend changed) and
+check health with `make remote-status-lab`.

@@ -9,9 +9,13 @@ PHYSICAL_NIC="${5:-}"
 
 echo "==> Configuring Host VM Bridge: ${BRIDGE_NAME} (${BRIDGE_IP}, Gateway: ${GATEWAY})..."
 
-# 1. Create main bridge if missing
+# 1. Create main bridge if missing (tolerate a concurrent creator)
 if ! ip link show "${BRIDGE_NAME}" >/dev/null 2>&1; then
-    sudo ip link add "${BRIDGE_NAME}" type bridge
+    sudo ip link add "${BRIDGE_NAME}" type bridge 2>/dev/null || true
+fi
+if ! ip link show "${BRIDGE_NAME}" >/dev/null 2>&1; then
+    echo "Error: bridge ${BRIDGE_NAME} could not be created" >&2
+    exit 1
 fi
 
 # 2. Assign Bridge IP
@@ -23,7 +27,9 @@ if [ -z "${PHYSICAL_NIC}" ]; then
     PHYSICAL_NIC=$(ip route show default | awk '/default/ {print $5}' | head -n1 || true)
 fi
 
-if [ -n "${PHYSICAL_NIC}" ] && [ "${PHYSICAL_NIC}" != "${BRIDGE_NAME}" ]; then
+if [ "${PHYSICAL_NIC}" = "none" ]; then
+    echo "==> Skipping physical NIC attachment (requested with 'none')."
+elif [ -n "${PHYSICAL_NIC}" ] && [ "${PHYSICAL_NIC}" != "${BRIDGE_NAME}" ]; then
     echo "==> Linking physical NIC ${PHYSICAL_NIC} to bridge ${BRIDGE_NAME}..."
     sudo ip link set dev "${PHYSICAL_NIC}" master "${BRIDGE_NAME}" 2>/dev/null || true
     sudo ip link set dev "${PHYSICAL_NIC}" up 2>/dev/null || true

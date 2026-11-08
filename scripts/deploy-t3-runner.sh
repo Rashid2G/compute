@@ -137,8 +137,8 @@ if [ "${BUILD_LOCAL}" = true ]; then
     printf "${BLUE}==>${NC} ${BOLD}Compiling Go binaries for linux/amd64...${NC}\n"
     mkdir -p "${REPO_ROOT}/bin"
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute" ./cmd/compute
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute" ./cmd/compute
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/computed" ./cmd/computed
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute-worker" ./cmd/compute-worker
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${REPO_ROOT}/bin/compute-bench" ./cmd/compute-bench
     printf "${GREEN}✓${NC} Successfully built binaries in bin/\n"
 fi
@@ -157,6 +157,7 @@ if [ "${RESTART_ONLY}" = false ]; then
             --exclude='.git' \
             --exclude='node_modules' \
             --exclude='.cache' \
+            --exclude='data/' \
             --exclude='coverage.out' \
             --exclude='benchmark-results.json' \
             --exclude='tmp/' \
@@ -170,9 +171,13 @@ if [ "${RESTART_ONLY}" = false ]; then
 
     # Ensure executable permissions on remote binaries and scripts
     ssh -o BatchMode=yes "${TARGET_HOST}" "chmod +x '${TARGET_DIR}'/bin/* '${TARGET_DIR}'/scripts/* 2>/dev/null || true"
-    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo install -m 0644 '${TARGET_DIR}/config/systemd/computed.service' /etc/systemd/system/computed.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-gui.service' /etc/systemd/system/compute-gui.service && sudo systemctl daemon-reload && sudo systemctl enable computed.service compute-gui.service >/dev/null"
+    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo install -m 0644 '${TARGET_DIR}/config/systemd/computed.service' /etc/systemd/system/computed.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-gui.service' /etc/systemd/system/compute-gui.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-net.service' /etc/systemd/system/compute-net.service && sudo systemctl daemon-reload && sudo systemctl enable computed.service compute-gui.service compute-net.service >/dev/null"
     printf "${GREEN}✓${NC} Files synchronized successfully.\n"
 fi
+
+# Ensure the host bridge/NAT exists before starting workloads
+printf "${BLUE}==>${NC} ${BOLD}Ensuring host network bridge is configured...${NC}\n"
+ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl start compute-net.service"
 
 # Step 3: Restart services
 printf "${BLUE}==>${NC} ${BOLD}Restarting services on %s (computed.service, compute-gui.service)...${NC}\n" "${TARGET_HOST}"

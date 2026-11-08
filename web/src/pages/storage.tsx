@@ -38,11 +38,12 @@ export function StoragePage({
 
   const [createOpen, setCreateOpen] = useState(false);
   const [volName, setVolName] = useState('');
-  const [volSizeGB, setVolSizeGB] = useState(50);
-  const [volPool, setVolPool] = useState('nvme-tier0');
+  const [volSizeGB, setVolSizeGB] = useState(10);
+  const [volPool, setVolPool] = useState('default');
   const [volFs, setVolFs] = useState('ext4');
   const [volAttachVM, setVolAttachVM] = useState('');
   const [creating, setCreating] = useState(false);
+  const [pools, setPools] = useState<string[]>(['default']);
 
   const [attachModalVol, setAttachModalVol] = useState<VolumeRecord | null>(
     null,
@@ -68,6 +69,19 @@ export function StoragePage({
   useEffect(() => {
     void loadVolumes();
   }, [loadVolumes]);
+
+  useEffect(() => {
+    void api
+      .listPools()
+      .then((res) => {
+        const names = (res || []).map((p) => p.name || p.id).filter(Boolean);
+        if (names.length) {
+          setPools(names);
+          setVolPool((current) => (names.includes(current) ? current : names[0]));
+        }
+      })
+      .catch(() => setPools(['default']));
+  }, []);
 
   const filteredVolumes = useMemo(() => {
     return volumes.filter((v) => {
@@ -280,6 +294,7 @@ export function StoragePage({
             </span>
             <button
               type="button"
+              aria-label="Close volume form"
               onClick={() => setCreateOpen(false)}
               className="text-muted-foreground hover:text-foreground"
             >
@@ -294,6 +309,7 @@ export function StoragePage({
               </label>
               <input
                 type="text"
+                aria-label="Volume name"
                 value={volName}
                 onChange={(e) => setVolName(e.target.value)}
                 placeholder="pgdata-prod-01"
@@ -307,6 +323,7 @@ export function StoragePage({
               </label>
               <input
                 type="number"
+                aria-label="Volume size in gigabytes"
                 min={1}
                 max={2000}
                 value={volSizeGB}
@@ -319,12 +336,16 @@ export function StoragePage({
                 Storage Pool
               </label>
               <select
+                aria-label="Storage pool"
                 value={volPool}
                 onChange={(e) => setVolPool(e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
               >
-                <option value="nvme-tier0">nvme-tier0</option>
-                <option value="local-lvm">local-lvm</option>
+                {pools.map((pool) => (
+                  <option key={pool} value={pool}>
+                    {pool}
+                  </option>
+                ))}
               </select>
             </div>
             <div>
@@ -332,30 +353,33 @@ export function StoragePage({
                 Filesystem
               </label>
               <select
+                aria-label="Volume filesystem"
                 value={volFs}
                 onChange={(e) => setVolFs(e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
               >
                 <option value="ext4">ext4</option>
                 <option value="xfs">xfs</option>
-                <option value="btrfs">btrfs</option>
               </select>
             </div>
             <div>
               <label className="block text-[11px] text-muted-foreground mb-1">
-                Attach to Sandbox (optional)
+                Attach to Sandbox (optional, stopped only)
               </label>
               <select
+                aria-label="Attach volume to sandbox"
                 value={volAttachVM}
                 onChange={(e) => setVolAttachVM(e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
               >
                 <option value="">Leave unattached</option>
-                {vms.map((v) => (
-                  <option key={v.id} value={v.name}>
-                    {v.name}
-                  </option>
-                ))}
+                {vms
+                  .filter((v) => v.status !== 'running' && v.status !== 'paused')
+                  .map((v) => (
+                    <option key={v.id} value={v.name}>
+                      {v.name}
+                    </option>
+                  ))}
               </select>
             </div>
           </div>
@@ -395,11 +419,13 @@ export function StoragePage({
             className="h-8 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
           >
             <option value="">Select sandbox…</option>
-            {vms.map((v) => (
-              <option key={v.id} value={v.name}>
-                {v.name} ({v.status})
-              </option>
-            ))}
+            {vms
+              .filter((v) => v.status !== 'running' && v.status !== 'paused')
+              .map((v) => (
+                <option key={v.id} value={v.name}>
+                  {v.name} ({v.status})
+                </option>
+              ))}
           </select>
           <button
             type="submit"
@@ -539,6 +565,15 @@ export function StoragePage({
                   </td>
                   <td className="py-2.5 px-3 text-right">
                     <div className="inline-flex items-center gap-1">
+                      {vol.id.startsWith('vol_root_') ? (
+                        <span
+                          className="text-[10.5px] text-muted-foreground"
+                          title="Root filesystem volume; lifecycle follows its sandbox"
+                        >
+                          managed by sandbox
+                        </span>
+                      ) : (
+                        <>
                       {vol.status === 'attached' ? (
                         <button
                           type="button"
@@ -588,6 +623,8 @@ export function StoragePage({
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
+                        </>
+                      )}
                     </div>
                   </td>
                 </tr>

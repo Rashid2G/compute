@@ -162,6 +162,7 @@ export function ApiPage({ config }: ApiPageProps) {
                 Provider
               </label>
               <select
+                aria-label="Agent provider"
                 value={provider}
                 onChange={(e) => setProvider(e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
@@ -306,9 +307,6 @@ export function ApiPage({ config }: ApiPageProps) {
             {tiers.map((t) => (
               <div key={t.id} className="p-3.5 space-y-1">
                 <div className="text-foreground font-medium">{t.name}</div>
-                <div className="text-[11px] text-muted-foreground">
-                  {t.vcpus} vCPU · {Math.round(t.default_ram_mb / 1024)} GB RAM
-                </div>
                 <div className="text-[10.5px] text-muted-foreground font-sans">
                   {t.description}
                 </div>

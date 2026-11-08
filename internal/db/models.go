@@ -201,6 +201,7 @@ type Volume struct {
 	DevicePath string    `json:"device_path"`
 	MountPoint string    `json:"mount_point"`
 	Filesystem string    `json:"filesystem"`
+	Path       string    `json:"path,omitempty"`
 	IOPS       int       `json:"iops"`
 	Throughput string    `json:"throughput"`
 	Snapshots  int       `json:"snapshots"`

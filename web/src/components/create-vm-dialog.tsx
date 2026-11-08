@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react';
-import { ChevronDown, Play, X } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { AlertTriangle, ChevronDown, Play, X } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import type {
   CreateVMRequest,
   CustomImage,
   DaemonConfig,
-  EnvironmentProfileRecord,
+  StatsResult,
   Template,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -15,57 +15,34 @@ interface CreateVMDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   config: DaemonConfig | null;
-  onCreate: (payload: CreateVMRequest, autoStart: boolean) => Promise<void>;
+  onCreate: (
+    payload: CreateVMRequest,
+    autoStart: boolean,
+    options?: { setupScript?: string },
+  ) => Promise<void>;
 }
 
-interface BoatTier {
-  id: 'small' | 'default' | 'large' | 'xlarge';
+interface Preset {
+  vcpus: 1 | 2 | 4;
   label: string;
-  vcpus: number;
-  ramGb: number;
-  memoryMb: number;
-  diskGb: number;
-  pricePerHour: string;
+  defaultMemoryMb: number;
 }
 
-const BOAT_TIERS: BoatTier[] = [
-  {
-    id: 'small',
-    label: 'small',
-    vcpus: 2,
-    ramGb: 4,
-    memoryMb: 4096,
-    diskGb: 25,
-    pricePerHour: '$0.018/h',
-  },
-  {
-    id: 'default',
-    label: 'default',
-    vcpus: 4,
-    ramGb: 8,
-    memoryMb: 8192,
-    diskGb: 51,
-    pricePerHour: '$0.036/h',
-  },
-  {
-    id: 'large',
-    label: 'large',
-    vcpus: 8,
-    ramGb: 16,
-    memoryMb: 16384,
-    diskGb: 102,
-    pricePerHour: '$0.072/h',
-  },
-  {
-    id: 'xlarge',
-    label: 'xlarge',
-    vcpus: 16,
-    ramGb: 32,
-    memoryMb: 32768,
-    diskGb: 204,
-    pricePerHour: '$0.144/h',
-  },
+const PRESETS: Preset[] = [
+  { vcpus: 1, label: 'micro', defaultMemoryMb: 512 },
+  { vcpus: 2, label: 'small', defaultMemoryMb: 1024 },
+  { vcpus: 4, label: 'medium', defaultMemoryMb: 2048 },
 ];
+
+const HOST_RESERVE_MB = 256;
+
+function formatMemory(mb: number): string {
+  if (mb >= 1024) {
+    const gb = mb / 1024;
+    return Number.isInteger(gb) ? `${gb} GB` : `${gb.toFixed(1)} GB`;
+  }
+  return `${mb} MB`;
+}
 
 export function CreateVMDialog({
   open,
@@ -73,26 +50,17 @@ export function CreateVMDialog({
   config,
   onCreate,
 }: CreateVMDialogProps) {
-  const [selectedTierId, setSelectedTierId] = useState<BoatTier['id']>('default');
+  const [vcpus, setVcpus] = useState<1 | 2 | 4>(1);
+  const [memoryMb, setMemoryMb] = useState(512);
+  const [diskGb, setDiskGb] = useState(50);
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
-  const [shareCode, setShareCode] = useState('');
-  const [environment, setEnvironment] = useState('Default');
-  const [autoStopHours, setAutoStopHours] = useState('1');
-  const [showAllSizes, setShowAllSizes] = useState(false);
+  const [setupScript, setSetupScript] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [images, setImages] = useState<CustomImage[]>([]);
-  const [environments, setEnvironments] = useState<EnvironmentProfileRecord[]>([]);
-
-  // Exact 4 toggles from boat.dev/dashboard Advanced create modal
-  const [neverAutoStop, setNeverAutoStop] = useState(false);
-  const [noEnv, setNoEnv] = useState(false);
-  const [snapshotsOff, setSnapshotsOff] = useState(false);
-  const [monitoringOff, setMonitoringOff] = useState(false);
-
-  const [setupScript, setSetupScript] = useState('#!/bin/bash\nnpm install');
-  const [submitting, setSubmitting] = useState(false);
+  const [stats, setStats] = useState<StatsResult | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -105,15 +73,37 @@ export function CreateVMDialog({
       .then((res) => setImages(res || []))
       .catch(() => setImages([]));
     void api
-      .listEnvironments()
-      .then((res) => setEnvironments(res || []))
-      .catch(() => setEnvironments([]));
+      .stats()
+      .then((res) => setStats(res))
+      .catch(() => setStats(null));
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onOpenChange(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onOpenChange]);
+
+  // Keep the default memory inside the host's actual headroom so the first
+  // click does not immediately queue the sandbox for lack of RAM.
+  const maxUsableMb = useMemo(() => {
+    const available = stats?.host_memory_available_mb ?? 0;
+    if (!available) return null;
+    return Math.max(128, available - HOST_RESERVE_MB);
+  }, [stats]);
+
+  useEffect(() => {
+    if (!open || !maxUsableMb) return;
+    setMemoryMb((current) => Math.min(current, maxUsableMb));
+  }, [open, maxUsableMb]);
 
   if (!open) return null;
 
-  const activeTier =
-    BOAT_TIERS.find((t) => t.id === selectedTierId) ?? BOAT_TIERS[1];
+  const availableImages = config?.images?.available ?? [];
+  const willQueue = maxUsableMb !== null && memoryMb > maxUsableMb;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -121,27 +111,32 @@ export function CreateVMDialog({
     try {
       const generatedName =
         sandboxName.trim() ||
-        `sbx-${activeTier.id}-${Math.random().toString(36).slice(2, 6)}`;
+        `sbx-${PRESETS.find((p) => p.vcpus === vcpus)?.label ?? 'micro'}-${Math.random()
+          .toString(36)
+          .slice(2, 6)}`;
 
       const payload: CreateVMRequest = {
         name: generatedName,
-        vcpus: activeTier.vcpus,
-        memory_mb: activeTier.memoryMb,
+        vcpus,
+        memory_mb: memoryMb,
+        disk_mb: diskGb === 100 ? 102400 : 51200,
         public_ip_enabled: true,
       };
 
-      if (shareCode.trim()) {
-        payload.clone_from = shareCode.trim();
-      } else if (fromSource.startsWith('tpl:')) {
+      if (fromSource.startsWith('tpl:')) {
         payload.template = fromSource.slice(4);
       } else if (fromSource.startsWith('img:')) {
         payload.image = fromSource.slice(4);
+      } else {
+        payload.image = 'ubuntu-24';
       }
 
-      await onCreate(payload, true);
+      await onCreate(payload, true, {
+        setupScript: setupScript.trim() || undefined,
+      });
       onOpenChange(false);
       setSandboxName('');
-      setShareCode('');
+      setSetupScript('');
     } finally {
       setSubmitting(false);
     }
@@ -159,13 +154,12 @@ export function CreateVMDialog({
         className="w-full max-w-[440px] border border-border bg-background p-6 text-foreground my-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header matching dashboard-02-advanced-create-modal.png */}
         <div className="flex items-center justify-between mb-5">
           <h2
             id="advanced-create-title"
             className="text-[15px] font-medium text-foreground"
           >
-            Advanced create
+            New sandbox
           </h2>
           <button
             type="button"
@@ -178,19 +172,39 @@ export function CreateVMDialog({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Type: 4-column rectangular tier cards matching dashboard-02 */}
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Name (optional)
+            </label>
+            <input
+              type="text"
+              aria-label="Sandbox name"
+              value={sandboxName}
+              onChange={(e) => setSandboxName(e.target.value)}
+              placeholder="sbx-prod-api-01"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            />
+          </div>
+
           <div className="space-y-2">
             <label className="block text-[12px] text-muted-foreground">
               Type
             </label>
-            <div className="grid grid-cols-4 gap-2">
-              {BOAT_TIERS.map((tier) => {
-                const selected = tier.id === selectedTierId;
+            <div className="grid grid-cols-3 gap-2">
+              {PRESETS.map((preset) => {
+                const selected = preset.vcpus === vcpus;
                 return (
                   <button
-                    key={tier.id}
+                    key={preset.vcpus}
                     type="button"
-                    onClick={() => setSelectedTierId(tier.id)}
+                    onClick={() => {
+                      setVcpus(preset.vcpus);
+                      setMemoryMb(
+                        maxUsableMb
+                          ? Math.min(preset.defaultMemoryMb, maxUsableMb)
+                          : preset.defaultMemoryMb,
+                      );
+                    }}
                     className={cn(
                       'flex flex-col items-center justify-center border py-2.5 px-1.5 text-center transition-colors',
                       selected
@@ -199,102 +213,80 @@ export function CreateVMDialog({
                     )}
                   >
                     <span className="text-[12px] font-medium leading-tight">
-                      {tier.label}
+                      {preset.label}
                     </span>
                     <span className="mt-1 text-[10px] text-muted-foreground leading-tight">
-                      {tier.vcpus} vCPU · {tier.ramGb} GB
+                      {preset.vcpus} vCPU · {formatMemory(preset.defaultMemoryMb)}
                     </span>
                   </button>
                 );
               })}
             </div>
-            <p className="text-[11.5px] text-muted-foreground pt-0.5">
-              {activeTier.vcpus} vCPU · {activeTier.ramGb} GB RAM ·{' '}
-              {activeTier.diskGb} GB disk · {activeTier.pricePerHour}.{' '}
-              <button
-                type="button"
-                onClick={() => setShowAllSizes((v) => !v)}
-                className="underline underline-offset-2 text-muted-foreground hover:text-foreground"
-              >
-                All sizes
-              </button>
-            </p>
           </div>
 
-          {showAllSizes && (
-            <div className="border border-border bg-muted/20 p-2.5 text-[11px]">
-              <label className="block text-muted-foreground mb-1">
-                Sandbox Name (optional)
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="block text-[12px] text-muted-foreground">
+                Memory (MB)
               </label>
               <input
-                type="text"
-                value={sandboxName}
-                onChange={(e) => setSandboxName(e.target.value)}
-                placeholder="sbx-prod-api-01"
-                className="h-8 w-full border border-border bg-background px-2 font-mono text-xs text-foreground focus:border-[#263fa9] focus:outline-none"
+                type="number"
+                aria-label="Memory in megabytes"
+                min={128}
+                step={128}
+                value={memoryMb}
+                onChange={(e) => setMemoryMb(Math.max(128, Number(e.target.value) || 128))}
+                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
               />
             </div>
-          )}
+            <div className="space-y-1.5">
+              <label className="block text-[12px] text-muted-foreground">
+                Disk
+              </label>
+              <div className="relative">
+                <select
+                  aria-label="Disk size"
+                  value={diskGb}
+                  onChange={(e) => setDiskGb(Number(e.target.value))}
+                  className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                >
+                  <option value={50}>50 GB</option>
+                  <option value={100}>100 GB</option>
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              </div>
+            </div>
+          </div>
 
-          {/* From: 2-column row [ Fresh sandbox ⌄ ] [ or paste bsh_... share code ] */}
           <div className="space-y-1.5">
             <label className="block text-[12px] text-muted-foreground">
               From
             </label>
-            <div className="grid grid-cols-2 gap-2">
-              <div className="relative">
-                <select
-                  value={fromSource}
-                  onChange={(e) => setFromSource(e.target.value)}
-                  className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
-                >
-                  <option value="fresh">Fresh sandbox</option>
-                  {config?.images?.available?.map((img) => (
+            <div className="relative">
+              <select
+                aria-label="Sandbox source"
+                value={fromSource}
+                onChange={(e) => setFromSource(e.target.value)}
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+              >
+                <option value="fresh">Fresh sandbox (ubuntu-24)</option>
+                {availableImages
+                  .filter((img) => img.name !== 'ubuntu-24')
+                  .map((img) => (
                     <option key={`avail-${img.name}`} value={`img:${img.name}`}>
                       Image: {img.name}
                     </option>
                   ))}
-                  {images
-                    .filter((i) => i.status === 'ready')
-                    .map((img) => (
-                      <option key={`custom-${img.id}`} value={`img:${img.name}`}>
-                        Custom: {img.name}
-                      </option>
-                    ))}
-                  {templates.map((tpl) => (
-                    <option key={`tpl-${tpl.id}`} value={`tpl:${tpl.name}`}>
-                      Snapshot: {tpl.name}
+                {images
+                  .filter((i) => i.status === 'ready')
+                  .map((img) => (
+                    <option key={`custom-${img.id}`} value={`img:${img.name}`}>
+                      Custom: {img.name}
                     </option>
                   ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              </div>
-              <input
-                type="text"
-                value={shareCode}
-                onChange={(e) => setShareCode(e.target.value)}
-                placeholder="or paste bsh_... share co"
-                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[11.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
-              />
-            </div>
-          </div>
-
-          {/* Environment dropdown */}
-          <div className="space-y-1.5">
-            <label className="block text-[12px] text-muted-foreground">
-              Environment
-            </label>
-            <div className="relative">
-              <select
-                value={environment}
-                onChange={(e) => setEnvironment(e.target.value)}
-                disabled={noEnv}
-                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none disabled:opacity-50"
-              >
-                <option value="Default">Default</option>
-                {environments.map((env) => (
-                  <option key={env.name} value={env.name}>
-                    {env.name} (v{env.version})
+                {templates.map((tpl) => (
+                  <option key={`tpl-${tpl.id}`} value={`tpl:${tpl.name}`}>
+                    Snapshot: {tpl.name}
                   </option>
                 ))}
               </select>
@@ -302,67 +294,36 @@ export function CreateVMDialog({
             </div>
           </div>
 
-          {/* Auto-stop after [ 1 ] hours */}
           <div className="space-y-1.5">
             <label className="block text-[12px] text-muted-foreground">
-              Auto-stop after
-            </label>
-            <div className="flex items-center gap-2.5">
-              <input
-                type="number"
-                min={1}
-                max={720}
-                value={autoStopHours}
-                disabled={neverAutoStop}
-                onChange={(e) => setAutoStopHours(e.target.value)}
-                className="h-9 w-24 border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none disabled:opacity-50"
-              />
-              <span className="text-[12px] text-muted-foreground">hours</span>
-            </div>
-          </div>
-
-          {/* 4 Rectangular Toggle Switch Rows matching dashboard-02 1:1 */}
-          <div className="divide-y divide-border border-t border-border pt-1">
-            <ToggleRow
-              title="Never auto-stop"
-              description="The sandbox runs until you stop it."
-              checked={neverAutoStop}
-              onChange={setNeverAutoStop}
-            />
-            <ToggleRow
-              title="No env"
-              description="No secret or login of yours reaches the sandbox."
-              checked={noEnv}
-              onChange={setNoEnv}
-            />
-            <ToggleRow
-              title="Snapshots off"
-              description="Never saved. A stop erases the sandbox."
-              checked={snapshotsOff}
-              onChange={setSnapshotsOff}
-            />
-            <ToggleRow
-              title="Monitoring off"
-              description="No command or process output, process list or CPU/RAM graphs kept."
-              checked={monitoringOff}
-              onChange={setMonitoringOff}
-            />
-          </div>
-
-          {/* Setup script monospace textarea */}
-          <div className="space-y-1.5 pt-1">
-            <label className="block text-[12px] text-muted-foreground">
-              Setup script
+              Setup script (optional, runs after boot)
             </label>
             <textarea
               rows={3}
+              aria-label="Setup script"
               value={setupScript}
               onChange={(e) => setSetupScript(e.target.value)}
-              className="w-full border border-border bg-[#1a1a1a] p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              placeholder="#!/bin/bash&#10;apt-get update && apt-get install -y nginx"
+              className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
           </div>
 
-          {/* Bottom-right [ ▷ Create ] cobalt button */}
+          <div className="space-y-1 text-[11px] text-muted-foreground">
+            {stats?.host_memory_available_mb ? (
+              <p>
+                Host headroom: {formatMemory(stats.host_memory_available_mb)} available
+                {stats.host_cpus ? ` across ${stats.host_cpus} vCPU` : ''}.
+              </p>
+            ) : null}
+            {willQueue ? (
+              <p className="flex items-start gap-1.5 text-amber-400">
+                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                Requested memory exceeds current headroom. The sandbox will be
+                queued until capacity frees up.
+              </p>
+            ) : null}
+          </div>
+
           <div className="flex justify-end pt-2">
             <button
               type="submit"
@@ -375,55 +336,6 @@ export function CreateVMDialog({
           </div>
         </form>
       </div>
-    </div>
-  );
-}
-
-function ToggleRow({
-  title,
-  description,
-  checked,
-  onChange,
-}: {
-  title: string;
-  description: string;
-  checked: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-3">
-      <div className="space-y-0.5">
-        <div className="text-[12.5px] font-medium text-foreground">{title}</div>
-        <div className="text-[11.5px] text-muted-foreground leading-snug">
-          {description}
-        </div>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className="flex items-center gap-2 shrink-0 focus:outline-none"
-      >
-        <span
-          className={cn(
-            'relative inline-flex h-5 w-9 items-center border transition-colors p-0.5',
-            checked
-              ? 'border-[#263fa9] bg-[#263fa9]'
-              : 'border-border bg-[#2e2e2e]',
-          )}
-        >
-          <span
-            className={cn(
-              'inline-block h-3.5 w-3.5 bg-white transition-transform',
-              checked ? 'translate-x-3.5' : 'translate-x-0',
-            )}
-          />
-        </span>
-        <span className="w-6 text-left text-[11.5px] text-muted-foreground font-mono">
-          {checked ? 'On' : 'Off'}
-        </span>
-      </button>
     </div>
   );
 }

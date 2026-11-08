@@ -69,8 +69,11 @@ function deriveTierType(vcpus: number): 'small' | 'default' | 'large' | 'xlarge'
 
 function deriveTierLabel(vcpus: number, memoryMb: number): string {
   const tier = deriveTierType(vcpus);
-  const ramGb = Math.max(1, Math.round(memoryMb / 1024));
-  return `${tier} (${vcpus}c/${ramGb}G)`;
+  const ram =
+    memoryMb >= 1024
+      ? `${Number.isInteger(memoryMb / 1024) ? memoryMb / 1024 : (memoryMb / 1024).toFixed(1)}G`
+      : `${memoryMb}M`;
+  return `${tier} (${vcpus}c/${ram})`;
 }
 
 function deriveHourlyRate(vcpus: number): number {
@@ -124,7 +127,7 @@ export function InstancesPage({
   } | null>(null);
 
   // Real Filesystem state
-  const [currentDir, setCurrentDir] = useState('/root');
+  const [currentDir, setCurrentDir] = useState('/home/compute');
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
 
@@ -719,7 +722,7 @@ export function InstancesPage({
         <div className="border border-border bg-background">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/20 px-4 py-2.5">
             <div className="flex items-center gap-3">
-              <span className="font-mono text-[11px] uppercase tracking-wider text-[#495eb7]">
+              <span className="font-mono text-[11px] uppercase tracking-wider text-[color:var(--link)]">
                 SANDBOX INSPECTOR
               </span>
               <span className="font-display text-[14px] font-medium text-foreground">

@@ -292,7 +292,7 @@ export function ImagesTemplatesPage({
             type="button"
             disabled={savingEnv}
             onClick={() => void handleSaveEnvironment()}
-            className="h-7 border border-border bg-[#1a1a1a] px-3 text-[12px] font-normal text-muted-foreground hover:border-foreground hover:text-foreground transition-colors disabled:opacity-50"
+            className="h-7 border border-border bg-background px-3 text-[12px] font-normal text-muted-foreground hover:border-foreground hover:text-foreground transition-colors disabled:opacity-50"
           >
             {savingEnv ? 'Saving…' : 'Save'}
           </button>
@@ -374,6 +374,7 @@ export function ImagesTemplatesPage({
             <SquareCheckbox
               checked={safeForThirdParties}
               onChange={setSafeForThirdParties}
+              label="Safe for third parties"
             />
             <div className="space-y-0.5">
               <div className="flex items-center gap-2 text-[12.5px] font-medium text-foreground">
@@ -395,6 +396,7 @@ export function ImagesTemplatesPage({
                 <SquareCheckbox
                   checked={githubReposChecked}
                   onChange={setGithubReposChecked}
+                  label="GitHub repositories"
                 />
                 <div className="space-y-0.5">
                   <button
@@ -499,6 +501,7 @@ export function ImagesTemplatesPage({
                 <SquareCheckbox
                   checked={secretsChecked}
                   onChange={setSecretsChecked}
+                  label="Secrets"
                 />
                 <div className="space-y-0.5">
                   <button
@@ -556,7 +559,7 @@ export function ImagesTemplatesPage({
                   placeholder={
                     'DATABASE_URL=postgres://user:pass@host:5432/db\n~/.config/token=secret_value'
                   }
-                  className="w-full border border-border bg-[#1a1a1a] p-2.5 font-mono text-[11.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                  className="w-full border border-border bg-background p-2.5 font-mono text-[11.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
                 />
               </div>
             )}
@@ -567,6 +570,7 @@ export function ImagesTemplatesPage({
             <SquareCheckbox
               checked={boatCredsChecked}
               onChange={setBoatCredsChecked}
+              label="Compute credentials"
             />
             <div className="space-y-0.5">
               <div className="flex items-center gap-2 text-[12.5px] font-medium text-foreground">
@@ -587,6 +591,7 @@ export function ImagesTemplatesPage({
                 <SquareCheckbox
                   checked={agentsCredsChecked}
                   onChange={setAgentsCredsChecked}
+                  label="Agents credentials"
                 />
                 <div className="space-y-0.5">
                   <div className="flex items-center gap-2 text-[12.5px] font-medium text-foreground">
@@ -648,7 +653,7 @@ export function ImagesTemplatesPage({
             </p>
           </div>
 
-          <div className="max-w-[340px] border border-border bg-[#111111]">
+          <div className="max-w-[340px] border border-border bg-popover">
             <div className="flex items-center justify-between px-3.5 py-2 text-[12px]">
               <div className="flex items-center gap-2">
                 <span className="font-mono font-medium text-foreground">
@@ -757,6 +762,7 @@ export function ImagesTemplatesPage({
                 Source Sandbox
               </label>
               <select
+                aria-label="Template source sandbox"
                 value={tplSourceVM}
                 onChange={(e) => setTplSourceVM(e.target.value)}
                 required
@@ -842,13 +848,13 @@ export function ImagesTemplatesPage({
                 Base Distribution
               </label>
               <select
+                aria-label="Base distribution"
                 value={imgBase}
                 onChange={(e) => setImgBase(e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
               >
                 <option value="ubuntu">ubuntu</option>
                 <option value="debian">debian</option>
-                <option value="alpine">alpine</option>
               </select>
             </div>
             <div>
@@ -953,6 +959,8 @@ export function ImagesTemplatesPage({
                         </button>
                         <button
                           type="button"
+                          aria-label={`Delete template ${tpl.name}`}
+                          title={`Delete template ${tpl.name}`}
                           onClick={() => {
                             void api
                               .deleteTemplate(tpl.id)
@@ -1062,15 +1070,18 @@ export function ImagesTemplatesPage({
 function SquareCheckbox({
   checked,
   onChange,
+  label,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
+  label: string;
 }) {
   return (
     <button
       type="button"
       role="checkbox"
       aria-checked={checked}
+      aria-label={label}
       onClick={() => onChange(!checked)}
       className={cn(
         'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border transition-colors focus:outline-none',

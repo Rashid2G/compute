@@ -11,6 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -115,6 +118,26 @@ func (m *Manager) GetNetworkManager() *network.Manager {
 // GetStore returns the underlying database store
 func (m *Manager) GetStore() *db.Store {
 	return m.store
+}
+
+// volumesForVM returns data volumes attached to vm in a stable order.
+func (m *Manager) volumesForVM(ctx context.Context, vm *db.VM) ([]*db.Volume, error) {
+	all, err := m.store.ListVolumes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []*db.Volume
+	for _, vol := range all {
+		if vol.Path == "" {
+			continue
+		}
+		if vol.AttachedVM != vm.Name && vol.AttachedVM != vm.ID {
+			continue
+		}
+		out = append(out, vol)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
 }
 
 // GetStorageManager returns the underlying storage manager
@@ -283,18 +306,47 @@ type QueueItem struct {
 }
 
 type StatsResult struct {
-	TotalVMs        int                    `json:"total_vms"`
-	RunningVMs      int                    `json:"running_vms"`
-	QueuedVMs       int                    `json:"queued_vms"`
-	SnapshottedVMs  int                    `json:"snapshotted_vms"`
-	StoppedVMs      int                    `json:"stopped_vms"`
-	CreatedVMs      int                    `json:"created_vms"`
-	TotalVCPUs      int                    `json:"total_vcpus"`
-	TotalMemoryMB   int                    `json:"total_memory_mb"`
-	RunningVCPUs    int                    `json:"running_vcpus"`
-	RunningMemoryMB int                    `json:"running_memory_mb"`
-	AllocatedIPs    int                    `json:"allocated_ips"`
-	ResourceLimits  *config.ResourceLimits `json:"resource_limits,omitempty"`
+	TotalVMs              int                    `json:"total_vms"`
+	RunningVMs            int                    `json:"running_vms"`
+	QueuedVMs             int                    `json:"queued_vms"`
+	SnapshottedVMs        int                    `json:"snapshotted_vms"`
+	StoppedVMs            int                    `json:"stopped_vms"`
+	CreatedVMs            int                    `json:"created_vms"`
+	TotalVCPUs            int                    `json:"total_vcpus"`
+	TotalMemoryMB         int                    `json:"total_memory_mb"`
+	RunningVCPUs          int                    `json:"running_vcpus"`
+	RunningMemoryMB       int                    `json:"running_memory_mb"`
+	AllocatedIPs          int                    `json:"allocated_ips"`
+	HostCPUs              int                    `json:"host_cpus"`
+	HostMemoryAvailableMB int                    `json:"host_memory_available_mb"`
+	ResourceLimits        *config.ResourceLimits `json:"resource_limits,omitempty"`
+}
+
+// hostMemoryAvailableMB reports the memory the kernel estimates is available for
+// new workloads. It returns 0 when the value cannot be determined.
+func hostMemoryAvailableMB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "MemAvailable:" {
+			continue
+		}
+		kb, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return 0
+		}
+		return kb / 1024
+	}
+	return 0
+}
+
+// NetManager exposes the network manager so API handlers can program host
+// networking primitives (port forwarding, TAP inspection, ...).
+func (m *Manager) NetManager() *network.Manager {
+	return m.netMgr
 }
 
 func (m *Manager) getVMStorageDir(vm *db.VM) string {
@@ -487,6 +539,15 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		// Check custom image first
 		customImg, _ := m.store.GetImage(ctx, imageName)
 		if customImg != nil {
+			if customImg.Status == db.ImageStatusBuilding {
+				// A daemon restart during a build can leave the record in the
+				// building state after the rootfs was produced.
+				if _, statErr := os.Stat(customImg.RootfsPath); statErr == nil {
+					customImg.Status = db.ImageStatusReady
+					customImg.UpdatedAt = time.Now().UTC()
+					_ = m.store.SaveImage(ctx, customImg)
+				}
+			}
 			if customImg.Status != db.ImageStatusReady {
 				return nil, fmt.Errorf("disk space issue: custom image '%s' is not ready (status: %s)", imageName, customImg.Status)
 			}
@@ -809,6 +870,25 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 		return fmt.Errorf("failed to attach root drive: %w", err)
 	}
 
+	// Attached data volumes (vdb, vdc, ...)
+	if vols, err := m.volumesForVM(ctx, vm); err == nil {
+		for i, vol := range vols {
+			if i >= 25 {
+				break
+			}
+			if err := fcClient.AttachDrive(ctx, firecracker.Drive{
+				DriveID:      fmt.Sprintf("data%d", i),
+				PathOnHost:   vol.Path,
+				IsRootDevice: false,
+				IsReadOnly:   false,
+			}); err != nil {
+				return fmt.Errorf("failed to attach volume %s: %w", vol.Name, err)
+			}
+			vol.DevicePath = fmt.Sprintf("/dev/vd%c", 'b'+rune(i))
+			_ = m.store.SaveVolume(ctx, vol)
+		}
+	}
+
 	// Network Interface
 	if err := fcClient.AttachNetworkInterface(ctx, firecracker.NetworkInterface{
 		IfaceID:     "eth0",
@@ -904,6 +984,15 @@ func (m *Manager) canRunVM(candidate *db.VM) (bool, string) {
 	}
 	if m.resourceLimits.MaxTotalMemoryMB > 0 && runningMemoryMB+candidate.MemoryMB > m.resourceLimits.MaxTotalMemoryMB {
 		return false, fmt.Sprintf("max total memory limit reached (%d MB + %d MB > %d MB)", runningMemoryMB, candidate.MemoryMB, m.resourceLimits.MaxTotalMemoryMB)
+	}
+
+	// Physical host admission control. The configured limits above are optional
+	// policy caps; this guard prevents the daemon from launching a microVM that
+	// would overcommit the machine's actually available RAM and trigger the OOM
+	// killer. Reserve headroom for the daemon, page cache, and host services.
+	const hostReserveMB = 256
+	if available := hostMemoryAvailableMB(); available > 0 && candidate.MemoryMB+hostReserveMB > available {
+		return false, fmt.Sprintf("insufficient host memory (requested %d MB + %d MB reserve, %d MB available)", candidate.MemoryMB, hostReserveMB, available)
 	}
 
 	return true, ""
@@ -1699,9 +1788,31 @@ func (m *Manager) BuildImage(ctx context.Context, req image.BuildRequest) (*db.C
 	return m.imgBuilder.BuildImage(ctx, req)
 }
 
-// ListImages lists all custom images registered in the system
+// ListImages lists all custom images registered in the system. Images left in
+// the "building" state by a daemon crash are reconciled against the filesystem
+// so a completed rootfs becomes usable immediately.
 func (m *Manager) ListImages(ctx context.Context) ([]*db.CustomImage, error) {
-	return m.store.ListImages(ctx)
+	imgs, err := m.store.ListImages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, img := range imgs {
+		if img.Status != db.ImageStatusBuilding {
+			continue
+		}
+		if _, statErr := os.Stat(img.RootfsPath); statErr == nil {
+			img.Status = db.ImageStatusReady
+			img.UpdatedAt = time.Now().UTC()
+			_ = m.store.SaveImage(ctx, img)
+			continue
+		}
+		if time.Since(img.UpdatedAt) > 15*time.Minute {
+			img.Status = db.ImageStatusFailed
+			img.UpdatedAt = time.Now().UTC()
+			_ = m.store.SaveImage(ctx, img)
+		}
+	}
+	return imgs, nil
 }
 
 // GetImage retrieves a custom image by ID or Name
@@ -1859,8 +1970,10 @@ func (m *Manager) GetStats(ctx context.Context) (*StatsResult, error) {
 		return nil, err
 	}
 	stats := &StatsResult{
-		TotalVMs:       len(vms),
-		ResourceLimits: &m.resourceLimits,
+		TotalVMs:              len(vms),
+		HostCPUs:              runtime.NumCPU(),
+		HostMemoryAvailableMB: hostMemoryAvailableMB(),
+		ResourceLimits:        &m.resourceLimits,
 	}
 	for _, v := range vms {
 		stats.TotalVCPUs += v.VCPUs

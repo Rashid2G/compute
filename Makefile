@@ -1,4 +1,4 @@
-.PHONY: all build build-ui dev-ui test test-coverage test-features bench bench-unit clean setup-host build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs
+.PHONY: all build build-ui dev-ui test test-coverage test-features bench bench-unit clean setup-host build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab
 
 all: build
 
@@ -55,6 +55,18 @@ deploy-restart:
 
 remote-status:
 	./scripts/deploy-t3-runner.sh --status
+
+# Local lab VM (192.168.1.70) that serves the daemon, Web GUI and CLI tests.
+LAB_HOST ?= compute-lab
+
+deploy-lab:
+	T3_RUNNER_HOST=$(LAB_HOST) ./scripts/deploy-t3-runner.sh
+
+deploy-lab-ui:
+	T3_RUNNER_HOST=$(LAB_HOST) ./scripts/deploy-t3-runner.sh --ui
+
+remote-status-lab:
+	T3_RUNNER_HOST=$(LAB_HOST) ./scripts/deploy-t3-runner.sh --status
 
 remote-logs:
 	ssh t3-runner "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"

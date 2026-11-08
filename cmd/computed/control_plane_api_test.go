@@ -130,7 +130,22 @@ func TestControlPlane_Volumes(t *testing.T) {
 
 	volID := createdVol.ID
 
-	// 3. Attach volume
+	// 3. Create a sandbox to attach the volume to.
+	vmBody, _ := json.Marshal(map[string]interface{}{
+		"name":      "test-vm-42",
+		"vcpus":     1,
+		"memory_mb": 512,
+	})
+	respVM, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(vmBody))
+	if err != nil {
+		t.Fatalf("create vm failed: %v", err)
+	}
+	defer respVM.Body.Close()
+	if respVM.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /vms status: %d", respVM.StatusCode)
+	}
+
+	// 4. Attach volume
 	attachBody, _ := json.Marshal(map[string]string{"vm_id": "test-vm-42"})
 	respAttach, err := http.Post(server.URL+"/api/v1/volumes/"+volID+"/attach", "application/json", bytes.NewReader(attachBody))
 	if err != nil {
@@ -387,7 +402,7 @@ func TestControlPlane_AccessAPIKeys(t *testing.T) {
 	}
 	var key db.AccessAPIKey
 	_ = json.NewDecoder(resp.Body).Decode(&key)
-	if !strings.HasPrefix(key.Token, "bsh_live_") || key.Name != "CI Runner Key" {
+	if !strings.HasPrefix(key.Token, "cmp_live_") || key.Name != "CI Runner Key" {
 		t.Fatalf("unexpected API key: %+v", key)
 	}
 

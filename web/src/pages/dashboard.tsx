@@ -228,7 +228,7 @@ export function DashboardPage({
             <button
               type="button"
               onClick={() => onNavigate?.('workers')}
-              className="font-mono text-xs text-[#495eb7] hover:underline"
+              className="font-mono text-xs text-[color:var(--link)] hover:underline"
             >
               Manage Workers ({workers.length}) →
             </button>
@@ -383,7 +383,7 @@ export function DashboardPage({
           <button
             type="button"
             onClick={() => onNavigate?.('events')}
-            className="font-mono text-xs text-[#495eb7] hover:underline"
+            className="font-mono text-xs text-[color:var(--link)] hover:underline"
           >
             Open Audit Stream &amp; Webhooks →
           </button>

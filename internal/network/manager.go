@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -370,6 +371,87 @@ func (m *Manager) setupBridgeForward(ctx context.Context) {
 	if len(out2) != 0 || out2 == nil {
 		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-o", m.cfg.BridgeName, "-j", "ACCEPT")
 	}
+}
+
+// AddPortForward installs host DNAT rules that expose a guest port on the host.
+// The rules are idempotent: existing entries are detected with iptables -C.
+func (m *Manager) AddPortForward(ctx context.Context, protocol string, hostPort int, guestIP string, guestPort int) error {
+	proto := strings.ToLower(strings.TrimSpace(protocol))
+	if proto == "" {
+		proto = "tcp"
+	}
+	if proto != "tcp" && proto != "udp" {
+		return fmt.Errorf("unsupported protocol %q: use tcp or udp", protocol)
+	}
+	if hostPort <= 0 || hostPort > 65535 || guestPort <= 0 || guestPort > 65535 {
+		return fmt.Errorf("host_port and guest_port must be between 1 and 65535")
+	}
+	ip := net.ParseIP(guestIP)
+	if ip == nil {
+		return fmt.Errorf("invalid guest IP %q", guestIP)
+	}
+
+	hostPortStr := strconv.Itoa(hostPort)
+	guestPortStr := strconv.Itoa(guestPort)
+	destination := net.JoinHostPort(guestIP, guestPortStr)
+
+	ensure := func(args ...string) error {
+		if _, err := m.runner.Run(ctx, "iptables", args...); err != nil {
+			full := append([]string{"iptables"}, args...)
+			return fmt.Errorf("%s: %w", strings.Join(full, " "), err)
+		}
+		return nil
+	}
+	exists := func(args ...string) bool {
+		_, err := m.runner.Run(ctx, "iptables", args...)
+		return err == nil
+	}
+
+	natRule := []string{"-t", "nat", "-C", "PREROUTING", "-p", proto, "--dport", hostPortStr, "-j", "DNAT", "--to-destination", destination}
+	if !exists(natRule...) {
+		if err := ensure("-t", "nat", "-A", "PREROUTING", "-p", proto, "--dport", hostPortStr, "-j", "DNAT", "--to-destination", destination); err != nil {
+			return err
+		}
+	}
+
+	// Host-local traffic (curl localhost) traverses OUTPUT rather than PREROUTING.
+	outRule := []string{"-t", "nat", "-C", "OUTPUT", "-p", proto, "--dport", hostPortStr, "-j", "DNAT", "--to-destination", destination}
+	if !exists(outRule...) {
+		if err := ensure("-t", "nat", "-A", "OUTPUT", "-p", proto, "--dport", hostPortStr, "-j", "DNAT", "--to-destination", destination); err != nil {
+			return err
+		}
+	}
+
+	fwdRule := []string{"-C", "FORWARD", "-p", proto, "-d", guestIP, "--dport", guestPortStr, "-j", "ACCEPT"}
+	if !exists(fwdRule...) {
+		if err := ensure("-A", "FORWARD", "-p", proto, "-d", guestIP, "--dport", guestPortStr, "-j", "ACCEPT"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemovePortForward removes the DNAT/FORWARD rules installed by AddPortForward.
+// Missing rules are ignored so the call is safe to repeat.
+func (m *Manager) RemovePortForward(ctx context.Context, protocol string, hostPort int, guestIP string, guestPort int) error {
+	proto := strings.ToLower(strings.TrimSpace(protocol))
+	if proto == "" {
+		proto = "tcp"
+	}
+	if proto != "tcp" && proto != "udp" {
+		return fmt.Errorf("unsupported protocol %q: use tcp or udp", protocol)
+	}
+	if hostPort <= 0 || guestPort <= 0 || net.ParseIP(guestIP) == nil {
+		return nil
+	}
+	hostPortStr := strconv.Itoa(hostPort)
+	guestPortStr := strconv.Itoa(guestPort)
+	destination := net.JoinHostPort(guestIP, guestPortStr)
+
+	m.runner.Run(ctx, "iptables", "-t", "nat", "-D", "PREROUTING", "-p", proto, "--dport", hostPortStr, "-j", "DNAT", "--to-destination", destination)
+	m.runner.Run(ctx, "iptables", "-t", "nat", "-D", "OUTPUT", "-p", proto, "--dport", hostPortStr, "-j", "DNAT", "--to-destination", destination)
+	m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-p", proto, "-d", guestIP, "--dport", guestPortStr, "-j", "ACCEPT")
+	return nil
 }
 
 // SetupTAP creates a tap interface, attaches it to the bridge, and brings it up

@@ -44,12 +44,12 @@ function Fact({
 }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+      <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
         {label}
-      </dt>
-      <dd className={mono ? 'mt-1 truncate font-mono text-xs' : 'mt-1 truncate text-xs'}>
+      </div>
+      <div className={mono ? 'mt-1 truncate font-mono text-xs' : 'mt-1 truncate text-xs'}>
         {value || '—'}
-      </dd>
+      </div>
     </div>
   );
 }

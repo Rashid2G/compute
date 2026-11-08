@@ -171,7 +171,7 @@ export function JobsPage({
                     <span className="text-[11.5px] text-muted-foreground">
                       or run{' '}
                       <code className="font-mono text-[11.5px] text-foreground">
-                        compute ci connect
+                        compute job run -- &lt;command&gt;
                       </code>
                     </span>
                   </div>
@@ -222,7 +222,9 @@ export function JobsPage({
                     A job passes on compute
                   </div>
                   <p className="text-[11.5px] text-muted-foreground leading-relaxed">
-                    Waiting for a job.
+                    {jobs.length > 0
+                      ? `${jobs.filter((j) => j.state === 'succeeded').length} succeeded of ${jobs.length} submitted.`
+                      : 'No jobs submitted yet.'}
                   </p>
                 </div>
               </div>
@@ -322,6 +324,7 @@ export function JobsPage({
                 Runner Tier
               </label>
               <select
+                aria-label="Runner tag"
                 value={jobRunnerTag}
                 onChange={(e) => setJobRunnerTag(e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
@@ -473,7 +476,7 @@ export function JobsPage({
         <div className="border border-border bg-background p-4 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 font-mono text-[12px]">
-              <Terminal className="h-3.5 w-3.5 text-[#495eb7]" />
+              <Terminal className="h-3.5 w-3.5 text-[color:var(--link)]" />
               <span className="text-foreground font-medium">
                 {selectedJob.id}
               </span>

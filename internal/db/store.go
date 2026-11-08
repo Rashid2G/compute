@@ -359,6 +359,7 @@ func (s *Store) initSchema() error {
 	}
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_key_name TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_public_key TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE volumes ADD COLUMN path TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, and public_ip_enabled columns exist
@@ -1322,8 +1323,8 @@ func (s *Store) SaveVolume(ctx context.Context, v *Volume) error {
 	}
 	query := `INSERT INTO volumes (
 		id, name, pool, size_gb, used_gb, status, attached_vm,
-		device_path, mount_point, filesystem, iops, throughput, snapshots, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		pool = excluded.pool,
@@ -1334,13 +1335,14 @@ func (s *Store) SaveVolume(ctx context.Context, v *Volume) error {
 		device_path = excluded.device_path,
 		mount_point = excluded.mount_point,
 		filesystem = excluded.filesystem,
+		path = excluded.path,
 		iops = excluded.iops,
 		throughput = excluded.throughput,
 		snapshots = excluded.snapshots,
 		updated_at = excluded.updated_at`
 	_, err := s.db.ExecContext(ctx, query,
 		v.ID, v.Name, v.Pool, v.SizeGB, v.UsedGB, v.Status, v.AttachedVM,
-		v.DevicePath, v.MountPoint, v.Filesystem, v.IOPS, v.Throughput, v.Snapshots, v.CreatedAt, v.UpdatedAt,
+		v.DevicePath, v.MountPoint, v.Filesystem, v.Path, v.IOPS, v.Throughput, v.Snapshots, v.CreatedAt, v.UpdatedAt,
 	)
 	return err
 }
@@ -1350,9 +1352,9 @@ func (s *Store) GetVolume(ctx context.Context, id string) (*Volume, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v := new(Volume)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
 		&v.ID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
-		&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
+		&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.Path, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1367,7 +1369,7 @@ func (s *Store) GetVolume(ctx context.Context, id string) (*Volume, error) {
 func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, iops, throughput, snapshots, created_at, updated_at FROM volumes ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1377,7 +1379,7 @@ func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
 		v := new(Volume)
 		if err := rows.Scan(
 			&v.ID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
-			&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
+			&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.Path, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

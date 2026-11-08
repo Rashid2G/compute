@@ -21,6 +21,7 @@ import {
 
 import { PAGES, type PageId } from '@/lib/navigation';
 import type { VM } from '@/lib/types';
+import { cn } from '@/lib/utils';
 
 interface CommandPaletteProps {
   open: boolean;
@@ -44,10 +45,16 @@ export function CommandPalette({
   onSelectVM,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
     if (!open) setQuery('');
+    setActiveIndex(0);
   }, [open]);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [query]);
 
   const actions = useMemo(
     () => [
@@ -162,6 +169,21 @@ export function CommandPalette({
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setActiveIndex((i) => Math.min(i + 1, Math.max(filtered.length - 1, 0)));
+              } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setActiveIndex((i) => Math.max(i - 1, 0));
+              } else if (e.key === 'Enter') {
+                e.preventDefault();
+                filtered[activeIndex]?.run();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                onOpenChange(false);
+              }
+            }}
             placeholder="Type a command, sandbox ID, or route (e.g. sandboxes, ci, workers, environment)..."
             className="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
           />
@@ -180,14 +202,17 @@ export function CommandPalette({
               No matching commands or sandboxes for "{query}".
             </div>
           ) : (
-            filtered.map((item) => {
+            filtered.map((item, index) => {
               const Icon = item.icon;
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={item.run}
-                  className="flex w-full items-center justify-between px-4 py-2.5 text-left text-xs hover:bg-selected transition-colors group"
+                  className={cn(
+                    'flex w-full items-center justify-between px-4 py-2.5 text-left text-xs transition-colors group',
+                    index === activeIndex ? 'bg-selected' : 'hover:bg-selected',
+                  )}
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <Icon className="h-3.5 w-3.5 text-muted-foreground group-hover:text-foreground shrink-0" />
@@ -209,7 +234,7 @@ export function CommandPalette({
 
         <div className="flex items-center justify-between border-t border-border bg-muted/30 px-4 py-2 font-mono text-[11px] text-muted-foreground">
           <span>↑↓ to navigate · ↵ to select · ESC to dismiss</span>
-          <span>.compute control-plane v2.4</span>
+          <span>.compute control-plane</span>
         </div>
       </div>
     </div>

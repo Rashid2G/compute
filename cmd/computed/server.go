@@ -321,6 +321,133 @@ func (s *Server) SetAuthManager(mgr *auth.Manager) {
 	s.authMgr = mgr
 }
 
+// mountAttachedVolumes mounts data volumes inside the guest after boot.
+func (s *Server) mountAttachedVolumes(ctx context.Context, v *db.VM) {
+	if s.vmMgr == nil || v == nil {
+		return
+	}
+	vols, err := s.vmMgr.GetStore().ListVolumes(ctx)
+	if err != nil {
+		return
+	}
+	index := 0
+	for _, vol := range vols {
+		if vol.Path == "" || (vol.AttachedVM != v.Name && vol.AttachedVM != v.ID) {
+			continue
+		}
+		device := vol.DevicePath
+		if device == "" {
+			device = fmt.Sprintf("/dev/vd%c", 'b'+rune(index))
+		}
+		mountPoint := "/mnt/data"
+		if index > 0 {
+			mountPoint = fmt.Sprintf("/mnt/data-%d", index+1)
+		}
+		index++
+		cmd := fmt.Sprintf("sudo mkdir -p %s && (mountpoint -q %s || sudo mount %s %s) && sudo chown 1000:1000 %s", mountPoint, mountPoint, device, mountPoint, mountPoint)
+		res, err := s.vmMgr.ExecVM(ctx, v.ID, vm.ExecRequest{Command: cmd, Timeout: 30})
+		if err != nil || res.ExitCode != 0 {
+			detail := ""
+			if res != nil {
+				detail = res.Stderr
+			}
+			log.Printf("[computed] could not mount volume %s at %s on %s: %v %s", vol.Name, mountPoint, v.Name, err, detail)
+			continue
+		}
+		if vol.MountPoint != mountPoint {
+			vol.MountPoint = mountPoint
+			_ = s.vmMgr.GetStore().SaveVolume(ctx, vol)
+		}
+	}
+}
+
+// applyPortForwardsForVM installs every host forwarding rule that belongs to v.
+// It is safe to call repeatedly; AddPortForward is idempotent.
+func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || s.vmMgr.NetManager() == nil || v == nil || v.IPAddress == "" {
+		return
+	}
+	st := s.vmMgr.GetStore()
+	pfs, err := st.ListPortForwards(ctx)
+	if err != nil {
+		log.Printf("[computed] port-forward reconcile: list failed: %v", err)
+		return
+	}
+	for _, pf := range pfs {
+		if pf.VMID != v.ID && pf.VMID != v.Name {
+			continue
+		}
+		if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
+			log.Printf("[computed] port-forward %s (%d->%d): %v", pf.ID, pf.HostPort, pf.GuestPort, err)
+			continue
+		}
+		if pf.Status != "active" {
+			pf.Status = "active"
+			_ = st.SavePortForward(ctx, pf)
+		}
+	}
+}
+
+// removePortForwardsForVM removes host rules for a sandbox. When deleteRecords
+// is true the stored forwarding definitions are deleted too (sandbox deletion);
+// otherwise they are kept as "pending" so a later start can re-install them.
+func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRecords bool) {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
+		return
+	}
+	st := s.vmMgr.GetStore()
+	pfs, err := st.ListPortForwards(ctx)
+	if err != nil {
+		return
+	}
+	for _, pf := range pfs {
+		if pf.VMID != v.ID && pf.VMID != v.Name {
+			continue
+		}
+		if v.IPAddress != "" && s.vmMgr.NetManager() != nil {
+			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
+		}
+		if deleteRecords {
+			_ = st.DeletePortForward(ctx, pf.ID)
+			continue
+		}
+		if pf.Status != "pending" {
+			pf.Status = "pending"
+			_ = st.SavePortForward(ctx, pf)
+		}
+	}
+}
+
+// ReconcilePortForwards re-installs stored host forwarding rules at startup so
+// rules survive daemon restarts and host reboots.
+func (s *Server) ReconcilePortForwards(ctx context.Context) {
+	if s.vmMgr == nil {
+		return
+	}
+	vms, err := s.vmMgr.ListVMs(ctx)
+	if err != nil {
+		return
+	}
+	for _, v := range vms {
+		if v.Status == db.StatusRunning {
+			s.applyPortForwardsForVM(ctx, v)
+		}
+	}
+
+	// Keep the UI honest: forwards whose sandbox is not running are pending.
+	if pfs, err := s.vmMgr.GetStore().ListPortForwards(ctx); err == nil {
+		for _, pf := range pfs {
+			v, _ := s.vmMgr.GetVM(ctx, pf.VMID)
+			if v == nil || v.Status != db.StatusRunning {
+				if pf.Status != "pending" {
+					pf.Status = "pending"
+					_ = s.vmMgr.GetStore().SavePortForward(ctx, pf)
+				}
+			}
+		}
+	}
+}
+
 func (s *Server) wrapAuth(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.authMgr == nil || !s.cfg.Server.AuthEnabled {
@@ -686,6 +813,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		case http.MethodGet:
 			json.NewEncoder(w).Encode(v)
 		case http.MethodDelete:
+			s.removePortForwardsForVM(ctx, v, true)
 			if err := s.vmMgr.DeleteVM(ctx, vmID); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -763,6 +891,8 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if v != nil && v.Status == db.StatusRunning {
 			// Give operators and automation a sandbox that is actually reachable.
 			s.waitGuestSSH(ctx, v, 30*time.Second)
+			s.mountAttachedVolumes(ctx, v)
+			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
 		json.NewEncoder(w).Encode(v)
@@ -784,6 +914,8 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
 		if v != nil && v.Status == db.StatusRunning {
 			s.waitGuestSSH(ctx, v, 30*time.Second)
+			s.mountAttachedVolumes(ctx, v)
+			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
 		json.NewEncoder(w).Encode(v)
@@ -794,6 +926,9 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
+		if v != nil {
+			s.removePortForwardsForVM(ctx, v, false)
+		}
 		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
 		json.NewEncoder(w).Encode(v)
 
@@ -937,15 +1072,16 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		})
 
 		for _, av := range s.vmMgr.GetStorageManager().GetConfig().AvailableImages {
-			if av.Name != cleanBaseName {
-				result = append(result, ImageListItem{
-					ID:          "img-base-" + av.Name,
-					Name:        av.Name,
-					Description: av.Description,
-					Status:      "ready",
-					Kind:        "base",
-				})
+			if strings.EqualFold(av.Rootfs, defaultRootfs) || strings.EqualFold(av.Name, cleanBaseName) {
+				continue
 			}
+			result = append(result, ImageListItem{
+				ID:          "img-base-" + av.Name,
+				Name:        av.Name,
+				Description: av.Description,
+				Status:      "ready",
+				Kind:        "base",
+			})
 		}
 
 		for _, c := range customImgs {

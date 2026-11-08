@@ -332,6 +332,7 @@ export function AccessPage() {
                   </label>
                   <input
                     type="text"
+                    aria-label="API key name"
                     value={newKeyName}
                     onChange={(e) => setNewKeyName(e.target.value)}
                     placeholder="ci-github-actions-runner"
@@ -344,6 +345,7 @@ export function AccessPage() {
                     Permissions Scope
                   </label>
                   <select
+                    aria-label="API key scope"
                     value={newKeyScope}
                     onChange={(e) => setNewKeyScope(e.target.value)}
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
@@ -359,6 +361,7 @@ export function AccessPage() {
                     Expiration
                   </label>
                   <select
+                    aria-label="API key expiration"
                     value={newKeyExpiry}
                     onChange={(e) => setNewKeyExpiry(e.target.value)}
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
