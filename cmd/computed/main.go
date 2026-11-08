@@ -200,9 +200,15 @@ func main() {
 	// 6. Setup Server
 	server := NewServer(vmMgr, globalCfg)
 
-	// Re-apply stored host port-forwarding rules now that VMs are reconciled.
-	pfCtx, pfCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Restore sandboxes that were running before the daemon/host restarted.
+	desiredCtx, desiredCancel := context.WithTimeout(context.Background(), 120*time.Second)
+	vmMgr.StartDesiredVMs(desiredCtx)
+	desiredCancel()
+
+	// Re-apply stored host port-forwarding and guest runtime state.
+	pfCtx, pfCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	server.ReconcilePortForwards(pfCtx)
+	server.ReconcileRunningVMState(pfCtx)
 	pfCancel()
 
 	// Mount embedded Web GUI

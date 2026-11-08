@@ -32,6 +32,7 @@ type VM struct {
 	OwnerID         string    `json:"owner_id,omitempty"`    // Owner / user ID for tenant isolation
 	Name            string    `json:"name"`                  // VM Name (also serves as the external VM ID)
 	Status          VMStatus  `json:"status"`
+	DesiredRunning  bool      `json:"desired_running"`
 	VCPUs           int       `json:"vcpus"`
 	MemoryMB        int       `json:"memory_mb"`
 	IPAddress       string    `json:"ip_address"`
