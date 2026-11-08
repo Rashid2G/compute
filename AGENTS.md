@@ -1,89 +1,76 @@
-# AGENTS.md — Instructions for AI Coding Agents
+# Compute repository guide for coding agents
 
-This repository contains **Compute** (`on-demand-vms`), a lightweight Firecracker microVM orchestration platform featuring a REST/WebSocket daemon (`computed`), a command-line client (`compute`), and an embedded Web GUI (`compute gui`).
+## Mission and product shape
 
----
+Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microVM sandboxes and distributed jobs. The repository contains the `computed` control-plane daemon, `compute` CLI (including the embedded GUI command), `compute-worker`, a React/Vite web UI, SDKs, host networking/runtime code, and deployment tooling. Treat existing APIs and persisted state as compatibility surfaces.
 
-## 🚨 MANDATORY: Deploying Changes to `t3-runner`
+## Read before changing code
 
-Whenever you finish making code modifications, bug fixes, configuration adjustments, or feature additions in this repository, **you MUST deploy your changes to the `ssh t3-runner` VM** so that the running services take effect immediately.
+1. Read this file and the relevant package documentation/tests.
+2. Check `git status --short` and preserve unrelated user changes.
+3. Trace a feature across its layers: CLI/client, API types and handlers, persistence/migrations, runtime/worker, and UI/SDK as applicable.
+4. For deployment or host changes, inspect the relevant scripts and config before acting. Never print secrets, private keys, enrollment tokens, or environment values into logs.
 
-### One-Command Deployment
+## Architecture map
 
-Run the standard deployment command from the repository root:
+- `cmd/computed`: daemon startup and command configuration.
+- `cmd/compute`: user CLI and GUI entry point.
+- `cmd/compute-worker`, `cmd/compute-agent`: worker and agent processes.
+- `internal/master`: control-plane API, auth, audit, PKI, WebSocket relay and orchestration.
+- `internal/store`, `internal/db`: persistence and migrations; preserve migration ordering and make schema changes forward-compatible.
+- `internal/vm`, `internal/firecracker`, `internal/node`: VM lifecycle, Firecracker integration, worker runtime and guest operations.
+- `internal/network`, `internal/storage`, `internal/image`, `internal/scheduler`, `internal/jobs`: host networking, volumes, images, placement and jobs.
+- `pkg/api`, `pkg/client`: shared API contracts and Go client.
+- `internal/gui`: embedded GUI assets/server; `web`: React/Vite source.
+- `sdk/`: language SDKs; `config/`, `scripts/`, Dockerfiles and `Makefile`: operations and packaging.
+
+## Engineering rules
+
+- Follow the established Go formatting, error handling, context cancellation, and package boundaries. Run `gofmt` on changed Go files.
+- Keep API request/response changes consistent across server, `pkg/api`, CLI/client, web UI, and SDKs. Handle malformed input and authorization at the boundary.
+- For database changes, add a new migration; do not rewrite migrations that may have shipped.
+- VM, filesystem, network, and process operations need explicit cleanup on errors and safe retry/reconciliation behavior. Avoid shell interpolation of user-controlled values.
+- UI changes should preserve the existing design system, keyboard operation, accessible labels/focus behavior, and loading/empty/error states.
+- Add or update focused tests for behavior changes. Do not claim a feature works from compilation alone.
+- Do not add dependencies or change generated/build artifacts unless the task requires it. Do not commit secrets, local state, VM disks, screenshots, or binaries unintentionally.
+
+## Build and verification
+
+- Go build: `make build`
+- Go tests: `make test` (or focused `go test ./path/...` while iterating)
+- Web typecheck/build: `cd web && npm run typecheck && npm run build` (Bun is also supported by the Makefile)
+- Full integration feature suite: `make test-features` (requires a running daemon and suitable host); lab suite: `ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"`.
+- Distinguish checks actually run from checks not run; integration tests may require Linux, KVM, root privileges, Docker, or a reachable lab host.
+
+## Deployment targets
+
+The current primary test/deployment host is `compute-lab` (`192.168.1.70`), serving UI on port 8080 and daemon API on port 18080. Prefer lab targets over legacy `t3-runner` targets:
+
+- Go/config/scripts changes: `make deploy-lab`
+- Any `web/` source change: `make deploy-lab-ui`
+- Status: `make remote-status-lab`; SSH: `ssh compute-lab`
+- Legacy `t3-runner` targets remain available: `make deploy`, `make deploy-ui`, `make remote-status`.
+
+### SSH access to `compute-lab`
+
+The deployment VM is reachable through the SSH host alias `compute-lab` (currently `192.168.1.70`). Agents and developers may connect directly with:
 
 ```bash
-make deploy
+ssh compute-lab
 ```
 
-*(Alternatively: `./scripts/deploy-t3-runner.sh`)*
+The alias must be configured in `~/.ssh/config` and a non-interactive SSH key must be authorized on the VM; deployment scripts use `BatchMode=yes` and do not support password prompts. The deployed checkout is normally `/home/rashid/on-demand-vms`. From the VM, inspect services with `systemctl status`, query the daemon locally at `http://127.0.0.1:18080`, and query the GUI at `http://127.0.0.1:8080`; use `sudo` only where required for service or host-network administration. Do not expose private keys, SSH configuration contents, or credentials in logs or reports.
 
-### If Web GUI Frontend Files Were Changed
+Deployment restarts live services and affects shared infrastructure. Deploy only when the user explicitly requests deployment or the active task/operating instructions require it. Confirm the correct target from current repository guidance; after deployment verify service health and report any failure. Never infer that a local test VM is safe to modify if it contains user workloads.
 
-If you modified any files under `web/` (React/Vite components, styles, or pages):
+## Change completion and Git
 
-```bash
-make deploy-ui
-```
+Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
 
-*(Alternatively: `./scripts/deploy-t3-runner.sh --ui`)*
+## Agent delegation and issues
 
----
+Work independently unless the user or repository task explicitly requests delegation. When delegation is requested, provide the child agent this file plus a bounded task, relevant paths, expected output, and shared-worktree coordination instructions. Do not claim a separate issue/thread has been created unless the issue/thread tool confirms it. Record concrete failures with reproduction steps and affected behavior; fix them in the current task when authorized, otherwise return a concise issue-ready report.
 
-## What the Deployment Process Does Automatically
+## Skills
 
-1. **Builds Static Linux Binaries**: Compiles `bin/compute`, `bin/computed`, and `bin/compute-bench` for `linux/amd64` (`CGO_ENABLED=0`).
-2. **Synchronizes Files**: Uses `rsync` to sync updated binaries, configs (`config/`), and helper scripts (`scripts/`) to `t3-runner:/home/rashid/on-demand-vms/`.
-3. **Restarts Remote Services**: Executes `sudo systemctl restart computed.service compute-gui.service` on the `t3-runner` host.
-4. **Verifies Health**:
-   - Ensures `computed.service` and `compute-gui.service` are active.
-   - Polls `http://127.0.0.1:18080/api/v1/health` for `{"status":"ok"}`.
-   - Validates that the Web GUI on port `8080` responds with `HTTP 200 OK`.
-   - Confirms CLI responsiveness via `compute sandbox list`.
-
----
-
-## Helpful Remote Commands for Agents
-
-| Task | Command |
-|---|---|
-| Deploy changes & restart services | `make deploy` |
-| Deploy changes including Web UI | `make deploy-ui` |
-| Quick restart without rebuilding | `make deploy-restart` |
-| Check remote service status & health | `make remote-status` |
-| Inspect remote service logs | `ssh t3-runner "sudo journalctl -u computed -u compute-gui -n 50 --no-pager"` |
-| Test remote CLI directly | `ssh t3-runner "COMPUTE_DAEMON=127.0.0.1:18080 /home/rashid/on-demand-vms/bin/compute sandbox list"` |
-
----
-
-## Remote Architecture Reference (`t3-runner`)
-- **Host Alias**: `t3-runner` (defined in `~/.ssh/config`, user `rashid`, passwordless sudo enabled).
-- **Remote Repo Path**: `/home/rashid/on-demand-vms`
-- **Systemd Services**:
-  - `computed.service`: Root service running `/home/rashid/on-demand-vms/bin/computed -listen 0.0.0.0:18080`
-  - `compute-gui.service`: User service running `/home/rashid/on-demand-vms/bin/compute gui --addr 0.0.0.0 --port 8080 --daemon http://127.0.0.1:18080`
-- **State Directories on `t3-runner`**:
-  - `/var/lib/compute/data/compute.db`: SQLite database
-  - `/var/lib/compute/images`: Rootfs images (e.g. `ubuntu-24.04.ext4`)
-  - `/var/lib/compute/vms`: VM workspaces and disks
-
-## Local Lab VM (`compute-lab`)
-
-A dedicated lab VM now serves the complete application on the local network:
-
-- **Host**: `compute-lab` / `192.168.1.70` (Libvirt on the `debian` hypervisor, LAN bridge `br0`)
-- **Web GUI**: http://192.168.1.70:8080
-- **Daemon API**: http://192.168.1.70:18080/api/v1/health
-- **Remote CLI**: `COMPUTE_DAEMON=192.168.1.70:18080 ./bin/compute sandbox list`
-- **Repository/state on VM**: `/home/rashid/on-demand-vms` (`data/` holds SQLite, images, volumes, templates, VM workspaces)
-- **Systemd services**: `computed.service`, `compute-gui.service`, `compute-net.service` (bridge/NAT), `docker.service` (custom image builds)
-
-Use the lab targets when deploying to the new VM instead of `t3-runner`:
-
-| Task | Command |
-|---|---|
-| Deploy code to compute-lab | `make deploy-lab` |
-| Deploy code + rebuild Web UI | `make deploy-lab-ui` |
-| Check lab service status | `make remote-status-lab` |
-| SSH into the lab | `ssh compute-lab` |
-| Run the feature suite on the lab | `ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"` |
+Use installed skills when their stated scope applies. The installed general skills do not currently provide a dedicated Compute repository workflow, so use the repository guidance in this file for codebase-specific architecture, testing, and deployment. Do not modify unrelated global skills. If a reusable project-specific workflow is needed, add it under `.agents/skills/<name>/SKILL.md` and document its trigger and limits; keep `AGENTS.md` as the authoritative entry point. Revisit this section when project skills are added.
