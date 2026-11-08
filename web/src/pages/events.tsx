@@ -46,7 +46,7 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
   const [otel, setOtel] = useState<OTelConfigRecord>({
     enabled: true,
     endpoint: 'https://otel.compute.internal:4318/v1/traces',
-    protocol: 'HTTP/protobuf (4318)',
+    protocol: 'HTTP/JSON (4318)',
     auth_header: '',
     service_name: 'compute-control-plane',
     sample_rate: '1.0',
@@ -603,10 +603,9 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                 }
                 className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
               >
-                <option value="HTTP/protobuf (4318)">
-                  HTTP/protobuf (4318)
+                <option value="HTTP/JSON (4318)">
+                  HTTP/JSON (4318)
                 </option>
-                <option value="gRPC (4317)">gRPC (4317)</option>
               </select>
             </div>
 

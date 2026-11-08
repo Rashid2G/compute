@@ -282,6 +282,10 @@ func (s *Server) recordEvent(event, actor, target, status string, durationMs int
 	}
 	s.eventMu.RUnlock()
 
+	// Fan the event out to subscribed webhook endpoints without blocking the
+	// API caller.
+	s.deliverWebhooks(auditEvt)
+
 	return auditEvt
 }
 
