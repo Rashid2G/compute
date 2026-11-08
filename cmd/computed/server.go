@@ -422,6 +422,26 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 	}
 }
 
+// ReconcileRunningVMState re-applies post-boot guest state (data volume mounts
+// and environment secrets) to sandboxes that are already running, including
+// sandboxes restored automatically after a daemon or host restart.
+func (s *Server) ReconcileRunningVMState(ctx context.Context) {
+	if s.vmMgr == nil {
+		return
+	}
+	vms, err := s.vmMgr.ListVMs(ctx)
+	if err != nil {
+		return
+	}
+	for _, v := range vms {
+		if v.Status != db.StatusRunning {
+			continue
+		}
+		s.mountAttachedVolumes(ctx, v)
+		s.applyEnvironment(ctx, v)
+	}
+}
+
 // ReconcilePortForwards re-installs stored host forwarding rules at startup so
 // rules survive daemon restarts and host reboots.
 func (s *Server) ReconcilePortForwards(ctx context.Context) {

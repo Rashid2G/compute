@@ -15,6 +15,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 // Store handles persistence of VM metadata
 type Store struct {
 	db *sql.DB
@@ -174,6 +181,7 @@ func (s *Store) initSchema() error {
 		owner_id TEXT NOT NULL DEFAULT 'default',
 		name TEXT NOT NULL,
 		status TEXT NOT NULL,
+		desired_running INTEGER NOT NULL DEFAULT 0,
 		vcpus INTEGER NOT NULL,
 		memory_mb INTEGER NOT NULL,
 		ip_address TEXT NOT NULL,
@@ -360,6 +368,7 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_key_name TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_public_key TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE volumes ADD COLUMN path TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, and public_ip_enabled columns exist
@@ -473,7 +482,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 
 	updateQuery := `
 	UPDATE vms SET
-		id = ?, name = ?, status = ?, vcpus = ?, memory_mb = ?,
+		id = ?, name = ?, status = ?, desired_running = ?, vcpus = ?, memory_mb = ?,
 		ip_address = ?, public_ip = ?, public_ip_enabled = ?,
 		mac_address = ?, tap_device = ?, rootfs_path = ?,
 		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
@@ -481,7 +490,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
 	`
 	res, err := s.db.ExecContext(ctx, updateQuery,
-		vm.ID, vm.Name, string(vm.Status), vm.VCPUs, vm.MemoryMB,
+		vm.ID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt,
 		vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
@@ -498,14 +507,14 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 
 	insertQuery := `
 	INSERT INTO vms (
-		id, internal_id, owner_id, name, status, vcpus, memory_mb,
+		id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb,
 		ip_address, public_ip, public_ip_enabled, mac_address, tap_device, rootfs_path, kernel_path,
 		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 		pid, socket_path, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err = s.db.ExecContext(ctx, insertQuery,
-		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), vm.VCPUs, vm.MemoryMB,
+		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt, vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
 		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, vm.CreatedAt, vm.UpdatedAt,
@@ -524,7 +533,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, internal_id, owner_id, name, status, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 	       pid, socket_path, created_at, updated_at
 	FROM vms
@@ -547,8 +556,9 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	vm := &VM{}
 	var status string
 	var pubEnabledInt int
+	var desiredRunning int
 	err := row.Scan(
-		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &vm.VCPUs, &vm.MemoryMB,
+		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB,
 		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
 		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
@@ -560,6 +570,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 		return nil, err
 	}
 	vm.Status = VMStatus(status)
+	vm.DesiredRunning = desiredRunning != 0
 	vm.PublicIPEnabled = pubEnabledInt != 0
 	if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
 		vm.PublicIP = vm.IPAddress
@@ -578,7 +589,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, internal_id, owner_id, name, status, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 	       pid, socket_path, created_at, updated_at
 	FROM vms
@@ -597,8 +608,9 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		vm := &VM{}
 		var status string
 		var pubEnabledInt int
+		var desiredRunning int
 		err := rows.Scan(
-			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &vm.VCPUs, &vm.MemoryMB,
+			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB,
 			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
 			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
@@ -607,6 +619,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 			return nil, err
 		}
 		vm.Status = VMStatus(status)
+		vm.DesiredRunning = desiredRunning != 0
 		vm.PublicIPEnabled = pubEnabledInt != 0
 		if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
 			vm.PublicIP = vm.IPAddress

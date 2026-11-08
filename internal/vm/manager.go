@@ -753,8 +753,9 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
 
+	vm.DesiredRunning = true
 	if vm.Status == db.StatusRunning && m.isAlive(vm.PID) {
-		return nil // Already running
+		return m.store.SaveVM(ctx, vm) // Already running; persist desired state
 	}
 
 	// Capacity check: if host resources are maxed out, queue the run
@@ -1152,6 +1153,7 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 	_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 
 	vm.Status = db.StatusPaused
+	vm.DesiredRunning = false
 	vm.SnapshotPath = snapPath
 	vm.MemFilePath = memPath
 	vm.PID = 0
@@ -1239,6 +1241,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	success = true
 	m.dequeue(vm.ID)
 	vm.Status = db.StatusRunning
+	vm.DesiredRunning = true
 	vm.PID = cmd.Process.Pid
 	vm.SocketPath = sockPath
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
@@ -1320,6 +1323,7 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	}
 
 	vm.Status = db.StatusStopped
+	vm.DesiredRunning = false
 	vm.PID = 0
 	if err := m.store.SaveVM(ctx, vm); err != nil {
 		return err
@@ -1411,6 +1415,35 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs)
 	m.processQueue(ctx)
 	return pruned, err
+}
+
+// StartDesiredVMs restarts sandboxes that were running before the daemon (or
+// host) went down. Paused snapshots stay paused and are resumed explicitly.
+func (m *Manager) StartDesiredVMs(ctx context.Context) {
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		log.Printf("[vm] desired-state startup: %v", err)
+		return
+	}
+	for _, vm := range vms {
+		if !vm.DesiredRunning {
+			continue
+		}
+		if vm.Status == db.StatusRunning {
+			continue
+		}
+		var startErr error
+		if vm.Status == db.StatusPaused {
+			startErr = m.ResumeVM(ctx, vm.ID)
+		} else {
+			startErr = m.RunVM(ctx, vm.ID)
+		}
+		if startErr != nil {
+			log.Printf("[vm] could not restore %s (%s): %v", vm.Name, vm.Status, startErr)
+			continue
+		}
+		log.Printf("[vm] restored sandbox %s after control-plane startup", vm.Name)
+	}
 }
 
 // GetNetworkInfo collects runtime state and returns a summary

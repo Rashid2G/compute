@@ -25,19 +25,20 @@ func TestStore(t *testing.T) {
 	ctx := context.Background()
 
 	vm := &VM{
-		ID:         "vm-test-1",
-		Name:       "test-vm",
-		Status:     StatusCreated,
-		VCPUs:      1,
-		MemoryMB:   512,
-		IPAddress:  "172.16.0.2",
-		MACAddress: "06:00:ac:10:00:02",
-		TAPDevice:  "mftap-test-1",
-		RootfsPath: "/tmp/rootfs.ext4",
-		KernelPath: "/tmp/vmlinux",
-		DiskPath:   "/tmp/disk.ext4",
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
+		ID:             "vm-test-1",
+		Name:           "test-vm",
+		Status:         StatusCreated,
+		DesiredRunning: true,
+		VCPUs:          1,
+		MemoryMB:       512,
+		IPAddress:      "172.16.0.2",
+		MACAddress:     "06:00:ac:10:00:02",
+		TAPDevice:      "mftap-test-1",
+		RootfsPath:     "/tmp/rootfs.ext4",
+		KernelPath:     "/tmp/vmlinux",
+		DiskPath:       "/tmp/disk.ext4",
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 
 	if err := store.SaveVM(ctx, vm); err != nil {
@@ -51,9 +52,13 @@ func TestStore(t *testing.T) {
 	if got == nil || got.ID != "vm-test-1" || got.Status != StatusCreated {
 		t.Fatalf("unexpected VM retrieved: %+v", got)
 	}
+	if !got.DesiredRunning {
+		t.Fatalf("expected desired_running to persist as true: %+v", got)
+	}
 
 	// Update status
 	got.Status = StatusRunning
+	got.DesiredRunning = false
 	if err := store.SaveVM(ctx, got); err != nil {
 		t.Fatalf("failed to update VM: %v", err)
 	}
@@ -61,6 +66,9 @@ func TestStore(t *testing.T) {
 	updated, _ := store.GetVM(ctx, "vm-test-1")
 	if updated.Status != StatusRunning {
 		t.Fatalf("expected status running, got %s", updated.Status)
+	}
+	if updated.DesiredRunning {
+		t.Fatalf("expected desired_running to update to false")
 	}
 
 	vms, err := store.ListVMs(ctx)
