@@ -1623,7 +1623,13 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	if vm.SSHKeyPath != "" {
 		sshArgs = append(sshArgs, "-i", vm.SSHKeyPath)
 	}
-	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), req.Command)
+	command := req.Command
+	if user != "root" {
+		// Make environment-profile secrets available to every non-root command
+		// (exec, jobs, setup scripts) the same way they are to interactive shells.
+		command = `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; fi; ` + command
+	}
+	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), command)
 
 	return exec.CommandContext(execCtx, "ssh", sshArgs...), execCtx, cancel, nil
 }
