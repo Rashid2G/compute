@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,9 +212,19 @@ func TestControlPlane_Volumes(t *testing.T) {
 func TestControlPlane_Webhooks(t *testing.T) {
 	server := newTestServer(t)
 
+	// A local receiver verifies that deliveries actually leave the daemon.
+	var deliveries atomic.Int32
+	var signature atomic.Value
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deliveries.Add(1)
+		signature.Store(r.Header.Get("X-Compute-Signature"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer receiver.Close()
+
 	// 1. Create webhook
 	body, _ := json.Marshal(map[string]interface{}{
-		"url":         "https://example.com/webhook",
+		"url":         receiver.URL,
 		"description": "Production Alerting",
 		"events":      []string{"sandbox.started", "sandbox.stopped"},
 	})
@@ -226,7 +238,7 @@ func TestControlPlane_Webhooks(t *testing.T) {
 	}
 	var hook db.WebhookEndpoint
 	_ = json.NewDecoder(respPost.Body).Decode(&hook)
-	if hook.URL != "https://example.com/webhook" || len(hook.Events) != 2 || hook.Secret == "" {
+	if hook.URL != receiver.URL || len(hook.Events) != 2 || hook.Secret == "" {
 		t.Fatalf("unexpected hook: %+v", hook)
 	}
 
@@ -260,6 +272,12 @@ func TestControlPlane_Webhooks(t *testing.T) {
 	if testRes["status"] != "ok" || int(testRes["code"].(float64)) != 200 {
 		t.Fatalf("unexpected test res: %+v", testRes)
 	}
+	if deliveries.Load() != 1 {
+		t.Fatalf("expected 1 webhook delivery, got %d", deliveries.Load())
+	}
+	if sig, _ := signature.Load().(string); !strings.HasPrefix(sig, "sha256=") {
+		t.Fatalf("expected HMAC signature, got %q", sig)
+	}
 
 	// 4. Delete webhook
 	reqDel, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/webhooks/"+whID, nil)
@@ -276,6 +294,17 @@ func TestControlPlane_Webhooks(t *testing.T) {
 func TestControlPlane_OTel(t *testing.T) {
 	server := newTestServer(t)
 
+	var traces atomic.Int32
+	var lastPath atomic.Value
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/traces" {
+			traces.Add(1)
+			lastPath.Store(r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
 	// 1. GET initial otel config
 	resp, err := http.Get(server.URL + "/api/v1/otel")
 	if err != nil {
@@ -290,7 +319,7 @@ func TestControlPlane_OTel(t *testing.T) {
 
 	// 2. PUT update otel config
 	cfg.Enabled = true
-	cfg.Endpoint = "http://otel-collector.prod:4318"
+	cfg.Endpoint = collector.URL
 	cfg.ServiceName = "custom-compute"
 	putBody, _ := json.Marshal(cfg)
 	reqPut, _ := http.NewRequest(http.MethodPut, server.URL+"/api/v1/otel", bytes.NewReader(putBody))
@@ -301,7 +330,7 @@ func TestControlPlane_OTel(t *testing.T) {
 	defer respPut.Body.Close()
 	var updatedCfg db.OTelConfig
 	_ = json.NewDecoder(respPut.Body).Decode(&updatedCfg)
-	if !updatedCfg.Enabled || updatedCfg.Endpoint != "http://otel-collector.prod:4318" {
+	if !updatedCfg.Enabled || updatedCfg.Endpoint != collector.URL {
 		t.Fatalf("unexpected updated cfg: %+v", updatedCfg)
 	}
 
@@ -315,6 +344,12 @@ func TestControlPlane_OTel(t *testing.T) {
 	_ = json.NewDecoder(respTest.Body).Decode(&testCfg)
 	if testCfg.SpansExported <= 0 || testCfg.LastExportAt == "Never" {
 		t.Fatalf("expected spans exported, got: %+v", testCfg)
+	}
+	if traces.Load() != 1 {
+		t.Fatalf("expected one OTLP export, got %d", traces.Load())
+	}
+	if path, _ := lastPath.Load().(string); path != "/v1/traces" {
+		t.Fatalf("unexpected OTLP path %q", path)
 	}
 }
 

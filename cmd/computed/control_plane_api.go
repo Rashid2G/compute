@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -558,13 +561,17 @@ func (s *Server) handleWebhookActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "webhook not found", http.StatusNotFound)
 			return
 		}
-		hook.DeliveriesCount++
-		hook.LastDelivery = "just now"
-		_ = st.SaveWebhook(ctx, hook)
-		s.recordEvent("webhook.tested", getActor(r), hook.URL, "delivered", 25, map[string]interface{}{"code": 200})
+		code, deliverErr := s.deliverWebhook(ctx, hook, "webhook.test", map[string]string{
+			"message": "Test delivery from the Compute control plane",
+		})
+		if deliverErr != nil {
+			httpError(w, "webhook delivery failed: "+deliverErr.Error(), http.StatusBadGateway)
+			return
+		}
+		s.recordEvent("webhook.tested", getActor(r), hook.URL, "delivered", 25, map[string]interface{}{"code": code})
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "ok",
-			"code":   200,
+			"code":   code,
 		})
 		return
 	}
@@ -629,11 +636,75 @@ func (s *Server) handleOTelTest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "otel config not found", http.StatusInternalServerError)
 		return
 	}
-	cfg.SpansExported += 142
+	if !cfg.Enabled {
+		httpError(w, "telemetry export is disabled", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(cfg.Endpoint) == "" {
+		httpError(w, "OTLP endpoint is not configured", http.StatusBadRequest)
+		return
+	}
+
+	endpoint := strings.TrimRight(strings.TrimSpace(cfg.Endpoint), "/")
+	if !strings.HasSuffix(endpoint, "/v1/traces") {
+		endpoint += "/v1/traces"
+	}
+	now := time.Now().UTC()
+	spanID := hex.EncodeToString(randomBytes(8))
+	traceID := hex.EncodeToString(randomBytes(16))
+	body, _ := json.Marshal(map[string]interface{}{
+		"resourceSpans": []interface{}{map[string]interface{}{
+			"resource": map[string]interface{}{
+				"attributes": []interface{}{map[string]interface{}{
+					"key":   "service.name",
+					"value": map[string]string{"stringValue": cfg.ServiceName},
+				}},
+			},
+			"scopeSpans": []interface{}{map[string]interface{}{
+				"scope": map[string]string{"name": "compute-control-plane"},
+				"spans": []interface{}{map[string]interface{}{
+					"traceId":           traceID,
+					"spanId":            spanID,
+					"name":              "otel.export.test",
+					"kind":              1,
+					"startTimeUnixNano": strconv.FormatInt(now.Add(-time.Millisecond).UnixNano(), 10),
+					"endTimeUnixNano":   strconv.FormatInt(now.UnixNano(), 10),
+					"status":            map[string]interface{}{"code": 1},
+				}},
+			}},
+		}},
+	})
+
+	exportCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(exportCtx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		httpError(w, "invalid OTLP endpoint: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Compute-Exporter", "computed")
+	if strings.TrimSpace(cfg.AuthHeader) != "" {
+		req.Header.Set("Authorization", strings.TrimSpace(cfg.AuthHeader))
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		s.recordEvent("otel.export_failed", getActor(r), "otel_collector", "failed", 10, map[string]string{"error": err.Error()})
+		httpError(w, "OTLP export failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.recordEvent("otel.export_failed", getActor(r), "otel_collector", "failed", 10, map[string]interface{}{"code": resp.StatusCode})
+		httpError(w, "OTLP endpoint returned HTTP "+strconv.Itoa(resp.StatusCode), http.StatusBadGateway)
+		return
+	}
+
+	cfg.SpansExported++
 	cfg.LastExportAt = time.Now().UTC().Format(time.RFC3339)
 	_ = st.SaveOTelConfig(ctx, cfg)
-
-	s.recordEvent("otel.test_exported", getActor(r), "otel_collector", "delivered", 30, map[string]interface{}{"spans": 142})
+	s.recordEvent("otel.test_exported", getActor(r), "otel_collector", "delivered", 30, map[string]interface{}{"spans": 1, "endpoint": endpoint})
 	json.NewEncoder(w).Encode(cfg)
 }
 
