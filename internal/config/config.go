@@ -115,6 +115,9 @@ type ServerConfig struct {
 	ListenAddr     string `json:"listen"`
 	DBPath         string `json:"db_path"`
 	FirecrackerBin string `json:"firecracker_bin"`
+	AuthEnabled    bool   `json:"auth_enabled"`
+	AuthDBPath     string `json:"auth_db_path,omitempty"`
+	AdminSecret    string `json:"admin_secret,omitempty"`
 }
 
 // DefaultsConfig holds default microVM specifications

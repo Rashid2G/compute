@@ -21,6 +21,10 @@ export function formatTime(value?: string): string {
   }).format(date);
 }
 
+export function formatTimestamp(value?: string): string {
+  return formatDateTime(value);
+}
+
 export function relativeTime(value?: string): string {
   if (!value) return '—';
   const date = new Date(value);
@@ -46,11 +50,15 @@ export function relativeTime(value?: string): string {
   return 'just now';
 }
 
+export function formatRelativeTime(value?: string): string {
+  return relativeTime(value);
+}
+
 export function formatMemory(megabytes: number): string {
   if (!Number.isFinite(megabytes) || megabytes <= 0) return '0 MB';
   if (megabytes >= 1024) {
     const gib = megabytes / 1024;
-    return `${gib % 1 === 0 ? gib.toFixed(0) : gib.toFixed(1)} GiB`;
+    return `${gib % 1 === 0 ? gib.toFixed(0) : gib.toFixed(1)} GB`;
   }
   return `${Math.round(megabytes)} MB`;
 }

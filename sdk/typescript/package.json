@@ -1,0 +1,24 @@
+{
+  "name": "@compute/sdk",
+  "version": "0.2.0",
+  "description": "Official TypeScript & JavaScript SDK for Compute Sandboxes (E2B / Boat.dev Parity)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [
+    "compute",
+    "sandboxes",
+    "microvms",
+    "firecracker",
+    "e2b",
+    "ai",
+    "code-interpreter"
+  ],
+  "author": "Compute Team",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

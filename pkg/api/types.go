@@ -215,6 +215,7 @@ type WorkerTokenResponse struct {
 	Name      string `json:"name"`
 	Token     string `json:"token"`
 	Prefix    string `json:"prefix"`
+	PoolID    string `json:"pool_id,omitempty"`
 	ExpiresAt *int64 `json:"expires_at,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 }

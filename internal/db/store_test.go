@@ -376,3 +376,225 @@ func TestStore_FailStaleJobs(t *testing.T) {
 		t.Fatalf("running job should be failed, got %+v", j)
 	}
 }
+
+func TestStore_NewEntities(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// 1. WorkerTokens
+	tok := &WorkerToken{
+		Token:     "tok-1",
+		Name:      "test-token",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, tok); err != nil {
+		t.Fatalf("SaveWorkerToken failed: %v", err)
+	}
+	tokens, err := store.ListWorkerTokens(ctx)
+	if err != nil || len(tokens) != 1 || tokens[0].Name != "test-token" {
+		t.Fatalf("unexpected tokens: %+v (err: %v)", tokens, err)
+	}
+	if err := store.DeleteWorkerToken(ctx, "tok-1"); err != nil {
+		t.Fatalf("DeleteWorkerToken failed: %v", err)
+	}
+	tokens, _ = store.ListWorkerTokens(ctx)
+	if len(tokens) != 0 {
+		t.Fatalf("expected 0 tokens after delete")
+	}
+
+	// 2. Volumes
+	vol := &Volume{
+		ID:         "vol-1",
+		Name:       "data-vol",
+		Pool:       "default",
+		SizeGB:     50,
+		UsedGB:     12.5,
+		Status:     "available",
+		Filesystem: "ext4",
+		IOPS:       3000,
+		Throughput: "250 MB/s",
+		Snapshots:  1,
+	}
+	if err := store.SaveVolume(ctx, vol); err != nil {
+		t.Fatalf("SaveVolume failed: %v", err)
+	}
+	vGot, err := store.GetVolume(ctx, "vol-1")
+	if err != nil || vGot == nil || vGot.Name != "data-vol" || vGot.SizeGB != 50 {
+		t.Fatalf("unexpected volume: %+v", vGot)
+	}
+	vols, _ := store.ListVolumes(ctx)
+	if len(vols) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(vols))
+	}
+	if err := store.DeleteVolume(ctx, "vol-1"); err != nil {
+		t.Fatalf("DeleteVolume failed: %v", err)
+	}
+
+	// 3. Webhooks
+	wh := &WebhookEndpoint{
+		ID:          "whk-1",
+		URL:         "https://example.com/hook",
+		Description: "test webhook",
+		Secret:      "whsec_test",
+		Events:      []string{"sandbox.started", "sandbox.stopped"},
+		Active:      true,
+		SuccessRate: "100%",
+	}
+	if err := store.SaveWebhook(ctx, wh); err != nil {
+		t.Fatalf("SaveWebhook failed: %v", err)
+	}
+	whGot, err := store.GetWebhook(ctx, "whk-1")
+	if err != nil || whGot == nil || len(whGot.Events) != 2 || !whGot.Active {
+		t.Fatalf("unexpected webhook: %+v", whGot)
+	}
+	whs, _ := store.ListWebhooks(ctx)
+	if len(whs) != 1 {
+		t.Fatalf("expected 1 webhook, got %d", len(whs))
+	}
+	if err := store.DeleteWebhook(ctx, "whk-1"); err != nil {
+		t.Fatalf("DeleteWebhook failed: %v", err)
+	}
+
+	// 4. OTelConfig
+	otelCfg, err := store.GetOTelConfig(ctx)
+	if err != nil || otelCfg == nil || otelCfg.ServiceName != "on-demand-vms" {
+		t.Fatalf("unexpected default otel cfg: %+v", otelCfg)
+	}
+	otelCfg.Enabled = true
+	otelCfg.Endpoint = "http://otel.collector:4318"
+	otelCfg.SpansExported = 100
+	if err := store.SaveOTelConfig(ctx, otelCfg); err != nil {
+		t.Fatalf("SaveOTelConfig failed: %v", err)
+	}
+	otelUpdated, _ := store.GetOTelConfig(ctx)
+	if !otelUpdated.Enabled || otelUpdated.Endpoint != "http://otel.collector:4318" || otelUpdated.SpansExported != 100 {
+		t.Fatalf("unexpected updated otel config: %+v", otelUpdated)
+	}
+
+	// 5. AuditEvents
+	evt := &AuditEvent{
+		ID:         "evt-1",
+		Event:      "sandbox.started",
+		Actor:      "admin",
+		Target:     "vm-1",
+		Status:     "delivered",
+		DurationMs: 45,
+		Payload:    `{"test":true}`,
+	}
+	if err := store.SaveAuditEvent(ctx, evt); err != nil {
+		t.Fatalf("SaveAuditEvent failed: %v", err)
+	}
+	evts, err := store.ListAuditEvents(ctx, 10)
+	if err != nil || len(evts) != 1 || evts[0].Event != "sandbox.started" {
+		t.Fatalf("unexpected audit events: %+v", evts)
+	}
+
+	// 6. AccessAPIKeys
+	apiKey := &AccessAPIKey{
+		ID:        "key-1",
+		Name:      "test-api-key",
+		Prefix:    "bsh_live_1234",
+		Token:     "bsh_live_1234567890",
+		Scope:     "admin",
+		CreatedBy: "admin",
+	}
+	if err := store.SaveAccessAPIKey(ctx, apiKey); err != nil {
+		t.Fatalf("SaveAccessAPIKey failed: %v", err)
+	}
+	keyGot, err := store.GetAccessAPIKey(ctx, "key-1")
+	if err != nil || keyGot == nil || keyGot.Name != "test-api-key" {
+		t.Fatalf("unexpected api key: %+v", keyGot)
+	}
+	keys, _ := store.ListAccessAPIKeys(ctx)
+	if len(keys) != 1 {
+		t.Fatalf("expected 1 api key, got %d", len(keys))
+	}
+	if err := store.DeleteAccessAPIKey(ctx, "key-1"); err != nil {
+		t.Fatalf("DeleteAccessAPIKey failed: %v", err)
+	}
+
+	// 7. AgentProfiles
+	prof := &AgentProfile{
+		ID:          "prof-1",
+		Name:        "Claude Proxy",
+		Provider:    "Anthropic",
+		UpstreamURL: "https://api.anthropic.com/v1",
+		Status:      "active",
+	}
+	if err := store.SaveAgentProfile(ctx, prof); err != nil {
+		t.Fatalf("SaveAgentProfile failed: %v", err)
+	}
+	pGot, err := store.GetAgentProfile(ctx, "prof-1")
+	if err != nil || pGot == nil || pGot.Name != "Claude Proxy" {
+		t.Fatalf("unexpected agent profile: %+v", pGot)
+	}
+	profs, _ := store.ListAgentProfiles(ctx)
+	if len(profs) != 1 {
+		t.Fatalf("expected 1 profile, got %d", len(profs))
+	}
+	if err := store.DeleteAgentProfile(ctx, "prof-1"); err != nil {
+		t.Fatalf("DeleteAgentProfile failed: %v", err)
+	}
+
+	// 8. Environments
+	env := &EnvironmentProfile{
+		Name:               "base",
+		IsDefault:          true,
+		SafeForThirdParty:  false,
+		GitHubReposEnabled: true,
+		GitHubRepos:        []string{"owner/repo1"},
+		SecretsEnabled:     true,
+		Secrets:            "KEY=VALUE",
+		BoatCredsEnabled:   true,
+		AgentCredsEnabled:  true,
+		CredentialProfile:  "Owner's default",
+		Version:            1,
+	}
+	if err := store.SaveEnvironment(ctx, env); err != nil {
+		t.Fatalf("SaveEnvironment failed: %v", err)
+	}
+	envGot, err := store.GetEnvironment(ctx, "base")
+	if err != nil || envGot == nil || !envGot.IsDefault || len(envGot.GitHubRepos) != 1 {
+		t.Fatalf("unexpected environment: %+v", envGot)
+	}
+	envs, _ := store.ListEnvironments(ctx)
+	if len(envs) != 1 {
+		t.Fatalf("expected 1 environment, got %d", len(envs))
+	}
+	if err := store.DeleteEnvironment(ctx, "base"); err != nil {
+		t.Fatalf("DeleteEnvironment failed: %v", err)
+	}
+
+	// 9. PortForwards
+	pf := &PortForward{
+		ID:        "pf-1",
+		HostPort:  8080,
+		VMID:      "vm-1",
+		VMName:    "my-vm",
+		GuestPort: 80,
+		Protocol:  "tcp",
+		Subdomain: "myvm",
+		PublicURL: "https://myvm.compute.dev",
+		Status:    "active",
+	}
+	if err := store.SavePortForward(ctx, pf); err != nil {
+		t.Fatalf("SavePortForward failed: %v", err)
+	}
+	pfGot, err := store.GetPortForward(ctx, "pf-1")
+	if err != nil || pfGot == nil || pfGot.HostPort != 8080 {
+		t.Fatalf("unexpected port forward: %+v", pfGot)
+	}
+	pfs, _ := store.ListPortForwards(ctx)
+	if len(pfs) != 1 {
+		t.Fatalf("expected 1 port forward, got %d", len(pfs))
+	}
+	if err := store.DeletePortForward(ctx, "pf-1"); err != nil {
+		t.Fatalf("DeletePortForward failed: %v", err)
+	}
+}

@@ -1,49 +1,56 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowRight, TriangleAlert } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 
+import { CommandPalette } from '@/components/command-palette';
 import { CreateVMDialog } from '@/components/create-vm-dialog';
 import { DeleteVMDialog } from '@/components/delete-vm-dialog';
 import { InspectVMDialog } from '@/components/inspect-vm-dialog';
-import { SSHKeysDialog } from '@/components/ssh-keys-dialog';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Topbar } from '@/components/layout/topbar';
-import { Button } from '@/components/ui/button';
+import { SSHKeysDialog } from '@/components/ssh-keys-dialog';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useCluster } from '@/hooks/use-cluster';
 import { api, errorMessage } from '@/lib/api';
+import { PAGES, resolvePageId, type PageId } from '@/lib/navigation';
 import type { CreateVMRequest, VM } from '@/lib/types';
-import { isPageId, PAGES, type PageId } from '@/lib/navigation';
+import { AccessPage } from '@/pages/access';
 import { ApiPage } from '@/pages/api';
 import { ConsolePage } from '@/pages/console';
 import { DashboardPage } from '@/pages/dashboard';
+import { EventsPage } from '@/pages/events';
 import { ImagesTemplatesPage } from '@/pages/images-templates';
 import { InstancesPage } from '@/pages/instances';
+import { JobsPage } from '@/pages/jobs';
 import { NetworkPage } from '@/pages/network';
 import { SettingsPage } from '@/pages/settings';
 import { SSHTerminalWindow } from '@/pages/ssh-terminal-window';
+import { StoragePage } from '@/pages/storage';
+import { WorkersPage } from '@/pages/workers';
 
 type Theme = 'light' | 'dark';
 
 function initialTheme(): Theme {
   const stored = window.localStorage.getItem('compute-theme');
   if (stored === 'light' || stored === 'dark') return stored;
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return 'dark';
 }
 
 function parseRoute(): { page: PageId | 'terminal'; vmId: string | null } {
-  const hash = window.location.hash.replace(/^#\/?/, '');
-  if (hash.startsWith('terminal/')) {
-    const rawId = hash.slice('terminal/'.length).split('?')[0];
+  const rawHash = window.location.hash.replace(/^#\/?/, '');
+  if (rawHash.startsWith('terminal/')) {
+    const rawId = rawHash.slice('terminal/'.length).split('?')[0];
     return { page: 'terminal', vmId: decodeURIComponent(rawId) };
   }
-  return { page: isPageId(hash) ? hash : 'overview', vmId: null };
+  if (!rawHash) {
+    return { page: 'instances', vmId: null };
+  }
+  return { page: resolvePageId(rawHash), vmId: null };
 }
 
 function pageFromHash(): PageId {
   const r = parseRoute();
-  return r.page === 'terminal' ? 'overview' : r.page;
+  return r.page === 'terminal' ? 'instances' : r.page;
 }
 
 export default function App() {
@@ -54,6 +61,7 @@ export default function App() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
   const [inspectTarget, setInspectTarget] = useState<VM | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VM | null>(null);
   const [consoleVMID, setConsoleVMID] = useState<string | null>(null);
@@ -66,7 +74,7 @@ export default function App() {
     window.localStorage.setItem('compute-theme', theme);
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'dark' ? '#111113' : '#faf9f6');
+      ?.setAttribute('content', theme === 'dark' ? '#060606' : '#fefefe');
   }, [theme]);
 
   useEffect(() => {
@@ -85,13 +93,23 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandOpen((prev) => !prev);
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   const navigate = useCallback((next: PageId) => {
     setPage(next);
     setMobileNavOpen(false);
     window.location.hash = `#/${next}`;
   }, []);
 
-  // Keep the console selection valid as instances are created or deleted.
   useEffect(() => {
     if (cluster.vms.length === 0) {
       setConsoleVMID(null);
@@ -148,7 +166,7 @@ export default function App() {
       await api.snapshotVM(vm.id);
       toast.success(`${vm.name} snapshotted`, {
         id: toastID,
-        description: 'Guest memory was written to disk.',
+        description: 'Guest memory state was saved to disk.',
       });
       await cluster.refresh(true);
     } catch (error) {
@@ -212,15 +230,15 @@ export default function App() {
     const toastID = toast.loading(`Deleting ${id}…`);
     try {
       await api.deleteVM(id);
-      toast.success('Instance deleted', {
+      toast.success('Sandbox deleted', {
         id: toastID,
-        description: 'The process, network lease and overlay disk were removed.',
+        description: 'Process, network lease, and overlay disk removed.',
       });
       if (consoleVMID === id) setConsoleVMID(null);
       if (inspectTarget?.id === id) setInspectTarget(null);
       await cluster.refresh(true);
     } catch (error) {
-      toast.error('Could not delete instance', {
+      toast.error('Could not delete sandbox', {
         id: toastID,
         description: errorMessage(error),
       });
@@ -230,6 +248,19 @@ export default function App() {
 
   const openNew = useCallback(() => setCreateOpen(true), []);
 
+  const quickCreate = useCallback(() => {
+    const name = `sbx-default-${Math.random().toString(36).slice(2, 6)}`;
+    void createVM(
+      {
+        name,
+        vcpus: cluster.config?.defaults?.vcpus || 2,
+        memory_mb: cluster.config?.defaults?.memory_mb || 2048,
+        public_ip_enabled: true,
+      },
+      true,
+    );
+  }, [cluster.config]);
+
   const pageContent = (() => {
     switch (page) {
       case 'overview':
@@ -237,12 +268,15 @@ export default function App() {
           <DashboardPage
             stats={cluster.stats}
             vms={cluster.vms}
+            workers={cluster.workers}
+            events={cluster.events}
             queue={cluster.queue}
             networkConfig={cluster.networkConfig}
             isLoading={cluster.isLoading}
             onNew={openNew}
             onViewInstances={() => navigate('instances')}
             onViewNetwork={() => navigate('network')}
+            onNavigate={navigate}
             onOpenConsole={openConsole}
             onStop={stopVM}
           />
@@ -251,8 +285,10 @@ export default function App() {
         return (
           <InstancesPage
             vms={cluster.vms}
+            events={cluster.events}
             isLoading={cluster.isLoading}
             onNew={openNew}
+            onQuickCreate={quickCreate}
             onRun={startVM}
             onStop={stopVM}
             onSnapshot={snapshotVM}
@@ -262,11 +298,41 @@ export default function App() {
             onConsole={openConsole}
           />
         );
+      case 'workers':
+        return (
+          <WorkersPage
+            workers={cluster.workers}
+            stats={cluster.stats}
+            vms={cluster.vms}
+            onRefresh={() => void cluster.refresh(true)}
+          />
+        );
+      case 'jobs':
+        return (
+          <JobsPage
+            jobs={cluster.jobs}
+            queue={cluster.queue}
+            onRefresh={() => void cluster.refresh(true)}
+          />
+        );
       case 'images':
         return (
           <ImagesTemplatesPage
             vms={cluster.vms}
+            mode="snapshots"
             onLaunchVM={openNew}
+            onNavigate={navigate}
+            onRefreshCluster={() => void cluster.refresh(true)}
+          />
+        );
+      case 'environment':
+        return (
+          <ImagesTemplatesPage
+            vms={cluster.vms}
+            mode="environment"
+            onLaunchVM={openNew}
+            onNavigate={navigate}
+            onRefreshCluster={() => void cluster.refresh(true)}
           />
         );
       case 'console':
@@ -286,6 +352,24 @@ export default function App() {
             onRefresh={() => void cluster.refresh()}
           />
         );
+      case 'storage':
+        return (
+          <StoragePage
+            volumes={cluster.volumes}
+            vms={cluster.vms}
+            config={cluster.config}
+            onRefresh={() => void cluster.refresh(true)}
+          />
+        );
+      case 'access':
+        return <AccessPage />;
+      case 'events':
+        return (
+          <EventsPage
+            events={cluster.events}
+            onRefresh={() => void cluster.refresh(true)}
+          />
+        );
       case 'api':
         return <ApiPage config={cluster.config} />;
       case 'settings':
@@ -297,6 +381,9 @@ export default function App() {
             latency={cluster.latency}
             wsConnected={cluster.wsConnected}
             config={cluster.config}
+            stats={cluster.stats}
+            vms={cluster.vms}
+            volumes={cluster.volumes}
           />
         );
       default:
@@ -320,62 +407,57 @@ export default function App() {
 
   return (
     <TooltipProvider delayDuration={250}>
-      <div className="min-h-screen bg-background">
-        <aside className="fixed inset-y-0 left-0 z-40 hidden w-60 border-r lg:block">
+      <div className="min-h-screen bg-background text-foreground flex flex-col">
+        <aside className="fixed inset-y-0 left-0 z-40 hidden w-56 border-r border-border lg:block">
           <Sidebar
             page={page}
             onNavigate={navigate}
             stats={cluster.stats}
+            workers={cluster.workers}
             daemonOnline={cluster.daemonOnline}
             theme={theme}
             onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+            onSetTheme={setTheme}
+            onOpenCommandPalette={() => setCommandOpen(true)}
           />
         </aside>
 
         <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
-          <SheetContent side="left" className="w-64 p-0">
+          <SheetContent side="left" className="w-56 p-0 border-r border-border">
             <Sidebar
               page={page}
               onNavigate={navigate}
               stats={cluster.stats}
+              workers={cluster.workers}
               daemonOnline={cluster.daemonOnline}
               theme={theme}
               onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+              onSetTheme={setTheme}
+              onOpenCommandPalette={() => setCommandOpen(true)}
             />
           </SheetContent>
         </Sheet>
 
-        <div className="flex flex-col lg:pl-60">
-          <Topbar
-            page={currentPage}
-            onOpenMenu={() => setMobileNavOpen(true)}
-            onNew={openNew}
-            onOpenKeys={() => setKeysOpen(true)}
-            daemonOnline={cluster.daemonOnline}
-            latency={cluster.latency}
-            wsConnected={cluster.wsConnected}
-          />
+        <div className="flex flex-1 flex-col lg:pl-56">
+          <div className="lg:hidden">
+            <Topbar
+              page={currentPage}
+              onOpenMenu={() => setMobileNavOpen(true)}
+              onNew={openNew}
+              onOpenKeys={() => setKeysOpen(true)}
+              onNavigate={navigate}
+              onOpenCommandPalette={() => setCommandOpen(true)}
+              daemonOnline={cluster.daemonOnline}
+              latency={cluster.latency}
+              wsConnected={cluster.wsConnected}
+            />
+          </div>
 
-          {!cluster.daemonOnline ? (
-            <div className="flex items-center justify-between border-b bg-destructive/10 px-6 py-2.5 text-xs text-destructive">
-              <div className="flex items-center gap-2">
-                <TriangleAlert className="h-4 w-4" />
-                <span>
-                  The Compute daemon could not be reached. Ensure <code className="font-mono">computed</code> is running.
-                </span>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-destructive/30 hover:bg-destructive/15"
-                onClick={() => void cluster.refresh()}
-              >
-                Retry
-              </Button>
+          <main className="flex-1 px-6 py-7 sm:px-10 sm:py-8">
+            <div className="mx-auto w-full max-w-[1400px]">
+              {pageContent}
             </div>
-          ) : null}
-
-          <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-16">{pageContent}</main>
+          </main>
         </div>
 
         <CreateVMDialog
@@ -383,6 +465,16 @@ export default function App() {
           onOpenChange={setCreateOpen}
           config={cluster.config}
           onCreate={createVM}
+        />
+
+        <CommandPalette
+          open={commandOpen}
+          onOpenChange={setCommandOpen}
+          onNavigate={navigate}
+          onNewSandbox={openNew}
+          onOpenKeys={() => setKeysOpen(true)}
+          onRefresh={() => void cluster.refresh()}
+          vms={cluster.vms}
         />
 
         <SSHKeysDialog

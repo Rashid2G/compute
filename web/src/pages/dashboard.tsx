@@ -1,389 +1,421 @@
 import {
   Activity,
-  ArrowRight,
-  ExternalLink,
+  ArrowUpRight,
+  ChevronDown,
   Cpu,
-  HardDrive,
-  Network as NetworkIcon,
-  Plus,
+  Layers,
+  Play,
   Server,
-  Square,
-  Terminal,
+  Zap,
 } from 'lucide-react';
 
-import { EmptyState } from '@/components/empty-state';
-import { StatCard } from '@/components/stat-card';
-import { openSSHTerminalWindow } from '@/lib/terminal';
-import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip';
-import { clampPercent, formatMemory, relativeTime } from '@/lib/format';
+import { formatMemory, formatRelativeTime, formatTimestamp } from '@/lib/format';
+import type { PageId } from '@/lib/navigation';
 import type {
+  AuditEventRecord,
   NetworkConfig,
   QueueResult,
   StatsResult,
   VM,
+  WorkerNodeRecord,
 } from '@/lib/types';
 
-function CapacityRow({
-  label,
-  value,
-  max,
-  used,
-}: {
-  label: string;
-  value: string;
-  max: string;
-  used: number;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <div className="flex items-baseline justify-between gap-3 text-xs">
-        <span className="text-muted-foreground">{label}</span>
-        <span className="tabular font-mono text-[11px] text-muted-foreground">
-          <span className="text-foreground">{value}</span> / {max}
-        </span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-secondary">
-        <div
-          className="h-full rounded-full bg-primary transition-[width] duration-500"
-          style={{ width: `${used}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-export function DashboardPage({
-  stats,
-  vms,
-  queue,
-  networkConfig,
-  isLoading,
-  onNew,
-  onViewInstances,
-  onViewNetwork,
-  onOpenConsole,
-  onStop,
-}: {
+interface DashboardPageProps {
   stats: StatsResult | null;
   vms: VM[];
+  workers?: WorkerNodeRecord[];
+  events?: AuditEventRecord[];
   queue: QueueResult | null;
   networkConfig: NetworkConfig | null;
   isLoading: boolean;
   onNew: () => void;
   onViewInstances: () => void;
   onViewNetwork: () => void;
+  onNavigate?: (page: PageId) => void;
   onOpenConsole: (vm: VM) => void;
   onStop: (vm: VM) => void;
-}) {
-  const runningVMs = vms.filter((vm) => vm.status === 'running');
-  const limits = stats?.resource_limits;
+}
 
-  const total = stats?.total_vms ?? vms.length;
-  const running = stats?.running_vms ?? runningVMs.length;
-  const queued = stats?.queued_vms ?? queue?.count ?? 0;
-  const stopped = stats?.stopped_vms ?? 0;
-  const snapshotted = stats?.snapshotted_vms ?? 0;
-  const runningVcpus = stats?.running_vcpus ?? 0;
-  const runningMemory = stats?.running_memory_mb ?? 0;
-  const allocatedIPs = stats?.allocated_ips ?? 0;
+export function DashboardPage({
+  stats,
+  vms,
+  workers = [],
+  events = [],
+  queue,
+  networkConfig,
+  onNew,
+  onViewInstances,
+  onViewNetwork,
+  onNavigate,
+}: DashboardPageProps) {
+  const runningVMs =
+    stats?.running_vms ?? vms.filter((v) => v.status === 'running').length;
+  const totalVMs = stats?.total_vms ?? vms.length;
+  const snapshottedVMs =
+    stats?.snapshotted_vms ?? vms.filter((v) => v.status === 'paused').length;
+  const queuedCount = queue?.count ?? stats?.queued_vms ?? 0;
 
-  const maxVMs = limits?.max_running_vms ?? 0;
-  const maxVcpus = limits?.max_total_vcpus ?? 0;
-  const maxMemory = limits?.max_total_memory_mb ?? 0;
+  const usedVcpus = stats?.running_vcpus ?? 0;
+  const maxVcpus =
+    stats?.resource_limits?.max_total_vcpus ||
+    workers.reduce((acc, w) => acc + (w.total_vcpus || 0), 0) ||
+    16;
 
-  const vmsPercent = clampPercent(running, maxVMs);
-  const vcpuPercent = clampPercent(runningVcpus, maxVcpus);
-  const memoryPercent = clampPercent(runningMemory, maxMemory);
+  const usedRamMb = stats?.running_memory_mb ?? 0;
+  const maxRamMb =
+    stats?.resource_limits?.max_total_memory_mb ||
+    workers.reduce((acc, w) => acc + (w.total_mem_mb || 0), 0) ||
+    32768;
 
   return (
-    <div className="space-y-6 animate-fade-in">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label="Instances"
-          value={isLoading && !stats ? '—' : total}
-          icon={Server}
-          detail={
-            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span>{running} running</span>
-              <span className="text-border">·</span>
-              <span>{stopped} stopped</span>
-              {queued > 0 ? (
-                <>
-                  <span className="text-border">·</span>
-                  <span className="text-warning">{queued} queued</span>
-                </>
-              ) : null}
-            </span>
-          }
-          progress={maxVMs > 0 ? vmsPercent : undefined}
-          footer={
-            maxVMs > 0 ? `${vmsPercent}% of ${maxVMs} running slots` : 'No running limit configured'
-          }
-        />
+    <div className="space-y-6">
+      {/* Header matching boat.dev/dashboard */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+            Overview
+          </h1>
+          <p className="text-[12px] text-muted-foreground">
+            Distributed Firecracker control plane, KVM worker fleet capacity,
+            and live sandbox telemetry.
+          </p>
+        </div>
 
-        <StatCard
-          label="vCPU allocated"
-          value={isLoading && !stats ? '—' : runningVcpus}
-          suffix={maxVcpus > 0 ? `/ ${maxVcpus}` : 'vCPU'}
-          icon={Cpu}
-          detail="Across running instances"
-          progress={maxVcpus > 0 ? vcpuPercent : undefined}
-          footer={maxVcpus > 0 ? `${vcpuPercent}% of host vCPU budget` : 'Uncapped'}
-        />
-
-        <StatCard
-          label="Memory allocated"
-          value={isLoading && !stats ? '—' : formatMemory(runningMemory)}
-          suffix={maxMemory > 0 ? `/ ${formatMemory(maxMemory)}` : undefined}
-          icon={HardDrive}
-          detail="Guest RAM currently reserved"
-          progress={maxMemory > 0 ? memoryPercent : undefined}
-          footer={maxMemory > 0 ? `${memoryPercent}% of host memory budget` : 'Uncapped'}
-        />
-
-        <StatCard
-          label="IP leases"
-          value={isLoading && !stats ? '—' : allocatedIPs}
-          icon={NetworkIcon}
-          detail={networkConfig?.subnet || '—'}
-          footer={
-            snapshotted > 0
-              ? `${snapshotted} instance${snapshotted === 1 ? '' : 's'} snapshotted`
-              : 'No memory snapshots'
-          }
-        />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onViewInstances}
+            className="h-8 border border-border bg-background px-3 text-[12px] text-foreground hover:bg-muted transition-colors"
+          >
+            View All Sandboxes →
+          </button>
+          <div className="inline-flex items-stretch">
+            <button
+              type="button"
+              onClick={onNew}
+              className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-[12px] font-medium text-white transition-colors"
+            >
+              <Play className="h-3 w-3 fill-current" />
+              <span>New</span>
+            </button>
+            <button
+              type="button"
+              onClick={onNew}
+              aria-label="Advanced create"
+              className="flex h-8 w-7 items-center justify-center border-l border-white/20 bg-[#263fa9] hover:bg-[#1e3180] text-white"
+            >
+              <ChevronDown className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="grid items-start gap-6 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div className="flex items-center gap-2">
-              <CardTitle>Running instances</CardTitle>
-              <span className="tabular rounded-md border bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-                {runningVMs.length}
+      {/* Top 4-Column 1px-Bordered Metric Strip */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 border border-border bg-background divide-y sm:divide-y-0 sm:divide-x divide-border">
+        <div className="p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Active Sandboxes</span>
+            <Server className="h-3.5 w-3.5 text-[#263fa9]" />
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="font-display text-2xl font-medium text-foreground tabular">
+              {runningVMs}{' '}
+              <span className="text-sm font-normal text-muted-foreground">
+                / {totalVMs} total
               </span>
-            </div>
-            <Button variant="ghost" size="sm" onClick={onViewInstances}>
-              View all
-              <ArrowRight />
-            </Button>
-          </CardHeader>
-          <CardContent className="p-0">
-            {runningVMs.length === 0 ? (
-              <EmptyState
-                icon={Activity}
-                title="No instances are running"
-                description="Start an existing instance or provision a new microVM to see live capacity here."
-                action={
-                  <div className="flex items-center gap-2">
-                    <Button size="sm" onClick={onNew}>
-                      <Plus />
-                      New instance
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={onViewInstances}>
-                      Browse instances
-                    </Button>
-                  </div>
-                }
-              />
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Instance</TableHead>
-                    <TableHead>Resources</TableHead>
-                    <TableHead>Address</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead className="w-24 text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {runningVMs.slice(0, 6).map((vm) => (
-                    <TableRow key={vm.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-2.5">
-                          <span className="flex h-7 w-7 items-center justify-center rounded-md border bg-secondary text-muted-foreground">
-                            <Server className="h-3.5 w-3.5" />
-                          </span>
-                          <div className="min-w-0">
-                            <div className="truncate text-[13px] font-medium">{vm.name}</div>
-                            <div className="truncate font-mono text-[11px] text-muted-foreground">
-                              {vm.id}
-                            </div>
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className="tabular whitespace-nowrap font-mono text-xs text-muted-foreground">
-                        {vm.vcpus} vCPU · {formatMemory(vm.memory_mb)}
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">
-                        {vm.ip_address || <span className="text-muted-foreground">—</span>}
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                        {relativeTime(vm.created_at)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center justify-end gap-1">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                onClick={() => openSSHTerminalWindow(vm.id, vm.name)}
-                                disabled={vm.status !== 'running'}
-                                aria-label={`Open SSH terminal for ${vm.name}`}
-                                className="text-primary hover:text-primary"
-                              >
-                                <ExternalLink />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Open SSH Terminal (New Window)</TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                onClick={() => onOpenConsole(vm)}
-                                aria-label={`Open console for ${vm.name}`}
-                              >
-                                <Terminal />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Open console</TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="ghost"
-                                size="icon-sm"
-                                onClick={() => onStop(vm)}
-                                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                                aria-label={`Stop ${vm.name}`}
-                              >
-                                <Square />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Stop instance</TooltipContent>
-                          </Tooltip>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-
-        <div className="space-y-6">
-          <Card>
-            <CardHeader className="pb-4">
-              <CardTitle>Capacity</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <CapacityRow
-                label="Running slots"
-                value={String(running)}
-                max={maxVMs > 0 ? String(maxVMs) : '∞'}
-                used={maxVMs > 0 ? vmsPercent : 0}
-              />
-              <CapacityRow
-                label="vCPU"
-                value={String(runningVcpus)}
-                max={maxVcpus > 0 ? String(maxVcpus) : '∞'}
-                used={maxVcpus > 0 ? vcpuPercent : 0}
-              />
-              <CapacityRow
-                label="Memory"
-                value={formatMemory(runningMemory)}
-                max={maxMemory > 0 ? formatMemory(maxMemory) : '∞'}
-                used={maxMemory > 0 ? memoryPercent : 0}
-              />
-              {maxVMs === 0 && maxVcpus === 0 && maxMemory === 0 ? (
-                <p className="pt-1 text-xs text-muted-foreground">
-                  No resource limits are configured on this daemon.
-                </p>
-              ) : null}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="flex-row items-center justify-between space-y-0 pb-4">
-              <CardTitle>Queue</CardTitle>
-              <span className="tabular rounded-md border bg-secondary px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
-                {queued}
-              </span>
-            </CardHeader>
-            <CardContent>
-              {queue && queue.queued_vms.length > 0 ? (
-                <div className="space-y-3">
-                  {queue.queued_vms.slice(0, 4).map((item) => (
-                    <div key={item.vm_id} className="flex items-start gap-2.5">
-                      <span className="tabular mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border bg-secondary font-mono text-[10px] text-muted-foreground">
-                        {item.position}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="truncate text-xs font-medium">{item.vm_name}</div>
-                        <div className="text-[11px] text-muted-foreground">{item.reason}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  No instances waiting. New workloads start immediately while capacity allows.
-                </p>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader className="flex-row items-center justify-between space-y-0 pb-4">
-              <CardTitle>Node network</CardTitle>
-              <Button variant="ghost" size="sm" onClick={onViewNetwork}>
-                Details
-              </Button>
-            </CardHeader>
-            <CardContent className="space-y-3 text-xs">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Mode</span>
-                <span className="font-mono uppercase">{networkConfig?.mode || '—'}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Bridge</span>
-                <span className="font-mono">{networkConfig?.bridge_name || '—'}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Gateway</span>
-                <span className="font-mono">{networkConfig?.bridge_ip || '—'}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Subnet</span>
-                <span className="font-mono">{networkConfig?.subnet || '—'}</span>
-              </div>
-            </CardContent>
-          </Card>
+            </span>
+            <span className="font-mono text-[11px] text-success">
+              {snapshottedVMs} warm snaps
+            </span>
+          </div>
+          <div className="h-1.5 w-full bg-muted overflow-hidden">
+            <div
+              className="h-full bg-[#263fa9]"
+              style={{
+                width: `${totalVMs > 0 ? Math.min(100, (runningVMs / totalVMs) * 100) : 0}%`,
+              }}
+            />
+          </div>
         </div>
+
+        <div className="p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Cluster vCPU Allocation</span>
+            <Cpu className="h-3.5 w-3.5 text-[#263fa9]" />
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="font-display text-2xl font-medium text-foreground tabular">
+              {usedVcpus}{' '}
+              <span className="text-sm font-normal text-muted-foreground">
+                / {maxVcpus} vCPU
+              </span>
+            </span>
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {Math.round((usedVcpus / Math.max(1, maxVcpus)) * 100)}% committed
+            </span>
+          </div>
+          <div className="h-1.5 w-full bg-muted overflow-hidden">
+            <div
+              className="h-full bg-[#263fa9]"
+              style={{
+                width: `${Math.min(100, (usedVcpus / Math.max(1, maxVcpus)) * 100)}%`,
+              }}
+            />
+          </div>
+        </div>
+
+        <div className="p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Cluster Memory (KVM RSS)</span>
+            <Layers className="h-3.5 w-3.5 text-[#263fa9]" />
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="font-display text-2xl font-medium text-foreground tabular">
+              {formatMemory(usedRamMb)}{' '}
+              <span className="text-sm font-normal text-muted-foreground">
+                / {formatMemory(maxRamMb)}
+              </span>
+            </span>
+            <span className="font-mono text-[11px] text-muted-foreground">
+              {stats?.allocated_ips ?? vms.length} IPs leased
+            </span>
+          </div>
+          <div className="h-1.5 w-full bg-muted overflow-hidden">
+            <div
+              className="h-full bg-[#263fa9]"
+              style={{
+                width: `${Math.min(100, (usedRamMb / Math.max(1, maxRamMb)) * 100)}%`,
+              }}
+            />
+          </div>
+        </div>
+
+        <div className="p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>Admission Queue &amp; Bridge</span>
+            <Zap className="h-3.5 w-3.5 text-[#263fa9]" />
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="font-display text-2xl font-medium text-foreground tabular">
+              {queuedCount}{' '}
+              <span className="text-sm font-normal text-muted-foreground">
+                queued
+              </span>
+            </span>
+            <span className="font-mono text-[11px] text-success">
+              {networkConfig?.mode || 'nat'} mode
+            </span>
+          </div>
+          <div className="font-mono text-[11px] text-muted-foreground truncate">
+            Bridge {networkConfig?.bridge_name || 'fcbr0'} ·{' '}
+            {networkConfig?.subnet || networkConfig?.subnet_cidr || '172.16.0.0/24'}
+          </div>
+        </div>
+      </div>
+
+      {/* Middle 2-Column Section: Live Worker Fleet + Platform Shortcuts */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 border border-border bg-background">
+          <div className="flex items-center justify-between border-b border-border px-4 py-3">
+            <div>
+              <h2 className="text-[13px] font-medium text-foreground">
+                Registered KVM Worker Nodes
+              </h2>
+              <p className="text-[11.5px] text-muted-foreground">
+                Live host hypervisors connected to the compute scheduler
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onNavigate?.('workers')}
+              className="font-mono text-xs text-[#495eb7] hover:underline"
+            >
+              Manage Workers ({workers.length}) →
+            </button>
+          </div>
+
+          {workers.length === 0 ? (
+            <div className="p-8 text-center text-[12px] text-muted-foreground">
+              No worker nodes enrolled yet.
+            </div>
+          ) : (
+            <div className="divide-y divide-border text-xs">
+              {workers.map((node) => (
+                <div
+                  key={node.id}
+                  className="flex flex-wrap items-center justify-between gap-4 px-4 py-3 hover:bg-muted/30"
+                >
+                  <div className="space-y-0.5 min-w-[200px]">
+                    <div className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 bg-success" />
+                      <span className="font-mono font-medium text-foreground">
+                        {node.name}
+                      </span>
+                      <span className="border border-border bg-muted/40 px-1.5 py-0.2 font-mono text-[10px] text-muted-foreground">
+                        pool:{node.pool_id}
+                      </span>
+                    </div>
+                    <div className="font-mono text-[11px] text-muted-foreground">
+                      {node.underlay_ip || '127.0.0.1'} · {node.arch || 'amd64'}{' '}
+                      · Heartbeat{' '}
+                      {node.last_heartbeat
+                        ? formatRelativeTime(node.last_heartbeat)
+                        : 'live'}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-6 font-mono text-[11.5px]">
+                    <div>
+                      <div className="text-muted-foreground text-[10px]">
+                        vCPU
+                      </div>
+                      <div>{node.total_vcpus} vCPU</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground text-[10px]">
+                        RAM
+                      </div>
+                      <div>{formatMemory(node.total_mem_mb)}</div>
+                    </div>
+                    <div>
+                      <div className="text-muted-foreground text-[10px]">
+                        Status
+                      </div>
+                      <div className="uppercase text-success">{node.status}</div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Right 1 col: Quick Platform Workflows */}
+        <div className="border border-border bg-background flex flex-col justify-between">
+          <div>
+            <div className="border-b border-border px-4 py-3">
+              <h2 className="text-[13px] font-medium text-foreground">
+                Quick Platform Workflows
+              </h2>
+              <p className="text-[11.5px] text-muted-foreground">
+                Direct navigation across the compute control plane
+              </p>
+            </div>
+
+            <div className="divide-y divide-border text-xs">
+              <button
+                type="button"
+                onClick={onViewInstances}
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-selected transition-colors"
+              >
+                <div>
+                  <div className="font-medium text-foreground">
+                    Sandboxes ({totalVMs})
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Provision, SSH, exec, and snapshot Firecracker VMs
+                  </div>
+                </div>
+                <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onNavigate?.('environment')}
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-selected transition-colors"
+              >
+                <div>
+                  <div className="font-medium text-foreground">
+                    Environment &amp; Secrets
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    GitHub repos, secrets, and agent credential profiles
+                  </div>
+                </div>
+                <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onNavigate?.('jobs')}
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-selected transition-colors"
+              >
+                <div>
+                  <div className="font-medium text-foreground">
+                    CI on Compute VMs
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    Ephemeral GitHub Actions microVM runners
+                  </div>
+                </div>
+                <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
+              </button>
+
+              <button
+                type="button"
+                onClick={onViewNetwork}
+                className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-selected transition-colors"
+              >
+                <div>
+                  <div className="font-medium text-foreground">
+                    Overlay Network &amp; Port Forwards
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    TAP leases, DNAT rules, and public IP routing
+                  </div>
+                </div>
+                <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Audit & Control Plane Lifecycle Stream */}
+      <div className="border border-border bg-background">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Activity className="h-3.5 w-3.5 text-[#263fa9]" />
+            <h2 className="text-[13px] font-medium text-foreground">
+              Recent Control-Plane Audit Events ({events.length})
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate?.('events')}
+            className="font-mono text-xs text-[#495eb7] hover:underline"
+          >
+            Open Audit Stream &amp; Webhooks →
+          </button>
+        </div>
+
+        {events.length === 0 ? (
+          <div className="p-6 text-center text-[12px] text-muted-foreground">
+            No audit events recorded yet.
+          </div>
+        ) : (
+          <div className="divide-y divide-border font-mono text-xs">
+            {events.slice(0, 6).map((ev) => (
+              <div
+                key={ev.id}
+                className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 hover:bg-muted/20"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-muted-foreground">
+                    {formatTimestamp(ev.timestamp)}
+                  </span>
+                  <span className="border border-border bg-muted/40 px-1.5 py-0.5 text-[11px] text-foreground">
+                    {ev.event}
+                  </span>
+                  <span className="text-foreground">{ev.target}</span>
+                </div>
+                <span className="text-muted-foreground text-[11px]">
+                  actor: {ev.actor}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

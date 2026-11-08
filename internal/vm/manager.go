@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -750,7 +751,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 
 	// 3. Launch Firecracker
 	var err error
-	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, vm.ID, logPath)
+	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, sanitizeFirecrackerID(vm.ID), logPath)
 	if err != nil {
 		return fmt.Errorf("failed to launch firecracker process: %w", err)
 	}
@@ -1131,7 +1132,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	if fcID == "" {
 		fcID = vm.ID
 	}
-	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, fcID, logPath)
+	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, sanitizeFirecrackerID(fcID), logPath)
 	if err != nil {
 		return fmt.Errorf("failed to launch firecracker process: %w", err)
 	}
@@ -1157,6 +1158,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 
 // StopVM gracefully shuts down a running VM, flushing caches, and cleaning runtime resources
 func (m *Manager) StopVM(ctx context.Context, vmID string) error {
+	log.Printf("[vm] StopVM invoked for %s", vmID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1291,6 +1293,7 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 // ReconcileAndPrune synchronizes database records with live system processes,
 // cleans up stale state from dead microVMs, and removes orphaned TAP interfaces.
 func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
+	log.Printf("[vm] ReconcileAndPrune invoked")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1303,6 +1306,7 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	for _, v := range vms {
 		if v.Status == db.StatusRunning {
 			if !m.isAlive(v.PID) {
+				log.Printf("[vm] reconcile marking %s stopped: pid=%d not alive", v.ID, v.PID)
 				v.Status = db.StatusStopped
 				v.PID = 0
 				_ = m.store.SaveVM(ctx, v)
@@ -1890,6 +1894,28 @@ func (m *Manager) GetVM(ctx context.Context, vmID string) (*db.VM, error) {
 // ListVMs lists all VMs
 func (m *Manager) ListVMs(ctx context.Context) ([]*db.VM, error) {
 	return m.store.ListVMs(ctx)
+}
+
+// sanitizeFirecrackerID returns an instance ID accepted by Firecracker
+// (alphanumerics and hyphens only, maximum 64 characters).
+func sanitizeFirecrackerID(id string) string {
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		out = "vm"
+	}
+	if len(out) > 64 {
+		out = out[:64]
+	}
+	return out
 }
 
 func isProcessAlive(pid int) bool {

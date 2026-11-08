@@ -1,0 +1,14 @@
+[Unit]
+Description=Compute Worker Node Agent
+After=computed.service
+Wants=computed.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/rashid/on-demand-vms
+ExecStart=/home/rashid/on-demand-vms/bin/compute-worker run --control-plane http://127.0.0.1:18080 --name worker-primary --pool default
+Restart=always
+RestartSec=3s
+
+[Install]
+WantedBy=default.target

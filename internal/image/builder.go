@@ -20,7 +20,8 @@ type BuildRequest struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
 	BaseImage   string   `json:"base_image,omitempty"` // defaults to "ubuntu-24.04"
-	Packages    []string `json:"packages"`
+	Packages    []string `json:"packages,omitempty"`
+	Dockerfile  string   `json:"dockerfile,omitempty"`
 	SizeMB      int      `json:"size_mb,omitempty"` // defaults to 2048 MB
 }
 
@@ -225,6 +226,10 @@ RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
     echo "UsePAM no" >> /etc/ssh/sshd_config && \
     echo "StrictModes no" >> /etc/ssh/sshd_config
 `, baseDockerImage, pkgsArg)
+
+	if strings.TrimSpace(req.Dockerfile) != "" {
+		dockerfileContent = req.Dockerfile
+	}
 
 	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte(dockerfileContent), 0644); err != nil {

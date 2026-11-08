@@ -14,15 +14,21 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
 	"github.com/Rashid2G/on-demand-vms/internal/jobs"
+	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
+	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/scheduler"
+	"github.com/Rashid2G/on-demand-vms/internal/store"
+	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/api"
 	"github.com/Rashid2G/on-demand-vms/pkg/version"
@@ -38,10 +44,36 @@ type Server struct {
 	workers   *scheduler.WorkerRegistry
 	scheduler *scheduler.Scheduler
 	jobRunner *jobs.Runner
+	authMgr   *auth.Manager
+	metaStore *store.Store
+	fcVersion string
+
+	eventMu   sync.RWMutex
+	eventSubs map[chan *db.AuditEvent]struct{}
+}
+
+// detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
+func detectFirecrackerVersion(bin string) string {
+	if bin == "" {
+		bin = "/usr/local/bin/firecracker"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	for _, field := range strings.Fields(string(out)) {
+		if len(field) > 1 && field[0] == 'v' && field[1] >= '0' && field[1] <= '9' {
+			return field
+		}
+	}
+	return ""
 }
 
 func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	workers := scheduler.NewWorkerRegistry()
+	fcVersion := detectFirecrackerVersion(cfg.Server.FirecrackerBin)
 	var sched *scheduler.Scheduler
 	var jobRunner *jobs.Runner
 	if vmMgr != nil && vmMgr.GetStore() != nil {
@@ -54,7 +86,141 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 			}
 		}
 		sched.Start(context.Background())
+
+		st := vmMgr.GetStore()
+		initCtx := context.Background()
+
+		// 1. Ensure "default" WorkerPool exists in SQLite
+		pools, _ := st.ListWorkerPools(initCtx)
+		hasDefaultPool := false
+		for _, p := range pools {
+			if p.ID == "default" {
+				hasDefaultPool = true
+				break
+			}
+		}
+		if !hasDefaultPool {
+			_ = st.SaveWorkerPool(initCtx, &db.WorkerPool{
+				ID:         "default",
+				Name:       "default",
+				LabelsJSON: `{"tier":"kvm-baremetal","region":"local"}`,
+				PolicyJSON: `{}`,
+			})
+		}
+
+		// 2. Register/update local host node in worker_nodes
+		now := time.Now().UTC()
+		hostname, err := os.Hostname()
+		if err != nil || hostname == "" {
+			hostname = "localhost"
+		}
+		status := "ready"
+		if existing, err := st.GetWorkerNode(initCtx, "nod_host_local"); err == nil && existing != nil {
+			if existing.Status == "cordoned" || existing.Status == "draining" {
+				status = existing.Status
+			}
+		}
+		underlayIP := "10.200.0.1"
+		if cfg.Network.BridgeIP != "" {
+			underlayIP = strings.Split(cfg.Network.BridgeIP, "/")[0]
+		}
+		hostVCPUs, hostMemMB, hostDiskMB := getHostResources(cfg.Resources.MaxTotalVCPUs, cfg.Resources.MaxTotalMemoryMB, int(cfg.Resources.MaxTotalDiskMB))
+		localNode := &db.WorkerNode{
+			ID:               "nod_host_local",
+			Name:             hostname,
+			PoolID:           "default",
+			Role:             "control-plane+worker",
+			Status:           status,
+			UnderlayIP:       underlayIP,
+			Arch:             runtime.GOARCH,
+			TotalVCPUs:       hostVCPUs,
+			TotalMemMB:       hostMemMB,
+			TotalDiskMB:      hostDiskMB,
+			LabelsJSON:       `{"kvm":"true","nvme":"true","role":"primary"}`,
+			CapabilitiesJSON: `{"firecracker":true,"snapshots":true,"ebpf":true}`,
+			AgentVersion:     version.Version,
+			FCVersion:        fcVersion,
+			LastHeartbeat:    &now,
+		}
+		_ = st.SaveWorkerNode(initCtx, localNode)
+
+		// 3. Seed initial system.daemon.started audit event if audit_events is empty
+		if evts, err := st.ListAuditEvents(initCtx, 1); err == nil && len(evts) == 0 {
+			_ = st.SaveAuditEvent(initCtx, &db.AuditEvent{
+				ID:         "evt_daemon_boot",
+				Timestamp:  now,
+				Event:      "system.daemon.started",
+				Actor:      "system",
+				Target:     hostname,
+				Status:     "delivered",
+				DurationMs: 12,
+				Payload:    fmt.Sprintf(`{"version":"%s","arch":"%s"}`, version.Version, runtime.GOARCH),
+			})
+		}
+
+		// 4. Auto-seed "base" default environment profile if environments table is empty
+		if envs, err := st.ListEnvironments(initCtx); err == nil && len(envs) == 0 {
+			_ = st.SaveEnvironment(initCtx, &db.EnvironmentProfile{
+				Name:               "base",
+				IsDefault:          true,
+				Version:            1,
+				SecretsEnabled:     true,
+				BoatCredsEnabled:   true,
+				AgentCredsEnabled:  true,
+				CredentialProfile:  "Owner's default",
+				GitHubReposEnabled: false,
+				GitHubRepos:        []string{},
+				Secrets:            "",
+				UpdatedAt:          now,
+			})
+		}
 	}
+
+	var authMgr *auth.Manager
+	var metaStore *store.Store
+
+	if cfg.Server.AuthEnabled || cfg.Server.AuthDBPath != "" {
+		authDB := cfg.Server.AuthDBPath
+		if authDB == "" {
+			masterDir := filepath.Dir(cfg.Server.DBPath)
+			if masterDir == "" || masterDir == "." {
+				masterDir = "/var/lib/compute/master"
+			}
+			authDB = filepath.Join(masterDir, "auth.db")
+		}
+		masterDir := filepath.Dir(authDB)
+		_ = os.MkdirAll(masterDir, 0700)
+		masterKeyPath := filepath.Join(masterDir, "master.key")
+		mk, err := pki.LoadOrCreateMasterKey(masterKeyPath)
+		if err == nil {
+			st, err := store.Open(authDB)
+			if err == nil {
+				metaStore = st
+				queries := storeDB.New(st.Writer())
+				adminSecret := cfg.Server.AdminSecret
+				if adminSecret == "" {
+					adminSecret = os.Getenv("COMPUTE_ADMIN_SECRET")
+				}
+				authMgr = auth.NewManager(queries, mk, 7*24*time.Hour, adminSecret)
+
+				// Seed default admin if no users exist
+				ctx := context.Background()
+				users, _ := queries.ListUsers(ctx)
+				if len(users) == 0 {
+					adminPW := os.Getenv("COMPUTE_ADMIN_PASSWORD")
+					if adminPW == "" {
+						adminPW = "compute-admin-2026!"
+					}
+					_, _ = authMgr.Signup(ctx, "admin@compute.local", "admin", "Administrator", adminPW, "admin")
+				}
+			} else {
+				log.Printf("[computed] Warning: failed to initialize auth store (%v)", err)
+			}
+		} else {
+			log.Printf("[computed] Warning: failed to load master key (%v)", err)
+		}
+	}
+
 	s := &Server{
 		vmMgr:     vmMgr,
 		cfg:       cfg,
@@ -62,9 +228,107 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		workers:   workers,
 		scheduler: sched,
 		jobRunner: jobRunner,
+		authMgr:   authMgr,
+		metaStore: metaStore,
+		fcVersion: fcVersion,
+		eventSubs: make(map[chan *db.AuditEvent]struct{}),
 	}
 	s.routes()
 	return s
+}
+
+func (s *Server) recordEvent(event, actor, target, status string, durationMs int, payload interface{}) *db.AuditEvent {
+	if actor == "" {
+		actor = "system"
+	}
+	if target == "" {
+		target = "cluster"
+	}
+	if status == "" {
+		status = "delivered"
+	}
+	if durationMs <= 0 {
+		durationMs = 15
+	}
+	payloadStr := "{}"
+	if payload != nil {
+		if str, ok := payload.(string); ok {
+			payloadStr = str
+		} else if b, err := json.Marshal(payload); err == nil {
+			payloadStr = string(b)
+		}
+	}
+	auditEvt := &db.AuditEvent{
+		ID:         "evt_" + strings.ReplaceAll(uuid.NewString()[:12], "-", ""),
+		Timestamp:  time.Now().UTC(),
+		Event:      event,
+		Actor:      actor,
+		Target:     target,
+		Status:     status,
+		DurationMs: durationMs,
+		Payload:    payloadStr,
+	}
+
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		_ = s.vmMgr.GetStore().SaveAuditEvent(context.Background(), auditEvt)
+	}
+
+	s.eventMu.RLock()
+	for ch := range s.eventSubs {
+		select {
+		case ch <- auditEvt:
+		default:
+		}
+	}
+	s.eventMu.RUnlock()
+
+	return auditEvt
+}
+
+func (s *Server) addEventSubscriber(ch chan *db.AuditEvent) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.eventSubs == nil {
+		s.eventSubs = make(map[chan *db.AuditEvent]struct{})
+	}
+	s.eventSubs[ch] = struct{}{}
+}
+
+func (s *Server) removeEventSubscriber(ch chan *db.AuditEvent) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	delete(s.eventSubs, ch)
+}
+
+func getActor(r *http.Request) string {
+	if r != nil {
+		if a := auth.GetAuth(r.Context()); a != nil {
+			if a.User != nil && a.User.Username != "" {
+				return a.User.Username
+			}
+			if a.APIKey != nil && a.APIKey.Prefix != "" {
+				return "api_key:" + a.APIKey.Prefix
+			}
+			if a.AuthType == "admin_secret" {
+				return "admin"
+			}
+		}
+	}
+	return "system"
+}
+
+func (s *Server) SetAuthManager(mgr *auth.Manager) {
+	s.authMgr = mgr
+}
+
+func (s *Server) wrapAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.authMgr == nil || !s.cfg.Server.AuthEnabled {
+			handler(w, r)
+			return
+		}
+		s.authMgr.RequireAuth(handler)(w, r)
+	}
 }
 
 func (s *Server) routes() {
@@ -72,31 +336,81 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
-	s.mux.HandleFunc("/api/v1/vms", s.handleVMs)
-	s.mux.HandleFunc("/api/v1/vms/", s.handleVMActions)
-	s.mux.HandleFunc("/api/v1/queue", s.handleQueue)
-	s.mux.HandleFunc("/api/v1/config", s.handleConfig)
-	s.mux.HandleFunc("/api/v1/network", s.handleNetworkInfo)
-	s.mux.HandleFunc("/api/v1/network/allocations", s.handleNetworkAllocations)
-	s.mux.HandleFunc("/api/v1/network/inspect/", s.handleNetworkInspect)
-	s.mux.HandleFunc("/api/v1/network/prune", s.handleNetworkPrune)
-	s.mux.HandleFunc("/api/v1/network/config", s.handleNetworkConfig)
-	s.mux.HandleFunc("/api/v1/images", s.handleImages)
-	s.mux.HandleFunc("/api/v1/images/", s.handleImageActions)
-	s.mux.HandleFunc("/api/v1/templates", s.handleTemplates)
-	s.mux.HandleFunc("/api/v1/templates/", s.handleTemplateActions)
-	s.mux.HandleFunc("/api/v1/keys", s.handleKeys)
-	s.mux.HandleFunc("/api/v1/keys/", s.handleKeyActions)
-	s.mux.HandleFunc("/api/v1/ws", s.handleWS)
+
+	// Auth & Identity
+	s.mux.HandleFunc("/api/v1/auth/signup", s.handleAuthSignup)
+	s.mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("/api/v1/auth/logout", s.handleAuthLogout)
+	s.mux.HandleFunc("/api/v1/auth/me", s.wrapAuth(s.handleAuthMe))
+	s.mux.HandleFunc("/api/v1/auth/keys", s.wrapAuth(s.handleAuthKeys))
+	s.mux.HandleFunc("/api/v1/auth/keys/", s.wrapAuth(s.handleAuthKeyActions))
+	s.mux.HandleFunc("/api/v1/orgs", s.wrapAuth(s.handleOrgs))
+	s.mux.HandleFunc("/api/v1/orgs/", s.wrapAuth(s.handleOrgActions))
+	s.mux.HandleFunc("/api/v1/limits", s.wrapAuth(s.handleLimits))
+
+	// Sandboxes / VMs
+	s.mux.HandleFunc("/api/v1/vms", s.wrapAuth(s.handleVMs))
+	s.mux.HandleFunc("/api/v1/vms/", s.wrapAuth(s.handleVMActions))
+	s.mux.HandleFunc("/api/v1/sandboxes", s.wrapAuth(s.handleVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/", s.wrapAuth(s.handleVMActions))
+
+	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
+	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
+	s.mux.HandleFunc("/api/v1/network", s.wrapAuth(s.handleNetworkInfo))
+	s.mux.HandleFunc("/api/v1/network/allocations", s.wrapAuth(s.handleNetworkAllocations))
+	s.mux.HandleFunc("/api/v1/network/inspect/", s.wrapAuth(s.handleNetworkInspect))
+	s.mux.HandleFunc("/api/v1/network/prune", s.wrapAuth(s.handleNetworkPrune))
+	s.mux.HandleFunc("/api/v1/network/config", s.wrapAuth(s.handleNetworkConfig))
+	s.mux.HandleFunc("/api/v1/images", s.wrapAuth(s.handleImages))
+	s.mux.HandleFunc("/api/v1/images/", s.wrapAuth(s.handleImageActions))
+	s.mux.HandleFunc("/api/v1/templates", s.wrapAuth(s.handleTemplates))
+	s.mux.HandleFunc("/api/v1/templates/", s.wrapAuth(s.handleTemplateActions))
+	s.mux.HandleFunc("/api/v1/keys", s.wrapAuth(s.handleKeys))
+	s.mux.HandleFunc("/api/v1/keys/", s.wrapAuth(s.handleKeyActions))
+	s.mux.HandleFunc("/api/v1/ws", s.wrapAuth(s.handleWS))
 	s.mux.HandleFunc("/api/v1/worker/connect", s.handleWorkerConnect)
-	s.mux.HandleFunc("/api/v1/worker-tokens", s.handleWorkerTokens)
-	s.mux.HandleFunc("/api/v1/workers", s.handleWorkers)
-	s.mux.HandleFunc("/api/v1/workers/", s.handleWorkerActions)
-	s.mux.HandleFunc("/api/v1/pools", s.handlePools)
-	s.mux.HandleFunc("/api/v1/pools/", s.handlePoolActions)
-	s.mux.HandleFunc("/api/v1/jobs", s.handleJobs)
-	s.mux.HandleFunc("/api/v1/jobs/", s.handleJobActions)
-	s.mux.HandleFunc("/api/v1/ssh/", s.handleSSHDirect)
+	s.mux.HandleFunc("/api/v1/worker-tokens", s.wrapAuth(s.handleWorkerTokens))
+	s.mux.HandleFunc("/api/v1/worker-tokens/", s.wrapAuth(s.handleWorkerTokens))
+	s.mux.HandleFunc("/api/v1/workers", s.wrapAuth(s.handleWorkers))
+	s.mux.HandleFunc("/api/v1/workers/", s.wrapAuth(s.handleWorkerActions))
+	s.mux.HandleFunc("/api/v1/pools", s.wrapAuth(s.handlePools))
+	s.mux.HandleFunc("/api/v1/pools/", s.wrapAuth(s.handlePoolActions))
+	s.mux.HandleFunc("/api/v1/jobs", s.wrapAuth(s.handleJobs))
+	s.mux.HandleFunc("/api/v1/jobs/", s.wrapAuth(s.handleJobActions))
+	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
+	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
+
+	// Volumes
+	s.mux.HandleFunc("/api/v1/volumes", s.wrapAuth(s.handleVolumes))
+	s.mux.HandleFunc("/api/v1/volumes/", s.wrapAuth(s.handleVolumeActions))
+
+	// Webhooks
+	s.mux.HandleFunc("/api/v1/webhooks", s.wrapAuth(s.handleWebhooks))
+	s.mux.HandleFunc("/api/v1/webhooks/", s.wrapAuth(s.handleWebhookActions))
+
+	// OTel
+	s.mux.HandleFunc("/api/v1/otel", s.wrapAuth(s.handleOTel))
+	s.mux.HandleFunc("/api/v1/otel/test", s.wrapAuth(s.handleOTelTest))
+
+	// Audit Events & SSE Stream
+	s.mux.HandleFunc("/api/v1/events", s.wrapAuth(s.handleEvents))
+	s.mux.HandleFunc("/api/v1/events/stream", s.wrapAuth(s.handleEventsStream))
+
+	// Scoped Access API Keys
+	s.mux.HandleFunc("/api/v1/api-keys", s.wrapAuth(s.handleAccessAPIKeys))
+	s.mux.HandleFunc("/api/v1/api-keys/", s.wrapAuth(s.handleAccessAPIKeyActions))
+
+	// Agent Profiles
+	s.mux.HandleFunc("/api/v1/agent-profiles", s.wrapAuth(s.handleAgentProfiles))
+	s.mux.HandleFunc("/api/v1/agent-profiles/", s.wrapAuth(s.handleAgentProfileActions))
+
+	// Environments
+	s.mux.HandleFunc("/api/v1/environments", s.wrapAuth(s.handleEnvironments))
+	s.mux.HandleFunc("/api/v1/environments/", s.wrapAuth(s.handleEnvironmentActions))
+
+	// Port Forwards
+	s.mux.HandleFunc("/api/v1/network/port-forwards", s.wrapAuth(s.handlePortForwards))
+	s.mux.HandleFunc("/api/v1/network/port-forwards/", s.wrapAuth(s.handlePortForwardActions))
 }
 
 func (s *Server) SetGUIHandler(h http.Handler) {
@@ -233,6 +547,29 @@ func (s *Server) handleNetworkInspect(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(res)
 }
 
+// waitGuestSSH polls the guest SSH port until it accepts connections or the
+// timeout elapses. It makes "sandbox start" return a genuinely usable VM.
+func (s *Server) waitGuestSSH(ctx context.Context, v *db.VM, timeout time.Duration) {
+	if v == nil || v.IPAddress == "" || v.IPAddress == "dhcp" {
+		return
+	}
+	addr := net.JoinHostPort(v.IPAddress, "22")
+	deadline := time.Now().Add(timeout)
+	dialer := &net.Dialer{Timeout: 500 * time.Millisecond}
+	for time.Now().Before(deadline) {
+		conn, err := dialer.DialContext(ctx, "tcp", addr)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
+
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -265,7 +602,14 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch r.Method {
 	case http.MethodGet:
-		vms, err := s.vmMgr.ListVMs(ctx)
+		authCtx := auth.GetAuth(ctx)
+		var vms []*db.VM
+		var err error
+		if authCtx != nil && authCtx.Role != "admin" {
+			vms, err = s.vmMgr.GetStore().ListVMsByOwner(ctx, authCtx.User.ID)
+		} else {
+			vms, err = s.vmMgr.ListVMs(ctx)
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -281,6 +625,9 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if authCtx := auth.GetAuth(ctx); authCtx != nil && req.OwnerID == "" {
+			req.OwnerID = authCtx.User.ID
+		}
 		created, err := s.vmMgr.CreateVM(ctx, req)
 		if err != nil {
 			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
@@ -291,6 +638,11 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
+		s.recordEvent("sandbox.created", getActor(r), created.Name, "delivered", 85, map[string]interface{}{
+			"vm_id":     created.ID,
+			"vcpus":     created.VCPUs,
+			"memory_mb": created.MemoryMB,
+		})
 		json.NewEncoder(w).Encode(created)
 
 	default:
@@ -300,7 +652,8 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/vms/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/sandboxes/")
+	path = strings.TrimPrefix(path, "/api/v1/vms/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 
 	if len(parts) == 0 || parts[0] == "" {
@@ -310,25 +663,34 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 
 	vmID := parts[0]
 
+	v, err := s.vmMgr.GetVM(ctx, vmID)
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if v == nil {
+		httpError(w, "vm not found", http.StatusNotFound)
+		return
+	}
+
+	// Multi-tenant authorization check
+	if authCtx := auth.GetAuth(ctx); authCtx != nil && authCtx.Role != "admin" {
+		if v.OwnerID != "" && v.OwnerID != authCtx.User.ID && v.OwnerID != "default" {
+			httpError(w, "vm not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			v, err := s.vmMgr.GetVM(ctx, vmID)
-			if err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if v == nil {
-				httpError(w, "vm not found", http.StatusNotFound)
-				return
-			}
 			json.NewEncoder(w).Encode(v)
-
 		case http.MethodDelete:
 			if err := s.vmMgr.DeleteVM(ctx, vmID); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			s.recordEvent("sandbox.deleted", getActor(r), vmID, "delivered", 40, map[string]string{"id": vmID})
 			json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": vmID})
 
 		case http.MethodPatch, http.MethodPut:
@@ -342,6 +704,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
 			json.NewEncoder(w).Encode(updated)
 
 		default:
@@ -357,6 +720,14 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "terminal" {
 		s.handleVMTerminal(w, r, vmID)
+		return
+	}
+	if action == "files" {
+		s.handleVMFiles(w, r, vmID, parts[2:])
+		return
+	}
+	if action == "processes" || action == "process" {
+		s.handleVMProcesses(w, r, vmID, parts[2:])
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -379,6 +750,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.recordEvent("sandbox.cloned", getActor(r), cloned.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": cloned.ID})
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(cloned)
 
@@ -388,6 +760,11 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
+		if v != nil && v.Status == db.StatusRunning {
+			// Give operators and automation a sandbox that is actually reachable.
+			s.waitGuestSSH(ctx, v, 30*time.Second)
+		}
+		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
 		json.NewEncoder(w).Encode(v)
 
 	case "save-state", "snapshot":
@@ -396,6 +773,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
+		s.recordEvent("snapshot.created", getActor(r), vmID, "delivered", 50, nil)
 		json.NewEncoder(w).Encode(v)
 
 	case "resume":
@@ -404,6 +782,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
+		if v != nil && v.Status == db.StatusRunning {
+			s.waitGuestSSH(ctx, v, 30*time.Second)
+		}
+		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
 		json.NewEncoder(w).Encode(v)
 
 	case "stop":
@@ -412,6 +794,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
+		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
 		json.NewEncoder(w).Encode(v)
 
 	case "exec":
@@ -425,6 +808,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.recordEvent("sandbox.command_executed", getActor(r), vmID, "delivered", 45, map[string]interface{}{"command": req.Command, "exit_code": res.ExitCode})
 		json.NewEncoder(w).Encode(res)
 
 	case "exec-stream":
@@ -751,6 +1135,10 @@ type ClusterSnapshot struct {
 	NetworkConfig network.Config          `json:"network_config"`
 	Config        config.GlobalConfig     `json:"config"`
 	Queue         map[string]interface{}  `json:"queue"`
+	Workers       []*db.WorkerNode        `json:"workers"`
+	Jobs          []*db.Job               `json:"jobs"`
+	Volumes       []*db.Volume            `json:"volumes"`
+	Events        []*db.AuditEvent        `json:"events"`
 	Timestamp     time.Time               `json:"timestamp"`
 }
 
@@ -789,6 +1177,30 @@ func (s *Server) getClusterSnapshot(ctx context.Context) *ClusterSnapshot {
 		queueData["running_mem_mb"] = stats.RunningMemoryMB
 	}
 
+	var workers []*db.WorkerNode
+	var jobsList []*db.Job
+	var vols []*db.Volume
+	var eventsList []*db.AuditEvent
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		workers, _ = s.vmMgr.GetStore().ListWorkerNodes(ctx)
+		s.enrichWorkerNodes(workers)
+		jobsList, _ = s.vmMgr.GetStore().ListJobs(ctx, "")
+		vols, _ = s.vmMgr.GetStore().ListVolumes(ctx)
+		eventsList, _ = s.vmMgr.GetStore().ListAuditEvents(ctx, 50)
+	}
+	if workers == nil {
+		workers = []*db.WorkerNode{}
+	}
+	if jobsList == nil {
+		jobsList = []*db.Job{}
+	}
+	if vols == nil {
+		vols = []*db.Volume{}
+	}
+	if eventsList == nil {
+		eventsList = []*db.AuditEvent{}
+	}
+
 	return &ClusterSnapshot{
 		Type:          "snapshot",
 		Stats:         stats,
@@ -797,6 +1209,10 @@ func (s *Server) getClusterSnapshot(ctx context.Context) *ClusterSnapshot {
 		NetworkConfig: netCfg,
 		Config:        cfg,
 		Queue:         queueData,
+		Workers:       workers,
+		Jobs:          jobsList,
+		Volumes:       vols,
+		Events:        eventsList,
 		Timestamp:     time.Now().UTC(),
 	}
 }
@@ -916,6 +1332,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		s.recordEvent("ssh_key.created", getActor(r), key.Name, "delivered", 15, map[string]string{"name": key.Name, "fingerprint": key.Fingerprint})
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(key)
 
@@ -959,6 +1376,7 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to delete key: %v"}`, err), http.StatusInternalServerError)
 			return
 		}
+		s.recordEvent("ssh_key.deleted", getActor(r), key.Name, "delivered", 15, map[string]string{"id": key.ID, "name": key.Name})
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": key.ID})
 
@@ -1197,7 +1615,10 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 		return
 	}
 
+	var outWG sync.WaitGroup
+	outWG.Add(2)
 	pipeOutput := func(rd io.Reader) {
+		defer outWG.Done()
 		buf := make([]byte, 4096)
 		for {
 			n, rErr := rd.Read(buf)
@@ -1244,6 +1665,9 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 	}()
 
 	waitErr := session.Wait()
+	// Flush all buffered stdout/stderr before signalling exit so the client
+	// never loses the tail of a short command.
+	outWG.Wait()
 	exitCode := 0
 	if waitErr != nil {
 		if exitErr, ok := waitErr.(*ssh.ExitError); ok {
@@ -1407,7 +1831,10 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 		return
 	}
 
+	var outWG sync.WaitGroup
+	outWG.Add(2)
 	pipeOutput := func(rd io.Reader) {
+		defer outWG.Done()
 		buf := make([]byte, 4096)
 		for {
 			n, rErr := rd.Read(buf)
@@ -1514,7 +1941,7 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
 		now := time.Now().UTC()
 		capJSON, _ := json.Marshal(hello.Capabilities)
-		_ = s.vmMgr.GetStore().SaveWorkerNode(ctx, &db.WorkerNode{
+		node := &db.WorkerNode{
 			ID:               workerID,
 			Name:             workerID,
 			PoolID:           "default",
@@ -1522,11 +1949,15 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 			Status:           "ready",
 			Arch:             hello.Architecture,
 			AgentVersion:     hello.AgentVersion,
+			FCVersion:        s.fcVersion,
+			UnderlayIP:       "127.0.0.1",
 			CapabilitiesJSON: string(capJSON),
 			LastHeartbeat:    &now,
 			CreatedAt:        now,
 			UpdatedAt:        now,
-		})
+		}
+		s.enrichWorkerNodes([]*db.WorkerNode{node})
+		_ = s.vmMgr.GetStore().SaveWorkerNode(ctx, node)
 	}
 
 	var handler func(context.Context, *scheduler.Worker, api.WorkerMessage, json.RawMessage) error
@@ -1540,45 +1971,160 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
 	}
+	ctx := r.Context()
+	st := s.vmMgr.GetStore()
 
-	var req api.WorkerTokenCreateRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	poolID := req.PoolID
-	if poolID == "" {
-		poolID = "default"
-	}
-	tokenStr := fmt.Sprintf("mft_%s", uuid.NewString()[:16])
-	expiresAt := time.Now().UTC().Add(30 * time.Minute)
+	// Check for DELETE /api/v1/worker-tokens/:id
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/worker-tokens")
+	path = strings.TrimPrefix(path, "/")
 
-	token := &db.WorkerToken{
-		Token:      tokenStr,
-		PoolID:     poolID,
-		LabelsJSON: "{}",
-		ExpiresAt:  expiresAt,
-		CreatedAt:  time.Now().UTC(),
-	}
-	if err := s.vmMgr.GetStore().SaveWorkerToken(r.Context(), token); err != nil {
-		httpError(w, err.Error(), http.StatusInternalServerError)
+	if r.Method == http.MethodDelete && path != "" {
+		if err := st.DeleteWorkerToken(ctx, path); err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("worker_token.deleted", getActor(r), path, "delivered", 10, nil)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
-	expUnix := expiresAt.Unix()
-	_ = json.NewEncoder(w).Encode(api.WorkerTokenResponse{
-		ID:        tokenStr,
-		Name:      req.Name,
-		Token:     tokenStr,
-		Prefix:    tokenStr[:8],
-		ExpiresAt: &expUnix,
-	})
+	switch r.Method {
+	case http.MethodGet:
+		tokens, err := st.ListWorkerTokens(ctx)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if tokens == nil {
+			tokens = []*db.WorkerToken{}
+		}
+		out := make([]api.WorkerTokenResponse, 0, len(tokens))
+		for _, t := range tokens {
+			prefix := t.Token
+			if len(prefix) > 8 {
+				prefix = prefix[:8]
+			}
+			expUnix := t.ExpiresAt.Unix()
+			out = append(out, api.WorkerTokenResponse{
+				ID:        t.Token,
+				Name:      t.Name,
+				Token:     t.Token,
+				Prefix:    prefix,
+				PoolID:    t.PoolID,
+				ExpiresAt: &expUnix,
+				CreatedAt: t.CreatedAt.Unix(),
+			})
+		}
+		json.NewEncoder(w).Encode(out)
+
+	case http.MethodPost:
+		var req api.WorkerTokenCreateRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		poolID := req.PoolID
+		if poolID == "" {
+			poolID = "default"
+		}
+		name := req.Name
+		if name == "" {
+			name = "worker-token"
+		}
+		tokenStr := fmt.Sprintf("mft_%s", uuid.NewString()[:16])
+		expiresAt := time.Now().UTC().Add(30 * time.Minute)
+		now := time.Now().UTC()
+
+		token := &db.WorkerToken{
+			Token:      tokenStr,
+			Name:       name,
+			PoolID:     poolID,
+			LabelsJSON: "{}",
+			ExpiresAt:  expiresAt,
+			CreatedAt:  now,
+		}
+		if err := st.SaveWorkerToken(ctx, token); err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		s.recordEvent("worker_token.created", getActor(r), name, "delivered", 15, map[string]interface{}{
+			"pool_id": poolID,
+			"token":   tokenStr,
+		})
+
+		w.WriteHeader(http.StatusCreated)
+		expUnix := expiresAt.Unix()
+		_ = json.NewEncoder(w).Encode(api.WorkerTokenResponse{
+			ID:        tokenStr,
+			Name:      name,
+			Token:     tokenStr,
+			Prefix:    tokenStr[:8],
+			PoolID:    poolID,
+			ExpiresAt: &expUnix,
+			CreatedAt: now.Unix(),
+		})
+
+	default:
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
+	var fallbackVCPUs, fallbackMemMB, fallbackDiskMB int
+	if s.vmMgr != nil {
+		limits := s.vmMgr.GetResourceLimits()
+		fallbackVCPUs, fallbackMemMB, fallbackDiskMB = getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
+	}
+	for _, n := range nodes {
+		if n.TotalVCPUs == 0 && n.CapabilitiesJSON != "" {
+			var cap struct {
+				VCPUs        int    `json:"vcpus"`
+				CPUs         int    `json:"cpus"`
+				MemoryMB     int    `json:"memory_mb"`
+				DiskMB       int    `json:"disk_mb"`
+				Architecture string `json:"architecture"`
+			}
+			if err := json.Unmarshal([]byte(n.CapabilitiesJSON), &cap); err == nil {
+				if cap.VCPUs > 0 {
+					n.TotalVCPUs = cap.VCPUs
+				} else if cap.CPUs > 0 {
+					n.TotalVCPUs = cap.CPUs
+				}
+				if cap.MemoryMB > 0 {
+					n.TotalMemMB = cap.MemoryMB
+				}
+				if cap.DiskMB > 0 {
+					n.TotalDiskMB = cap.DiskMB
+				}
+				if n.Arch == "" && cap.Architecture != "" {
+					n.Arch = cap.Architecture
+				}
+			}
+		}
+		if n.TotalVCPUs == 0 && fallbackVCPUs > 0 {
+			n.TotalVCPUs = fallbackVCPUs
+		}
+		if n.TotalMemMB == 0 && fallbackMemMB > 0 {
+			n.TotalMemMB = fallbackMemMB
+		}
+		if n.TotalDiskMB == 0 && fallbackDiskMB > 0 {
+			n.TotalDiskMB = fallbackDiskMB
+		}
+		if n.Arch == "" {
+			n.Arch = runtime.GOARCH
+		}
+		if n.AgentVersion == "" {
+			n.AgentVersion = version.Version
+		}
+		if n.FCVersion == "" {
+			n.FCVersion = s.fcVersion
+		}
+		if n.UnderlayIP == "" {
+			n.UnderlayIP = "127.0.0.1"
+		}
+	}
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
@@ -1590,11 +2136,27 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]*db.WorkerNode{})
 		return
 	}
-	nodes, err := s.vmMgr.GetStore().ListWorkerNodes(r.Context())
+	ctx := r.Context()
+	st := s.vmMgr.GetStore()
+
+	// Refresh nod_host_local heartbeat & limits live from host
+	if localNode, err := st.GetWorkerNode(ctx, "nod_host_local"); err == nil && localNode != nil {
+		now := time.Now().UTC()
+		localNode.LastHeartbeat = &now
+		limits := s.vmMgr.GetResourceLimits()
+		vcpus, memMB, diskMB := getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
+		localNode.TotalVCPUs = vcpus
+		localNode.TotalMemMB = memMB
+		localNode.TotalDiskMB = diskMB
+		_ = st.SaveWorkerNode(ctx, localNode)
+	}
+
+	nodes, err := st.ListWorkerNodes(ctx)
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.enrichWorkerNodes(nodes)
 	if nodes == nil {
 		nodes = []*db.WorkerNode{}
 	}
@@ -1603,9 +2165,8 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/workers/")
-	parts := strings.Split(path, "/")
-	id := parts[0]
-	if id == "" {
+	path = strings.Trim(path, "/")
+	if path == "" {
 		httpError(w, "worker id required", http.StatusBadRequest)
 		return
 	}
@@ -1614,11 +2175,43 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
 	}
+	ctx := r.Context()
+	st := s.vmMgr.GetStore()
+
+	// Support POST /api/v1/workers/reconcile
+	if path == "reconcile" {
+		if r.Method != http.MethodPost {
+			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		nodes, err := st.ListWorkerNodes(ctx)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		now := time.Now().UTC()
+		for _, n := range nodes {
+			n.LastHeartbeat = &now
+			if n.Status != "cordoned" {
+				n.Status = "ready"
+			}
+			_ = st.SaveWorkerNode(ctx, n)
+		}
+		s.recordEvent("worker.reconciled_all", getActor(r), "all", "delivered", 20, map[string]interface{}{"count": len(nodes)})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "reconciled",
+			"count":  len(nodes),
+		})
+		return
+	}
+
+	parts := strings.Split(path, "/")
+	id := parts[0]
 
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			node, err := s.vmMgr.GetStore().GetWorkerNode(r.Context(), id)
+			node, err := st.GetWorkerNode(ctx, id)
 			if err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -1629,10 +2222,11 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 			}
 			json.NewEncoder(w).Encode(node)
 		case http.MethodDelete:
-			if err := s.vmMgr.GetStore().DeleteWorkerNode(r.Context(), id); err != nil {
+			if err := st.DeleteWorkerNode(ctx, id); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			s.recordEvent("worker.deleted", getActor(r), id, "delivered", 15, nil)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1647,17 +2241,41 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 	}
 	switch action {
 	case "cordon":
-		if err := s.vmMgr.GetStore().UpdateWorkerNodeStatus(r.Context(), id, "cordoned"); err != nil {
+		if err := st.UpdateWorkerNodeStatus(ctx, id, "cordoned"); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.recordEvent("worker.cordon", getActor(r), id, "delivered", 15, nil)
 		json.NewEncoder(w).Encode(map[string]string{"status": "cordoned"})
-	case "drain":
-		if err := s.vmMgr.GetStore().UpdateWorkerNodeStatus(r.Context(), id, "draining"); err != nil {
+	case "uncordon":
+		if err := st.UpdateWorkerNodeStatus(ctx, id, "ready"); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.recordEvent("worker.uncordon", getActor(r), id, "delivered", 15, nil)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+	case "drain":
+		if err := st.UpdateWorkerNodeStatus(ctx, id, "draining"); err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("worker.drain", getActor(r), id, "delivered", 15, nil)
 		json.NewEncoder(w).Encode(map[string]string{"status": "draining"})
+	case "reconcile":
+		node, err := st.GetWorkerNode(ctx, id)
+		if err != nil || node == nil {
+			httpError(w, "worker not found", http.StatusNotFound)
+			return
+		}
+		now := time.Now().UTC()
+		node.LastHeartbeat = &now
+		node.Status = "ready"
+		if err := st.SaveWorkerNode(ctx, node); err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("worker.reconcile", getActor(r), id, "delivered", 15, nil)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 	default:
 		httpError(w, "unknown action", http.StatusNotFound)
 	}
@@ -1744,7 +2362,11 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		jobs, err := s.vmMgr.GetStore().ListJobs(r.Context(), "")
+		ownerFilter := ""
+		if authCtx := auth.GetAuth(r.Context()); authCtx != nil && authCtx.Role != "admin" {
+			ownerFilter = authCtx.User.ID
+		}
+		jobs, err := s.vmMgr.GetStore().ListJobs(r.Context(), ownerFilter)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1761,9 +2383,13 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		specJSON, _ := json.Marshal(req.Spec)
 		jobID := fmt.Sprintf("job_%s", uuid.NewString()[:8])
+		ownerID := "default"
+		if authCtx := auth.GetAuth(r.Context()); authCtx != nil {
+			ownerID = authCtx.User.ID
+		}
 		job := &db.Job{
 			ID:        jobID,
-			OwnerID:   "default",
+			OwnerID:   ownerID,
 			PoolID:    req.PoolID,
 			Type:      req.Type,
 			State:     "queued",
@@ -1780,6 +2406,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		s.recordEvent("ci.job.queued", getActor(r), job.ID, "delivered", 15, map[string]interface{}{"type": job.Type, "priority": job.Priority})
 
 		if s.scheduler != nil {
 			go func() {
@@ -1807,18 +2435,26 @@ func (s *Server) handleJobActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	job, err := s.vmMgr.GetStore().GetJob(r.Context(), id)
+	if err != nil {
+		httpError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if job == nil {
+		httpError(w, "job not found", http.StatusNotFound)
+		return
+	}
+	// Multi-tenant authorization check
+	if authCtx := auth.GetAuth(r.Context()); authCtx != nil && authCtx.Role != "admin" {
+		if job.OwnerID != "" && job.OwnerID != authCtx.User.ID && job.OwnerID != "default" {
+			httpError(w, "job not found", http.StatusNotFound)
+			return
+		}
+	}
+
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
 			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		job, err := s.vmMgr.GetStore().GetJob(r.Context(), id)
-		if err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if job == nil {
-			httpError(w, "job not found", http.StatusNotFound)
 			return
 		}
 		json.NewEncoder(w).Encode(job)
@@ -1836,6 +2472,7 @@ func (s *Server) handleJobActions(w http.ResponseWriter, r *http.Request) {
 		if s.jobRunner != nil {
 			s.jobRunner.Cancel(id)
 		}
+		s.recordEvent("ci.job.cancelled", getActor(r), id, "delivered", 15, nil)
 		json.NewEncoder(w).Encode(map[string]string{"status": "canceled"})
 	case "logs":
 		if r.Method != http.MethodGet {

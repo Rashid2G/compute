@@ -1,126 +1,329 @@
-import { PAGES, type PageId } from '@/lib/navigation';
-import type { StatsResult } from '@/lib/types';
+import { useState } from 'react';
+import {
+  BookOpen,
+  Braces,
+  Building2,
+  ChevronDown,
+  Cpu,
+  Database,
+  ExternalLink,
+  HardDrive,
+  Headphones,
+  KeyRound,
+  LayoutDashboard,
+  List,
+  Moon,
+  Network,
+  Radio,
+  Sliders,
+  Sun,
+  Terminal,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react';
+
+import type { PageId } from '@/lib/navigation';
+import type { StatsResult, WorkerNodeRecord } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
-function BrandMark() {
-  return (
-    <span className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
-      <svg
-        viewBox="0 0 24 24"
-        className="h-5 w-5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M4 18V7l8 5 8-5v11" />
-      </svg>
-    </span>
-  );
+interface SidebarProps {
+  page: PageId;
+  onNavigate: (page: PageId) => void;
+  stats: StatsResult | null;
+  workers?: WorkerNodeRecord[];
+  daemonOnline: boolean;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
+  onSetTheme?: (theme: 'light' | 'dark') => void;
+  onOpenCommandPalette?: () => void;
 }
+
+const ORG_CONTEXTS = [
+  {
+    id: 'personal',
+    label: 'Personal',
+    sandboxBill: 'Personal',
+    cliBill: 'Personal',
+  },
+  {
+    id: 'default-cluster',
+    label: 'Default KVM Cluster',
+    sandboxBill: 'Default KVM Cluster',
+    cliBill: 'Default KVM Cluster',
+  },
+];
 
 export function Sidebar({
   page,
   onNavigate,
   stats,
+  workers = [],
   daemonOnline,
-  className,
-}: {
-  page: PageId;
-  onNavigate: (page: PageId) => void;
-  stats: StatsResult | null;
-  daemonOnline: boolean;
-  theme?: 'light' | 'dark';
-  onToggleTheme?: () => void;
-  className?: string;
-}) {
-  const badges: Partial<Record<PageId, string | number>> = {
-    instances: stats?.total_vms ?? 0,
-    network: stats?.allocated_ips ?? 0,
+  theme,
+  onToggleTheme,
+  onSetTheme,
+}: SidebarProps) {
+  const [selectedOrgId, setSelectedOrgId] = useState('personal');
+  const currentOrg =
+    ORG_CONTEXTS.find((o) => o.id === selectedOrgId) ?? ORG_CONTEXTS[0];
+
+  const totalVMs = stats?.total_vms ?? 0;
+  const runningVMs = stats?.running_vms ?? 0;
+
+  const navItems: Array<{
+    id: PageId;
+    label: string;
+    icon: LucideIcon;
+    count?: string | number;
+  }> = [
+    {
+      id: 'instances',
+      label: 'Sandboxes',
+      icon: List,
+      count: totalVMs > 0 ? `${runningVMs}/${totalVMs}` : undefined,
+    },
+    {
+      id: 'images',
+      label: 'Snapshots',
+      icon: Database,
+      count:
+        stats && stats.snapshotted_vms > 0 ? stats.snapshotted_vms : undefined,
+    },
+    {
+      id: 'environment',
+      label: 'Environment',
+      icon: Sliders,
+    },
+    {
+      id: 'access',
+      label: 'API keys',
+      icon: KeyRound,
+    },
+    {
+      id: 'events',
+      label: 'Webhooks & OTel',
+      icon: Radio,
+    },
+    {
+      id: 'api',
+      label: 'Agents & Proxying',
+      icon: Braces,
+    },
+    {
+      id: 'jobs',
+      label: 'CI on Compute VMs',
+      icon: Zap,
+    },
+    {
+      id: 'overview',
+      label: 'Overview',
+      icon: LayoutDashboard,
+    },
+    {
+      id: 'workers',
+      label: 'Worker Nodes',
+      icon: Cpu,
+    },
+    {
+      id: 'storage',
+      label: 'Persistent Volumes',
+      icon: HardDrive,
+    },
+    {
+      id: 'network',
+      label: 'Network & NAT',
+      icon: Network,
+    },
+    {
+      id: 'console',
+      label: 'Console & SSH',
+      icon: Terminal,
+    },
+    {
+      id: 'settings',
+      label: 'Organization',
+      icon: Building2,
+    },
+  ];
+
+  const handleLight = () => {
+    if (onSetTheme) onSetTheme('light');
+    else if (theme !== 'light') onToggleTheme();
+  };
+
+  const handleDark = () => {
+    if (onSetTheme) onSetTheme('dark');
+    else if (theme !== 'dark') onToggleTheme();
   };
 
   return (
-    <div className={cn('flex h-full flex-col bg-background', className)}>
-      <div className="flex h-16 shrink-0 items-center gap-2.5 border-b px-5">
-        <BrandMark />
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold leading-tight">Compute</div>
-          <div className="truncate text-[11px] text-muted-foreground">Fleet control</div>
-        </div>
-      </div>
-
-      <div className="px-3 py-4">
-        <div className="rounded-md border bg-card px-3 py-2.5">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-              Node
-            </span>
-            <span className="rounded border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-              KVM
-            </span>
-          </div>
-          <div className="mt-1.5 flex items-center gap-2">
-            <span
-              className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                daemonOnline ? 'bg-success' : 'bg-destructive',
-              )}
-            />
-            <span className="truncate font-mono text-xs">
-              local-firecracker
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <nav className="flex-1 space-y-0.5 px-3">
-        <div className="px-2 pb-1.5 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
-          Workspace
-        </div>
-        {PAGES.map((item) => {
-          const Icon = item.icon;
-          const active = page === item.id;
-          const badge = badges[item.id];
-
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => onNavigate(item.id)}
-              className={cn(
-                'flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors',
-                active
-                  ? 'bg-secondary font-medium text-foreground'
-                  : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
-              )}
-              aria-current={active ? 'page' : undefined}
+    <div className="flex h-full flex-col justify-between bg-background text-foreground select-none px-3.5 py-4">
+      <div className="space-y-3.5 overflow-y-auto">
+        {/* Top Brand Header matching boat.dev/dashboard */}
+        <div className="flex items-center justify-between px-0.5">
+          <button
+            type="button"
+            onClick={() => onNavigate('instances')}
+            className="flex items-center gap-2 text-left focus:outline-none group"
+          >
+            {/* Compute geometric mark */}
+            <svg
+              viewBox="0 0 32 32"
+              className="h-6 w-6 shrink-0 text-foreground"
+              fill="currentColor"
+              aria-hidden="true"
             >
-              <Icon
-                className={cn(
-                  'h-4 w-4 shrink-0',
-                  active ? 'text-primary' : 'text-muted-foreground',
-                )}
-              />
-              <span className="flex-1 text-left">{item.label}</span>
-              {badge !== undefined ? (
-                <span className="tabular rounded border bg-card px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                  {badge}
-                </span>
-              ) : null}
-            </button>
-          );
-        })}
-      </nav>
+              <path d="M15 5L6 21h9V5zm2 4v12h8L17 9zM5 23l3 4h16l3-4H5z" />
+            </svg>
+            <span className="font-display text-[21px] font-medium tracking-tight text-foreground leading-none">
+              Compute
+            </span>
+          </button>
+        </div>
 
-      <div className="border-t p-3">
-        <div className="flex items-center justify-between px-2 font-mono text-[10px] text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <span className={cn('h-1.5 w-1.5 rounded-full', daemonOnline ? 'bg-emerald-500' : 'bg-destructive')} />
-            Firecracker v1.9+
-          </span>
-          <span>v2.0</span>
+        {/* Organization / Cluster Selector matching boat.dev/dashboard */}
+        <div className="space-y-2 border-b border-border pb-3">
+          <div className="relative">
+            <select
+              aria-label="Organization Context"
+              value={selectedOrgId}
+              onChange={(e) => setSelectedOrgId(e.target.value)}
+              className="h-8 w-full appearance-none border border-border bg-background px-2.5 pr-7 text-[12px] font-normal text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            >
+              {ORG_CONTEXTS.map((org) => (
+                <option
+                  key={org.id}
+                  value={org.id}
+                  className="bg-background text-foreground"
+                >
+                  {org.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          </div>
+
+          <div className="space-y-0.5 px-0.5 text-[11px] leading-[1.4] text-muted-foreground">
+            <p>
+              Sandboxes you create here bill{' '}
+              <span className="text-foreground font-medium">
+                {currentOrg.sandboxBill}
+              </span>
+              .
+            </p>
+            <p>
+              CLI and API keys bill{' '}
+              <span className="text-foreground font-medium">
+                {currentOrg.cliBill}
+              </span>
+              .{' '}
+              <button
+                type="button"
+                onClick={() => onNavigate('settings')}
+                className="underline underline-offset-2 text-muted-foreground hover:text-foreground"
+              >
+                Change
+              </button>
+            </p>
+          </div>
+        </div>
+
+        {/* Primary Navigation List matching boat.dev/dashboard */}
+        <nav className="space-y-0.5" aria-label="Main Navigation">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const active = item.id === page;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onNavigate(item.id)}
+                className={cn(
+                  'flex h-7 w-full items-center justify-between px-2 text-[12.5px] font-normal transition-colors',
+                  active
+                    ? 'boat-selected text-foreground font-medium'
+                    : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
+                )}
+              >
+                <span className="flex items-center gap-2.5 truncate">
+                  <Icon
+                    className={cn(
+                      'h-3.5 w-3.5 shrink-0',
+                      active ? 'text-foreground' : 'text-[var(--icon-quiet)]',
+                    )}
+                  />
+                  <span className="truncate">{item.label}</span>
+                </span>
+                {item.count !== undefined && (
+                  <span
+                    className={cn(
+                      'font-mono text-[10.5px] tabular',
+                      active ? 'text-foreground/90' : 'text-muted-foreground',
+                    )}
+                  >
+                    {item.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+
+          <div className="space-y-0.5">
+            <button
+              type="button"
+              onClick={() => onNavigate('api')}
+              className="flex h-7 w-full items-center justify-between px-2 text-[12.5px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+            >
+              <span className="flex items-center gap-2.5">
+                <BookOpen className="h-3.5 w-3.5 text-[var(--icon-quiet)]" />
+                <span>Docs</span>
+              </span>
+              <ExternalLink className="h-3 w-3 text-muted-foreground/60" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('events')}
+              className="flex h-7 w-full items-center justify-between px-2 text-[12.5px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
+            >
+              <span className="flex items-center gap-2.5">
+                <Headphones className="h-3.5 w-3.5 text-[var(--icon-quiet)]" />
+                <span>Support</span>
+              </span>
+              <ExternalLink className="h-3 w-3 text-muted-foreground/60" />
+            </button>
+          </div>
+        </nav>
+      </div>
+
+      {/* Bottom Segmented [ ☼ Light | ☾ Dark ] Switcher matching boat.dev/dashboard */}
+      <div className="pt-3">
+        <div className="grid grid-cols-2 border border-border bg-background h-8">
+          <button
+            type="button"
+            onClick={handleLight}
+            className={cn(
+              'flex items-center justify-center gap-1.5 text-[12px] transition-colors',
+              theme === 'light'
+                ? 'bg-[#f1f3f9] text-[#263fa9] font-medium'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            <Sun className="h-3.5 w-3.5" />
+            <span>Light</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleDark}
+            className={cn(
+              'flex items-center justify-center gap-1.5 text-[12px] transition-colors border-l border-border',
+              theme === 'dark'
+                ? 'bg-[#0f1634] text-[#fefefe] font-medium'
+                : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            <Moon className="h-3.5 w-3.5" />
+            <span>Dark</span>
+          </button>
         </div>
       </div>
     </div>
