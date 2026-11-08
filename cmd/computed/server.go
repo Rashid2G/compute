@@ -896,6 +896,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			// Give operators and automation a sandbox that is actually reachable.
 			s.waitGuestSSH(ctx, v, 30*time.Second)
 			s.mountAttachedVolumes(ctx, v)
+			s.applyEnvironment(ctx, v)
 			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
@@ -919,6 +920,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if v != nil && v.Status == db.StatusRunning {
 			s.waitGuestSSH(ctx, v, 30*time.Second)
 			s.mountAttachedVolumes(ctx, v)
+			s.applyEnvironment(ctx, v)
 			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
