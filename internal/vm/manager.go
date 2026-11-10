@@ -24,35 +24,69 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/firecracker"
 	"github.com/Rashid2G/on-demand-vms/internal/image"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
+	jailer "github.com/Rashid2G/on-demand-vms/internal/node/runtime/firecracker"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
 	"github.com/google/uuid"
 )
 
 type Config struct {
-	FirecrackerBinary string
-	Defaults          config.DefaultsConfig
-	Resources         config.ResourceLimits
+	FirecrackerBinary   string
+	JailerBinary        string
+	JailerEnabled       bool
+	JailerBaseDir       string
+	JailerUID           int
+	JailerGID           int
+	JailerNetNS         string
+	JailerDevFallback   bool
+	JailerUseNamespaces bool
+	CgroupParent        string
+	CgroupEnforce       bool
+	CgroupDevOverride   bool
+	Defaults            config.DefaultsConfig
+	Resources           config.ResourceLimits
 }
 
 type Manager struct {
-	cfg            Config
-	store          *db.Store
-	netMgr         *network.Manager
-	storMgr        *storage.Manager
-	imgBuilder     *image.Builder
-	defaults       config.DefaultsConfig
-	resourceLimits config.ResourceLimits
-	runQueue       []string
-	queueReasons   map[string]string
-	queueTimes     map[string]time.Time
-	processChecker func(pid int) bool
-	launcher       func(ctx context.Context, vm *db.VM) error
-	mu             sync.Mutex
+	cfg                   Config
+	store                 *db.Store
+	netMgr                *network.Manager
+	storMgr               *storage.Manager
+	imgBuilder            *image.Builder
+	cgroupMgr             *CgroupManager
+	cgroupEnforceExplicit bool
+	defaults              config.DefaultsConfig
+	resourceLimits        config.ResourceLimits
+	runQueue              []string
+	queueReasons          map[string]string
+	queueTimes            map[string]time.Time
+	queueMu               sync.Mutex
+	processChecker        func(pid int) bool
+	launcher              func(ctx context.Context, vm *db.VM) error
+	mu                    sync.RWMutex
+	vms                   map[string]*db.VM
+	templates             map[string]*db.Template
+	images                map[string]*db.CustomImage
+	vmLocks               sync.Map // canonicalKey -> *sync.RWMutex
 }
 
 func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *storage.Manager) *Manager {
 	if cfg.FirecrackerBinary == "" {
 		cfg.FirecrackerBinary = "/usr/local/bin/firecracker"
+	}
+	if cfg.JailerBinary == "" {
+		cfg.JailerBinary = "/usr/local/bin/jailer"
+	}
+	if cfg.JailerBaseDir == "" {
+		cfg.JailerBaseDir = "/srv/jailer"
+	}
+	if cfg.JailerUID <= 0 {
+		cfg.JailerUID = 1000
+	}
+	if cfg.JailerGID <= 0 {
+		cfg.JailerGID = cfg.JailerUID
+	}
+	if cfg.CgroupParent == "" {
+		cfg.CgroupParent = "/sys/fs/cgroup/compute"
 	}
 	if cfg.Defaults.VCPUs <= 0 {
 		cfg.Defaults.VCPUs = 1
@@ -76,17 +110,215 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 		imgBuilder = image.NewBuilder(store, storMgr)
 	}
 
-	return &Manager{
+	cgroupMgr := NewCgroupManager(cfg.CgroupParent)
+
+	m := &Manager{
 		cfg:            cfg,
 		store:          store,
 		netMgr:         netMgr,
 		storMgr:        storMgr,
 		imgBuilder:     imgBuilder,
+		cgroupMgr:      cgroupMgr,
 		defaults:       cfg.Defaults,
 		resourceLimits: cfg.Resources,
 		queueReasons:   make(map[string]string),
 		queueTimes:     make(map[string]time.Time),
+		vms:            make(map[string]*db.VM),
+		templates:      make(map[string]*db.Template),
+		images:         make(map[string]*db.CustomImage),
 	}
+
+	if netMgr != nil && store != nil {
+		netMgr.SetStore(store)
+	}
+
+	if store != nil {
+		if list, err := store.ListVMs(context.Background()); err == nil {
+			for _, v := range list {
+				m.vms[v.ID] = v
+				if v.InternalID != "" {
+					m.vms[v.InternalID] = v
+				}
+			}
+		}
+		if tpls, err := store.ListTemplates(context.Background()); err == nil {
+			for _, t := range tpls {
+				m.templates[t.ID] = t
+				if t.InternalID != "" {
+					m.templates[t.InternalID] = t
+				}
+			}
+		}
+		if imgs, err := store.ListImages(context.Background()); err == nil {
+			for _, img := range imgs {
+				m.images[img.ID] = img
+				if img.InternalID != "" {
+					m.images[img.InternalID] = img
+				}
+			}
+		}
+	}
+
+	return m
+}
+
+func (m *Manager) getVMLock(vmID string) *sync.RWMutex {
+	canonicalKey := vmID
+	m.mu.RLock()
+	v, ok := m.vms[vmID]
+	m.mu.RUnlock()
+
+	if (!ok || v == nil) && m.store != nil {
+		if dbV, _ := m.store.GetVM(context.Background(), vmID); dbV != nil {
+			m.mu.Lock()
+			m.vms[dbV.ID] = dbV
+			if dbV.InternalID != "" {
+				m.vms[dbV.InternalID] = dbV
+			}
+			m.mu.Unlock()
+			v = dbV
+		}
+	}
+
+	if v != nil {
+		if v.InternalID != "" {
+			canonicalKey = v.InternalID
+		} else if v.ID != "" {
+			canonicalKey = v.ID
+		}
+	}
+
+	val, _ := m.vmLocks.LoadOrStore(canonicalKey, &sync.RWMutex{})
+	return val.(*sync.RWMutex)
+}
+
+func (m *Manager) saveVMRecord(ctx context.Context, vm *db.VM) error {
+	if m.store != nil {
+		if err := m.store.SaveVM(ctx, vm); err != nil {
+			return err
+		}
+	}
+	m.mu.Lock()
+	m.vms[vm.ID] = vm
+	if vm.InternalID != "" {
+		m.vms[vm.InternalID] = vm
+	}
+	if vm.Name != "" {
+		m.vms[vm.Name] = vm
+	}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) deleteVMRecord(ctx context.Context, vmID string) error {
+	var internalID, id, name string
+
+	m.mu.RLock()
+	if v, ok := m.vms[vmID]; ok && v != nil {
+		internalID = v.InternalID
+		id = v.ID
+		name = v.Name
+	}
+	m.mu.RUnlock()
+
+	if internalID == "" && m.store != nil {
+		if v, _ := m.store.GetVM(ctx, vmID); v != nil {
+			internalID = v.InternalID
+			id = v.ID
+			name = v.Name
+		}
+	}
+
+	m.mu.Lock()
+	delete(m.vms, vmID)
+	if internalID != "" {
+		delete(m.vms, internalID)
+	}
+	if id != "" {
+		if cur, ok := m.vms[id]; ok && cur != nil && (cur.InternalID == internalID || cur.ID == id) {
+			delete(m.vms, id)
+		}
+	}
+	if name != "" {
+		if cur, ok := m.vms[name]; ok && cur != nil && cur.InternalID == internalID {
+			delete(m.vms, name)
+		}
+	}
+	m.mu.Unlock()
+
+	m.vmLocks.Delete(vmID)
+	if internalID != "" {
+		m.vmLocks.Delete(internalID)
+	}
+
+	if m.store != nil {
+		if internalID != "" {
+			return m.store.DeleteVMByInternalID(ctx, internalID)
+		}
+		return m.store.DeleteVM(ctx, vmID)
+	}
+	return nil
+}
+
+func (m *Manager) getVMUnsafe(ctx context.Context, vmID string) (*db.VM, error) {
+	if m.store != nil {
+		v, err := m.store.GetVM(ctx, vmID)
+		if err != nil {
+			return nil, err
+		}
+		if v != nil {
+			m.mu.Lock()
+			m.vms[v.ID] = v
+			if v.InternalID != "" {
+				m.vms[v.InternalID] = v
+			}
+			if v.Name != "" {
+				m.vms[v.Name] = v
+			}
+			m.mu.Unlock()
+			return v, nil
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if v, ok := m.vms[vmID]; ok && v != nil {
+		return v, nil
+	}
+	return nil, nil
+}
+
+// CgroupManager returns the underlying cgroup manager
+func (m *Manager) CgroupManager() *CgroupManager {
+	return m.cgroupMgr
+}
+
+// SetCgroupEnforce enables or disables fail-closed cgroup enforcement
+func (m *Manager) SetCgroupEnforce(enforce bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cgroupEnforceExplicit = true
+	m.cfg.CgroupEnforce = enforce
+	if !enforce {
+		m.cfg.CgroupDevOverride = true
+	} else {
+		m.cfg.CgroupDevOverride = false
+	}
+}
+
+func (m *Manager) isCgroupEnforced() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cgroupMgr == nil {
+		return false
+	}
+	if m.cfg.CgroupDevOverride {
+		return false
+	}
+	if m.cgroupEnforceExplicit {
+		return m.cfg.CgroupEnforce
+	}
+	// Cgroup v2 setup and process assignment fail closed by default when cgroupMgr is active
+	return true
 }
 
 // SetProcessChecker overrides process liveness checking (useful for testing)
@@ -159,23 +391,23 @@ func (m *Manager) SetImageBuilder(b *image.Builder) {
 
 // GetDefaults returns default specs
 func (m *Manager) GetDefaults() config.DefaultsConfig {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.defaults
 }
 
 // GetResourceLimits returns active capacity resource limits
 func (m *Manager) GetResourceLimits() config.ResourceLimits {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.resourceLimits
 }
 
 // SetResourceLimits dynamically updates capacity limits
 func (m *Manager) SetResourceLimits(limits config.ResourceLimits) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.resourceLimits = limits
+	m.mu.Unlock()
 	m.processQueue(context.Background())
 }
 
@@ -197,6 +429,14 @@ type CreateRequest struct {
 	DHCP            *bool  `json:"dhcp,omitempty"`
 	SSHKeyID        string `json:"ssh_key_id,omitempty"`
 	SSHPublicKey    string `json:"ssh_public_key,omitempty"`
+
+	// AuthorizedOwnerIDs lists every owner whose templates, images, clone
+	// sources, and SSH keys the caller may use. It is populated by the control
+	// plane after authentication and is never decoded from request JSON.
+	AuthorizedOwnerIDs []string `json:"-"`
+	// AllowCrossOwner lets a verified administrator use resources belonging to
+	// any tenant. It is set only by the control plane, never by API clients.
+	AllowCrossOwner bool `json:"-"`
 }
 
 func (r *CreateRequest) UnmarshalJSON(data []byte) error {
@@ -253,6 +493,7 @@ type BuildImageRequest = image.BuildRequest
 
 type CreateTemplateRequest struct {
 	Name        string `json:"name"`
+	OwnerID     string `json:"owner_id,omitempty"`
 	Description string `json:"description,omitempty"`
 	VMID        string `json:"vm_id"`
 }
@@ -299,6 +540,7 @@ type QueueItem struct {
 	Position int       `json:"position"`
 	VMID     string    `json:"vm_id"`
 	VMName   string    `json:"vm_name"`
+	OwnerID  string    `json:"-"` // used for tenant-scoped queue filtering
 	VCPUs    int       `json:"vcpus"`
 	MemoryMB int       `json:"memory_mb"`
 	QueuedAt time.Time `json:"queued_at"`
@@ -375,11 +617,187 @@ func (m *Manager) getVMDirID(vm *db.VM) string {
 	return vm.ID
 }
 
+// isInternalServiceOwner reports whether ownerID is an internal job service
+// identity rather than a tenant. The control plane authorizes the image before
+// handing the job off, so these processes may consume tenant images.
+func isInternalServiceOwner(ownerID string) bool {
+	switch ownerID {
+	case "jobs", "worker-job":
+		return true
+	}
+	return false
+}
+
+// resourceOwnerAllowed reports whether req may use a resource owned by
+// resourceOwner. Requests coming from the control plane always carry either an
+// explicit authorized owner set or the administrator cross-owner flag, so the
+// legacy "default" shared-resource fallback no longer applies to tenants.
+func resourceOwnerAllowed(req *CreateRequest, fallbackOwner, resourceOwner string) bool {
+	if req == nil || req.AllowCrossOwner {
+		return true
+	}
+	if fallbackOwner == "default" || isInternalServiceOwner(fallbackOwner) {
+		return true
+	}
+	if len(req.AuthorizedOwnerIDs) > 0 {
+		if resourceOwner == "" {
+			return false
+		}
+		for _, id := range req.AuthorizedOwnerIDs {
+			if id != "" && id == resourceOwner {
+				return true
+			}
+		}
+		return false
+	}
+	// Direct (non-HTTP) callers keep the historical single-tenant behaviour.
+	return resourceOwner == "" || resourceOwner == fallbackOwner
+}
+
+// lookupTemplateForRequest resolves a template while honouring the caller's
+// authorized owners. Pinned internal IDs (tpl_...) resolve through the same
+// owner-scoped query because it matches internal_id as well as name.
+func (m *Manager) lookupTemplateForRequest(ctx context.Context, req *CreateRequest, identifier, fallbackOwner string) (*db.Template, error) {
+	if req == nil || req.AllowCrossOwner || fallbackOwner == "default" || isInternalServiceOwner(fallbackOwner) {
+		return m.store.GetTemplate(ctx, identifier)
+	}
+	owners := req.AuthorizedOwnerIDs
+	if len(owners) == 0 {
+		owners = []string{fallbackOwner}
+	}
+	for _, ownerID := range owners {
+		if ownerID == "" {
+			continue
+		}
+		tpl, err := m.store.GetTemplateByOwner(ctx, ownerID, identifier)
+		if err != nil {
+			return nil, err
+		}
+		if tpl != nil && resourceOwnerAllowed(req, fallbackOwner, tpl.OwnerID) {
+			return tpl, nil
+		}
+	}
+	if len(req.AuthorizedOwnerIDs) == 0 && fallbackOwner != "" {
+		// Records created before ownership was introduced are treated as
+		// legacy single-tenant assets for direct callers only.
+		if global, _ := m.store.GetTemplate(ctx, identifier); global != nil && resourceOwnerAllowed(req, fallbackOwner, global.OwnerID) {
+			return global, nil
+		}
+	}
+	return nil, nil
+}
+
+// lookupImageForRequest resolves a custom image while honouring the caller's
+// authorized owners.
+func (m *Manager) lookupImageForRequest(ctx context.Context, req *CreateRequest, identifier, fallbackOwner string) (*db.CustomImage, error) {
+	if req == nil || req.AllowCrossOwner || fallbackOwner == "default" || isInternalServiceOwner(fallbackOwner) {
+		return m.store.GetImage(ctx, identifier)
+	}
+	owners := req.AuthorizedOwnerIDs
+	if len(owners) == 0 {
+		owners = []string{fallbackOwner}
+	}
+	for _, ownerID := range owners {
+		if ownerID == "" {
+			continue
+		}
+		img, err := m.store.GetImageByOwner(ctx, ownerID, identifier)
+		if err != nil {
+			return nil, err
+		}
+		if img != nil && resourceOwnerAllowed(req, fallbackOwner, img.OwnerID) {
+			return img, nil
+		}
+	}
+	if len(req.AuthorizedOwnerIDs) == 0 && fallbackOwner != "" {
+		if global, _ := m.store.GetImage(ctx, identifier); global != nil && resourceOwnerAllowed(req, fallbackOwner, global.OwnerID) {
+			return global, nil
+		}
+	}
+	return nil, nil
+}
+
+// lookupSSHKeyForRequest resolves an SSH key while honouring the caller's
+// authorized owners. SSH key names are only unique per owner, so a global
+// name lookup would be able to select another tenant's key.
+func (m *Manager) lookupSSHKeyForRequest(ctx context.Context, req *CreateRequest, identifier, fallbackOwner string) (*db.SSHKey, error) {
+	if req == nil || req.AllowCrossOwner || fallbackOwner == "default" {
+		return m.store.GetSSHKey(ctx, identifier)
+	}
+	owners := req.AuthorizedOwnerIDs
+	if len(owners) == 0 {
+		owners = []string{fallbackOwner}
+	}
+	for _, ownerID := range owners {
+		if ownerID == "" {
+			continue
+		}
+		key, err := m.store.GetSSHKeyByOwner(ctx, ownerID, identifier)
+		if err != nil {
+			return nil, err
+		}
+		if key != nil && resourceOwnerAllowed(req, fallbackOwner, key.OwnerID) {
+			return key, nil
+		}
+	}
+	if len(req.AuthorizedOwnerIDs) == 0 && fallbackOwner != "" {
+		if global, _ := m.store.GetSSHKey(ctx, identifier); global != nil && resourceOwnerAllowed(req, fallbackOwner, global.OwnerID) {
+			return global, nil
+		}
+	}
+	return nil, nil
+}
+
+// isPlatformBaseImage reports whether imageName resolves to a platform-provided
+// base image. Custom images must never shadow these names for other tenants.
+func (m *Manager) isPlatformBaseImage(imageName string) bool {
+	if m.storMgr == nil || strings.TrimSpace(imageName) == "" {
+		return false
+	}
+	_, _, err := m.storMgr.ResolveImage(imageName)
+	return err == nil
+}
+
+// IsPlatformBaseImage reports whether name refers to a platform-provided base
+// image (for example "ubuntu-24.04") rather than a tenant-owned custom image or
+// template. Control-plane handlers use it to keep foreign custom images from
+// shadowing platform image names.
+func (m *Manager) IsPlatformBaseImage(name string) bool {
+	return m.isPlatformBaseImage(name)
+}
+
+// lookupVMForRequest resolves a clone source VM within the caller's authorized
+// owners. Callers pin internal IDs so duplicate names cannot cross tenants.
+func (m *Manager) lookupVMForRequest(ctx context.Context, req *CreateRequest, identifier, fallbackOwner string) (*db.VM, error) {
+	if req == nil || req.AllowCrossOwner || fallbackOwner == "default" || isInternalServiceOwner(fallbackOwner) {
+		return m.store.GetVM(ctx, identifier)
+	}
+	owners := req.AuthorizedOwnerIDs
+	if len(owners) == 0 {
+		owners = []string{fallbackOwner}
+	}
+	for _, ownerID := range owners {
+		if ownerID == "" {
+			continue
+		}
+		v, err := m.store.GetVMByOwner(ctx, ownerID, identifier)
+		if err != nil {
+			return nil, err
+		}
+		if v != nil && resourceOwnerAllowed(req, fallbackOwner, v.OwnerID) {
+			return v, nil
+		}
+	}
+	if len(req.AuthorizedOwnerIDs) == 0 && fallbackOwner != "" {
+		if global, _ := m.store.GetVM(ctx, identifier); global != nil && resourceOwnerAllowed(req, fallbackOwner, global.OwnerID) {
+			return global, nil
+		}
+	}
+	return nil, nil
+}
+
 // CreateVM reserves networking, validates disk space and images, and registers a created VM
 func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	uid := uuid.New().String()
 	cleanU := strings.ReplaceAll(uid, "-", "")
 	internalID := fmt.Sprintf("ins_%s", cleanU[:16])
@@ -398,18 +816,25 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	if ownerID == "" {
 		ownerID = "default"
 	}
+	// Internal job service processes may consume images/templates that the
+	// control plane already authorized for a tenant.
+	imageLookupOwner := ownerID
+	if isInternalServiceOwner(ownerID) {
+		imageLookupOwner = "default"
+	}
 
 	existing, _ := m.store.GetVMByOwner(ctx, ownerID, name)
 	if existing != nil {
 		return nil, fmt.Errorf("a VM named %q already exists for owner %q", name, ownerID)
 	}
 
-	// Check if launching from a saved template
+	// Check if launching from a saved template. The template must belong to one
+	// of the caller's authorized owners (or the caller is an administrator).
 	var tpl *db.Template
 	if req.Template != "" {
 		var tplErr error
-		tpl, tplErr = m.store.GetTemplate(ctx, req.Template)
-		if tplErr != nil || tpl == nil {
+		tpl, tplErr = m.lookupTemplateForRequest(ctx, &req, req.Template, imageLookupOwner)
+		if tplErr != nil || tpl == nil || !resourceOwnerAllowed(&req, imageLookupOwner, tpl.OwnerID) {
 			return nil, fmt.Errorf("disk space issue: template '%s' not found", req.Template)
 		}
 		if req.Tier == "" && req.VCPUs <= 0 && tpl.VCPUs > 0 {
@@ -517,9 +942,9 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 			kernelPath = m.storMgr.GetBaseKernelPath()
 		}
 	} else if req.CloneFrom != "" {
-		// Clone disk from existing VM
-		srcVM, err := m.store.GetVM(ctx, req.CloneFrom)
-		if err != nil || srcVM == nil {
+		// Clone disk from existing VM. The source must be visible to the caller.
+		srcVM, err := m.lookupVMForRequest(ctx, &req, req.CloneFrom, ownerID)
+		if err != nil || srcVM == nil || !resourceOwnerAllowed(&req, ownerID, srcVM.OwnerID) {
 			return nil, fmt.Errorf("disk space issue: clone source VM '%s' not found", req.CloneFrom)
 		}
 		srcDirID := m.getVMDirID(srcVM)
@@ -536,8 +961,15 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 			kernelPath = m.storMgr.GetBaseKernelPath()
 		}
 	} else {
-		// Check custom image first
-		customImg, _ := m.store.GetImage(ctx, imageName)
+		// Check custom image first. Images and templates are owner-scoped so a
+		// same-named resource from another tenant can never be selected.
+		customImg, imgErr := m.lookupImageForRequest(ctx, &req, imageName, imageLookupOwner)
+		if imgErr != nil {
+			return nil, fmt.Errorf("disk space issue: failed to resolve image '%s': %w", imageName, imgErr)
+		}
+		if customImg != nil && !resourceOwnerAllowed(&req, imageLookupOwner, customImg.OwnerID) {
+			return nil, fmt.Errorf("disk space issue: custom image '%s' not found or not accessible", imageName)
+		}
 		if customImg != nil {
 			if customImg.Status == db.ImageStatusBuilding {
 				// A daemon restart during a build can leave the record in the
@@ -566,7 +998,13 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 			}
 		} else {
 			// Check if imageName refers to a template
-			namedTpl, _ := m.store.GetTemplate(ctx, imageName)
+			namedTpl, tplErr := m.lookupTemplateForRequest(ctx, &req, imageName, imageLookupOwner)
+			if tplErr != nil {
+				return nil, fmt.Errorf("disk space issue: failed to resolve template '%s': %w", imageName, tplErr)
+			}
+			if namedTpl != nil && !resourceOwnerAllowed(&req, imageLookupOwner, namedTpl.OwnerID) {
+				return nil, fmt.Errorf("disk space issue: template '%s' not found", imageName)
+			}
 			if namedTpl != nil {
 				if _, err := os.Stat(namedTpl.DiskPath); err != nil {
 					return nil, fmt.Errorf("disk space issue: template disk not found at %s: %w", namedTpl.DiskPath, err)
@@ -582,6 +1020,18 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 					kernelPath = m.storMgr.GetBaseKernelPath()
 				}
 			} else {
+				// A same-named resource owned by someone else must not be
+				// silently replaced by a base image when the caller explicitly
+				// asked for that name. Platform base image names are exempt:
+				// a foreign custom image must never shadow them.
+				if req.Image != "" && !m.isPlatformBaseImage(imageName) {
+					if foreignImg, _ := m.store.GetImage(ctx, imageName); foreignImg != nil {
+						return nil, fmt.Errorf("disk space issue: custom image '%s' not found or not accessible", imageName)
+					}
+					if foreignTpl, _ := m.store.GetTemplate(ctx, imageName); foreignTpl != nil {
+						return nil, fmt.Errorf("disk space issue: template '%s' not found", imageName)
+					}
+				}
 				// Resolve base image (compute supports Ubuntu 24 base image)
 				var err error
 				kernelPath, rootfsPath, err = m.storMgr.ResolveImage(imageName)
@@ -608,11 +1058,16 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		embeddedPubKey = strings.TrimSpace(req.SSHPublicKey)
 		embeddedKeyName = "custom"
 	} else if req.SSHKeyID != "" {
-		key, err := m.store.GetSSHKey(ctx, req.SSHKeyID)
+		key, err := m.lookupSSHKeyForRequest(ctx, &req, req.SSHKeyID, ownerID)
 		if err != nil {
 			return nil, fmt.Errorf("invalid requested ssh key: %w", err)
 		}
 		if key != nil {
+			// SSH keys follow the same owner scoping as images and templates:
+			// the caller may use a key owned by their user or active org.
+			if !resourceOwnerAllowed(&req, imageLookupOwner, key.OwnerID) {
+				return nil, fmt.Errorf("ssh key not found: %s", req.SSHKeyID)
+			}
 			embeddedPubKey = key.PublicKey
 			embeddedKeyName = key.Name
 		} else {
@@ -620,7 +1075,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		}
 	}
 
-	if embeddedPubKey != "" && diskPath != "" {
+	if diskPath != "" {
 		_ = m.storMgr.EmbedSSHKey(diskPath, embeddedPubKey)
 	}
 
@@ -707,6 +1162,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		Status:          db.StatusCreated,
 		VCPUs:           vcpus,
 		MemoryMB:        memoryMB,
+		DiskMB:          diskMB,
 		IPAddress:       ip,
 		PublicIP:        publicIP,
 		PublicIPEnabled: publicIPEnabled,
@@ -722,7 +1178,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		UpdatedAt:       time.Now().UTC(),
 	}
 
-	if err := m.store.SaveVM(ctx, vm); err != nil {
+	if err := m.saveVMRecord(ctx, vm); err != nil {
 		m.storMgr.CleanupVM(internalID)
 		m.storMgr.CleanupVM(externalID)
 		return nil, fmt.Errorf("failed to save VM in DB: %w", err)
@@ -733,9 +1189,13 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 
 // CloneVM clones an existing VM's disk into a new VM with optional specification overrides
 func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest) (*db.VM, error) {
+	srcLock := m.getVMLock(srcVMID)
+	srcLock.RLock()
+	defer srcLock.RUnlock()
+
 	req.CloneFrom = srcVMID
 	if req.PublicIP == nil && req.PublicIPEnabled == nil && req.DedicatedIP == nil {
-		if srcVM, _ := m.store.GetVM(ctx, srcVMID); srcVM != nil {
+		if srcVM, _ := m.getVMUnsafe(ctx, srcVMID); srcVM != nil {
 			req.PublicIP = &srcVM.PublicIPEnabled
 			req.PublicIPEnabled = &srcVM.PublicIPEnabled
 		}
@@ -745,17 +1205,18 @@ func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest
 
 // RunVM starts an existing VM immediately if resources permit, or queues it if host capacity is reached
 func (m *Manager) RunVM(ctx context.Context, vmID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
+	defer vmLock.Unlock()
 
-	vm, err := m.store.GetVM(ctx, vmID)
+	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
 
 	vm.DesiredRunning = true
 	if vm.Status == db.StatusRunning && m.isAlive(vm.PID) {
-		return m.store.SaveVM(ctx, vm) // Already running; persist desired state
+		return m.saveVMRecord(ctx, vm) // Already running; persist desired state
 	}
 
 	// Capacity check: if host resources are maxed out, queue the run
@@ -763,7 +1224,7 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 	if !canRun {
 		vm.Status = db.StatusQueued
 		m.enqueue(vm.ID, reason)
-		if err := m.store.SaveVM(ctx, vm); err != nil {
+		if err := m.saveVMRecord(ctx, vm); err != nil {
 			return fmt.Errorf("failed to save queued VM state: %w", err)
 		}
 		return nil
@@ -776,7 +1237,7 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 
 	m.dequeue(vm.ID)
 	vm.Status = db.StatusRunning
-	return m.store.SaveVM(ctx, vm)
+	return m.saveVMRecord(ctx, vm)
 }
 
 // startVMProcess executes the Firecracker binary, attaches TAP, and boots the microVM
@@ -793,7 +1254,48 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 		return fmt.Errorf("failed to setup TAP device: %w", err)
 	}
 
-	// 2. Setup paths
+	// Apply L2/L3 Anti-Spoofing and Bridge Port Isolation
+	if m.netMgr != nil {
+		isoCfg := network.IsolationConfig{
+			TAPDevice:  vm.TAPDevice,
+			IPAddress:  vm.IPAddress,
+			MACAddress: vm.MACAddress,
+			OwnerID:    vm.OwnerID,
+		}
+		if vm.OwnerID != "" && vm.OwnerID != "default" && m.store != nil {
+			if peers, err := m.store.ListVMsByOwner(ctx, vm.OwnerID); err == nil {
+				for _, peer := range peers {
+					if peer != nil && peer.ID != vm.ID && peer.TAPDevice != "" && peer.Status == db.StatusRunning {
+						isoCfg.AllowedPeerTAPs = append(isoCfg.AllowedPeerTAPs, peer.TAPDevice)
+					}
+				}
+			}
+		}
+		_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
+	}
+
+	// 2. Setup Cgroups v2 resource limits
+	if m.cgroupMgr != nil {
+		limits := CgroupLimits{
+			VCPUs:                vm.VCPUs,
+			MemoryMB:             vm.MemoryMB,
+			MemorySafetyBufferMB: 64,
+			MemoryHighBufferMB:   32,
+			PidsMax:              512,
+		}
+		if _, cgErr := m.cgroupMgr.Setup(vm.ID, limits); cgErr != nil {
+			log.Printf("[vm-manager] Warning: cgroups v2 setup for vm %s: %v", vm.ID, cgErr)
+			if m.isCgroupEnforced() {
+				if m.netMgr != nil {
+					_ = m.netMgr.RemoveAntiSpoofAndIsolation(ctx, network.IsolationConfig{TAPDevice: vm.TAPDevice})
+					_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+				}
+				return fmt.Errorf("failed to setup cgroup limits: %w", cgErr)
+			}
+		}
+	}
+
+	// 3. Setup paths
 	vmDir := m.getVMStorageDir(vm)
 	sockPath := filepath.Join(vmDir, "firecracker.sock")
 	logPath := filepath.Join(vmDir, "firecracker.log")
@@ -801,21 +1303,144 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 	// Ensure cleanup on failure rollback
 	var success bool
 	var cmd *exec.Cmd
+	var jailerProc *jailer.InstanceProcess
 	defer func() {
 		if !success {
+			if jailerProc != nil {
+				_ = jailerProc.Stop(2 * time.Second)
+				_ = jailerProc.Cleanup()
+			}
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
-			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+			if m.cgroupMgr != nil {
+				_ = m.cgroupMgr.Teardown(vm.ID)
+			}
+			if m.netMgr != nil {
+				_ = m.netMgr.RemoveAntiSpoofAndIsolation(ctx, network.IsolationConfig{TAPDevice: vm.TAPDevice})
+				_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+			}
 			_ = os.Remove(sockPath)
 		}
 	}()
 
-	// 3. Launch Firecracker
+	// Resolve boot arguments
+	gwIP := m.netMgr.GetGatewayIP()
+	netmask := m.netMgr.GetNetmask()
+	var bootArgs string
+	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
+		bootArgs = "console=ttyS0 reboot=k panic=1 pci=off ip=dhcp root=/dev/vda rw quiet"
+	} else {
+		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:%s:%s:eth0:off root=/dev/vda rw quiet", vm.IPAddress, gwIP, netmask, vm.ID)
+	}
+
+	// If VM still has "dhcp" as IP, try resolving lease before booting Firecracker
+	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
+		if leasedIP, err := m.netMgr.ResolveGuestIPByMAC(ctx, vm.MACAddress); err == nil && leasedIP != "" {
+			vm.IPAddress = leasedIP
+			if vm.PublicIPEnabled {
+				vm.PublicIP = leasedIP
+			}
+			_ = m.saveVMRecord(ctx, vm)
+		}
+	}
+
+	// 4. Check if Jailer is enabled
+	if m.cfg.JailerEnabled {
+		if !jailer.IsJailerAvailable(m.cfg.JailerBinary) {
+			if !m.cfg.JailerDevFallback {
+				return fmt.Errorf("jailer is enabled but jailer binary is unavailable at %s (fail-closed)", m.cfg.JailerBinary)
+			}
+			log.Printf("[vm-manager] Warning: jailer enabled but unavailable, falling back to un-jailed launch (dev override)")
+		} else {
+			var extraDrives []jailer.ExtraDrive
+			if vols, err := m.volumesForVM(ctx, vm); err == nil {
+				for i, vol := range vols {
+					if i >= 25 {
+						break
+					}
+					extraDrives = append(extraDrives, jailer.ExtraDrive{
+						DriveID:    fmt.Sprintf("data%d", i),
+						HostPath:   vol.Path,
+						IsReadOnly: false,
+					})
+					vol.DevicePath = fmt.Sprintf("/dev/vd%c", 'b'+rune(i))
+					_ = m.store.SaveVolume(ctx, vol)
+				}
+			}
+
+			jOpts := jailer.JailerOptions{
+				ID:            sanitizeFirecrackerID(vm.ID),
+				Firecracker:   m.cfg.FirecrackerBinary,
+				Jailer:        m.cfg.JailerBinary,
+				ChrootBaseDir: m.cfg.JailerBaseDir,
+				UID:           m.cfg.JailerUID,
+				GID:           m.cfg.JailerGID,
+				VCPUs:         vm.VCPUs,
+				MemoryMB:      vm.MemoryMB,
+				KernelSrcPath: vm.KernelPath,
+				RootfsSrcPath: vm.DiskPath,
+				BootArgs:      bootArgs,
+				TapName:       vm.TAPDevice,
+				MAC:           vm.MACAddress,
+				ExtraDrives:   extraDrives,
+				UseNamespaces: os.Geteuid() == 0 || m.cfg.JailerUseNamespaces,
+				NetNS:         m.cfg.JailerNetNS,
+			}
+
+			ip, jErr := jailer.LaunchJailer(ctx, jOpts)
+			if jErr == nil {
+				jailerProc = ip
+				cmd = ip.Cmd
+				sockPath = ip.APISock
+
+				// Assign process to Cgroups v2
+				if m.cgroupMgr != nil && ip.PID > 0 {
+					if aErr := m.cgroupMgr.Assign(vm.ID, ip.PID); aErr != nil {
+						log.Printf("[vm-manager] Warning: cgroups assign for jailed vm %s: %v", vm.ID, aErr)
+						if m.isCgroupEnforced() {
+							return fmt.Errorf("failed to assign jailed process to cgroup: %w", aErr)
+						}
+					}
+				}
+
+				// Wait for socket to become active
+				if err := firecracker.WaitForSocket(sockPath, 5*time.Second); err != nil {
+					return fmt.Errorf("jailer firecracker socket not ready at %s: %w", sockPath, err)
+				}
+
+				success = true
+				vm.PID = ip.PID
+				vm.SocketPath = sockPath
+				_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
+				if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
+					go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
+				}
+				return nil
+			}
+
+			if !m.cfg.JailerDevFallback {
+				return fmt.Errorf("failed to launch inside jailer: %w (fail-closed)", jErr)
+			}
+			log.Printf("[vm-manager] Warning: failed to launch inside Jailer (%v), falling back to un-jailed launch (dev override)", jErr)
+		}
+	}
+
+	// 5. Un-jailed Firecracker launch (fallback or dev mode)
 	var err error
 	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, sanitizeFirecrackerID(vm.ID), logPath)
 	if err != nil {
 		return fmt.Errorf("failed to launch firecracker process: %w", err)
+	}
+
+	// Assign process to Cgroups v2
+	if m.cgroupMgr != nil && cmd.Process != nil {
+		if aErr := m.cgroupMgr.Assign(vm.ID, cmd.Process.Pid); aErr != nil {
+			log.Printf("[vm-manager] Warning: cgroups assign for vm %s: %v", vm.ID, aErr)
+			if m.isCgroupEnforced() {
+				return fmt.Errorf("failed to assign process to cgroup: %w", aErr)
+			}
+		}
 	}
 
 	// Wait for socket
@@ -823,7 +1448,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 		return fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
-	// 4. Configure via API
+	// 6. Configure via Firecracker API
 	fcClient := firecracker.NewClient(sockPath)
 
 	// Machine Config
@@ -834,26 +1459,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 		return fmt.Errorf("failed to set machine config: %w", err)
 	}
 
-	// If VM still has "dhcp" as IP, try resolving lease before booting Firecracker
-	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
-		if leasedIP, err := m.netMgr.ResolveGuestIPByMAC(ctx, vm.MACAddress); err == nil && leasedIP != "" {
-			vm.IPAddress = leasedIP
-			if vm.PublicIPEnabled {
-				vm.PublicIP = leasedIP
-			}
-			_ = m.store.SaveVM(ctx, vm)
-		}
-	}
-
 	// Boot source with exact netmask and gateway
-	gwIP := m.netMgr.GetGatewayIP()
-	netmask := m.netMgr.GetNetmask()
-	var bootArgs string
-	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
-		bootArgs = "console=ttyS0 reboot=k panic=1 pci=off ip=dhcp root=/dev/vda rw quiet"
-	} else {
-		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:%s:%s:eth0:off root=/dev/vda rw quiet", vm.IPAddress, gwIP, netmask, vm.ID)
-	}
 	if err := fcClient.SetBootSource(ctx, firecracker.BootSource{
 		KernelImagePath: vm.KernelPath,
 		BootArgs:        bootArgs,
@@ -920,17 +1526,24 @@ func (m *Manager) pollDHCPLease(vmID, mac string, publicIPEnabled bool) {
 
 	checkLease := func() bool {
 		if leasedIP, err := m.netMgr.ResolveGuestIPByMAC(ctx, mac); err == nil && leasedIP != "" {
-			m.mu.Lock()
-			vm, _ := m.store.GetVM(context.Background(), vmID)
+			vmLock := m.getVMLock(vmID)
+			vmLock.Lock()
+			vm, _ := m.getVMUnsafe(context.Background(), vmID)
 			if vm != nil && (vm.IPAddress == "dhcp" || vm.IPAddress == "") {
 				vm.IPAddress = leasedIP
 				if publicIPEnabled {
 					vm.PublicIP = leasedIP
 				}
-				_ = m.store.SaveVM(context.Background(), vm)
+				_ = m.saveVMRecord(context.Background(), vm)
 				_ = m.netMgr.ConfigureVMPublicIP(context.Background(), leasedIP, vm.TAPDevice, publicIPEnabled)
+				_ = m.netMgr.ApplyAntiSpoofAndIsolation(context.Background(), network.IsolationConfig{
+					TAPDevice:  vm.TAPDevice,
+					IPAddress:  leasedIP,
+					MACAddress: vm.MACAddress,
+					OwnerID:    vm.OwnerID,
+				})
 			}
-			m.mu.Unlock()
+			vmLock.Unlock()
 			return true
 		}
 		return false
@@ -1000,6 +1613,8 @@ func (m *Manager) canRunVM(candidate *db.VM) (bool, string) {
 }
 
 func (m *Manager) enqueue(vmID, reason string) {
+	m.queueMu.Lock()
+	defer m.queueMu.Unlock()
 	for _, id := range m.runQueue {
 		if id == vmID {
 			m.queueReasons[vmID] = reason
@@ -1012,6 +1627,8 @@ func (m *Manager) enqueue(vmID, reason string) {
 }
 
 func (m *Manager) dequeue(vmID string) {
+	m.queueMu.Lock()
+	defer m.queueMu.Unlock()
 	var next []string
 	for _, id := range m.runQueue {
 		if id != vmID {
@@ -1025,16 +1642,26 @@ func (m *Manager) dequeue(vmID string) {
 
 // processQueue iterates over queued VMs and launches any that now fit within host capacity
 func (m *Manager) processQueue(ctx context.Context) {
+	m.queueMu.Lock()
 	if len(m.runQueue) == 0 {
+		m.queueMu.Unlock()
 		return
 	}
+	queuedIDs := append([]string(nil), m.runQueue...)
+	m.queueMu.Unlock()
 
 	var remaining []string
-	for _, id := range m.runQueue {
-		v, err := m.store.GetVM(ctx, id)
+	for _, id := range queuedIDs {
+		vmLock := m.getVMLock(id)
+		vmLock.Lock()
+
+		v, err := m.getVMUnsafe(ctx, id)
 		if err != nil || v == nil || v.Status != db.StatusQueued {
+			vmLock.Unlock()
+			m.queueMu.Lock()
 			delete(m.queueReasons, id)
 			delete(m.queueTimes, id)
+			m.queueMu.Unlock()
 			continue
 		}
 
@@ -1042,29 +1669,36 @@ func (m *Manager) processQueue(ctx context.Context) {
 		if canRun {
 			if err := m.startVMProcess(ctx, v); err == nil {
 				v.Status = db.StatusRunning
-				_ = m.store.SaveVM(ctx, v)
+				_ = m.saveVMRecord(ctx, v)
+				vmLock.Unlock()
+				m.queueMu.Lock()
 				delete(m.queueReasons, id)
 				delete(m.queueTimes, id)
+				m.queueMu.Unlock()
 				continue
 			} else {
 				v.Status = db.StatusFailed
-				_ = m.store.SaveVM(ctx, v)
+				_ = m.saveVMRecord(ctx, v)
+				vmLock.Unlock()
+				m.queueMu.Lock()
 				delete(m.queueReasons, id)
 				delete(m.queueTimes, id)
+				m.queueMu.Unlock()
 				continue
 			}
 		}
 
+		vmLock.Unlock()
 		remaining = append(remaining, id)
 	}
+
+	m.queueMu.Lock()
 	m.runQueue = remaining
+	m.queueMu.Unlock()
 }
 
 // RecoverQueue recovers queued VMs from database state and attempts to launch them
 func (m *Manager) RecoverQueue(ctx context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	vms, err := m.store.ListVMs(ctx)
 	if err != nil {
 		return err
@@ -1080,8 +1714,8 @@ func (m *Manager) RecoverQueue(ctx context.Context) error {
 
 // GetQueue returns the list of currently queued runs in order
 func (m *Manager) GetQueue(ctx context.Context) ([]*QueueItem, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.queueMu.Lock()
+	defer m.queueMu.Unlock()
 
 	var items []*QueueItem
 	pos := 1
@@ -1100,6 +1734,7 @@ func (m *Manager) GetQueue(ctx context.Context) ([]*QueueItem, error) {
 				Position: pos,
 				VMID:     v.ID,
 				VMName:   v.Name,
+				OwnerID:  v.OwnerID,
 				VCPUs:    v.VCPUs,
 				MemoryMB: v.MemoryMB,
 				QueuedAt: qTime,
@@ -1116,15 +1751,17 @@ func (m *Manager) GetQueue(ctx context.Context) ([]*QueueItem, error) {
 
 // SaveState pauses the running VM and creates a state + memory snapshot
 func (m *Manager) SaveState(ctx context.Context, vmID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
 
-	vm, err := m.store.GetVM(ctx, vmID)
+	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
+		vmLock.Unlock()
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
 
 	if vm.Status != db.StatusRunning || !m.isAlive(vm.PID) {
+		vmLock.Unlock()
 		return fmt.Errorf("vm %s is not running (status: %s)", vmID, vm.Status)
 	}
 
@@ -1132,6 +1769,7 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 
 	// 1. Pause VM
 	if err := fcClient.Pause(ctx); err != nil {
+		vmLock.Unlock()
 		return fmt.Errorf("failed to pause vm: %w", err)
 	}
 
@@ -1142,6 +1780,7 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 
 	if err := fcClient.CreateSnapshot(ctx, snapPath, memPath); err != nil {
 		fcClient.Resume(ctx)
+		vmLock.Unlock()
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
@@ -1158,20 +1797,23 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 	vm.MemFilePath = memPath
 	vm.PID = 0
 
-	if err := m.store.SaveVM(ctx, vm); err != nil {
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		vmLock.Unlock()
 		return err
 	}
 
+	vmLock.Unlock()
 	m.processQueue(ctx)
 	return nil
 }
 
 // ResumeVM restores a paused/snapshotted VM
 func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
+	defer vmLock.Unlock()
 
-	vm, err := m.store.GetVM(ctx, vmID)
+	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
@@ -1191,7 +1833,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	if !canRun {
 		vm.Status = db.StatusQueued
 		m.enqueue(vm.ID, reason)
-		return m.store.SaveVM(ctx, vm)
+		return m.saveVMRecord(ctx, vm)
 	}
 
 	// 1. Ensure Network & TAP
@@ -1202,17 +1844,48 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("failed to setup TAP device: %w", err)
 	}
 
-	// 2. Launch new Firecracker process
+	// 2. Setup Cgroups v2 resource limits
+	if m.cgroupMgr != nil {
+		limits := CgroupLimits{
+			VCPUs:                vm.VCPUs,
+			MemoryMB:             vm.MemoryMB,
+			MemorySafetyBufferMB: 64,
+			MemoryHighBufferMB:   32,
+			PidsMax:              512,
+		}
+		if _, cgErr := m.cgroupMgr.Setup(vm.ID, limits); cgErr != nil {
+			log.Printf("[vm-manager] Warning: cgroups v2 setup for resumed vm %s: %v", vm.ID, cgErr)
+			if m.isCgroupEnforced() {
+				_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+				return fmt.Errorf("failed to setup cgroup limits for resumed vm: %w", cgErr)
+			}
+		}
+	}
+
+	// 3. Launch new Firecracker process
 	vmDir := m.getVMStorageDir(vm)
+	if err := os.MkdirAll(vmDir, 0755); err != nil {
+		return fmt.Errorf("failed to create vm directory %s: %w", vmDir, err)
+	}
 	sockPath := filepath.Join(vmDir, "firecracker.sock")
 	logPath := filepath.Join(vmDir, "firecracker.log")
 
 	var success bool
 	var cmd *exec.Cmd
+	var jailerProc *jailer.InstanceProcess
+	snapPathToLoad := vm.SnapshotPath
+	memPathToLoad := vm.MemFilePath
+
 	defer func() {
 		if !success {
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
+			}
+			if jailerProc != nil {
+				_ = jailerProc.Cleanup()
+			}
+			if m.cgroupMgr != nil {
+				_ = m.cgroupMgr.Teardown(vm.ID)
 			}
 			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 			_ = os.Remove(sockPath)
@@ -1223,38 +1896,119 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	if fcID == "" {
 		fcID = vm.ID
 	}
-	cmd, err = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, sanitizeFirecrackerID(fcID), logPath)
-	if err != nil {
-		return fmt.Errorf("failed to launch firecracker process: %w", err)
+
+	if m.cfg.JailerEnabled {
+		if !jailer.IsJailerAvailable(m.cfg.JailerBinary) {
+			if !m.cfg.JailerDevFallback {
+				return fmt.Errorf("jailer is enabled but jailer binary is unavailable at %s (fail-closed)", m.cfg.JailerBinary)
+			}
+			log.Printf("[vm-manager] Warning: jailer enabled but unavailable, falling back to un-jailed resume (dev override)")
+		} else {
+			var extraDrives []jailer.ExtraDrive
+			if vols, err := m.volumesForVM(ctx, vm); err == nil {
+				for i, vol := range vols {
+					if i >= 25 {
+						break
+					}
+					extraDrives = append(extraDrives, jailer.ExtraDrive{
+						DriveID:    fmt.Sprintf("data%d", i),
+						HostPath:   vol.Path,
+						IsReadOnly: false,
+					})
+				}
+			}
+
+			jOpts := jailer.JailerOptions{
+				ID:              sanitizeFirecrackerID(fcID),
+				Firecracker:     m.cfg.FirecrackerBinary,
+				Jailer:          m.cfg.JailerBinary,
+				ChrootBaseDir:   m.cfg.JailerBaseDir,
+				UID:             m.cfg.JailerUID,
+				GID:             m.cfg.JailerGID,
+				VCPUs:           vm.VCPUs,
+				MemoryMB:        vm.MemoryMB,
+				RootfsSrcPath:   vm.DiskPath,
+				SnapshotSrcPath: vm.SnapshotPath,
+				MemFileSrcPath:  vm.MemFilePath,
+				IsResume:        true,
+				TapName:         vm.TAPDevice,
+				MAC:             vm.MACAddress,
+				ExtraDrives:     extraDrives,
+				UseNamespaces:   os.Geteuid() == 0 || m.cfg.JailerUseNamespaces,
+				NetNS:           m.cfg.JailerNetNS,
+			}
+
+			ip, jErr := jailer.LaunchJailer(ctx, jOpts)
+			if jErr == nil {
+				jailerProc = ip
+				cmd = ip.Cmd
+				sockPath = ip.APISock
+				snapPathToLoad = ip.SnapshotInChroot
+				memPathToLoad = ip.MemFileInChroot
+			} else {
+				if !m.cfg.JailerDevFallback {
+					return fmt.Errorf("failed to resume inside jailer: %w (fail-closed)", jErr)
+				}
+				log.Printf("[vm-manager] Warning: failed to resume inside Jailer (%v), falling back to un-jailed resume (dev override)", jErr)
+			}
+		}
+	}
+
+	if jailerProc == nil {
+		var launchErr error
+		cmd, launchErr = firecracker.LaunchProcess(m.cfg.FirecrackerBinary, sockPath, sanitizeFirecrackerID(fcID), logPath)
+		if launchErr != nil {
+			return fmt.Errorf("failed to launch firecracker process: %w", launchErr)
+		}
+	}
+
+	// Assign resumed process to Cgroups v2
+	if m.cgroupMgr != nil && cmd.Process != nil {
+		if aErr := m.cgroupMgr.Assign(vm.ID, cmd.Process.Pid); aErr != nil {
+			log.Printf("[vm-manager] Warning: cgroups assign for resumed vm %s: %v", vm.ID, aErr)
+			if m.isCgroupEnforced() {
+				return fmt.Errorf("failed to assign resumed process to cgroup: %w", aErr)
+			}
+		}
 	}
 
 	if err := firecracker.WaitForSocket(sockPath, 5*time.Second); err != nil {
 		return fmt.Errorf("firecracker socket not ready: %w", err)
 	}
 
-	// 3. Load Snapshot with resume=true
+	// 4. Load Snapshot with resume=true
 	fcClient := firecracker.NewClient(sockPath)
-	if err := fcClient.LoadSnapshot(ctx, vm.SnapshotPath, vm.MemFilePath, true); err != nil {
+	if err := fcClient.LoadSnapshot(ctx, snapPathToLoad, memPathToLoad, true); err != nil {
 		return fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
 	success = true
 	m.dequeue(vm.ID)
 	vm.Status = db.StatusRunning
-	vm.DesiredRunning = true
 	vm.PID = cmd.Process.Pid
 	vm.SocketPath = sockPath
+	vm.DesiredRunning = true
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
-	return m.store.SaveVM(ctx, vm)
+	return m.saveVMRecord(ctx, vm)
 }
 
 // StopVM gracefully shuts down a running VM, flushing caches, and cleaning runtime resources
 func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	log.Printf("[vm] StopVM invoked for %s", vmID)
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
 
-	vm, err := m.store.GetVM(ctx, vmID)
+	err := m.stopVMUnlocked(ctx, vmID)
+	vmLock.Unlock()
+
+	if err == nil {
+		m.processQueue(ctx)
+	}
+	return err
+}
+
+func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string) error {
+	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
@@ -1315,6 +2069,14 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 		}
 	}
 
+	// Teardown Cgroups v2
+	if m.cgroupMgr != nil {
+		_ = m.cgroupMgr.Teardown(vm.ID)
+		if vm.InternalID != "" {
+			_ = m.cgroupMgr.Teardown(vm.InternalID)
+		}
+	}
+
 	// Clean up TAP interface, public IP isolation rules, and socket
 	_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
@@ -1325,26 +2087,70 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	vm.Status = db.StatusStopped
 	vm.DesiredRunning = false
 	vm.PID = 0
-	if err := m.store.SaveVM(ctx, vm); err != nil {
+	return m.saveVMRecord(ctx, vm)
+}
+
+// StopVMForOwner stops only the VM belonging to ownerID. It is used by the
+// control plane so a tenant cannot stop another tenant's same-named VM.
+func (m *Manager) StopVMForOwner(ctx context.Context, ownerID, vmID string) error {
+	if ownerID == "" {
+		return m.StopVM(ctx, vmID)
+	}
+	vm, err := m.store.GetVMByOwner(ctx, ownerID, vmID)
+	if err != nil {
 		return err
 	}
+	if vm == nil || vm.OwnerID != ownerID {
+		return fmt.Errorf("vm %s not found", vmID)
+	}
+	key := vm.InternalID
+	if key == "" {
+		key = vm.ID
+	}
+	return m.StopVM(ctx, key)
+}
 
-	// Wake up queued VMs if capacity is now available
-	m.processQueue(ctx)
-	return nil
+// DeleteVMForOwner stops and deletes only the VM belonging to ownerID. The
+// lookup is scoped to the owner so a same-named VM owned by another tenant is
+// never touched.
+func (m *Manager) DeleteVMForOwner(ctx context.Context, ownerID, vmID string) error {
+	if ownerID == "" {
+		return m.DeleteVM(ctx, vmID)
+	}
+	vm, err := m.store.GetVMByOwner(ctx, ownerID, vmID)
+	if err != nil {
+		return err
+	}
+	if vm == nil || vm.OwnerID != ownerID {
+		return fmt.Errorf("vm %s not found", vmID)
+	}
+	key := vm.InternalID
+	if key == "" {
+		key = vm.ID
+	}
+	return m.DeleteVM(ctx, key)
 }
 
 // DeleteVM stops the VM, cleans up disks, and deletes the record from DB
 func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
-	vm, _ := m.store.GetVM(ctx, vmID)
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
+
+	vm, _ := m.getVMUnsafe(ctx, vmID)
 	if vm != nil {
 		_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
 	}
 
-	_ = m.StopVM(ctx, vmID)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	// Always stop using the exact record we resolved. Internal IDs are unique
+	// across tenants, unlike names/IDs which can collide.
+	stopKey := vmID
+	if vm != nil {
+		stopKey = vm.InternalID
+		if stopKey == "" {
+			stopKey = vm.ID
+		}
+	}
+	_ = m.stopVMUnlocked(ctx, stopKey)
 
 	m.dequeue(vmID)
 	if vm != nil {
@@ -1361,22 +2167,39 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 		_ = m.netMgr.ReleaseDHCPLease(ctx, vm.MACAddress, vm.IPAddress)
 	}
 
+	// Teardown cgroup
+	if m.cgroupMgr != nil {
+		_ = m.cgroupMgr.Teardown(vmID)
+		if vm != nil && vm.InternalID != "" {
+			_ = m.cgroupMgr.Teardown(vm.InternalID)
+		}
+	}
+
+	// Clean up chroot jail directory if jailer was used
+	if vm != nil {
+		_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.ID)))
+		if vm.InternalID != "" {
+			_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.InternalID)))
+		}
+	}
+
+	var deleteErr error
 	if vm != nil {
 		if vm.InternalID != "" {
 			_ = m.storMgr.CleanupVM(vm.InternalID)
+			deleteErr = m.deleteVMRecord(ctx, vm.InternalID)
+		} else {
+			_ = m.storMgr.CleanupVM(vm.ID)
+			deleteErr = m.deleteVMRecord(ctx, vm.ID)
 		}
-		_ = m.storMgr.CleanupVM(vm.ID)
-		_ = m.storMgr.CleanupVM(vm.Name)
-		if err := m.store.DeleteVM(ctx, vm.InternalID); err != nil {
-			_ = m.store.DeleteVM(ctx, vm.ID)
-			return err
-		}
-		_ = m.store.DeleteVM(ctx, vm.ID)
 	} else {
 		_ = m.storMgr.CleanupVM(vmID)
-		if err := m.store.DeleteVM(ctx, vmID); err != nil {
-			return err
-		}
+		deleteErr = m.deleteVMRecord(ctx, vmID)
+	}
+
+	vmLock.Unlock()
+	if deleteErr != nil {
+		return deleteErr
 	}
 
 	m.processQueue(ctx)
@@ -1388,10 +2211,10 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	log.Printf("[vm] ReconcileAndPrune invoked")
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	vms, err := m.store.ListVMs(ctx)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("failed to list VMs for reconciliation: %w", err)
 	}
 
@@ -1402,6 +2225,16 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 				log.Printf("[vm] reconcile marking %s stopped: pid=%d not alive", v.ID, v.PID)
 				v.Status = db.StatusStopped
 				v.PID = 0
+				if cached, ok := m.vms[v.ID]; ok && cached != nil {
+					cached.Status = db.StatusStopped
+					cached.PID = 0
+				}
+				if v.InternalID != "" {
+					if cached, ok := m.vms[v.InternalID]; ok && cached != nil {
+						cached.Status = db.StatusStopped
+						cached.PID = 0
+					}
+				}
 				_ = m.store.SaveVM(ctx, v)
 				_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
 			} else {
@@ -1413,6 +2246,8 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	}
 
 	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs)
+	m.mu.Unlock()
+
 	m.processQueue(ctx)
 	return pruned, err
 }
@@ -1469,11 +2304,25 @@ func (m *Manager) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, err
 
 // InspectNetwork checks the live network connectivity and configuration for a VM
 func (m *Manager) InspectNetwork(ctx context.Context, vmID string) (*NetworkInspectResult, error) {
-	vm, err := m.store.GetVM(ctx, vmID)
+	return m.InspectNetworkForOwner(ctx, vmID, "")
+}
+
+// InspectNetworkForOwner resolves the VM by internal ID and, when ownerID is
+// non-empty, verifies it belongs to that owner. Control-plane callers pass the
+// owner of the already-authorized VM so a duplicate name or external ID can
+// never resolve to another tenant's record.
+func (m *Manager) InspectNetworkForOwner(ctx context.Context, vmID, ownerID string) (*NetworkInspectResult, error) {
+	var vm *db.VM
+	var err error
+	if ownerID == "" {
+		vm, err = m.store.GetVM(ctx, vmID)
+	} else {
+		vm, err = m.store.GetVMByOwner(ctx, ownerID, vmID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get vm: %w", err)
 	}
-	if vm == nil {
+	if vm == nil || (ownerID != "" && vm.OwnerID != "" && vm.OwnerID != ownerID) {
 		return nil, fmt.Errorf("vm not found: %s", vmID)
 	}
 
@@ -1577,10 +2426,11 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 
 // UpdateVMConfig updates configuration parameters on an existing VM (such as toggling dedicated public IP on or off)
 func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMConfigRequest) (*db.VM, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
+	defer vmLock.Unlock()
 
-	vm, err := m.store.GetVM(ctx, vmID)
+	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
 		return nil, fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
@@ -1609,7 +2459,7 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 		if vm.Status == db.StatusRunning {
 			_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
 		}
-		if err := m.store.SaveVM(ctx, vm); err != nil {
+		if err := m.saveVMRecord(ctx, vm); err != nil {
 			return nil, fmt.Errorf("failed to save vm config: %w", err)
 		}
 	}
@@ -1620,7 +2470,7 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 // newSSHExec builds an SSH command for a running VM. A zero Timeout means no
 // deadline; callers that want a default apply it before calling.
 func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) (*exec.Cmd, context.Context, context.CancelFunc, error) {
-	vm, err := m.store.GetVM(ctx, vmID)
+	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to get vm: %w", err)
 	}
@@ -1658,8 +2508,6 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	}
 	command := req.Command
 	if user != "root" {
-		// Make environment-profile secrets available to every non-root command
-		// (exec, jobs, setup scripts) the same way they are to interactive shells.
 		command = `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; fi; ` + command
 	}
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), command)
@@ -1670,6 +2518,10 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 // ExecVM executes a remote command inside a running VM via SSH, buffering the
 // output until the command finishes.
 func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*ExecResponse, error) {
+	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
+	defer vmLock.RUnlock()
+
 	if req.Timeout <= 0 {
 		req.Timeout = 30
 	}
@@ -1707,6 +2559,10 @@ func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*Ex
 // ExecVMInput executes a remote command inside a running VM while piping stdin
 // to it. Output is buffered until the command finishes.
 func (m *Manager) ExecVMInput(ctx context.Context, vmID string, req ExecRequest, stdin io.Reader) (*ExecResponse, error) {
+	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
+	defer vmLock.RUnlock()
+
 	if req.Timeout <= 0 {
 		req.Timeout = 60
 	}
@@ -1746,6 +2602,10 @@ func (m *Manager) ExecVMInput(ctx context.Context, vmID string, req ExecRequest,
 // chunks as they arrive. A zero Timeout means the command may run indefinitely.
 // The final event always carries the exit code (and an error, when relevant).
 func (m *Manager) ExecVMStream(ctx context.Context, vmID string, req ExecRequest, emit func(ExecStreamEvent) error) error {
+	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
+	defer vmLock.RUnlock()
+
 	cmd, execCtx, cancel, err := m.newSSHExec(ctx, vmID, req)
 	if err != nil {
 		return err
@@ -1856,7 +2716,23 @@ func (m *Manager) ListImages(ctx context.Context) ([]*db.CustomImage, error) {
 
 // GetImage retrieves a custom image by ID or Name
 func (m *Manager) GetImage(ctx context.Context, nameOrID string) (*db.CustomImage, error) {
-	return m.store.GetImage(ctx, nameOrID)
+	m.mu.RLock()
+	if img, ok := m.images[nameOrID]; ok && img != nil {
+		m.mu.RUnlock()
+		return img, nil
+	}
+	m.mu.RUnlock()
+
+	img, err := m.store.GetImage(ctx, nameOrID)
+	if err == nil && img != nil {
+		m.mu.Lock()
+		m.images[img.ID] = img
+		if img.InternalID != "" {
+			m.images[img.InternalID] = img
+		}
+		m.mu.Unlock()
+	}
+	return img, err
 }
 
 // DeleteImage deletes a custom image and cleans up its rootfs file
@@ -1869,11 +2745,21 @@ func (m *Manager) DeleteImage(ctx context.Context, nameOrID string) error {
 		return fmt.Errorf("image '%s' not found", nameOrID)
 	}
 
-	_ = m.storMgr.DeleteImageFile(img.Name)
+	// Image artefacts are owner-unique; remove the record's own path instead of
+	// deriving a filename from the (tenant-reusable) image name.
 	if img.RootfsPath != "" {
 		_ = os.Remove(img.RootfsPath)
 	}
-	return m.store.DeleteImage(ctx, img.ID)
+	uniqueID := img.InternalID
+	if uniqueID == "" {
+		uniqueID = img.ID
+	}
+	m.mu.Lock()
+	delete(m.images, nameOrID)
+	delete(m.images, uniqueID)
+	m.mu.Unlock()
+
+	return m.store.DeleteImage(ctx, uniqueID)
 }
 
 // CreateTemplate creates a reusable template from an existing VM's disk
@@ -1889,11 +2775,13 @@ func (m *Manager) CreateTemplate(ctx context.Context, req CreateTemplateRequest)
 		}
 	}
 
-	existingTpl, _ := m.store.GetTemplate(ctx, cleanName)
+	// Name uniqueness is scoped to the owner so different tenants may reuse
+	// image and template names without blocking or shadowing each other.
+	existingTpl, _ := m.store.GetTemplateByOwner(ctx, req.OwnerID, cleanName)
 	if existingTpl != nil {
 		return nil, fmt.Errorf("template with name '%s' already exists", cleanName)
 	}
-	existingImg, _ := m.store.GetImage(ctx, cleanName)
+	existingImg, _ := m.store.GetImageByOwner(ctx, req.OwnerID, cleanName)
 	if existingImg != nil {
 		return nil, fmt.Errorf("image with name '%s' already exists", cleanName)
 	}
@@ -1915,9 +2803,11 @@ func (m *Manager) CreateTemplate(ctx context.Context, req CreateTemplateRequest)
 	tplID := fmt.Sprintf("tpl-%s", shortID)
 
 	srcDirID := m.getVMDirID(srcVM)
-	tplDiskPath, err := m.storMgr.CreateTemplateDiskFromVM(srcDirID, cleanName)
+	// Scope the on-disk template artefact by its unique ID: template names may
+	// be reused by different tenants and must not overwrite each other.
+	tplDiskPath, err := m.storMgr.CreateTemplateDiskFromVM(srcDirID, tplID)
 	if err != nil && srcDirID != srcVM.ID {
-		tplDiskPath, err = m.storMgr.CreateTemplateDiskFromVM(srcVM.ID, cleanName)
+		tplDiskPath, err = m.storMgr.CreateTemplateDiskFromVM(srcVM.ID, tplID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone VM disk for template: %w", err)
@@ -1935,6 +2825,7 @@ func (m *Manager) CreateTemplate(ctx context.Context, req CreateTemplateRequest)
 
 	tpl := &db.Template{
 		ID:          tplID,
+		OwnerID:     req.OwnerID,
 		Name:        cleanName,
 		Description: req.Description,
 		SourceVMID:  srcVM.ID,
@@ -1952,6 +2843,13 @@ func (m *Manager) CreateTemplate(ctx context.Context, req CreateTemplateRequest)
 		return nil, fmt.Errorf("failed to save template record: %w", err)
 	}
 
+	m.mu.Lock()
+	m.templates[tpl.ID] = tpl
+	if tpl.InternalID != "" {
+		m.templates[tpl.InternalID] = tpl
+	}
+	m.mu.Unlock()
+
 	return tpl, nil
 }
 
@@ -1962,7 +2860,23 @@ func (m *Manager) ListTemplates(ctx context.Context) ([]*db.Template, error) {
 
 // GetTemplate retrieves a template by ID or Name
 func (m *Manager) GetTemplate(ctx context.Context, nameOrID string) (*db.Template, error) {
-	return m.store.GetTemplate(ctx, nameOrID)
+	m.mu.RLock()
+	if t, ok := m.templates[nameOrID]; ok && t != nil {
+		m.mu.RUnlock()
+		return t, nil
+	}
+	m.mu.RUnlock()
+
+	t, err := m.store.GetTemplate(ctx, nameOrID)
+	if err == nil && t != nil {
+		m.mu.Lock()
+		m.templates[t.ID] = t
+		if t.InternalID != "" {
+			m.templates[t.InternalID] = t
+		}
+		m.mu.Unlock()
+	}
+	return t, err
 }
 
 // DeleteTemplate removes a template and deletes its disk image
@@ -1975,12 +2889,22 @@ func (m *Manager) DeleteTemplate(ctx context.Context, nameOrID string) error {
 		return fmt.Errorf("template '%s' not found", nameOrID)
 	}
 
-	_ = m.storMgr.DeleteTemplateFile(tpl.Name)
-	_ = m.storMgr.DeleteTemplateFile(tpl.ID)
+	// Template disks are stored under the unique ID to avoid cross-tenant name
+	// collisions; remove that path directly.
 	if tpl.DiskPath != "" {
 		_ = os.Remove(tpl.DiskPath)
 	}
-	return m.store.DeleteTemplate(ctx, tpl.ID)
+	uniqueID := tpl.InternalID
+	if uniqueID == "" {
+		uniqueID = tpl.ID
+	}
+
+	m.mu.Lock()
+	delete(m.templates, nameOrID)
+	delete(m.templates, uniqueID)
+	m.mu.Unlock()
+
+	return m.store.DeleteTemplate(ctx, uniqueID)
 }
 
 // LaunchTemplate provisions and starts a new VM from a template
@@ -2038,9 +2962,30 @@ func (m *Manager) GetStats(ctx context.Context) (*StatsResult, error) {
 	return stats, nil
 }
 
-// GetVM retrieves VM details
+// GetVM retrieves VM details from in-memory registry or underlying store
 func (m *Manager) GetVM(ctx context.Context, vmID string) (*db.VM, error) {
-	return m.store.GetVM(ctx, vmID)
+	if m.store != nil {
+		v, err := m.store.GetVM(ctx, vmID)
+		if err == nil && v != nil {
+			m.mu.Lock()
+			m.vms[v.ID] = v
+			if v.InternalID != "" {
+				m.vms[v.InternalID] = v
+			}
+			if v.Name != "" {
+				m.vms[v.Name] = v
+			}
+			m.mu.Unlock()
+		}
+		return v, err
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if v, ok := m.vms[vmID]; ok && v != nil {
+		return v, nil
+	}
+	return nil, nil
 }
 
 // ListVMs lists all VMs

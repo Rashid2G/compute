@@ -117,6 +117,25 @@ func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerTo
 	}
 	return t, tx.Commit()
 }
+
+// ConsumeWorkerTokenAtomic atomically marks a worker token as consumed if it is valid, unconsumed, and not expired.
+func (s *Store) ConsumeWorkerTokenAtomic(ctx context.Context, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.ExecContext(ctx, `UPDATE worker_tokens SET used_at = CURRENT_TIMESTAMP WHERE token = ? AND used_at IS NULL AND (expires_at > CURRENT_TIMESTAMP OR datetime(expires_at) > datetime('now'))`, token)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("worker token already consumed or expired")
+	}
+	return nil
+}
+
 func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -184,6 +203,7 @@ func (s *Store) initSchema() error {
 		desired_running INTEGER NOT NULL DEFAULT 0,
 		vcpus INTEGER NOT NULL,
 		memory_mb INTEGER NOT NULL,
+		disk_mb INTEGER NOT NULL DEFAULT 0,
 		ip_address TEXT NOT NULL,
 		public_ip TEXT NOT NULL DEFAULT '',
 		public_ip_enabled INTEGER NOT NULL DEFAULT 1,
@@ -252,6 +272,7 @@ func (s *Store) initSchema() error {
 
 	CREATE TABLE IF NOT EXISTS volumes (
 		id TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT 'default',
 		name TEXT NOT NULL,
 		pool TEXT NOT NULL DEFAULT 'default',
 		size_gb INTEGER NOT NULL,
@@ -351,6 +372,7 @@ func (s *Store) initSchema() error {
 
 	CREATE TABLE IF NOT EXISTS port_forwards (
 		id TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT 'default',
 		host_port INTEGER NOT NULL,
 		vm_id TEXT NOT NULL,
 		vm_name TEXT NOT NULL DEFAULT '',
@@ -359,6 +381,7 @@ func (s *Store) initSchema() error {
 		subdomain TEXT NOT NULL DEFAULT '',
 		public_url TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'active',
+		public INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMP NOT NULL
 	);
 	`
@@ -369,12 +392,15 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN ssh_public_key TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE volumes ADD COLUMN path TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN disk_mb INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, and public_ip_enabled columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled"})
 	_ = s.migrateTableColumns("images", []string{"internal_id", "owner_id"})
 	_ = s.migrateTableColumns("templates", []string{"internal_id", "owner_id"})
+	_ = s.migrateTableColumns("volumes", []string{"owner_id"})
+	_ = s.migrateTableColumns("port_forwards", []string{"owner_id", "public"})
 
 	indexes := `
 	CREATE INDEX IF NOT EXISTS idx_vms_internal_id ON vms(internal_id);
@@ -399,8 +425,11 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_workers_pool_status ON worker_nodes(pool_id,status);
 	CREATE INDEX IF NOT EXISTS idx_job_logs_job_seq ON job_logs(job_id,seq);
 	CREATE INDEX IF NOT EXISTS idx_volumes_status ON volumes(status);
+	CREATE INDEX IF NOT EXISTS idx_volumes_owner ON volumes(owner_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_vm ON port_forwards(vm_id);
+	CREATE INDEX IF NOT EXISTS idx_port_forwards_owner ON port_forwards(owner_id);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_port_forwards_host_port ON port_forwards(host_port);
 	`
 	_, err := s.db.Exec(indexes)
 	return err
@@ -429,6 +458,8 @@ func (s *Store) migrateTableColumns(tableName string, cols []string) error {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT 'default';", tableName, col))
 			} else if col == "public_ip_enabled" {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 1;", tableName, col))
+			} else if col == "public" {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 0;", tableName, col))
 			} else if col == "public_ip" {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT '';", tableName, col))
 				_, _ = s.db.Exec(fmt.Sprintf("UPDATE %s SET %s = ip_address WHERE %s = '' OR %s IS NULL;", tableName, col, col, col))
@@ -482,7 +513,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 
 	updateQuery := `
 	UPDATE vms SET
-		id = ?, name = ?, status = ?, desired_running = ?, vcpus = ?, memory_mb = ?,
+		id = ?, name = ?, status = ?, desired_running = ?, vcpus = ?, memory_mb = ?, disk_mb = ?,
 		ip_address = ?, public_ip = ?, public_ip_enabled = ?,
 		mac_address = ?, tap_device = ?, rootfs_path = ?,
 		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
@@ -490,7 +521,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
 	`
 	res, err := s.db.ExecContext(ctx, updateQuery,
-		vm.ID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB,
+		vm.ID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt,
 		vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
@@ -507,14 +538,14 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 
 	insertQuery := `
 	INSERT INTO vms (
-		id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb,
+		id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb,
 		ip_address, public_ip, public_ip_enabled, mac_address, tap_device, rootfs_path, kernel_path,
 		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 		pid, socket_path, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err = s.db.ExecContext(ctx, insertQuery,
-		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB,
+		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt, vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
 		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, vm.CreatedAt, vm.UpdatedAt,
@@ -533,7 +564,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 	       pid, socket_path, created_at, updated_at
 	FROM vms
@@ -558,7 +589,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	var pubEnabledInt int
 	var desiredRunning int
 	err := row.Scan(
-		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB,
+		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
 		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
 		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
@@ -589,7 +620,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
 	       pid, socket_path, created_at, updated_at
 	FROM vms
@@ -610,7 +641,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		var pubEnabledInt int
 		var desiredRunning int
 		err := rows.Scan(
-			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB,
+			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
 			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
 			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
@@ -644,6 +675,20 @@ func (s *Store) DeleteVMByOwner(ctx context.Context, ownerID, idOrName string) e
 	return err
 }
 
+// DeleteVMByInternalID removes exactly one VM row by its globally unique
+// internal ID. Unlike id/name (which tenants may reuse), internal IDs are never
+// shared, so this cannot affect another tenant's VM.
+func (s *Store) DeleteVMByInternalID(ctx context.Context, internalID string) error {
+	if strings.TrimSpace(internalID) == "" {
+		return fmt.Errorf("internal vm id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `DELETE FROM vms WHERE internal_id = ?;`, internalID)
+	return err
+}
+
 // GetAllocatedIPs returns a set of all currently assigned IPs
 func (s *Store) GetAllocatedIPs(ctx context.Context) (map[string]bool, error) {
 	s.mu.RLock()
@@ -671,7 +716,7 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, name, status, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, updated_at
+	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, updated_at
 	FROM vms WHERE ip_address != '' ORDER BY ip_address ASC;
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -685,7 +730,7 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 		var a NetworkAllocation
 		var status string
 		var pubEnabledInt int
-		if err := rows.Scan(&a.VMID, &a.VMName, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
+		if err := rows.Scan(&a.VMID, &a.VMName, &a.OwnerID, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
 			a.Status = VMStatus(status)
 			a.PublicIPEnabled = pubEnabledInt != 0
 			if a.PublicIPEnabled && a.PublicIP == "" && a.IPAddress != "" {
@@ -695,6 +740,34 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 		}
 	}
 	return allocs, rows.Err()
+}
+
+// GetNetworkAllocation returns structured allocation information for a specific VM by TAP device, ID, or name
+func (s *Store) GetNetworkAllocation(ctx context.Context, tapOrID string) (*NetworkAllocation, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, updated_at
+	FROM vms WHERE tap_device = ? OR id = ? OR name = ? LIMIT 1;
+	`
+	row := s.db.QueryRowContext(ctx, query, tapOrID, tapOrID, tapOrID)
+	var a NetworkAllocation
+	var status string
+	var pubEnabledInt int
+	err := row.Scan(&a.VMID, &a.VMName, &a.OwnerID, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.Status = VMStatus(status)
+	a.PublicIPEnabled = pubEnabledInt != 0
+	if a.PublicIPEnabled && a.PublicIP == "" && a.IPAddress != "" {
+		a.PublicIP = a.IPAddress
+	}
+	return &a, nil
 }
 
 // SaveImage inserts or updates a CustomImage record
@@ -768,18 +841,26 @@ func (s *Store) SaveImage(ctx context.Context, img *CustomImage) error {
 
 // GetImage retrieves a custom image by internal ID, external ID, or Name
 func (s *Store) GetImage(ctx context.Context, idOrName string) (*CustomImage, error) {
+	return s.GetImageByOwner(ctx, "", idOrName)
+}
+
+// GetImageByOwner retrieves a custom image scoped to an owner. Duplicate image
+// names are allowed across tenants, so owner-scoped lookups are required.
+func (s *Store) GetImageByOwner(ctx context.Context, ownerID, idOrName string) (*CustomImage, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	query := `
 	SELECT id, internal_id, owner_id, name, description, base_image, packages, rootfs_path, kernel_path,
 	       size_mb, status, error_message, created_at, updated_at
-	FROM images WHERE internal_id = ? OR id = ? OR name = ?
+	FROM images
+	WHERE (internal_id = ? OR id = ? OR name = ?)
+	  AND (? = '' OR owner_id = ? OR owner_id = '')
 	ORDER BY CASE WHEN internal_id = ? THEN 1 WHEN id = ? THEN 2 ELSE 3 END
 	LIMIT 1;
 	`
 
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName)
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName)
 	img := &CustomImage{}
 	var pkgsStr, statusStr string
 	err := row.Scan(
@@ -912,18 +993,26 @@ func (s *Store) SaveTemplate(ctx context.Context, tpl *Template) error {
 
 // GetTemplate retrieves a template by internal ID, external ID, or Name
 func (s *Store) GetTemplate(ctx context.Context, idOrName string) (*Template, error) {
+	return s.GetTemplateByOwner(ctx, "", idOrName)
+}
+
+// GetTemplateByOwner retrieves a template scoped to an owner. Duplicate
+// template names are allowed across tenants.
+func (s *Store) GetTemplateByOwner(ctx context.Context, ownerID, idOrName string) (*Template, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	query := `
 	SELECT id, internal_id, owner_id, name, description, source_vm_id, disk_path, kernel_path,
 	       vcpus, memory_mb, disk_mb, created_at, updated_at
-	FROM templates WHERE internal_id = ? OR id = ? OR name = ?
+	FROM templates
+	WHERE (internal_id = ? OR id = ? OR name = ?)
+	  AND (? = '' OR owner_id = ? OR owner_id = '')
 	ORDER BY CASE WHEN internal_id = ? THEN 1 WHEN id = ? THEN 2 ELSE 3 END
 	LIMIT 1;
 	`
 
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName)
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName)
 	tpl := &Template{}
 	err := row.Scan(
 		&tpl.ID, &tpl.InternalID, &tpl.OwnerID, &tpl.Name, &tpl.Description, &tpl.SourceVMID, &tpl.DiskPath,
@@ -1013,7 +1102,7 @@ func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, err
 	query := `
 	SELECT id, owner_id, name, public_key, fingerprint, created_at
 	FROM ssh_keys
-	WHERE (? = "" OR owner_id = ? OR owner_id = "default")
+	WHERE (? = "" OR owner_id = ?)
 	ORDER BY created_at DESC;
 	`
 	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
@@ -1046,6 +1135,32 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 	LIMIT 1;
 	`
 	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName)
+	k := &SSHKey{}
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+// GetSSHKeyByOwner retrieves an SSH key belonging to ownerID by ID or name. An
+// empty ownerID keeps the global (administrator or legacy) lookup. Owner
+// scoping prevents duplicate key names across tenants from colliding.
+func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) (*SSHKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, owner_id, name, public_key, fingerprint, created_at
+	FROM ssh_keys
+	WHERE (id = ? OR name = ?) AND (? = '' OR owner_id = ?)
+	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END, created_at DESC
+	LIMIT 1;
+	`
+	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, ownerID, ownerID, idOrName)
 	k := &SSHKey{}
 	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt)
 	if err == sql.ErrNoRows {
@@ -1206,8 +1321,18 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	query := `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE (? = "" OR owner_id = ? OR owner_id = "default") ORDER BY queued_at DESC`
-	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
+	const selectCols = `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if ownerID == "" {
+		rows, err = s.db.QueryContext(ctx, selectCols+` ORDER BY queued_at DESC`)
+	} else {
+		// A specific owner sees strictly their own jobs; the legacy "default"
+		// owner is not shared with authenticated tenants.
+		rows, err = s.db.QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY queued_at DESC`, ownerID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1334,11 +1459,15 @@ func (s *Store) SaveVolume(ctx context.Context, v *Volume) error {
 	if v.Filesystem == "" {
 		v.Filesystem = "ext4"
 	}
+	if v.OwnerID == "" {
+		v.OwnerID = "default"
+	}
 	query := `INSERT INTO volumes (
-		id, name, pool, size_gb, used_gb, status, attached_vm,
+		id, owner_id, name, pool, size_gb, used_gb, status, attached_vm,
 		device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
+		owner_id = excluded.owner_id,
 		name = excluded.name,
 		pool = excluded.pool,
 		size_gb = excluded.size_gb,
@@ -1354,19 +1483,29 @@ func (s *Store) SaveVolume(ctx context.Context, v *Volume) error {
 		snapshots = excluded.snapshots,
 		updated_at = excluded.updated_at`
 	_, err := s.db.ExecContext(ctx, query,
-		v.ID, v.Name, v.Pool, v.SizeGB, v.UsedGB, v.Status, v.AttachedVM,
+		v.ID, v.OwnerID, v.Name, v.Pool, v.SizeGB, v.UsedGB, v.Status, v.AttachedVM,
 		v.DevicePath, v.MountPoint, v.Filesystem, v.Path, v.IOPS, v.Throughput, v.Snapshots, v.CreatedAt, v.UpdatedAt,
 	)
 	return err
 }
 
-// GetVolume retrieves a volume by ID or name
+// GetVolume retrieves a volume by ID or name using the legacy global lookup.
+// Callers serving tenant requests should prefer GetVolumeByOwner so duplicate
+// names across owners cannot resolve to another tenant's volume.
 func (s *Store) GetVolume(ctx context.Context, id string) (*Volume, error) {
+	return s.GetVolumeByOwner(ctx, "", id)
+}
+
+// GetVolumeByOwner retrieves a volume belonging to ownerID by internal ID,
+// external ID, or name. An empty ownerID keeps the global (administrator or
+// legacy) lookup. Volume IDs are globally unique, but the owner predicate still
+// applies to ID lookups so a caller cannot reach a foreign volume by ID.
+func (s *Store) GetVolumeByOwner(ctx context.Context, ownerID, idOrName string) (*Volume, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v := new(Volume)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
-		&v.ID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE (id = ? OR name = ?) AND (? = '' OR owner_id = ?) ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END LIMIT 1`, idOrName, idOrName, ownerID, ownerID, idOrName).Scan(
+		&v.ID, &v.OwnerID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
 		&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.Path, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1380,9 +1519,14 @@ func (s *Store) GetVolume(ctx context.Context, id string) (*Volume, error) {
 
 // ListVolumes returns all persistent volumes
 func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
+	return s.ListVolumesByOwner(ctx, "")
+}
+
+// ListVolumesByOwner returns volumes owned by ownerID, or every volume when ownerID is empty.
+func (s *Store) ListVolumesByOwner(ctx context.Context, ownerID string) ([]*Volume, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, owner_id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE (? = '' OR owner_id = ?) ORDER BY created_at DESC`, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -1391,7 +1535,7 @@ func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
 	for rows.Next() {
 		v := new(Volume)
 		if err := rows.Scan(
-			&v.ID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
+			&v.ID, &v.OwnerID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
 			&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.Path, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -1401,11 +1545,25 @@ func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
 	return out, rows.Err()
 }
 
-// DeleteVolume deletes a volume by ID or name
+// DeleteVolume deletes a volume by its exact ID. Names are not globally
+// unique, so name-based deletion would be able to cross tenant boundaries.
 func (s *Store) DeleteVolume(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `DELETE FROM volumes WHERE id = ? OR name = ?`, id, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM volumes WHERE id = ?`, id)
+	return err
+}
+
+// DeleteVolumeByID deletes a volume by its exact ID, optionally constrained to
+// ownerID. Passing an empty ownerID performs an administrator/legacy delete.
+func (s *Store) DeleteVolumeByID(ctx context.Context, id, ownerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ownerID == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM volumes WHERE id = ?`, id)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM volumes WHERE id = ? AND owner_id = ?`, id, ownerID)
 	return err
 }
 
@@ -1678,6 +1836,43 @@ func (s *Store) GetAccessAPIKey(ctx context.Context, id string) (*AccessAPIKey, 
 	return k, nil
 }
 
+// GetAccessAPIKeyByToken retrieves an API access key by its full secret token
+func (s *Store) GetAccessAPIKeyByToken(ctx context.Context, token string) (*AccessAPIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k := new(AccessAPIKey)
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE token = ? LIMIT 1`, token).Scan(
+		&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
+// ListAccessAPIKeysByCreator lists API access keys created by a specific actor.
+func (s *Store) ListAccessAPIKeysByCreator(ctx context.Context, createdBy string) ([]*AccessAPIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE created_by = ? ORDER BY created_at DESC`, createdBy)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*AccessAPIKey
+	for rows.Next() {
+		k := new(AccessAPIKey)
+		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
 // ListAccessAPIKeys lists all API access keys
 func (s *Store) ListAccessAPIKeys(ctx context.Context) ([]*AccessAPIKey, error) {
 	s.mu.RLock()
@@ -1931,10 +2126,18 @@ func (s *Store) SavePortForward(ctx context.Context, pf *PortForward) error {
 	if pf.Status == "" {
 		pf.Status = "active"
 	}
+	if pf.OwnerID == "" {
+		pf.OwnerID = "default"
+	}
+	publicInt := 0
+	if pf.Public {
+		publicInt = 1
+	}
 	query := `INSERT INTO port_forwards (
-		id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
+		owner_id = excluded.owner_id,
 		host_port = excluded.host_port,
 		vm_id = excluded.vm_id,
 		vm_name = excluded.vm_name,
@@ -1942,9 +2145,10 @@ func (s *Store) SavePortForward(ctx context.Context, pf *PortForward) error {
 		protocol = excluded.protocol,
 		subdomain = excluded.subdomain,
 		public_url = excluded.public_url,
-		status = excluded.status`
+		status = excluded.status,
+		public = excluded.public`
 	_, err := s.db.ExecContext(ctx, query,
-		pf.ID, pf.HostPort, pf.VMID, pf.VMName, pf.GuestPort, pf.Protocol, pf.Subdomain, pf.PublicURL, pf.Status, pf.CreatedAt,
+		pf.ID, pf.OwnerID, pf.HostPort, pf.VMID, pf.VMName, pf.GuestPort, pf.Protocol, pf.Subdomain, pf.PublicURL, pf.Status, publicInt, pf.CreatedAt,
 	)
 	return err
 }
@@ -1954,8 +2158,9 @@ func (s *Store) GetPortForward(ctx context.Context, id string) (*PortForward, er
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	pf := new(PortForward)
-	err := s.db.QueryRowContext(ctx, `SELECT id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, created_at FROM port_forwards WHERE id = ? LIMIT 1`, id).Scan(
-		&pf.ID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &pf.CreatedAt,
+	var publicInt int
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE id = ? LIMIT 1`, id).Scan(
+		&pf.ID, &pf.OwnerID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &publicInt, &pf.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1963,14 +2168,20 @@ func (s *Store) GetPortForward(ctx context.Context, id string) (*PortForward, er
 	if err != nil {
 		return nil, err
 	}
+	pf.Public = publicInt == 1
 	return pf, nil
 }
 
 // ListPortForwards returns all port forwarding mappings
 func (s *Store) ListPortForwards(ctx context.Context) ([]*PortForward, error) {
+	return s.ListPortForwardsByOwner(ctx, "")
+}
+
+// ListPortForwardsByOwner returns port forwards owned by ownerID, or every mapping when ownerID is empty.
+func (s *Store) ListPortForwardsByOwner(ctx context.Context, ownerID string) ([]*PortForward, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, created_at FROM port_forwards ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE (? = '' OR owner_id = ?) ORDER BY created_at DESC`, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -1978,14 +2189,25 @@ func (s *Store) ListPortForwards(ctx context.Context) ([]*PortForward, error) {
 	var out []*PortForward
 	for rows.Next() {
 		pf := new(PortForward)
+		var publicInt int
 		if err := rows.Scan(
-			&pf.ID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &pf.CreatedAt,
+			&pf.ID, &pf.OwnerID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &publicInt, &pf.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
+		pf.Public = publicInt == 1
 		out = append(out, pf)
 	}
 	return out, rows.Err()
+}
+
+// IsPortForwardPublic checks whether a given guest port on a VM is exposed as public.
+func (s *Store) IsPortForwardPublic(ctx context.Context, vmIDOrName string, guestPort int) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var count int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM port_forwards WHERE (vm_id = ? OR vm_name = ?) AND guest_port = ? AND public = 1`, vmIDOrName, vmIDOrName, guestPort).Scan(&count)
+	return count > 0
 }
 
 // DeletePortForward deletes a port forward mapping by ID

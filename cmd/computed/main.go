@@ -42,6 +42,10 @@ func main() {
 	physicalNIC := flag.String("physical-nic", "", "Host physical NIC name for 'wired'/'nic' mode (e.g. eth0)")
 	gatewayIP := flag.String("gateway-ip", "", "Default IPv4 gateway for wired microVMs (overrides config file)")
 	firecrackerBin := flag.String("firecracker-bin", "", "Path to firecracker executable")
+	jailerFlag := flag.Bool("jailer", false, "Enable Firecracker jailer chroot sandbox isolation")
+	jailerBinFlag := flag.String("jailer-bin", "", "Path to jailer executable")
+	jailerDirFlag := flag.String("jailer-dir", "", "Base directory for jailer chroot environments")
+	cgroupEnforceFlag := flag.Bool("cgroup-enforce", true, "Fail-closed enforcement of Cgroups v2 resource limits")
 	versionFlag := flag.Bool("version", false, "Display version information and exit")
 	flag.BoolVar(versionFlag, "v", false, "Display version information and exit")
 	flag.Parse()
@@ -121,6 +125,19 @@ func main() {
 		globalCfg.Network.GatewayIP = *gatewayIP
 	}
 
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "jailer":
+			globalCfg.Server.JailerEnabled = *jailerFlag
+		case "jailer-bin":
+			globalCfg.Server.JailerBinary = *jailerBinFlag
+		case "jailer-dir":
+			globalCfg.Server.JailerBaseDir = *jailerDirFlag
+		case "cgroup-enforce":
+			globalCfg.Server.CgroupEnforce = *cgroupEnforceFlag
+		}
+	})
+
 	isWired := globalCfg.Network.Mode == network.ModeNIC || globalCfg.Network.Mode == network.ModeWired
 
 	log.Printf("[computed] Starting daemon...")
@@ -136,6 +153,9 @@ func main() {
 		globalCfg.Resources.MaxTotalDiskMB, globalCfg.Resources.MinFreeDiskSpaceMB)
 	log.Printf("[computed] Network: mode=%s bridge=%s ip=%s subnet=%s",
 		globalCfg.Network.Mode, globalCfg.Network.BridgeName, globalCfg.Network.BridgeIP, globalCfg.Network.SubnetCIDR)
+	log.Printf("[computed] Jailer: enabled=%v bin=%s base_dir=%s",
+		globalCfg.Server.JailerEnabled, globalCfg.Server.JailerBinary, globalCfg.Server.JailerBaseDir)
+	log.Printf("[computed] Cgroups: enforce=%v", globalCfg.Server.CgroupEnforce)
 	if isWired {
 		log.Printf("[computed] Wired dedicated IPs enabled on physical interface: %s (gateway: %s)",
 			globalCfg.Network.PhysicalNIC, globalCfg.Network.GatewayIP)
@@ -180,9 +200,14 @@ func main() {
 		log.Fatalf("Failed to initialize storage manager: %v", err)
 	}
 
-	// 5. Initialize VM Manager with Defaults and Resource Limits
+	// 5. Initialize VM Manager with Defaults, Resource Limits, Jailer, and Cgroups
 	vmMgr := vm.NewManager(vm.Config{
 		FirecrackerBinary: globalCfg.Server.FirecrackerBin,
+		JailerBinary:      globalCfg.Server.JailerBinary,
+		JailerEnabled:     globalCfg.Server.JailerEnabled,
+		JailerBaseDir:     globalCfg.Server.JailerBaseDir,
+		CgroupEnforce:     globalCfg.Server.CgroupEnforce,
+		CgroupDevOverride: !globalCfg.Server.CgroupEnforce,
 		Defaults:          globalCfg.Defaults,
 		Resources:         globalCfg.Resources,
 	}, store, netMgr, storMgr)

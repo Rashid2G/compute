@@ -19,21 +19,29 @@ import (
 type contextKey string
 
 const (
-	AuthContextKey contextKey = "compute_auth_context"
-	SessionCookieName         = "compute_session"
+	AuthContextKey    contextKey = "compute_auth_context"
+	SessionCookieName            = "compute_session"
 )
 
 // AuthContext contains the caller's verified identity, active organization, role, and scopes.
 type AuthContext struct {
-	User      *db.User    `json:"user"`
-	APIKey    *db.APIKey  `json:"api_key,omitempty"`
-	Session   *db.Session `json:"session,omitempty"`
-	OrgID     string      `json:"org_id"`
-	Role      string      `json:"role"`
-	Scopes    []string    `json:"scopes"`
-	AuthType  string      `json:"auth_type"` // "api_key", "session", "admin_secret"
-	ClientIP  string      `json:"client_ip"`
+	User     *db.User    `json:"user"`
+	APIKey   *db.APIKey  `json:"api_key,omitempty"`
+	Session  *db.Session `json:"session,omitempty"`
+	OrgID    string      `json:"org_id"`
+	Role     string      `json:"role"`
+	Scopes   []string    `json:"scopes"`
+	AuthType string      `json:"auth_type"` // "api_key", "session", "admin_secret"
+	ClientIP string      `json:"client_ip"`
 }
+
+// ExternalAuthenticator verifies tokens issued by an external/scoped key store
+// (for example access_api_keys managed by the compute control plane).
+type ExternalAuthenticator func(ctx context.Context, token, clientIP string) (*AuthContext, error)
+
+// UsageProvider computes live resource usage for a user. It lets the control
+// plane (which owns VM and volume state) supply real numbers to GetLimits.
+type UsageProvider func(ctx context.Context, userID string) (*db.QuotaUsage, error)
 
 // Manager orchestrates user registration, logins, API keys, sessions, and request authentication.
 type Manager struct {
@@ -42,6 +50,8 @@ type Manager struct {
 	keyMgr         *KeyManager
 	sessionMgr     *SessionManager
 	adminBootstrap string // optional static admin bearer secret
+	externalAuth   ExternalAuthenticator
+	usageProvider  UsageProvider
 }
 
 // NewManager creates an authentication and identity manager.
@@ -63,6 +73,16 @@ func (m *Manager) KeyManager() *KeyManager {
 // SessionManager returns the underlying session manager.
 func (m *Manager) SessionManager() *SessionManager {
 	return m.sessionMgr
+}
+
+// SetExternalAuthenticator installs a fallback verifier for external API keys.
+func (m *Manager) SetExternalAuthenticator(fn ExternalAuthenticator) {
+	m.externalAuth = fn
+}
+
+// SetUsageProvider installs a live-usage provider used by GetLimits.
+func (m *Manager) SetUsageProvider(fn UsageProvider) {
+	m.usageProvider = fn
 }
 
 // Signup registers a new user, hashes password with Argon2id, and provisions their default organization.
@@ -154,24 +174,95 @@ func (m *Manager) Login(ctx context.Context, identifier, password, ip, userAgent
 	return user, token, csrf, nil
 }
 
-// AuthenticateRequest inspects incoming HTTP headers or cookies to establish caller identity.
+// isQueryAuthPermitted returns true only for WebSocket, SSE, and preview proxy endpoints
+// where browsers cannot set custom Authorization headers. Caller-controlled headers like
+// Upgrade or Accept MUST NEVER grant query token auth on arbitrary REST endpoints.
+func isQueryAuthPermitted(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	path := r.URL.Path
+
+	// Explicitly reject query parameter authentication on all standard REST CRUD endpoints
+	// (e.g. /api/v1/vms, /api/v1/sandboxes, /api/v1/volumes, /api/v1/images, /api/v1/templates,
+	// /api/v1/jobs, /api/v1/config, etc.) whenever they are not one of the allowed endpoints below,
+	// even if the resource name starts with or contains "ws".
+	crudPrefixes := []string{
+		"/api/v1/vms",
+		"/api/v1/sandboxes",
+		"/api/v1/volumes",
+		"/api/v1/images",
+		"/api/v1/templates",
+		"/api/v1/jobs",
+		"/api/v1/config",
+		"/api/v1/users",
+		"/api/v1/pools",
+		"/api/v1/workers",
+	}
+
+	// Strictly allow only known WebSocket, SSE, exec terminal, preview proxy, and logs stream routes:
+	// - WebSocket endpoint: path == "/api/v1/ws" || strings.HasPrefix(path, "/api/v1/ws/")
+	// - Events endpoint: path == "/api/v1/events" || path == "/api/v1/events/stream"
+	// - Sandboxes/VMs exec terminal: strings.HasSuffix(path, "/exec")
+	// - Sandboxes/VMs preview proxy: strings.Contains(path, "/preview/") || strings.HasPrefix(path, "/preview/")
+	// - Logs stream: strings.HasSuffix(path, "/logs")
+	isAllowedStreamingRoute := (path == "/api/v1/ws" || strings.HasPrefix(path, "/api/v1/ws/")) ||
+		(path == "/api/v1/events" || path == "/api/v1/events/stream") ||
+		strings.HasSuffix(path, "/exec") ||
+		(strings.Contains(path, "/preview/") || strings.HasPrefix(path, "/preview/")) ||
+		strings.HasSuffix(path, "/logs")
+
+	if !isAllowedStreamingRoute {
+		return false
+	}
+
+	// For any standard REST CRUD endpoints, query auth is strictly forbidden unless
+	// accessing an allowed sub-route (/exec, /preview/..., /logs).
+	for _, prefix := range crudPrefixes {
+		if path == prefix || path == prefix+"/" {
+			return false
+		}
+		if strings.HasPrefix(path, prefix+"/") {
+			if !strings.HasSuffix(path, "/exec") &&
+				!strings.HasSuffix(path, "/logs") &&
+				!strings.Contains(path, "/preview/") {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// AuthenticateRequest inspects incoming HTTP headers, query parameters, or
+// cookies to establish caller identity. Query parameters ("token" / "api_key")
+// are strictly restricted to browser WebSocket, SSE, and preview proxy endpoints
+// and are rejected on standard REST CRUD endpoints.
 func (m *Manager) AuthenticateRequest(r *http.Request) (*AuthContext, error) {
 	clientIP := extractClientIP(r)
 
-	// 1. Check Bearer token or X-API-Key
+	// 1. Resolve a token from Authorization, X-API-Key, or query parameters (for allowed streaming routes only).
 	authHeader := r.Header.Get("Authorization")
-	var token string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	} else if keyHeader := r.Header.Get("X-API-Key"); keyHeader != "" {
-		token = keyHeader
+	var headerToken string
+	switch {
+	case strings.HasPrefix(authHeader, "Bearer "):
+		headerToken = strings.TrimPrefix(authHeader, "Bearer ")
+	case r.Header.Get("X-API-Key") != "":
+		headerToken = r.Header.Get("X-API-Key")
+	}
+	headerToken = strings.TrimSpace(headerToken)
+
+	token := headerToken
+	if token == "" && isQueryAuthPermitted(r) {
+		token = strings.TrimSpace(r.URL.Query().Get("token"))
+		if token == "" {
+			token = strings.TrimSpace(r.URL.Query().Get("api_key"))
+		}
 	}
 
-	token = strings.TrimSpace(token)
-
-	// Admin Bootstrap Secret Check
-	if m.adminBootstrap != "" && token != "" {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(m.adminBootstrap)) == 1 {
+	// Admin Bootstrap Secret Check (header credentials only)
+	if m.adminBootstrap != "" && headerToken != "" {
+		if subtle.ConstantTimeCompare([]byte(headerToken), []byte(m.adminBootstrap)) == 1 {
 			adminUser := &db.User{
 				ID:          "usr_system_admin",
 				Email:       "admin@compute.local",
@@ -193,58 +284,94 @@ func (m *Manager) AuthenticateRequest(r *http.Request) (*AuthContext, error) {
 
 	// API Key Authentication (format: mfk_... or cmp_...)
 	if strings.HasPrefix(token, "mfk_") || strings.HasPrefix(token, "cmp_") {
-		// Normalize prefix for KeyManager if using cmp_ format
+		// Normalize the user-facing cmp_live_ prefix back to the platform key format.
 		lookupToken := token
-		if strings.HasPrefix(token, "cmp_") {
+		if strings.HasPrefix(token, "cmp_live_") {
+			lookupToken = "mfk_" + strings.TrimPrefix(token, "cmp_live_")
+		} else if strings.HasPrefix(token, "cmp_") {
 			lookupToken = "mfk_" + strings.TrimPrefix(token, "cmp_")
 		}
-		user, keyRecord, err := m.keyMgr.AuthenticateToken(r.Context(), lookupToken, clientIP)
-		if err != nil {
-			return nil, err
+		if user, keyRecord, err := m.keyMgr.AuthenticateToken(r.Context(), lookupToken, clientIP); err == nil {
+			return m.authContextForUser(r, user, keyRecord, nil, "api_key", clientIP), nil
 		}
+		// Not a platform key: could be a scoped access key such as cmp_live_...
+	}
 
-		orgID := r.Header.Get("X-Compute-Org")
-		if orgID == "" {
-			orgID = "org_" + strings.TrimPrefix(user.ID, "usr_")
+	// External / scoped API keys (access_api_keys in the control-plane store).
+	if token != "" && m.externalAuth != nil {
+		if authCtx, err := m.externalAuth(r.Context(), token, clientIP); err == nil && authCtx != nil {
+			authCtx.ClientIP = clientIP
+			return authCtx, nil
 		}
+	}
 
-		return &AuthContext{
-			User:     user,
-			APIKey:   keyRecord,
-			OrgID:    orgID,
-			Role:     user.Role,
-			Scopes:   []string{"*"},
-			AuthType: "api_key",
-			ClientIP: clientIP,
-		}, nil
+	// Session token passed directly through a header or query parameter.
+	if token != "" {
+		if user, session, err := m.sessionMgr.AuthenticateSession(r.Context(), token); err == nil {
+			return m.authContextForUser(r, user, nil, session, "session", clientIP), nil
+		}
 	}
 
 	// 2. Cookie Authentication (Session)
 	cookie, err := r.Cookie(SessionCookieName)
 	if err == nil && cookie.Value != "" {
-		sessionToken := cookie.Value
-		user, session, err := m.sessionMgr.AuthenticateSession(r.Context(), sessionToken)
+		user, session, err := m.sessionMgr.AuthenticateSession(r.Context(), cookie.Value)
 		if err != nil {
 			return nil, err
 		}
-
-		orgID := r.Header.Get("X-Compute-Org")
-		if orgID == "" {
-			orgID = "org_" + strings.TrimPrefix(user.ID, "usr_")
-		}
-
-		return &AuthContext{
-			User:     user,
-			Session:  session,
-			OrgID:    orgID,
-			Role:     user.Role,
-			Scopes:   []string{"*"},
-			AuthType: "session",
-			ClientIP: clientIP,
-		}, nil
+		return m.authContextForUser(r, user, nil, session, "session", clientIP), nil
 	}
 
 	return nil, errors.New("no valid authentication token or session provided")
+}
+
+// personalOrgIDFor returns the deterministic personal organization ID for a user.
+func personalOrgIDFor(userID string) string {
+	return "org_" + strings.TrimPrefix(userID, "usr_")
+}
+
+// resolveOrgID returns the organization a request may act within. A caller may
+// only select an organization they are a confirmed member of; any other value
+// (including an empty header) falls back to their personal organization. This
+// prevents X-Compute-Org from being used as a cross-tenant authorization bypass.
+func (m *Manager) resolveOrgID(ctx context.Context, user *db.User, requested string) string {
+	personal := personalOrgIDFor(user.ID)
+	requested = strings.TrimSpace(requested)
+	if requested == "" || requested == personal {
+		return personal
+	}
+	if m.queries != nil {
+		if orgs, err := m.queries.ListOrganizationsForUser(ctx, user.ID); err == nil {
+			for _, org := range orgs {
+				if org != nil && org.ID == requested {
+					return requested
+				}
+			}
+		}
+	}
+	return personal
+}
+
+// authContextForUser builds a verified AuthContext for a user and optional key/session.
+func (m *Manager) authContextForUser(r *http.Request, user *db.User, keyRecord *db.APIKey, session *db.Session, authType, clientIP string) *AuthContext {
+	orgID := m.resolveOrgID(r.Context(), user, r.Header.Get("X-Compute-Org"))
+	scopes := []string{"*"}
+	if keyRecord != nil && keyRecord.Scopes != "" {
+		var parsed []string
+		if json.Unmarshal([]byte(keyRecord.Scopes), &parsed) == nil && len(parsed) > 0 {
+			scopes = parsed
+		}
+	}
+	return &AuthContext{
+		User:     user,
+		APIKey:   keyRecord,
+		Session:  session,
+		OrgID:    orgID,
+		Role:     user.Role,
+		Scopes:   scopes,
+		AuthType: authType,
+		ClientIP: clientIP,
+	}
 }
 
 // Middleware returns an HTTP middleware enforcing authentication on routes.
@@ -320,21 +447,38 @@ func netSplitHostPort(addr string) (string, string, error) {
 	return addr[:idx], addr[idx+1:], nil
 }
 
-// GetLimits returns quota and limit metrics for a user.
+// GetLimits returns quota and limit metrics for a user or organization owner.
+// Organizations share the same quota surface as users; an unknown organization
+// falls back to default limits instead of failing on the user-only lookup.
 func (m *Manager) GetLimits(ctx context.Context, userID string) (*quota.Quota, *db.QuotaUsage, error) {
-	user, err := m.queries.GetUserByID(ctx, userID)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	limits := quota.DefaultQuota()
-	if user.QuotaJSON.Valid && user.QuotaJSON.String != "" {
-		_ = json.Unmarshal([]byte(user.QuotaJSON.String), &limits)
+	if strings.HasPrefix(userID, "org_") {
+		org, err := m.queries.GetOrganizationByID(ctx, userID)
+		if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return nil, nil, err
+		}
+		if org != nil && org.QuotaJSON != nil && strings.TrimSpace(*org.QuotaJSON) != "" {
+			_ = json.Unmarshal([]byte(*org.QuotaJSON), &limits)
+		}
+	} else {
+		user, err := m.queries.GetUserByID(ctx, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if user.QuotaJSON.Valid && user.QuotaJSON.String != "" {
+			_ = json.Unmarshal([]byte(user.QuotaJSON.String), &limits)
+		}
 	}
 
 	usage, err := m.queries.GetUserQuotaUsage(ctx, userID)
+	if m.usageProvider != nil {
+		usage, err = m.usageProvider(ctx, userID)
+	}
 	if err != nil {
 		return nil, nil, err
+	}
+	if usage == nil {
+		usage = &db.QuotaUsage{}
 	}
 
 	return &limits, usage, nil

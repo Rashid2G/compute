@@ -35,6 +35,7 @@ type VM struct {
 	DesiredRunning  bool      `json:"desired_running"`
 	VCPUs           int       `json:"vcpus"`
 	MemoryMB        int       `json:"memory_mb"`
+	DiskMB          int       `json:"disk_mb"`
 	IPAddress       string    `json:"ip_address"`
 	PublicIP        string    `json:"public_ip"`
 	PublicIPEnabled bool      `json:"public_ip_enabled"`
@@ -93,6 +94,7 @@ type Template struct {
 type NetworkAllocation struct {
 	VMID            string    `json:"vm_id"`
 	VMName          string    `json:"vm_name"`
+	OwnerID         string    `json:"-"`
 	Status          VMStatus  `json:"status"`
 	IPAddress       string    `json:"ip_address"`
 	PublicIP        string    `json:"public_ip,omitempty"`
@@ -193,6 +195,7 @@ type JobLog struct {
 // Volume represents a persistent block storage volume
 type Volume struct {
 	ID         string    `json:"id"`
+	OwnerID    string    `json:"owner_id,omitempty"` // Owner / user ID for tenant isolation
 	Name       string    `json:"name"`
 	Pool       string    `json:"pool"`
 	SizeGB     int       `json:"size_gb"`
@@ -257,6 +260,7 @@ type AuditEvent struct {
 type AccessAPIKey struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
+	Role      string    `json:"role,omitempty"`
 	Prefix    string    `json:"prefix"`
 	Token     string    `json:"token,omitempty"`
 	Scope     string    `json:"scope"`
@@ -299,6 +303,7 @@ type EnvironmentProfile struct {
 // PortForward represents a port forwarding mapping
 type PortForward struct {
 	ID        string    `json:"id"`
+	OwnerID   string    `json:"owner_id,omitempty"` // Owner / user ID for tenant isolation
 	HostPort  int       `json:"host_port"`
 	VMID      string    `json:"vm_id"`
 	VMName    string    `json:"vm_name"`
@@ -307,5 +312,6 @@ type PortForward struct {
 	Subdomain string    `json:"subdomain"`
 	PublicURL string    `json:"public_url"`
 	Status    string    `json:"status"`
+	Public    bool      `json:"public"`
 	CreatedAt time.Time `json:"created_at"`
 }

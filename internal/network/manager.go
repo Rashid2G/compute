@@ -3,14 +3,23 @@ package network
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/Rashid2G/on-demand-vms/internal/db"
 )
+
+// AllocationStore defines an interface for retrieving network allocation metadata.
+type AllocationStore interface {
+	GetNetworkAllocation(ctx context.Context, tapOrID string) (*db.NetworkAllocation, error)
+}
 
 // Runner executes system shell commands
 type Runner interface {
@@ -44,6 +53,7 @@ type Config struct {
 	PhysicalNIC   string   `json:"physical_nic,omitempty"`   // e.g. "eth0"
 	GatewayIP     string   `json:"gateway_ip,omitempty"`     // e.g. "192.168.1.1" (main router)
 	LinkedBridges []string `json:"linked_bridges,omitempty"` // Explicit list of bridges to link
+	BaseDomain    string   `json:"base_domain,omitempty"`    // e.g. "preview.localhost", "compute.internal"
 }
 
 // DefaultNATConfig returns standard NAT network configuration
@@ -136,10 +146,12 @@ type NetworkInfo struct {
 
 // Manager handles bridge, tap, iptables isolation, and multi-bridge linking
 type Manager struct {
-	cfg    Config
-	ipam   *IPAM
-	runner Runner
-	mu     sync.Mutex
+	cfg              Config
+	ipam             *IPAM
+	runner           Runner
+	store            AllocationStore
+	isolationConfigs map[string]IsolationConfig
+	mu               sync.Mutex
 }
 
 // NewManager creates a network manager instance
@@ -169,10 +181,18 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 	}
 
 	return &Manager{
-		cfg:    cfg,
-		ipam:   ipam,
-		runner: runner,
+		cfg:              cfg,
+		ipam:             ipam,
+		runner:           runner,
+		isolationConfigs: make(map[string]IsolationConfig),
 	}, nil
+}
+
+// SetStore configures the allocation store for network allocation lookups during teardown.
+func (m *Manager) SetStore(store AllocationStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store = store
 }
 
 // GetConfig returns the active configuration
@@ -488,7 +508,169 @@ func (m *Manager) SetupTAP(ctx context.Context, tapName string) error {
 	return nil
 }
 
-// RemoveTAP deletes a TAP interface
+// IsolationConfig specifies network parameters for TAP anti-spoofing and bridge isolation.
+type IsolationConfig struct {
+	TAPDevice       string   `json:"tap_device"`
+	IPAddress       string   `json:"ip_address"`
+	MACAddress      string   `json:"mac_address"`
+	OwnerID         string   `json:"owner_id,omitempty"`
+	AllowedPeerTAPs []string `json:"allowed_peer_taps,omitempty"`
+	AllowedPeerIPs  []string `json:"allowed_peer_ips,omitempty"`
+}
+
+// ApplyAntiSpoofAndIsolation installs L2 MAC anti-spoofing, L3 IP anti-spoofing, DHCP server
+// impersonation blocking, and bridge port isolation for a microVM TAP interface.
+func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if cfg.TAPDevice == "" {
+		return nil
+	}
+
+	// Clean any previous rules for this TAP first to prevent duplication
+	_ = m.removeAntiSpoofAndIsolationLocked(ctx, cfg)
+
+	if m.isolationConfigs == nil {
+		m.isolationConfigs = make(map[string]IsolationConfig)
+	}
+	m.isolationConfigs[cfg.TAPDevice] = cfg
+
+	var errs []error
+	runSetup := func(name string, args ...string) {
+		out, err := m.runner.Run(ctx, name, args...)
+		if err != nil {
+			log.Printf("[ERROR] ApplyAntiSpoofAndIsolation: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
+			errs = append(errs, fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err))
+		}
+	}
+
+	// 1. Kernel Bridge Port Isolation (L2 lateral movement isolation on the bridge)
+	runSetup("bridge", "link", "set", "dev", cfg.TAPDevice, "isolated", "on")
+
+	// 2. DHCP Server Impersonation Blocking:
+	// A guest microVM on a TAP device must never act as a rogue DHCP server (UDP src port 67)
+	runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-p", "udp", "--sport", "67", "-j", "DROP")
+
+	// 3. L3 IP Anti-Spoofing:
+	// Drop any traffic from this TAP if the source IP does not match the assigned IP
+	if cfg.IPAddress != "" && cfg.IPAddress != "dhcp" {
+		runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-s", cfg.IPAddress, "-j", "DROP")
+	}
+
+	// 4. L2 MAC Anti-Spoofing & Rogue ARP Spoofing:
+	if cfg.MACAddress != "" {
+		runSetup("ebtables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-s", "!", cfg.MACAddress, "-j", "DROP")
+		runSetup("ebtables", "-I", "INPUT", "1", "-i", cfg.TAPDevice, "-s", "!", cfg.MACAddress, "-j", "DROP")
+		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "--source-mac", "!", cfg.MACAddress, "-j", "DROP")
+	}
+	if cfg.IPAddress != "" && cfg.IPAddress != "dhcp" {
+		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "--source-ip", "!", cfg.IPAddress, "-j", "DROP")
+	}
+
+	// 5. Bridge Port Isolation & Intra-Tenant Lateral Communication:
+	// If allowed peer TAPs (e.g. from the same tenant or organization) are provided, allow bi-directional traffic
+	for _, peerTAP := range cfg.AllowedPeerTAPs {
+		if peerTAP != "" && peerTAP != cfg.TAPDevice {
+			runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
+			runSetup("iptables", "-I", "FORWARD", "1", "-i", peerTAP, "-o", cfg.TAPDevice, "-j", "ACCEPT")
+		}
+	}
+	// Default: drop cross-tenant lateral movement to/from any other TAP device on the bridge
+	runSetup("iptables", "-A", "FORWARD", "-i", cfg.TAPDevice, "-o", "mftap-+", "-j", "DROP")
+	runSetup("iptables", "-A", "FORWARD", "-i", "mftap-+", "-o", cfg.TAPDevice, "-j", "DROP")
+
+	return errors.Join(errs...)
+}
+
+// ApplyIsolation is an alias for ApplyAntiSpoofAndIsolation
+func (m *Manager) ApplyIsolation(ctx context.Context, cfg IsolationConfig) error {
+	return m.ApplyAntiSpoofAndIsolation(ctx, cfg)
+}
+
+// RemoveAntiSpoofAndIsolation cleans up all firewall rules, anti-spoofing guards, and bridge
+// isolation settings associated with a microVM TAP interface.
+func (m *Manager) RemoveAntiSpoofAndIsolation(ctx context.Context, cfg IsolationConfig) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.removeAntiSpoofAndIsolationLocked(ctx, cfg)
+}
+
+// RemoveIsolation is an alias for RemoveAntiSpoofAndIsolation
+func (m *Manager) RemoveIsolation(ctx context.Context, cfg IsolationConfig) error {
+	return m.RemoveAntiSpoofAndIsolation(ctx, cfg)
+}
+
+func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg IsolationConfig) error {
+	tapName := cfg.TAPDevice
+	if tapName == "" {
+		return nil
+	}
+
+	targetCfg := cfg
+	if storedCfg, ok := m.isolationConfigs[tapName]; ok {
+		targetCfg = storedCfg
+		delete(m.isolationConfigs, tapName)
+	} else if (targetCfg.IPAddress == "" || targetCfg.MACAddress == "") && m.store != nil {
+		if alloc, err := m.store.GetNetworkAllocation(ctx, tapName); err == nil && alloc != nil {
+			if targetCfg.IPAddress == "" {
+				targetCfg.IPAddress = alloc.IPAddress
+			}
+			if targetCfg.MACAddress == "" {
+				targetCfg.MACAddress = alloc.MACAddress
+			}
+		} else if err != nil {
+			log.Printf("[ERROR] removeAntiSpoofAndIsolation: GetNetworkAllocation failed for %s: %v", tapName, err)
+		}
+	}
+
+	var errs []error
+	runTeardown := func(name string, args ...string) {
+		out, err := m.runner.Run(ctx, name, args...)
+		if err != nil {
+			log.Printf("[ERROR] removeAntiSpoofAndIsolation: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
+			errs = append(errs, fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err))
+		}
+	}
+
+	// Delete bridge isolation drop rules
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", "mftap-+", "-j", "DROP")
+	runTeardown("iptables", "-D", "FORWARD", "-i", "mftap-+", "-o", targetCfg.TAPDevice, "-j", "DROP")
+
+	// Delete intra-tenant accept rules
+	for _, peerTAP := range targetCfg.AllowedPeerTAPs {
+		if peerTAP != "" && peerTAP != targetCfg.TAPDevice {
+			runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
+			runTeardown("iptables", "-D", "FORWARD", "-i", peerTAP, "-o", targetCfg.TAPDevice, "-j", "ACCEPT")
+		}
+	}
+
+	// Delete DHCP guard
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-p", "udp", "--sport", "67", "-j", "DROP")
+
+	// Delete IP anti-spoof
+	if targetCfg.IPAddress != "" && targetCfg.IPAddress != "dhcp" {
+		runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-s", targetCfg.IPAddress, "-j", "DROP")
+	}
+
+	// Delete ARP and MAC anti-spoof
+	if targetCfg.MACAddress != "" {
+		runTeardown("ebtables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-s", "!", targetCfg.MACAddress, "-j", "DROP")
+		runTeardown("ebtables", "-D", "INPUT", "-i", targetCfg.TAPDevice, "-s", "!", targetCfg.MACAddress, "-j", "DROP")
+		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "--source-mac", "!", targetCfg.MACAddress, "-j", "DROP")
+	}
+	if targetCfg.IPAddress != "" && targetCfg.IPAddress != "dhcp" {
+		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "--source-ip", "!", targetCfg.IPAddress, "-j", "DROP")
+	}
+
+	// Reset bridge port isolation if link is still present
+	runTeardown("bridge", "link", "set", "dev", targetCfg.TAPDevice, "isolated", "off")
+
+	return errors.Join(errs...)
+}
+
+// RemoveTAP deletes a TAP interface and tears down associated firewall isolation rules
 func (m *Manager) RemoveTAP(ctx context.Context, tapName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -496,8 +678,12 @@ func (m *Manager) RemoveTAP(ctx context.Context, tapName string) error {
 	if tapName == "" {
 		return nil
 	}
-	_, err := m.runner.Run(ctx, "ip", "link", "del", "dev", tapName)
-	return err
+	isoErr := m.removeAntiSpoofAndIsolationLocked(ctx, IsolationConfig{TAPDevice: tapName})
+	out, linkErr := m.runner.Run(ctx, "ip", "link", "del", "dev", tapName)
+	if linkErr != nil {
+		log.Printf("[ERROR] RemoveTAP: ip link del dev %s failed: %v (output: %s)", tapName, linkErr, string(out))
+	}
+	return errors.Join(isoErr, linkErr)
 }
 
 // ConfigureVMPublicIP manages public network access for a dedicated VM IP/TAP.
@@ -511,39 +697,46 @@ func (m *Manager) ConfigureVMPublicIP(ctx context.Context, ip string, tapDev str
 		return nil
 	}
 
+	runIPCmd := func(name string, args ...string) {
+		out, err := m.runner.Run(ctx, name, args...)
+		if err != nil {
+			log.Printf("[ERROR] ConfigureVMPublicIP: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
+		}
+	}
+
 	// Always clear existing DROP and ACCEPT rules first to avoid duplicate rules
 	if ip != "" && ip != "dhcp" {
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-s", ip, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-d", ip, "!", "-i", m.cfg.BridgeName, "-j", "DROP")
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-d", ip, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-s", ip, "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+		runIPCmd("iptables", "-D", "FORWARD", "-s", ip, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+		runIPCmd("iptables", "-D", "FORWARD", "-d", ip, "!", "-i", m.cfg.BridgeName, "-j", "DROP")
+		runIPCmd("iptables", "-D", "FORWARD", "-d", ip, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+		runIPCmd("iptables", "-D", "FORWARD", "-s", ip, "-i", m.cfg.BridgeName, "-j", "ACCEPT")
 	}
 	if tapDev != "" && m.cfg.PhysicalNIC != "" {
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "DROP")
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "DROP")
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "ACCEPT")
-		m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "ACCEPT")
+		runIPCmd("iptables", "-D", "FORWARD", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "DROP")
+		runIPCmd("iptables", "-D", "FORWARD", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "DROP")
+		runIPCmd("iptables", "-D", "FORWARD", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "ACCEPT")
+		runIPCmd("iptables", "-D", "FORWARD", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "ACCEPT")
 	}
 
 	if enabled {
 		// When public IP is turned ON, install FORWARD rules allowing external ingress and egress for the VM
 		if ip != "" && ip != "dhcp" {
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-d", ip, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-s", ip, "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-d", ip, "-o", m.cfg.BridgeName, "-j", "ACCEPT")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-s", ip, "-i", m.cfg.BridgeName, "-j", "ACCEPT")
 		}
 		if tapDev != "" && m.cfg.PhysicalNIC != "" {
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "ACCEPT")
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "ACCEPT")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "ACCEPT")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "ACCEPT")
 		}
 	} else {
 		// If public IP is turned OFF, install DROP rules blocking external/public forwarding
 		if ip != "" && ip != "dhcp" {
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-s", ip, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-d", ip, "!", "-i", m.cfg.BridgeName, "-j", "DROP")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-s", ip, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-d", ip, "!", "-i", m.cfg.BridgeName, "-j", "DROP")
 		}
 		if tapDev != "" && m.cfg.PhysicalNIC != "" {
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "DROP")
-			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "DROP")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-i", tapDev, "-o", m.cfg.PhysicalNIC, "-j", "DROP")
+			runIPCmd("iptables", "-I", "FORWARD", "1", "-i", m.cfg.PhysicalNIC, "-o", tapDev, "-j", "DROP")
 		}
 	}
 
@@ -813,6 +1006,7 @@ func (m *Manager) PruneOrphanTAPs(ctx context.Context, activeTAPs map[string]boo
 	var pruned []string
 	for _, tap := range hostTAPs {
 		if !activeTAPs[tap] {
+			m.RemoveAntiSpoofAndIsolation(ctx, IsolationConfig{TAPDevice: tap})
 			if _, err := m.runner.Run(ctx, "ip", "link", "del", "dev", tap); err == nil {
 				pruned = append(pruned, tap)
 			}

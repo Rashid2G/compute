@@ -6,14 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 )
 
@@ -70,6 +67,10 @@ func (s *Server) handleVMFiles(w http.ResponseWriter, r *http.Request, vmID stri
 	ctx := r.Context()
 	v, err := s.vmMgr.GetVM(ctx, vmID)
 	if err != nil || v == nil {
+		httpError(w, "sandbox not found", http.StatusNotFound)
+		return
+	}
+	if !s.canAccessOwner(r, v.OwnerID) {
 		httpError(w, "sandbox not found", http.StatusNotFound)
 		return
 	}
@@ -306,6 +307,10 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 		httpError(w, "sandbox not found", http.StatusNotFound)
 		return
 	}
+	if !s.canAccessOwner(r, v.OwnerID) {
+		httpError(w, "sandbox not found", http.StatusNotFound)
+		return
+	}
 	if v.Status != db.StatusRunning {
 		httpError(w, "sandbox is not running", http.StatusConflict)
 		return
@@ -437,69 +442,12 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 	}
 }
 
-// handlePreviewProxy handles reverse-proxying HTTP/WebSocket traffic to microVM ports.
+// handlePreviewProxy handles reverse-proxying HTTP/WebSocket traffic to microVM ports via unified IngressProxy.
 // URL pattern: /preview/:sandbox_id/:port/*
 func (s *Server) handlePreviewProxy(w http.ResponseWriter, r *http.Request) {
-	// Trim prefix: /preview/
-	path := strings.TrimPrefix(r.URL.Path, "/preview/")
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 2 {
-		http.Error(w, "invalid preview url format. Expected: /preview/:sandbox_id/:port/*", http.StatusBadRequest)
+	if s.ingressProxy != nil {
+		s.ingressProxy.ServeHTTP(w, r)
 		return
 	}
-
-	vmID := parts[0]
-	portStr := parts[1]
-	port, err := strconv.Atoi(portStr)
-	if err != nil || port <= 0 || port > 65535 {
-		http.Error(w, "invalid port", http.StatusBadRequest)
-		return
-	}
-
-	subPath := "/"
-	if len(parts) == 3 && parts[2] != "" {
-		subPath = "/" + parts[2]
-	}
-
-	ctx := r.Context()
-	v, err := s.vmMgr.GetVM(ctx, vmID)
-	if err != nil || v == nil {
-		http.Error(w, "sandbox not found", http.StatusNotFound)
-		return
-	}
-
-	// Multi-tenant authorization check if auth is enabled
-	if s.authMgr != nil && s.cfg.Server.AuthEnabled {
-		if authCtx := auth.GetAuth(ctx); authCtx != nil && authCtx.Role != "admin" {
-			if v.OwnerID != "" && v.OwnerID != authCtx.User.ID && v.OwnerID != "default" {
-				http.Error(w, "sandbox not found", http.StatusNotFound)
-				return
-			}
-		}
-	}
-
-	if v.Status != db.StatusRunning {
-		http.Error(w, fmt.Sprintf("sandbox %s is not running (status: %s)", vmID, v.Status), http.StatusServiceUnavailable)
-		return
-	}
-	if v.IPAddress == "" {
-		http.Error(w, fmt.Sprintf("sandbox %s has no allocated IP address", vmID), http.StatusServiceUnavailable)
-		return
-	}
-
-	targetURL, err := url.Parse(fmt.Sprintf("http://%s:%d", v.IPAddress, port))
-	if err != nil {
-		http.Error(w, "failed to resolve upstream url: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.URL.Path = subPath
-		req.Host = fmt.Sprintf("%s:%d", v.IPAddress, port)
-	}
-
-	proxy.ServeHTTP(w, r)
+	http.Error(w, "ingress proxy not initialized", http.StatusInternalServerError)
 }

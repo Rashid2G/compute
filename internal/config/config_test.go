@@ -28,6 +28,18 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Resources.MinFreeDiskSpaceMB != 512 {
 		t.Fatalf("expected 512MB min free, got %d", cfg.Resources.MinFreeDiskSpaceMB)
 	}
+	if !cfg.Server.CgroupEnforce {
+		t.Fatalf("expected CgroupEnforce to be true by default")
+	}
+	if cfg.Server.JailerEnabled {
+		t.Fatalf("expected JailerEnabled to be false by default")
+	}
+	if cfg.Server.JailerBinary != "/usr/local/bin/jailer" {
+		t.Fatalf("expected default JailerBinary /usr/local/bin/jailer, got %s", cfg.Server.JailerBinary)
+	}
+	if cfg.Server.JailerBaseDir != "/srv/jailer" {
+		t.Fatalf("expected default JailerBaseDir /srv/jailer, got %s", cfg.Server.JailerBaseDir)
+	}
 }
 
 func TestTiersAndValidation(t *testing.T) {

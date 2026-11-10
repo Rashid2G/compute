@@ -131,3 +131,84 @@ func TestManager_MiddlewareProtection(t *testing.T) {
 		t.Errorf("Expected 200 with bootstrap secret, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
+
+func TestManager_QueryParameterRestrictions(t *testing.T) {
+	mgr, st, _ := setupTestManager(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	user, err := mgr.Signup(ctx, "charlie@example.com", "charlie", "Charlie Brown", "SecretPass123!", "user")
+	if err != nil {
+		t.Fatalf("Signup failed: %v", err)
+	}
+
+	token, _, err := mgr.KeyManager().GenerateAPIKey(ctx, user.ID, "query-test-key", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey failed: %v", err)
+	}
+
+	// 1. REST CRUD endpoint with ?token= must be REJECTED (401 / error), even with "ws" substrings
+	restEndpoints := []string{
+		"/api/v1/sandboxes?token=" + token,
+		"/api/v1/sandboxes?api_key=" + token,
+		"/api/v1/vms/vm-123?token=" + token,
+		"/api/v1/volumes?api_key=" + token,
+		"/api/v1/vms/ws-production?token=" + token,
+		"/api/v1/vms/ws-test?token=" + token,
+		"/api/v1/sandboxes/ws-production?token=" + token,
+		"/api/v1/sandboxes/ws-test?api_key=" + token,
+		"/api/v1/sandboxes/ws?token=" + token,
+		"/api/v1/images/ws-image?token=" + token,
+		"/api/v1/templates/ws-tpl?token=" + token,
+		"/api/v1/jobs/ws-job?token=" + token,
+		"/api/v1/config?token=" + token,
+	}
+	for _, ep := range restEndpoints {
+		req := httptest.NewRequest("GET", ep, nil)
+		_, err := mgr.AuthenticateRequest(req)
+		if err == nil {
+			t.Errorf("expected AuthenticateRequest on REST route %q to be rejected, but it succeeded", ep)
+		}
+	}
+
+	// 2. Allowed streaming / preview endpoints with ?token= or ?api_key= must SUCCEED
+	allowedEndpoints := []string{
+		"/api/v1/ws?token=" + token,
+		"/api/v1/ws/live?api_key=" + token,
+		"/api/v1/sandboxes/vm-1/exec?token=" + token,
+		"/preview/vm-1/proxy?token=" + token,
+		"/api/v1/events?api_key=" + token,
+		"/api/v1/events/stream?token=" + token,
+		"/api/v1/vms/vm-1/logs?token=" + token,
+	}
+	for _, ep := range allowedEndpoints {
+		req := httptest.NewRequest("GET", ep, nil)
+		authCtx, err := mgr.AuthenticateRequest(req)
+		if err != nil {
+			t.Errorf("expected AuthenticateRequest on streaming route %q to succeed, got: %v", ep, err)
+		} else if authCtx.User.ID != user.ID {
+			t.Errorf("expected user %s, got %s", user.ID, authCtx.User.ID)
+		}
+	}
+
+	// 3. Request with Upgrade: websocket header on REST endpoints MUST BE REJECTED
+	wsReq := httptest.NewRequest("GET", "/api/v1/vms?token="+token, nil)
+	wsReq.Header.Set("Upgrade", "websocket")
+	if _, err := mgr.AuthenticateRequest(wsReq); err == nil {
+		t.Errorf("expected AuthenticateRequest with Upgrade: websocket on /api/v1/vms to be rejected, but it succeeded")
+	}
+
+	// 4. Request with Accept: text/event-stream header on REST endpoints MUST BE REJECTED
+	sseReq := httptest.NewRequest("GET", "/api/v1/vms?api_key="+token, nil)
+	sseReq.Header.Set("Accept", "text/event-stream")
+	if _, err := mgr.AuthenticateRequest(sseReq); err == nil {
+		t.Errorf("expected AuthenticateRequest with Accept: text/event-stream on /api/v1/vms to be rejected, but it succeeded")
+	}
+
+	// 5. Generic unapproved route with spoofed headers MUST ALSO BE REJECTED
+	genericReq := httptest.NewRequest("GET", "/any/custom/route?token="+token, nil)
+	genericReq.Header.Set("Upgrade", "websocket")
+	if _, err := mgr.AuthenticateRequest(genericReq); err == nil {
+		t.Errorf("expected AuthenticateRequest on generic route with Upgrade header to be rejected, but it succeeded")
+	}
+}

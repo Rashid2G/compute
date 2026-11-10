@@ -606,3 +606,56 @@ func TestStore_NewEntities(t *testing.T) {
 		t.Fatalf("DeletePortForward failed: %v", err)
 	}
 }
+
+func TestStore_ConsumeWorkerTokenAtomic(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// 1. Valid token
+	tok := &WorkerToken{
+		Token:     "tok-atomic-1",
+		Name:      "test-worker-1",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.SaveWorkerToken(ctx, tok); err != nil {
+		t.Fatalf("SaveWorkerToken failed: %v", err)
+	}
+
+	// First consumption must succeed
+	if err := store.ConsumeWorkerTokenAtomic(ctx, "tok-atomic-1"); err != nil {
+		t.Fatalf("first ConsumeWorkerTokenAtomic failed: %v", err)
+	}
+
+	// Second consumption on already-used token must fail
+	if err := store.ConsumeWorkerTokenAtomic(ctx, "tok-atomic-1"); err == nil {
+		t.Fatalf("expected second ConsumeWorkerTokenAtomic to fail, but succeeded")
+	}
+
+	// 2. Expired token
+	expiredTok := &WorkerToken{
+		Token:     "tok-atomic-expired",
+		Name:      "expired-worker",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(-time.Hour),
+		CreatedAt: time.Now().UTC().Add(-2 * time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, expiredTok); err != nil {
+		t.Fatalf("SaveWorkerToken expired failed: %v", err)
+	}
+
+	if err := store.ConsumeWorkerTokenAtomic(ctx, "tok-atomic-expired"); err == nil {
+		t.Fatalf("expected ConsumeWorkerTokenAtomic on expired token to fail, but succeeded")
+	}
+
+	// 3. Non-existent token
+	if err := store.ConsumeWorkerTokenAtomic(ctx, "tok-non-existent"); err == nil {
+		t.Fatalf("expected ConsumeWorkerTokenAtomic on non-existent token to fail, but succeeded")
+	}
+}
