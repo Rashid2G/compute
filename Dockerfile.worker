@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute
 # Final runtime image
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates curl iproute2 iptables tar gzip bash
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables tar gzip bash
 
 WORKDIR /var/lib/compute-worker
 

@@ -18,6 +18,7 @@ import (
 // BuildRequest defines parameters for building a new custom image with pre-installed packages
 type BuildRequest struct {
 	Name        string   `json:"name"`
+	OwnerID     string   `json:"owner_id,omitempty"`
 	Description string   `json:"description,omitempty"`
 	BaseImage   string   `json:"base_image,omitempty"` // defaults to "ubuntu-24.04"
 	Packages    []string `json:"packages,omitempty"`
@@ -64,12 +65,13 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 		}
 	}
 
-	// Check if image or template with same name already exists in store
-	existing, _ := b.store.GetImage(ctx, cleanName)
+	// Check if image or template with same name already exists for this owner.
+	// Names are tenant-scoped, so the same name may be reused by other owners.
+	existing, _ := b.store.GetImageByOwner(ctx, req.OwnerID, cleanName)
 	if existing != nil {
 		return nil, fmt.Errorf("image with name '%s' already exists", cleanName)
 	}
-	existingTpl, _ := b.store.GetTemplate(ctx, cleanName)
+	existingTpl, _ := b.store.GetTemplateByOwner(ctx, req.OwnerID, cleanName)
 	if existingTpl != nil {
 		return nil, fmt.Errorf("template with name '%s' already exists", cleanName)
 	}
@@ -104,12 +106,13 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 	shortID := strings.ReplaceAll(uid, "-", "")[:8]
 	imgID := fmt.Sprintf("img-%s", shortID)
 
-	rootfsFilename := fmt.Sprintf("%s.ext4", cleanName)
+	rootfsFilename := fmt.Sprintf("%s-%s.ext4", cleanName, shortID)
 	rootfsPath := filepath.Join(b.storMgr.GetConfig().BaseImagesDir, rootfsFilename)
 	kernelPath := b.storMgr.GetBaseKernelPath()
 
 	img := &db.CustomImage{
 		ID:          imgID,
+		OwnerID:     req.OwnerID,
 		Name:        cleanName,
 		Description: req.Description,
 		BaseImage:   baseImage,

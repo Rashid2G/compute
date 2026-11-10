@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
+	"github.com/Rashid2G/on-demand-vms/internal/master/auth/quota"
 	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
 )
 
@@ -118,6 +119,20 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Revoke the backing session so the token cannot be replayed.
+	if s.authMgr != nil {
+		sessionID := ""
+		if authCtx, err := s.authMgr.AuthenticateRequest(r); err == nil && authCtx != nil && authCtx.Session != nil {
+			sessionID = authCtx.Session.ID
+		}
+		if cookie, err := r.Cookie(auth.SessionCookieName); err == nil && cookie.Value != "" {
+			_ = s.authMgr.SessionManager().RevokeSession(r.Context(), cookie.Value)
+		}
+		if sessionID != "" {
+			_ = s.authMgr.SessionManager().RevokeSessionByID(r.Context(), sessionID)
+		}
 	}
 
 	http.SetCookie(w, &http.Cookie{
@@ -384,20 +399,22 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request) {
 		userID = authCtx.User.ID
 	}
 
-	var runningVMs int
-	var totalVMs int
-	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		vms, _ := s.vmMgr.GetStore().ListVMsByOwner(r.Context(), userID)
-		totalVMs = len(vms)
-		for _, v := range vms {
-			if v.Status == "running" {
-				runningVMs++
-			}
+	limits := quota.DefaultQuota()
+	usage := storeDB.QuotaUsage{}
+	if s.authMgr != nil && userID != "" {
+		if l, u, err := s.authMgr.GetLimits(r.Context(), userID); err == nil && l != nil && u != nil {
+			limits = *l
+			usage = *u
 		}
+	} else if u, err := s.ownerUsage(r.Context(), userID); err == nil && u != nil {
+		usage = *u
 	}
 
-	maxConcurrent := 10
-	if authCtx != nil && authCtx.Role == "admin" {
+	maxConcurrent := limits.RunningInstances
+	if maxConcurrent <= 0 || !s.authEnabled() {
+		maxConcurrent = 10
+	}
+	if authCtx != nil && authCtx.Role == "admin" && maxConcurrent < 100 {
 		maxConcurrent = 100
 	}
 
@@ -405,18 +422,31 @@ func (s *Server) handleLimits(w http.ResponseWriter, r *http.Request) {
 		"limits": map[string]interface{}{
 			"concurrent_sandboxes": maxConcurrent,
 			"max_duration_seconds": 86400, // 24 hours
-			"max_vcpus":            32,
-			"max_memory_mb":        65536,
+			"max_vcpus":            limits.VCPUs,
+			"max_memory_mb":        limits.MemoryMB,
 			"starts_per_minute":    60,
 			"starts_per_hour":      300,
 			"starts_per_day":       1200,
+			"instances":            limits.Instances,
+			"running_instances":    limits.RunningInstances,
+			"vcpus":                limits.VCPUs,
+			"memory_mb":            limits.MemoryMB,
+			"disk_gb":              limits.DiskGB,
+			"api_keys":             limits.APIKeys,
 		},
+		"quota": limits,
 		"usage": map[string]interface{}{
-			"active_sandboxes":  runningVMs,
-			"total_sandboxes":   totalVMs,
+			"active_sandboxes":  usage.RunningInstances,
+			"total_sandboxes":   usage.TotalInstances,
 			"active_starts_min": 1,
-			"active_starts_hr":  totalVMs,
-			"active_starts_day": totalVMs,
+			"active_starts_hr":  usage.TotalInstances,
+			"active_starts_day": usage.TotalInstances,
+			"instances":         usage.TotalInstances,
+			"running_instances": usage.RunningInstances,
+			"vcpus":             usage.AllocatedVCPUs,
+			"memory_mb":         usage.AllocatedMemory,
+			"disk_gb":           usage.AllocatedDiskMB / 1024,
+			"api_keys":          usage.TotalAPIKeys,
 		},
 	}
 

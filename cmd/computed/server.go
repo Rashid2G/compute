@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"strings"
@@ -38,18 +40,20 @@ import (
 )
 
 type Server struct {
-	vmMgr     *vm.Manager
-	cfg       config.GlobalConfig
-	mux       *http.ServeMux
-	workers   *scheduler.WorkerRegistry
-	scheduler *scheduler.Scheduler
-	jobRunner *jobs.Runner
-	authMgr   *auth.Manager
-	metaStore *store.Store
-	fcVersion string
+	vmMgr        *vm.Manager
+	cfg          config.GlobalConfig
+	mux          *http.ServeMux
+	workers      *scheduler.WorkerRegistry
+	scheduler    *scheduler.Scheduler
+	jobRunner    *jobs.Runner
+	authMgr      *auth.Manager
+	metaStore    *store.Store
+	fcVersion    string
+	ingressProxy *network.IngressProxy
 
-	eventMu   sync.RWMutex
-	eventSubs map[chan *db.AuditEvent]struct{}
+	eventMu       sync.RWMutex
+	eventSubs     map[chan *db.AuditEvent]struct{}
+	portForwardMu sync.Mutex
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -207,9 +211,17 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 				ctx := context.Background()
 				users, _ := queries.ListUsers(ctx)
 				if len(users) == 0 {
-					adminPW := os.Getenv("COMPUTE_ADMIN_PASSWORD")
+					adminPW := cfg.Server.AdminPassword
 					if adminPW == "" {
-						adminPW = "compute-admin-2026!"
+						adminPW = os.Getenv("COMPUTE_ADMIN_PASSWORD")
+					}
+					if adminPW == "" {
+						pwBytes := make([]byte, 32)
+						if _, err := rand.Read(pwBytes); err != nil {
+							panic("failed to generate secure random admin password: " + err.Error())
+						}
+						adminPW = hex.EncodeToString(pwBytes)
+						log.Printf("[computed] SECURITY NOTICE: No admin password configured. Generated secure random admin password: %s", adminPW)
 					}
 					_, _ = authMgr.Signup(ctx, "admin@compute.local", "admin", "Administrator", adminPW, "admin")
 				}
@@ -233,6 +245,29 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		fcVersion: fcVersion,
 		eventSubs: make(map[chan *db.AuditEvent]struct{}),
 	}
+
+	var domains []string
+	if cfg.Network.BaseDomain != "" {
+		domains = append(domains, cfg.Network.BaseDomain)
+	}
+	domains = append(domains, "preview.localhost", "compute.internal", "compute.dev", "localhost")
+
+	s.ingressProxy = network.NewIngressProxy(network.ProxyOptions{
+		BaseDomains: domains,
+		Resolver:    s,
+		Auth: func(r *http.Request, ownerID string) bool {
+			if !s.authEnabled() {
+				return true
+			}
+			req, _, err := s.authenticateRequestIfNeeded(r)
+			if err != nil {
+				return false
+			}
+			return s.canAccessOwner(req, ownerID)
+		},
+	})
+
+	s.configureAuthIntegrations()
 	s.routes()
 	return s
 }
@@ -323,6 +358,30 @@ func getActor(r *http.Request) string {
 
 func (s *Server) SetAuthManager(mgr *auth.Manager) {
 	s.authMgr = mgr
+	s.configureAuthIntegrations()
+}
+
+// volumeAttachedToVM reports whether vol is attached to v for the same owner.
+// Names are not globally unique, so owner scoping is required.
+func volumeAttachedToVM(vol *db.Volume, v *db.VM) bool {
+	if vol == nil || v == nil || vol.OwnerID != v.OwnerID {
+		return false
+	}
+	if vol.AttachedVM == "" {
+		return false
+	}
+	return vol.AttachedVM == v.Name || vol.AttachedVM == v.ID || (v.InternalID != "" && vol.AttachedVM == v.InternalID)
+}
+
+// portForwardTargetsVM reports whether pf targets v for the same owner.
+func portForwardTargetsVM(pf *db.PortForward, v *db.VM) bool {
+	if pf == nil || v == nil || pf.OwnerID != v.OwnerID {
+		return false
+	}
+	if pf.VMName != "" && pf.VMName == v.Name {
+		return true
+	}
+	return pf.VMID == v.Name || pf.VMID == v.ID || (v.InternalID != "" && pf.VMID == v.InternalID)
 }
 
 // mountAttachedVolumes mounts data volumes inside the guest after boot.
@@ -336,7 +395,7 @@ func (s *Server) mountAttachedVolumes(ctx context.Context, v *db.VM) {
 	}
 	index := 0
 	for _, vol := range vols {
-		if vol.Path == "" || (vol.AttachedVM != v.Name && vol.AttachedVM != v.ID) {
+		if vol.Path == "" || !volumeAttachedToVM(vol, v) {
 			continue
 		}
 		device := vol.DevicePath
@@ -378,7 +437,7 @@ func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
 		return
 	}
 	for _, pf := range pfs {
-		if pf.VMID != v.ID && pf.VMID != v.Name {
+		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
 		if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
@@ -405,7 +464,7 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 		return
 	}
 	for _, pf := range pfs {
-		if pf.VMID != v.ID && pf.VMID != v.Name {
+		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
 		if v.IPAddress != "" && s.vmMgr.NetManager() != nil {
@@ -461,7 +520,7 @@ func (s *Server) ReconcilePortForwards(ctx context.Context) {
 	// Keep the UI honest: forwards whose sandbox is not running are pending.
 	if pfs, err := s.vmMgr.GetStore().ListPortForwards(ctx); err == nil {
 		for _, pf := range pfs {
-			v, _ := s.vmMgr.GetVM(ctx, pf.VMID)
+			v, _ := s.vmMgr.GetStore().GetVMByOwner(ctx, pf.OwnerID, pf.VMID)
 			if v == nil || v.Status != db.StatusRunning {
 				if pf.Status != "pending" {
 					pf.Status = "pending"
@@ -474,11 +533,21 @@ func (s *Server) ReconcilePortForwards(ctx context.Context) {
 
 func (s *Server) wrapAuth(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.authMgr == nil || !s.cfg.Server.AuthEnabled {
+		if !s.cfg.Server.AuthEnabled {
 			handler(w, r)
 			return
 		}
-		s.authMgr.RequireAuth(handler)(w, r)
+		// Auth is configured: never fall back to the legacy open mode when the
+		// backend failed to initialize. Fail closed with a retryable error.
+		if s.authUnavailable(w) {
+			return
+		}
+		s.authMgr.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
+			if !s.enforceScope(w, r) {
+				return
+			}
+			handler(w, r)
+		})(w, r)
 	}
 }
 
@@ -568,7 +637,44 @@ func (s *Server) SetGUIHandler(h http.Handler) {
 	s.mux.Handle("/", h)
 }
 
+// ResolveTarget resolves target microVM details for the unified ingress reverse proxy.
+func (s *Server) ResolveTarget(ctx context.Context, idOrName string) (*network.TargetInfo, error) {
+	if s.vmMgr == nil {
+		return nil, fmt.Errorf("vm manager not available")
+	}
+	v, err := s.vmMgr.GetVM(ctx, idOrName)
+	if err != nil || v == nil {
+		if s.vmMgr.GetStore() != nil {
+			v, err = s.vmMgr.GetStore().GetVM(ctx, idOrName)
+		}
+	}
+	if err != nil || v == nil {
+		return nil, fmt.Errorf("sandbox %q not found", idOrName)
+	}
+	return &network.TargetInfo{
+		ID:        v.ID,
+		Name:      v.Name,
+		OwnerID:   v.OwnerID,
+		Status:    string(v.Status),
+		IPAddress: v.IPAddress,
+	}, nil
+}
+
+// IsPortPublic checks whether a given guest port on a VM is configured for public exposure.
+func (s *Server) IsPortPublic(ctx context.Context, idOrName string, port int) bool {
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		if s.vmMgr.GetStore().IsPortForwardPublic(ctx, idOrName, port) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.ingressProxy != nil && s.ingressProxy.ShouldHandle(r) {
+		s.ingressProxy.ServeHTTP(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/api/") && r.Header.Get("Upgrade") == "" {
 		w.Header().Set("Content-Type", "application/json")
 	}
@@ -605,12 +711,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Return the latest active limits and network mode as well
-	cfg := s.cfg
-	cfg.Resources = s.vmMgr.GetResourceLimits()
-	cfg.Network = s.vmMgr.GetNetworkManager().GetConfig()
-	cfg.Defaults = s.vmMgr.GetDefaults()
-	json.NewEncoder(w).Encode(cfg)
+	_, isAdmin := s.currentOwnerID(r)
+	json.NewEncoder(w).Encode(s.safeConfig(isAdmin))
 }
 
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
@@ -622,6 +724,16 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if _, isAdmin := s.currentOwnerID(r); !isAdmin {
+		owners := s.accessibleOwnerSet(r)
+		filtered := make([]*vm.QueueItem, 0, len(queue))
+		for _, q := range queue {
+			if q != nil && owners[q.OwnerID] {
+				filtered = append(filtered, q)
+			}
+		}
+		queue = filtered
 	}
 	if queue == nil {
 		queue = []*vm.QueueItem{}
@@ -673,6 +785,17 @@ func (s *Server) handleNetworkAllocations(w http.ResponseWriter, r *http.Request
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	_, isAdmin := s.currentOwnerID(r)
+	if !isAdmin {
+		owners := s.accessibleOwnerSet(r)
+		filtered := make([]*db.NetworkAllocation, 0, len(allocs))
+		for _, a := range allocs {
+			if a != nil && owners[a.OwnerID] {
+				filtered = append(filtered, a)
+			}
+		}
+		allocs = filtered
+	}
 	if allocs == nil {
 		allocs = []*db.NetworkAllocation{}
 	}
@@ -690,7 +813,14 @@ func (s *Server) handleNetworkInspect(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "missing vm id", http.StatusBadRequest)
 		return
 	}
-	res, err := s.vmMgr.InspectNetwork(r.Context(), vmID)
+	v, err := s.resolveAccessibleVM(r.Context(), r, vmID)
+	if err != nil || v == nil {
+		httpError(w, "vm not found", http.StatusNotFound)
+		return
+	}
+	// Inspect by unique internal ID and verify the resolved VM's owner so a
+	// duplicate name can never expose another tenant's network metadata.
+	res, err := s.vmMgr.InspectNetworkForOwner(r.Context(), vmIdentifier(v), v.OwnerID)
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -726,6 +856,9 @@ func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	pruned, err := s.vmMgr.ReconcileAndPrune(r.Context())
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
@@ -753,14 +886,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	switch r.Method {
 	case http.MethodGet:
-		authCtx := auth.GetAuth(ctx)
-		var vms []*db.VM
-		var err error
-		if authCtx != nil && authCtx.Role != "admin" {
-			vms, err = s.vmMgr.GetStore().ListVMsByOwner(ctx, authCtx.User.ID)
-		} else {
-			vms, err = s.vmMgr.ListVMs(ctx)
-		}
+		vms, err := s.listAccessibleVMs(ctx, r)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -776,11 +902,78 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if authCtx := auth.GetAuth(ctx); authCtx != nil && req.OwnerID == "" {
-			req.OwnerID = authCtx.User.ID
+		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+			return
 		}
+
+		if req.CloneFrom != "" {
+			src, err := s.resolveAccessibleVM(ctx, r, req.CloneFrom)
+			if err != nil || src == nil || !s.canAccessOwner(r, src.OwnerID) {
+				httpError(w, "clone source not found", http.StatusNotFound)
+				return
+			}
+			// Pin to the unique ID so a same-named VM owned by another tenant
+			// can never be cloned by the manager's global lookup.
+			req.CloneFrom = vmIdentifier(src)
+		}
+		if req.Template != "" {
+			tpl, err := s.resolveAccessibleTemplate(ctx, r, req.Template)
+			if err != nil || tpl == nil || !s.canAccessOwner(r, tpl.OwnerID) {
+				httpError(w, "template not found", http.StatusNotFound)
+				return
+			}
+			req.Template = templateIdentifier(tpl)
+		}
+		if req.Image != "" {
+			// The image field may name either a custom image or a template; both
+			// are owner-scoped. Mirror the manager's resolution order so a
+			// non-admin cannot reach another tenant's template through it.
+			img, err := s.resolveAccessibleImage(ctx, r, req.Image)
+			if err != nil {
+				httpError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if img != nil {
+				// Pin to the unique ID so the manager cannot resolve a
+				// same-named image belonging to another tenant.
+				req.Image = imageIdentifier(img)
+			} else {
+				tpl, tplErr := s.resolveAccessibleTemplate(ctx, r, req.Image)
+				if tplErr != nil {
+					httpError(w, tplErr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if tpl != nil {
+					req.Image = templateIdentifier(tpl)
+				} else if !s.vmMgr.IsPlatformBaseImage(req.Image) {
+					// An image/template with this name may exist for another
+					// tenant. Preserve the non-enumerating 404 contract, but
+					// never let a foreign custom image shadow a platform base
+					// image name such as "ubuntu-24.04".
+					if globalImg, _ := s.vmMgr.GetImage(ctx, req.Image); globalImg != nil {
+						httpError(w, "image not found", http.StatusNotFound)
+						return
+					}
+					if globalTpl, _ := s.vmMgr.GetTemplate(ctx, req.Image); globalTpl != nil {
+						httpError(w, "image not found", http.StatusNotFound)
+						return
+					}
+				}
+			}
+		}
+
+		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
+		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+
 		created, err := s.vmMgr.CreateVM(ctx, req)
 		if err != nil {
+			if strings.Contains(err.Error(), "ssh key not found") {
+				httpError(w, err.Error(), http.StatusNotFound)
+				return
+			}
 			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
@@ -814,7 +1007,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 
 	vmID := parts[0]
 
-	v, err := s.vmMgr.GetVM(ctx, vmID)
+	v, err := s.resolveAccessibleVM(ctx, r, vmID)
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -824,13 +1017,11 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Multi-tenant authorization check
-	if authCtx := auth.GetAuth(ctx); authCtx != nil && authCtx.Role != "admin" {
-		if v.OwnerID != "" && v.OwnerID != authCtx.User.ID && v.OwnerID != "default" {
-			httpError(w, "vm not found", http.StatusNotFound)
-			return
-		}
-	}
+	// Use the unique internal ID for every downstream manager operation. Names
+	// and external IDs can be duplicated by different tenants, and a global
+	// lookup would otherwise resolve to another tenant's VM.
+	requestedID := vmID
+	vmID = vmIdentifier(v)
 
 	if len(parts) == 1 {
 		switch r.Method {
@@ -838,12 +1029,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(v)
 		case http.MethodDelete:
 			s.removePortForwardsForVM(ctx, v, true)
-			if err := s.vmMgr.DeleteVM(ctx, vmID); err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
+			var delErr error
+			if _, isAdmin := s.currentOwnerID(r); isAdmin {
+				delErr = s.vmMgr.DeleteVM(ctx, vmID)
+			} else {
+				delErr = s.vmMgr.DeleteVMForOwner(ctx, v.OwnerID, vmID)
+			}
+			if delErr != nil {
+				httpError(w, delErr.Error(), http.StatusInternalServerError)
 				return
 			}
-			s.recordEvent("sandbox.deleted", getActor(r), vmID, "delivered", 40, map[string]string{"id": vmID})
-			json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": vmID})
+			s.recordEvent("sandbox.deleted", getActor(r), requestedID, "delivered", 40, map[string]string{"id": requestedID})
+			json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": requestedID})
 
 		case http.MethodPatch, http.MethodPut:
 			var req vm.UpdateVMConfigRequest
@@ -893,8 +1090,20 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
+		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+			return
+		}
+		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
+		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
 		cloned, err := s.vmMgr.CloneVM(ctx, vmID, req)
 		if err != nil {
+			if strings.Contains(err.Error(), "ssh key not found") {
+				httpError(w, err.Error(), http.StatusNotFound)
+				return
+			}
 			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
@@ -907,6 +1116,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(cloned)
 
 	case "run", "start":
+		if err := s.enforceRunQuota(ctx, r, v); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
 		if err := s.vmMgr.RunVM(ctx, vmID); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -932,6 +1145,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(v)
 
 	case "resume":
+		if err := s.enforceRunQuota(ctx, r, v); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
 		if err := s.vmMgr.ResumeVM(ctx, vmID); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -947,7 +1164,12 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(v)
 
 	case "stop":
-		if err := s.vmMgr.StopVM(ctx, vmID); err != nil {
+		if _, isAdmin := s.currentOwnerID(r); isAdmin {
+			if err := s.vmMgr.StopVM(ctx, vmID); err != nil {
+				httpError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		} else if err := s.vmMgr.StopVMForOwner(ctx, v.OwnerID, vmID); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1059,6 +1281,7 @@ func httpError(w http.ResponseWriter, message string, code int) {
 
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	_, isAdmin := s.currentOwnerID(r)
 	switch r.Method {
 	case http.MethodGet:
 		customImgs, err := s.vmMgr.ListImages(ctx)
@@ -1111,6 +1334,9 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for _, c := range customImgs {
+			if !isAdmin && !s.canAccessOwner(r, c.OwnerID) {
+				continue
+			}
 			createdStr := ""
 			if !c.CreatedAt.IsZero() {
 				createdStr = c.CreatedAt.Format(time.RFC3339)
@@ -1136,6 +1362,18 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		ownerID, isAdmin, ok := s.callerIdentity(r)
+		if !ok {
+			httpError(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if isAdmin {
+			if strings.TrimSpace(req.OwnerID) == "" {
+				req.OwnerID = ownerID
+			}
+		} else {
+			req.OwnerID = ownerID
+		}
 		img, err := s.vmMgr.BuildImage(ctx, req)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusBadRequest)
@@ -1160,7 +1398,7 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		img, err := s.vmMgr.GetImage(ctx, nameOrID)
+		img, err := s.resolveAccessibleImage(ctx, r, nameOrID)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1181,10 +1419,25 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "image not found", http.StatusNotFound)
 			return
 		}
+		if !s.canAccessOwner(r, img.OwnerID) {
+			httpError(w, "image not found", http.StatusNotFound)
+			return
+		}
 		json.NewEncoder(w).Encode(img)
 
 	case http.MethodDelete:
-		if err := s.vmMgr.DeleteImage(ctx, nameOrID); err != nil {
+		img, err := s.resolveAccessibleImage(ctx, r, nameOrID)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if img == nil || !s.canAccessOwner(r, img.OwnerID) {
+			httpError(w, "image not found", http.StatusNotFound)
+			return
+		}
+		// Delete by the unique identifier so a same-named image owned by
+		// another tenant is never removed.
+		if err := s.vmMgr.DeleteImage(ctx, imageIdentifier(img)); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1197,12 +1450,22 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	_, isAdmin := s.currentOwnerID(r)
 	switch r.Method {
 	case http.MethodGet:
 		tpls, err := s.vmMgr.ListTemplates(ctx)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if !isAdmin {
+			filtered := make([]*db.Template, 0, len(tpls))
+			for _, tpl := range tpls {
+				if tpl != nil && s.canAccessOwner(r, tpl.OwnerID) {
+					filtered = append(filtered, tpl)
+				}
+			}
+			tpls = filtered
 		}
 		if tpls == nil {
 			tpls = []*db.Template{}
@@ -1214,6 +1477,28 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
+		}
+		ownerID, isAdmin, ok := s.callerIdentity(r)
+		if !ok {
+			httpError(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if isAdmin {
+			if strings.TrimSpace(req.OwnerID) == "" {
+				req.OwnerID = ownerID
+			}
+		} else {
+			req.OwnerID = ownerID
+		}
+		if req.VMID != "" {
+			src, err := s.resolveAccessibleVM(ctx, r, req.VMID)
+			if err != nil || src == nil || !s.canAccessOwner(r, src.OwnerID) {
+				httpError(w, "source vm not found", http.StatusNotFound)
+				return
+			}
+			// Pin to the unique internal ID so a same-named VM owned by another
+			// tenant can never be snapshotted.
+			req.VMID = vmIdentifier(src)
 		}
 		tpl, err := s.vmMgr.CreateTemplate(ctx, req)
 		if err != nil {
@@ -1242,19 +1527,30 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			tpl, err := s.vmMgr.GetTemplate(ctx, nameOrID)
+			tpl, err := s.resolveAccessibleTemplate(ctx, r, nameOrID)
 			if err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if tpl == nil {
+			if tpl == nil || !s.canAccessOwner(r, tpl.OwnerID) {
 				httpError(w, "template not found", http.StatusNotFound)
 				return
 			}
 			json.NewEncoder(w).Encode(tpl)
 
 		case http.MethodDelete:
-			if err := s.vmMgr.DeleteTemplate(ctx, nameOrID); err != nil {
+			tpl, err := s.resolveAccessibleTemplate(ctx, r, nameOrID)
+			if err != nil {
+				httpError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if tpl == nil || !s.canAccessOwner(r, tpl.OwnerID) {
+				httpError(w, "template not found", http.StatusNotFound)
+				return
+			}
+			// Delete by the unique identifier so a same-named template owned by
+			// another tenant is never removed.
+			if err := s.vmMgr.DeleteTemplate(ctx, templateIdentifier(tpl)); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -1272,11 +1568,42 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "launch requires POST", http.StatusMethodNotAllowed)
 			return
 		}
+		tpl, err := s.resolveAccessibleTemplate(ctx, r, nameOrID)
+		if err != nil || tpl == nil || !s.canAccessOwner(r, tpl.OwnerID) {
+			httpError(w, "template not found", http.StatusNotFound)
+			return
+		}
 		var req vm.CreateRequest
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
 		}
-		launchedVM, err := s.vmMgr.LaunchTemplate(ctx, nameOrID, req)
+		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+			return
+		}
+		// Apply any template defaults before quota estimation so limits reflect
+		// the resources the launched sandbox will actually consume.
+		if req.VCPUs <= 0 && tpl.VCPUs > 0 {
+			req.VCPUs = tpl.VCPUs
+		}
+		if req.MemoryMB <= 0 && tpl.MemoryMB > 0 {
+			req.MemoryMB = tpl.MemoryMB
+		}
+		if req.DiskMB <= 0 && tpl.DiskMB > 0 {
+			req.DiskMB = tpl.DiskMB
+		}
+		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
+		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+		// Templates launch (and run) immediately, so the running quota applies.
+		if err := s.enforceRunQuota(ctx, r, &db.VM{OwnerID: req.OwnerID, VCPUs: vcpus, MemoryMB: memoryMB, DiskMB: diskMB}); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+		// Pin to the unique internal ID so duplicate template names cannot
+		// resolve to another tenant's template inside the manager.
+		launchedVM, err := s.vmMgr.LaunchTemplate(ctx, templateIdentifier(tpl), req)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1304,24 +1631,59 @@ type ClusterSnapshot struct {
 	Timestamp     time.Time               `json:"timestamp"`
 }
 
-func (s *Server) getClusterSnapshot(ctx context.Context) *ClusterSnapshot {
-	stats, _ := s.vmMgr.GetStats(ctx)
-	vms, _ := s.vmMgr.ListVMs(ctx)
+func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthContext) *ClusterSnapshot {
+	scoped := s.authEnabled() && authCtx != nil && authCtx.User != nil && !isAdminAuthContext(authCtx)
+
+	store := s.vmMgr.GetStore()
+	var stats *vm.StatsResult
+	var vms []*db.VM
+	if scoped {
+		vms = s.listVMsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
+		stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
+	} else {
+		stats, _ = s.vmMgr.GetStats(ctx)
+		vms, _ = s.vmMgr.ListVMs(ctx)
+	}
 	if vms == nil {
 		vms = []*db.VM{}
 	}
-	allocs, _ := s.vmMgr.GetStore().GetNetworkAllocations(ctx)
+
+	owners := make(map[string]bool)
+	if scoped {
+		for _, oid := range append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...) {
+			if oid != "" {
+				owners[oid] = true
+			}
+		}
+	}
+
+	allocs, _ := store.GetNetworkAllocations(ctx)
+	if scoped {
+		filtered := make([]*db.NetworkAllocation, 0, len(allocs))
+		for _, a := range allocs {
+			if a != nil && owners[a.OwnerID] {
+				filtered = append(filtered, a)
+			}
+		}
+		allocs = filtered
+	}
 	if allocs == nil {
 		allocs = []*db.NetworkAllocation{}
 	}
 	netCfg := s.vmMgr.GetNetworkManager().GetConfig()
 
-	cfg := s.cfg
-	cfg.Resources = s.vmMgr.GetResourceLimits()
-	cfg.Network = netCfg
-	cfg.Defaults = s.vmMgr.GetDefaults()
+	cfg := s.safeConfig(!scoped)
 
 	queue, _ := s.vmMgr.GetQueue(ctx)
+	if scoped {
+		filtered := make([]*vm.QueueItem, 0, len(queue))
+		for _, q := range queue {
+			if q != nil && owners[q.OwnerID] {
+				filtered = append(filtered, q)
+			}
+		}
+		queue = filtered
+	}
 	if queue == nil {
 		queue = []*vm.QueueItem{}
 	}
@@ -1343,12 +1705,29 @@ func (s *Server) getClusterSnapshot(ctx context.Context) *ClusterSnapshot {
 	var jobsList []*db.Job
 	var vols []*db.Volume
 	var eventsList []*db.AuditEvent
-	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		workers, _ = s.vmMgr.GetStore().ListWorkerNodes(ctx)
-		s.enrichWorkerNodes(workers)
-		jobsList, _ = s.vmMgr.GetStore().ListJobs(ctx, "")
-		vols, _ = s.vmMgr.GetStore().ListVolumes(ctx)
-		eventsList, _ = s.vmMgr.GetStore().ListAuditEvents(ctx, 50)
+	if s.vmMgr != nil && store != nil {
+		if !scoped {
+			// Worker topology is infrastructure metadata and is admin-only.
+			workers, _ = store.ListWorkerNodes(ctx)
+			s.enrichWorkerNodes(workers)
+		}
+		if scoped {
+			jobsList = s.listJobsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
+			vols = s.listVolumesForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
+			allEvents, _ := store.ListAuditEvents(ctx, 100)
+			for _, evt := range allEvents {
+				if evt != nil && evt.Actor == authCtx.User.Username {
+					eventsList = append(eventsList, evt)
+					if len(eventsList) >= 50 {
+						break
+					}
+				}
+			}
+		} else {
+			jobsList, _ = store.ListJobs(ctx, "")
+			vols, _ = store.ListVolumes(ctx)
+			eventsList, _ = store.ListAuditEvents(ctx, 50)
+		}
 	}
 	if workers == nil {
 		workers = []*db.WorkerNode{}
@@ -1379,6 +1758,40 @@ func (s *Server) getClusterSnapshot(ctx context.Context) *ClusterSnapshot {
 	}
 }
 
+func orgIDIfDifferent(authCtx *auth.AuthContext) []string {
+	if authCtx == nil || authCtx.OrgID == "" || authCtx.User == nil || authCtx.OrgID == authCtx.User.ID {
+		return nil
+	}
+	return []string{authCtx.OrgID}
+}
+
+func snapshotStats(vms []*db.VM, limits config.ResourceLimits) *vm.StatsResult {
+	stats := &vm.StatsResult{ResourceLimits: &limits}
+	for _, v := range vms {
+		if v == nil {
+			continue
+		}
+		stats.TotalVMs++
+		stats.TotalVCPUs += v.VCPUs
+		stats.TotalMemoryMB += v.MemoryMB
+		switch v.Status {
+		case db.StatusRunning:
+			stats.RunningVMs++
+			stats.RunningVCPUs += v.VCPUs
+			stats.RunningMemoryMB += v.MemoryMB
+		case db.StatusQueued:
+			stats.QueuedVMs++
+		case db.StatusStopped:
+			stats.StoppedVMs++
+		case db.StatusCreated:
+			stats.CreatedVMs++
+		case db.StatusPaused:
+			stats.SnapshottedVMs++
+		}
+	}
+	return stats
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	opts := &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -1393,7 +1806,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Initial snapshot
-	snapshot := s.getClusterSnapshot(ctx)
+	authCtx := auth.GetAuth(r.Context())
+	snapshot := s.getClusterSnapshot(ctx, authCtx)
 	if data, err := json.Marshal(snapshot); err == nil {
 		_ = conn.Write(ctx, websocket.MessageText, data)
 	}
@@ -1409,7 +1823,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if msgType == websocket.MessageText {
 				var req map[string]interface{}
 				_ = json.Unmarshal(data, &req)
-				snap := s.getClusterSnapshot(ctx)
+				snap := s.getClusterSnapshot(ctx, authCtx)
 				if respBytes, err := json.Marshal(snap); err == nil {
 					_ = conn.Write(ctx, websocket.MessageText, respBytes)
 				}
@@ -1426,7 +1840,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return
 		case <-ticker.C:
-			snap := s.getClusterSnapshot(ctx)
+			snap := s.getClusterSnapshot(ctx, authCtx)
 			data, err := json.Marshal(snap)
 			if err != nil {
 				continue
@@ -1444,9 +1858,34 @@ type CreateKeyRequest struct {
 }
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
+	ownerID, isAdmin, ok := s.callerIdentity(r)
+	if !ok {
+		httpError(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		keys, err := s.vmMgr.GetStore().ListSSHKeys(r.Context(), "default")
+		var keys []*db.SSHKey
+		var err error
+		if isAdmin {
+			keys, err = s.vmMgr.GetStore().ListSSHKeys(r.Context(), "")
+		} else {
+			seen := make(map[string]bool)
+			for _, oid := range s.ownerIDsFor(r) {
+				owned, listErr := s.vmMgr.GetStore().ListSSHKeys(r.Context(), oid)
+				if listErr != nil {
+					err = listErr
+					break
+				}
+				for _, k := range owned {
+					if k == nil || seen[k.ID] {
+						continue
+					}
+					seen[k.ID] = true
+					keys = append(keys, k)
+				}
+			}
+		}
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to list keys: %v"}`, err), http.StatusInternalServerError)
 			return
@@ -1482,7 +1921,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 
 		key := &db.SSHKey{
 			ID:          keyID,
-			OwnerID:     "default",
+			OwnerID:     ownerID,
 			Name:        req.Name,
 			PublicKey:   req.PublicKey,
 			Fingerprint: fingerprint,
@@ -1511,29 +1950,21 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	key, err := s.resolveAccessibleSSHKey(r.Context(), r, idOrName)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to get key: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+	if key == nil {
+		http.Error(w, fmt.Sprintf(`{"error":"key not found: %s"}`, idOrName), http.StatusNotFound)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
-		key, err := s.vmMgr.GetStore().GetSSHKey(r.Context(), idOrName)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"failed to get key: %v"}`, err), http.StatusInternalServerError)
-			return
-		}
-		if key == nil {
-			http.Error(w, fmt.Sprintf(`{"error":"key not found: %s"}`, idOrName), http.StatusNotFound)
-			return
-		}
 		json.NewEncoder(w).Encode(key)
 
 	case http.MethodDelete:
-		key, err := s.vmMgr.GetStore().GetSSHKey(r.Context(), idOrName)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"failed to query key: %v"}`, err), http.StatusInternalServerError)
-			return
-		}
-		if key == nil {
-			http.Error(w, fmt.Sprintf(`{"error":"key not found: %s"}`, idOrName), http.StatusNotFound)
-			return
-		}
 		if err := s.vmMgr.GetStore().DeleteSSHKey(r.Context(), key.ID); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to delete key: %v"}`, err), http.StatusInternalServerError)
 			return
@@ -1545,6 +1976,91 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 	}
+}
+
+// EnsureHostSSHKey auto-generates or loads the master host Ed25519 SSH key.
+func (s *Server) EnsureHostSSHKey() (ssh.Signer, string, error) {
+	var candidates []string
+	if s.cfg.Images.SSHKeyPath != "" {
+		candidates = append(candidates, s.cfg.Images.SSHKeyPath)
+	}
+	if s.cfg.Images.ImagesDir != "" {
+		candidates = append(candidates, filepath.Join(s.cfg.Images.ImagesDir, "ssh", "id_ed25519"))
+	}
+	candidates = append(candidates, "/var/lib/compute/images/ssh/id_ed25519")
+	if s.cfg.Server.DBPath != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(s.cfg.Server.DBPath), "ssh", "id_ed25519"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".ssh", "id_ed25519"))
+	}
+
+	// 1. Check if an existing key is already present
+	for _, cand := range candidates {
+		if cand == "" {
+			continue
+		}
+		if data, err := os.ReadFile(cand); err == nil {
+			signer, err := ssh.ParsePrivateKey(data)
+			if err == nil {
+				pubData, _ := os.ReadFile(cand + ".pub")
+				return signer, string(pubData), nil
+			}
+		}
+	}
+
+	// 2. Fallback to temporary directory if system directories are not writable
+	candidates = append(candidates, filepath.Join(os.TempDir(), "compute-ssh", "id_ed25519"))
+
+	var genErr error
+	for _, targetPath := range candidates {
+		if targetPath == "" {
+			continue
+		}
+		signer, pubBytes, err := generateHostEd25519(targetPath)
+		if err == nil {
+			return signer, string(pubBytes), nil
+		}
+		genErr = err
+	}
+
+	return nil, "", fmt.Errorf("failed to auto-generate master host ssh key: %w", genErr)
+}
+
+func generateHostEd25519(privPath string) (ssh.Signer, []byte, error) {
+	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	block, err := ssh.MarshalPrivateKey(privKey, "compute-host-master-key")
+	if err != nil {
+		return nil, nil, err
+	}
+	privPEM := pem.EncodeToMemory(block)
+
+	sshPubKey, err := ssh.NewPublicKey(pubKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	pubBytes := ssh.MarshalAuthorizedKey(sshPubKey)
+
+	if err := os.MkdirAll(filepath.Dir(privPath), 0700); err != nil {
+		return nil, nil, err
+	}
+	if err := os.WriteFile(privPath, privPEM, 0600); err != nil {
+		return nil, nil, err
+	}
+	if err := os.WriteFile(privPath+".pub", pubBytes, 0644); err != nil {
+		return nil, nil, err
+	}
+
+	signer, err := ssh.ParsePrivateKey(privPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return signer, pubBytes, nil
 }
 
 func (s *Server) resolveSSHKey(keyPath, pubKey, keyName string) []ssh.AuthMethod {
@@ -1588,6 +2104,14 @@ func (s *Server) resolveSSHKey(keyPath, pubKey, keyName string) []ssh.AuthMethod
 		}
 		signers = append(signers, signer)
 	}
+
+	// Auto-provision master host Ed25519 private key if none exists on host
+	if len(signers) == 0 {
+		if signer, _, err := s.EnsureHostSSHKey(); err == nil && signer != nil {
+			signers = append(signers, signer)
+		}
+	}
+
 	if len(signers) > 0 {
 		methods = append(methods, ssh.PublicKeys(signers...))
 	}
@@ -1606,9 +2130,43 @@ func (s *Server) handleSSHDirect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string) {
-	v, err := s.vmMgr.GetVM(r.Context(), vmID)
+	// 1. Scoped API key enforcement: must possess ssh:vms, *, or admin
+	if s.authEnabled() {
+		authCtx := auth.GetAuth(r.Context())
+		if authCtx != nil && authCtx.AuthType == "api_key" {
+			if !s.scopePermits(authCtx, "ssh", "vms") {
+				s.recordEvent("ssh.tunnel_attempt", getActor(r), vmID, "rejected", 0, map[string]interface{}{
+					"reason": "insufficient_scope",
+					"error":  "ssh:vms scope required",
+				})
+				httpError(w, "forbidden: insufficient scope for ssh:vms", http.StatusForbidden)
+				return
+			}
+		}
+	}
+
+	v, err := s.resolveAccessibleVM(r.Context(), r, vmID)
 	isWS := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 	if err != nil || v == nil {
+		s.recordEvent("ssh.tunnel_attempt", getActor(r), vmID, "rejected", 0, map[string]interface{}{
+			"reason": "vm_not_found",
+		})
+		if isWS {
+			opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+			if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
+				_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
+				_ = conn.Close(websocket.StatusNormalClosure, "vm not found")
+			}
+		} else {
+			httpError(w, "vm not found", http.StatusNotFound)
+		}
+		return
+	}
+
+	if !s.canAccessOwner(r, v.OwnerID) {
+		s.recordEvent("ssh.tunnel_attempt", getActor(r), vmID, "rejected", 0, map[string]interface{}{
+			"reason": "forbidden_cross_tenant",
+		})
 		if isWS {
 			opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 			if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
@@ -1649,6 +2207,102 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 		return
 	}
 
+	user := r.URL.Query().Get("user")
+	if user == "" {
+		user = "compute"
+	}
+
+	sshPort := "22"
+	if p := r.URL.Query().Get("port"); p != "" {
+		sshPort = p
+	}
+	targetAddr := net.JoinHostPort(v.IPAddress, sshPort)
+	if host, port, err := net.SplitHostPort(v.IPAddress); err == nil {
+		targetAddr = net.JoinHostPort(host, port)
+	}
+
+	isRawStream := r.URL.Query().Get("stream") == "raw" || r.URL.Query().Get("mode") == "stdio"
+
+	// 2. Raw Stream / ProxyCommand Mode: Full-duplex WebSocket <-> TCP bridging
+	if isRawStream {
+		opts := &websocket.AcceptOptions{
+			InsecureSkipVerify: true,
+		}
+		wsConn, err := websocket.Accept(w, r, opts)
+		if err != nil {
+			return
+		}
+		defer wsConn.Close(websocket.StatusInternalError, "session closed")
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		s.recordEvent("ssh.tunnel_attempt", getActor(r), vmID, "connected", 0, map[string]interface{}{
+			"mode":        "raw_stream",
+			"target":      v.ID,
+			"user":        user,
+			"remote_addr": r.RemoteAddr,
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		})
+
+		tcpConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+		if err != nil {
+			errMsg := fmt.Sprintf("\r\n\x1b[31;1m[Compute SSH Error]\x1b[0m Connection to %s failed: %v\r\n", targetAddr, err)
+			_ = wsConn.Write(ctx, websocket.MessageBinary, []byte(errMsg))
+			_ = wsConn.Close(websocket.StatusInternalError, "tcp dial failed")
+			return
+		}
+		defer tcpConn.Close()
+
+		errc := make(chan error, 2)
+
+		// WebSocket -> TCP
+		go func() {
+			for {
+				msgType, data, rErr := wsConn.Read(ctx)
+				if rErr != nil {
+					errc <- rErr
+					return
+				}
+				if len(data) > 0 {
+					if _, wErr := tcpConn.Write(data); wErr != nil {
+						errc <- wErr
+						return
+					}
+				}
+				_ = msgType
+			}
+		}()
+
+		// TCP -> WebSocket
+		go func() {
+			buf := make([]byte, 32768)
+			for {
+				n, rErr := tcpConn.Read(buf)
+				if n > 0 {
+					if wErr := wsConn.Write(ctx, websocket.MessageBinary, buf[:n]); wErr != nil {
+						errc <- wErr
+						return
+					}
+				}
+				if rErr != nil {
+					errc <- rErr
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+		case <-errc:
+		}
+
+		_ = tcpConn.Close()
+		_ = wsConn.Close(websocket.StatusNormalClosure, "tunnel closed")
+		return
+	}
+
+	// 3. Interactive PTY mode
 	opts := &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	}
@@ -1661,16 +2315,19 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	s.recordEvent("ssh.tunnel_attempt", getActor(r), vmID, "connected", 0, map[string]interface{}{
+		"mode":        "interactive",
+		"target":      v.ID,
+		"user":        user,
+		"remote_addr": r.RemoteAddr,
+		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+	})
+
 	var writeMu sync.Mutex
 	safeWrite := func(typ websocket.MessageType, data []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		return wsConn.Write(ctx, typ, data)
-	}
-
-	user := r.URL.Query().Get("user")
-	if user == "" {
-		user = "compute"
 	}
 
 	cmd := r.URL.Query().Get("cmd")
@@ -1721,7 +2378,7 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 		Timeout:         10 * time.Second,
 	}
 
-	dest := net.JoinHostPort(v.IPAddress, "22")
+	dest := targetAddr
 	sshClient, err := ssh.Dial("tcp", dest, sshConfig)
 	if err != nil {
 		errMsg := fmt.Sprintf("\r\n\x1b[31;1m[Compute SSH Connection Failed]\x1b[0m %v\r\n\r\n\x1b[33mEnsure the VM guest SSH service has finished initializing.\x1b[0m\r\n", err)
@@ -1847,8 +2504,19 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 }
 
 func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID string) {
-	v, err := s.vmMgr.GetVM(r.Context(), vmID)
+	v, err := s.resolveAccessibleVM(r.Context(), r, vmID)
 	if err != nil || v == nil {
+		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
+			_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
+			_ = conn.Close(websocket.StatusNormalClosure, "vm not found")
+		} else {
+			httpError(w, "vm not found", http.StatusNotFound)
+		}
+		return
+	}
+
+	if !s.canAccessOwner(r, v.OwnerID) {
 		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
@@ -2050,6 +2718,32 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 // Worker and Job endpoints
 
 func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
+	var workerToken string
+	if t := r.Header.Get("X-Worker-Token"); t != "" {
+		workerToken = t
+	} else if authHdr := r.Header.Get("Authorization"); strings.HasPrefix(authHdr, "Bearer ") {
+		workerToken = strings.TrimPrefix(authHdr, "Bearer ")
+	} else if t := r.URL.Query().Get("token"); t != "" {
+		workerToken = t
+	}
+
+	if s.authEnabled() {
+		if workerToken == "" {
+			http.Error(w, "unauthorized: worker token required", http.StatusUnauthorized)
+			return
+		}
+
+		if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
+			http.Error(w, "unauthorized: store unavailable", http.StatusUnauthorized)
+			return
+		}
+
+		if err := s.vmMgr.GetStore().ConsumeWorkerTokenAtomic(r.Context(), workerToken); err != nil {
+			http.Error(w, "unauthorized: invalid or already consumed worker token", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	opts := &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
 	}
@@ -2071,8 +2765,12 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if hello.Token != "" && s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		_, _ = s.vmMgr.GetStore().ConsumeWorkerToken(ctx, hello.Token)
+	tokenToConsume := hello.Token
+	if tokenToConsume == "" {
+		tokenToConsume = workerToken
+	}
+	if !s.authEnabled() && tokenToConsume != "" && s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		_, _ = s.vmMgr.GetStore().ConsumeWorkerToken(ctx, tokenToConsume)
 	}
 
 	workerID := hello.ID
@@ -2133,6 +2831,9 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -2294,6 +2995,9 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		json.NewEncoder(w).Encode([]*db.WorkerNode{})
 		return
@@ -2326,6 +3030,9 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/workers/")
 	path = strings.Trim(path, "/")
 	if path == "" {
@@ -2444,6 +3151,9 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePools(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -2485,6 +3195,9 @@ func (s *Server) handlePools(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePoolActions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/pools/")
 	if id == "" {
 		httpError(w, "pool id required", http.StatusBadRequest)
@@ -2524,11 +3237,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		ownerFilter := ""
-		if authCtx := auth.GetAuth(r.Context()); authCtx != nil && authCtx.Role != "admin" {
-			ownerFilter = authCtx.User.ID
-		}
-		jobs, err := s.vmMgr.GetStore().ListJobs(r.Context(), ownerFilter)
+		jobs, err := s.listAccessibleJobs(r.Context(), r)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -2538,17 +3247,76 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(jobs)
 	case http.MethodPost:
+		ctx := r.Context()
 		var req api.JobCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		ownerID, isAdmin, ok := s.callerIdentity(r)
+		if !ok {
+			httpError(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		// The job image is owner-scoped when it names a custom image or a
+		// template. Without this check a tenant could boot another tenant's
+		// private image through the worker/job pipeline.
+		if req.Spec.ImageID != "" {
+			ctx := r.Context()
+			img, imgErr := s.resolveAccessibleImage(ctx, r, req.Spec.ImageID)
+			if imgErr != nil {
+				httpError(w, imgErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if img != nil {
+				req.Spec.ImageID = imageIdentifier(img)
+			} else {
+				tpl, tplErr := s.resolveAccessibleTemplate(ctx, r, req.Spec.ImageID)
+				if tplErr != nil {
+					httpError(w, tplErr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if tpl != nil {
+					req.Spec.ImageID = templateIdentifier(tpl)
+				} else if !s.vmMgr.IsPlatformBaseImage(req.Spec.ImageID) {
+					if globalImg, _ := s.vmMgr.GetImage(ctx, req.Spec.ImageID); globalImg != nil {
+						httpError(w, "image not found", http.StatusNotFound)
+						return
+					} else if globalTpl, _ := s.vmMgr.GetTemplate(ctx, req.Spec.ImageID); globalTpl != nil {
+						httpError(w, "image not found", http.StatusNotFound)
+						return
+					}
+				}
+			}
+		}
+		// Jobs provision and run a sandbox, so both creation and concurrent-run
+		// quotas apply before the job is accepted.
+		jobVCPUs, jobMemoryMB, jobDiskMB := s.estimateRequestResources(ctx, vm.CreateRequest{
+			Image:    req.Spec.ImageID,
+			VCPUs:    req.Spec.VCPUs,
+			MemoryMB: req.Spec.MemoryMB,
+			DiskMB:   req.Spec.DiskMB,
+		})
+		if err := s.enforceCreateQuota(ctx, r, ownerID, jobVCPUs, jobMemoryMB, jobDiskMB); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+		if err := s.enforceRunQuota(ctx, r, &db.VM{OwnerID: ownerID, VCPUs: jobVCPUs, MemoryMB: jobMemoryMB, DiskMB: jobDiskMB}); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+
+		// Persist the control-plane authorization decision with the job so the
+		// worker can honour the same owner scope after a restart. Client-supplied
+		// values are always overwritten here.
+		req.Spec.AllowCrossOwner = isAdmin
+		req.Spec.AuthorizedOwnerIDs = nil
+		if !isAdmin {
+			req.Spec.AuthorizedOwnerIDs = s.ownerIDsFor(r)
+		}
+
 		specJSON, _ := json.Marshal(req.Spec)
 		jobID := fmt.Sprintf("job_%s", uuid.NewString()[:8])
-		ownerID := "default"
-		if authCtx := auth.GetAuth(r.Context()); authCtx != nil {
-			ownerID = authCtx.User.ID
-		}
 		job := &db.Job{
 			ID:        jobID,
 			OwnerID:   ownerID,
@@ -2607,11 +3375,9 @@ func (s *Server) handleJobActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Multi-tenant authorization check
-	if authCtx := auth.GetAuth(r.Context()); authCtx != nil && authCtx.Role != "admin" {
-		if job.OwnerID != "" && job.OwnerID != authCtx.User.ID && job.OwnerID != "default" {
-			httpError(w, "job not found", http.StatusNotFound)
-			return
-		}
+	if !s.canAccessOwner(r, job.OwnerID) {
+		httpError(w, "job not found", http.StatusNotFound)
+		return
 	}
 
 	if len(parts) == 1 {

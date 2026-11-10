@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"runtime"
 	"strings"
@@ -45,7 +46,15 @@ func (c *Client) Run(ctx context.Context) error {
 	} else if u.Scheme == "http" {
 		u.Scheme = "ws"
 	}
-	conn, _, e := websocket.Dial(ctx, u.String(), nil)
+	var dialOpts *websocket.DialOptions
+	if c.Config.Token != "" {
+		dialOpts = &websocket.DialOptions{
+			HTTPHeader: http.Header{
+				"X-Worker-Token": []string{c.Config.Token},
+			},
+		}
+	}
+	conn, _, e := websocket.Dial(ctx, u.String(), dialOpts)
 	if e != nil {
 		return e
 	}

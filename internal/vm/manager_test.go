@@ -436,7 +436,7 @@ func TestVMOpsByNameAndDistinctInternalIDs(t *testing.T) {
 	vm, err := m.CreateVM(ctx, CreateRequest{
 		Name:     "web-prod",
 		Tier:     "2vcpu",
-		MemoryMB: 2048,
+		MemoryMB: 512,
 	})
 	if err != nil {
 		t.Fatalf("CreateVM failed: %v", err)
