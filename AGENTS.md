@@ -76,6 +76,13 @@ Deployment restarts live services and affects shared infrastructure. Deploy only
 - Never force-push or rewrite published history on `main`/`dev`.
 - See skill `dev-workflow` for full details and `deployment` for lab deploy steps.
 
+## Issue-driven tracking
+
+- Persist any out-of-scope problem, deferred work, or follow-up as a GitHub issue so it can be resumed later; see skill `github-issues`.
+- Reference issues from branches (`fix/<n>-<slug>`) and PR bodies (`Closes #n` when fully resolved, else `Refs #n`).
+- Record reproduction steps, environment, affected paths, and testable acceptance criteria; redact secrets.
+- Do not close an issue without a linked commit/PR or a written reason.
+
 ## Change completion and Git
 
 Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.

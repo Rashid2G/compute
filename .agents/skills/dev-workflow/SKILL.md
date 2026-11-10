@@ -23,6 +23,10 @@ description: >
 6. Open PR **targeting `dev`**: `gh pr create --base dev`.
 7. After review/approval, merge into `dev`.
 
+## Issues
+- Track bugs, deferred work, and follow-ups as GitHub issues (see skill `github-issues`).
+- Name branches after the issue (`fix/42-queue-starvation`) and reference it in the PR body.
+
 ## Promoting dev -> main
 - Only the maintainer opens PRs from `dev` to `main`.
 - PRs to `main` require explicit user approval.
