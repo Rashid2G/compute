@@ -63,6 +63,19 @@ The alias must be configured in `~/.ssh/config` and a non-interactive SSH key mu
 
 Deployment restarts live services and affects shared infrastructure. Deploy only when the user explicitly requests deployment or the active task/operating instructions require it. Confirm the correct target from current repository guidance; after deployment verify service health and report any failure. Never infer that a local test VM is safe to modify if it contains user workloads.
 
+## Branch, worktree, and release workflow
+
+- `main` is production. Never push directly; changes arrive only via approved PRs.
+- `dev` is the integration branch. All agent work targets `dev`.
+- Work happens in git worktrees checked out from `dev`:
+  - `git fetch origin && git worktree add ../on-demand-vms-<topic> -b <type>/<topic> origin/dev`
+  - prefixes: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`
+  - clean up with `git worktree remove` after merge.
+- Push branch and open PR against `dev`: `git push -u origin <branch>` then `gh pr create --base dev`.
+- Promoting `dev` -> `main` is maintainer-only and requires explicit user approval.
+- Never force-push or rewrite published history on `main`/`dev`.
+- See skill `dev-workflow` for full details and `deployment` for lab deploy steps.
+
 ## Change completion and Git
 
 Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
