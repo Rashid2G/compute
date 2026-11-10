@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,12 +191,9 @@ func (m *Manager) InitVMDiskFromImageWithResize(vmID string, baseRootfs string, 
 		return "", fmt.Errorf("base rootfs not found at %s: %w", baseRootfs, err)
 	}
 
-	// Copy using cp --sparse=always if available, otherwise sparse file copy
-	cmd := exec.Command("cp", "--sparse=always", baseRootfs, diskPath)
-	if err := cmd.Run(); err != nil {
-		if err := copySparseFile(baseRootfs, diskPath); err != nil {
-			return "", fmt.Errorf("failed to copy base rootfs: %w", err)
-		}
+	// Fast Copy-on-Write (Reflink / FICLONE) with fallback to sparse copy
+	if err := CloneFileCOW(baseRootfs, diskPath); err != nil {
+		return "", fmt.Errorf("failed to copy base rootfs: %w", err)
 	}
 
 	// Resize sparse file and ext4 filesystem if target size is specified
@@ -230,11 +226,8 @@ func (m *Manager) CreateTemplateDiskFromPath(srcDiskPath, templateID string) (st
 	}
 
 	dstPath := filepath.Join(m.cfg.TemplatesDir, templateID+".ext4")
-	cmd := exec.Command("cp", "--sparse=always", srcDiskPath, dstPath)
-	if err := cmd.Run(); err != nil {
-		if err := copySparseFile(srcDiskPath, dstPath); err != nil {
-			return "", fmt.Errorf("failed to clone disk for template: %w", err)
-		}
+	if err := CloneFileCOW(srcDiskPath, dstPath); err != nil {
+		return "", fmt.Errorf("failed to clone disk for template: %w", err)
 	}
 
 	return dstPath, nil
@@ -479,37 +472,38 @@ func (m *Manager) CleanupVM(vmID string) error {
 }
 
 func copySparseFile(src, dst string) error {
-	source, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer source.Close()
-
-	destination, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer destination.Close()
-
-	_, err = io.Copy(destination, source)
-	return err
+	return CloneFileCOW(src, dst)
 }
 
 // EmbedSSHKey injects an SSH public key into the target ext4 disk image.
 // It writes to /root/.ssh/authorized_keys and /home/compute/.ssh/authorized_keys.
 func (m *Manager) EmbedSSHKey(diskPath string, pubKey string) error {
 	pubKey = strings.TrimSpace(pubKey)
-	if pubKey == "" {
-		return nil
-	}
 
 	// Read daemon internal public key if available so internal automation continues to work
 	var internalPubKey string
-	privKey := m.GetSSHKeyPath()
-	if privKey != "" {
-		if data, err := os.ReadFile(privKey + ".pub"); err == nil {
+	candidates := []string{}
+	if privKey := m.GetSSHKeyPath(); privKey != "" {
+		candidates = append(candidates, privKey+".pub")
+	}
+	candidates = append(candidates,
+		filepath.Join(m.cfg.BaseImagesDir, "ssh", "id_ed25519.pub"),
+		"/var/lib/compute/images/ssh/id_ed25519.pub",
+		filepath.Join(os.TempDir(), "compute-ssh", "id_ed25519.pub"),
+	)
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".ssh", "id_ed25519.pub"))
+	}
+
+	for _, cand := range candidates {
+		if data, err := os.ReadFile(cand); err == nil && len(strings.TrimSpace(string(data))) > 0 {
 			internalPubKey = strings.TrimSpace(string(data))
+			break
 		}
+	}
+
+	if pubKey == "" && internalPubKey == "" {
+		return nil
 	}
 
 	// Combine keys avoiding duplicates
@@ -519,9 +513,12 @@ func (m *Manager) EmbedSSHKey(diskPath string, pubKey string) error {
 		combinedKeys = append(combinedKeys, internalPubKey)
 		seen[internalPubKey] = true
 	}
-	if !seen[pubKey] {
+	if pubKey != "" && !seen[pubKey] {
 		combinedKeys = append(combinedKeys, pubKey)
 		seen[pubKey] = true
+	}
+	if len(combinedKeys) == 0 {
+		return nil
 	}
 	keysContent := strings.Join(combinedKeys, "\n") + "\n"
 

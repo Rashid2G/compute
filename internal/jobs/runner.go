@@ -123,13 +123,19 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 	}()
 
 	logs.append("stdout", fmt.Sprintf("[compute] creating sandbox from image %q", spec.ImageID))
+	ownerID := job.OwnerID
+	if ownerID == "" {
+		ownerID = "jobs"
+	}
 	created, err := r.mgr.CreateVM(ctx, vm.CreateRequest{
-		Name:     jobSandboxName(job.ID),
-		OwnerID:  "jobs",
-		Image:    spec.ImageID,
-		VCPUs:    spec.VCPUs,
-		MemoryMB: spec.MemoryMB,
-		DiskMB:   spec.DiskMB,
+		Name:               jobSandboxName(job.ID),
+		OwnerID:            ownerID,
+		Image:              spec.ImageID,
+		VCPUs:              spec.VCPUs,
+		MemoryMB:           spec.MemoryMB,
+		DiskMB:             spec.DiskMB,
+		AuthorizedOwnerIDs: spec.AuthorizedOwnerIDs,
+		AllowCrossOwner:    spec.AllowCrossOwner,
 	})
 	if err != nil {
 		failure := "failed to create sandbox: " + err.Error()

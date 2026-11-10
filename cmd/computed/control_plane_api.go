@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/google/uuid"
 )
 
@@ -59,6 +61,19 @@ func getHostResources(cfgVCPUs, cfgMemMB, cfgDiskMB int) (vcpus int, memMB int, 
 
 // ===== Volumes API =====
 
+// rootVolumeIDFor derives a deterministic rootfs volume ID for a VM. Tenant
+// owners are encoded so two users can use the same VM name without colliding.
+func rootVolumeIDFor(v *db.VM) string {
+	if v == nil {
+		return ""
+	}
+	owner := v.OwnerID
+	if owner == "" || owner == "default" {
+		return "vol_root_" + v.Name
+	}
+	return "vol_root_" + strings.TrimPrefix(owner, "usr_") + "_" + v.Name
+}
+
 func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
@@ -69,12 +84,16 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		// Sync running / existing VMs into volumes store so rootfs volumes are reflected
-		vms, _ := s.vmMgr.ListVMs(ctx)
-		liveVMs := map[string]bool{}
+		// Sync running / existing VMs into volumes store so rootfs volumes are reflected.
+		// Only VMs visible to the caller are synchronised.
+		vms, _ := s.listAccessibleVMs(ctx, r)
+		liveRootVolumes := map[string]bool{}
 		for _, v := range vms {
-			liveVMs[v.Name] = true
-			volID := "vol_root_" + v.Name
+			if v == nil {
+				continue
+			}
+			volID := rootVolumeIDFor(v)
+			liveRootVolumes[volID] = true
 			existing, _ := st.GetVolume(ctx, volID)
 			status := "available"
 			attachedVM := ""
@@ -86,9 +105,14 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			if sizeGB < 10 {
 				sizeGB = 10
 			}
+			volOwner := v.OwnerID
+			if volOwner == "" {
+				volOwner = "default"
+			}
 			if existing == nil {
 				_ = st.SaveVolume(ctx, &db.Volume{
 					ID:         volID,
+					OwnerID:    volOwner,
 					Name:       v.Name + "-rootfs",
 					Pool:       "default",
 					SizeGB:     sizeGB,
@@ -103,9 +127,10 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 					Snapshots:  0,
 				})
 			} else {
-				if existing.Status != status || existing.AttachedVM != attachedVM {
+				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner {
 					existing.Status = status
 					existing.AttachedVM = attachedVM
+					existing.OwnerID = volOwner
 					_ = st.SaveVolume(ctx, existing)
 				}
 			}
@@ -113,18 +138,15 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 
 		// Drop synthetic rootfs volumes whose sandbox no longer exists so the
 		// storage view never shows attachments to deleted VMs.
-		if allVols, err := st.ListVolumes(ctx); err == nil {
+		if allVols, err := s.listAccessibleVolumes(ctx, r); err == nil {
 			for _, vol := range allVols {
-				if strings.HasPrefix(vol.ID, "vol_root_") {
-					name := strings.TrimPrefix(vol.ID, "vol_root_")
-					if !liveVMs[name] {
-						_ = st.DeleteVolume(ctx, vol.ID)
-					}
+				if strings.HasPrefix(vol.ID, "vol_root_") && !liveRootVolumes[vol.ID] {
+					_ = st.DeleteVolume(ctx, vol.ID)
 				}
 			}
 		}
 
-		vols, err := st.ListVolumes(ctx)
+		vols, err := s.listAccessibleVolumes(ctx, r)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -146,6 +168,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		ownerID, isAdmin, ok := s.callerIdentity(r)
+		if !ok {
+			httpError(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
 		if req.Name == "" {
 			httpError(w, "name is required", http.StatusBadRequest)
 			return
@@ -163,9 +190,10 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "filesystem must be ext4 or xfs", http.StatusBadRequest)
 			return
 		}
+		volOwner := ownerID
 		if req.AttachedVM != "" {
-			vm, _ := s.vmMgr.GetVM(ctx, req.AttachedVM)
-			if vm == nil {
+			vm, _ := s.resolveAccessibleVM(ctx, r, req.AttachedVM)
+			if vm == nil || (!isAdmin && !s.canAccessOwner(r, vm.OwnerID)) {
 				httpError(w, "sandbox not found: "+req.AttachedVM, http.StatusNotFound)
 				return
 			}
@@ -174,6 +202,9 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			req.AttachedVM = vm.Name
+			if vm.OwnerID != "" {
+				volOwner = vm.OwnerID
+			}
 		}
 		status := "available"
 		mountPoint := ""
@@ -182,6 +213,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			status = "attached"
 			mountPoint = "/mnt/data"
 			devicePath = "/dev/vdb"
+		}
+
+		if err := s.enforceDiskQuota(ctx, r, volOwner, req.SizeGB*1024); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
 		}
 
 		volID := "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
@@ -193,6 +229,7 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 
 		vol := &db.Volume{
 			ID:         volID,
+			OwnerID:    volOwner,
 			Name:       req.Name,
 			Pool:       req.Pool,
 			SizeGB:     req.SizeGB,
@@ -243,7 +280,7 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			vol, err := st.GetVolume(ctx, id)
+			vol, err := s.resolveAccessibleVolume(ctx, r, id)
 			if err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -255,21 +292,32 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(vol)
 
 		case http.MethodDelete:
-			if strings.HasPrefix(id, "vol_root_") {
+			vol, err := s.resolveAccessibleVolume(ctx, r, id)
+			if err != nil {
+				httpError(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if vol == nil {
+				httpError(w, "volume not found", http.StatusNotFound)
+				return
+			}
+			if strings.HasPrefix(vol.ID, "vol_root_") {
 				httpError(w, "rootfs volumes are managed automatically by their sandbox", http.StatusConflict)
 				return
 			}
-			if vol, _ := st.GetVolume(ctx, id); vol != nil && vol.Path != "" {
+			if vol.Path != "" {
 				if err := s.vmMgr.GetStorageManager().DeleteDataVolume(vol.Path); err != nil {
 					httpError(w, "failed to delete volume image: "+err.Error(), http.StatusInternalServerError)
 					return
 				}
 			}
-			if err := st.DeleteVolume(ctx, id); err != nil {
+			// Delete strictly by the resolved unique ID (and owner) so a
+			// same-named volume belonging to another tenant is never removed.
+			if err := st.DeleteVolumeByID(ctx, vol.ID, vol.OwnerID); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			s.recordEvent("volume.deleted", getActor(r), id, "delivered", 15, nil)
+			s.recordEvent("volume.deleted", getActor(r), vol.ID, "delivered", 15, nil)
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 		default:
@@ -284,7 +332,7 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vol, err := st.GetVolume(ctx, id)
+	vol, err := s.resolveAccessibleVolume(ctx, r, id)
 	if err != nil || vol == nil {
 		httpError(w, "volume not found", http.StatusNotFound)
 		return
@@ -304,8 +352,8 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "vm_id is required", http.StatusBadRequest)
 			return
 		}
-		vm, _ := s.vmMgr.GetVM(ctx, req.VMID)
-		if vm == nil {
+		vm, _ := s.resolveAccessibleVM(ctx, r, req.VMID)
+		if vm == nil || !s.canAccessOwner(r, vm.OwnerID) {
 			httpError(w, "sandbox not found: "+req.VMID, http.StatusNotFound)
 			return
 		}
@@ -330,7 +378,7 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 
 	case "detach":
 		if vol.AttachedVM != "" {
-			if vm, _ := s.vmMgr.GetVM(ctx, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
+			if vm, _ := st.GetVMByOwner(ctx, vol.OwnerID, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
 				httpError(w, "stop the sandbox before detaching this volume", http.StatusConflict)
 				return
 			}
@@ -355,10 +403,14 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			req.AddGB = 10
 		}
 		if vol.AttachedVM != "" {
-			if vm, _ := s.vmMgr.GetVM(ctx, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
+			if vm, _ := st.GetVMByOwner(ctx, vol.OwnerID, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
 				httpError(w, "stop the sandbox before expanding this volume", http.StatusConflict)
 				return
 			}
+		}
+		if err := s.enforceDiskQuota(ctx, r, vol.OwnerID, req.AddGB*1024); err != nil {
+			httpError(w, err.Error(), http.StatusTooManyRequests)
+			return
 		}
 		if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
 			httpError(w, "failed to expand volume: "+err.Error(), http.StatusBadRequest)
@@ -374,7 +426,7 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 
 	case "snapshot":
 		if vol.AttachedVM != "" {
-			if vm, _ := s.vmMgr.GetVM(ctx, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
+			if vm, _ := st.GetVMByOwner(ctx, vol.OwnerID, vol.AttachedVM); vm != nil && (vm.Status == db.StatusRunning || vm.Status == db.StatusPaused) {
 				httpError(w, "stop the sandbox before snapshotting this volume", http.StatusConflict)
 				return
 			}
@@ -399,6 +451,9 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 // ===== Webhooks API =====
 
 func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -469,6 +524,9 @@ func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWebhookActions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -582,6 +640,9 @@ func (s *Server) handleWebhookActions(w http.ResponseWriter, r *http.Request) {
 // ===== OpenTelemetry API =====
 
 func (s *Server) handleOTel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -620,6 +681,9 @@ func (s *Server) handleOTel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOTelTest(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -725,6 +789,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if _, isAdmin := s.currentOwnerID(r); !isAdmin {
+			username := ""
+			if authCtx := auth.GetAuth(ctx); authCtx != nil && authCtx.User != nil {
+				username = authCtx.User.Username
+			}
+			filtered := make([]*db.AuditEvent, 0, len(events))
+			for _, evt := range events {
+				if evt != nil && username != "" && evt.Actor == username {
+					filtered = append(filtered, evt)
+				}
+			}
+			events = filtered
+		}
 		if events == nil {
 			events = []*db.AuditEvent{}
 		}
@@ -776,6 +853,12 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, ": connected\n\n")
 	flusher.Flush()
 
+	_, isAdmin := s.currentOwnerID(r)
+	username := ""
+	if authCtx := auth.GetAuth(r.Context()); authCtx != nil && authCtx.User != nil {
+		username = authCtx.User.Username
+	}
+
 	for {
 		select {
 		case <-r.Context().Done():
@@ -783,6 +866,9 @@ func (s *Server) handleEventsStream(w http.ResponseWriter, r *http.Request) {
 		case evt, ok := <-eventCh:
 			if !ok {
 				return
+			}
+			if !isAdmin && (evt == nil || username == "" || evt.Actor != username) {
+				continue
 			}
 			b, err := json.Marshal(evt)
 			if err == nil {
@@ -805,7 +891,13 @@ func (s *Server) handleAccessAPIKeys(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		keys, err := st.ListAccessAPIKeys(ctx)
+		var keys []*db.AccessAPIKey
+		var err error
+		if _, isAdmin := s.currentOwnerID(r); isAdmin {
+			keys, err = st.ListAccessAPIKeys(ctx)
+		} else if authCtx := auth.GetAuth(ctx); authCtx != nil && authCtx.User != nil {
+			keys, err = st.ListAccessAPIKeysByCreator(ctx, authCtx.User.Username)
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -822,6 +914,7 @@ func (s *Server) handleAccessAPIKeys(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req struct {
 			Name      string `json:"name"`
+			Role      string `json:"role"`
 			Scope     string `json:"scope"`
 			ExpiresAt string `json:"expires_at"`
 		}
@@ -834,10 +927,7 @@ func (s *Server) handleAccessAPIKeys(w http.ResponseWriter, r *http.Request) {
 		if scope == "" {
 			scope = "admin"
 		}
-		expiresAt := req.ExpiresAt
-		if expiresAt == "" {
-			expiresAt = "in 90 days"
-		}
+		expiresAt := normalizeAccessKeyExpiration(req.ExpiresAt)
 
 		b := make([]byte, 16)
 		_, _ = rand.Read(b)
@@ -846,9 +936,15 @@ func (s *Server) handleAccessAPIKeys(w http.ResponseWriter, r *http.Request) {
 		prefix := "cmp_live_" + tokenHex[:4] + "..." + tokenHex[len(tokenHex)-4:]
 		id := "key_live_" + tokenHex[:8]
 
+		role := req.Role
+		if role == "" && scope == "admin" {
+			role = "admin"
+		}
+
 		key := &db.AccessAPIKey{
 			ID:        id,
 			Name:      name,
+			Role:      role,
 			Prefix:    prefix,
 			Token:     fullToken,
 			Scope:     scope,
@@ -893,10 +989,27 @@ func (s *Server) handleAccessAPIKeyActions(w http.ResponseWriter, r *http.Reques
 			httpError(w, "key not found", http.StatusNotFound)
 			return
 		}
+		if _, isAdmin := s.currentOwnerID(r); !isAdmin {
+			if authCtx := auth.GetAuth(ctx); authCtx == nil || authCtx.User == nil || key.CreatedBy != authCtx.User.Username {
+				httpError(w, "key not found", http.StatusNotFound)
+				return
+			}
+		}
 		key.Token = ""
 		json.NewEncoder(w).Encode(key)
 
 	case http.MethodDelete:
+		key, err := st.GetAccessAPIKey(ctx, id)
+		if err != nil || key == nil {
+			httpError(w, "key not found", http.StatusNotFound)
+			return
+		}
+		if _, isAdmin := s.currentOwnerID(r); !isAdmin {
+			if authCtx := auth.GetAuth(ctx); authCtx == nil || authCtx.User == nil || key.CreatedBy != authCtx.User.Username {
+				httpError(w, "key not found", http.StatusNotFound)
+				return
+			}
+		}
 		if err := st.DeleteAccessAPIKey(ctx, id); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -912,6 +1025,9 @@ func (s *Server) handleAccessAPIKeyActions(w http.ResponseWriter, r *http.Reques
 // ===== Agent Profiles API =====
 
 func (s *Server) handleAgentProfiles(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -981,6 +1097,9 @@ func (s *Server) handleAgentProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentProfileActions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -1067,6 +1186,9 @@ func (s *Server) handleAgentProfileActions(w http.ResponseWriter, r *http.Reques
 // ===== Environments API =====
 
 func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -1126,6 +1248,9 @@ func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEnvironmentActions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
 		return
@@ -1191,7 +1316,27 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		pfs, err := st.ListPortForwards(ctx)
+		var pfs []*db.PortForward
+		var err error
+		if _, isAdmin := s.currentOwnerID(r); isAdmin {
+			pfs, err = st.ListPortForwards(ctx)
+		} else {
+			seen := make(map[string]bool)
+			for _, oid := range s.ownerIDsFor(r) {
+				owned, listErr := st.ListPortForwardsByOwner(ctx, oid)
+				if listErr != nil {
+					err = listErr
+					break
+				}
+				for _, pf := range owned {
+					if pf == nil || seen[pf.ID] {
+						continue
+					}
+					seen[pf.ID] = true
+					pfs = append(pfs, pf)
+				}
+			}
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1209,23 +1354,76 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			GuestPort int    `json:"guest_port"`
 			Protocol  string `json:"protocol"`
 			Subdomain string `json:"subdomain"`
+			Public    *bool  `json:"public,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.HostPort <= 0 || req.GuestPort <= 0 {
-			httpError(w, "host_port and guest_port must be positive", http.StatusBadRequest)
+		ownerID, isAdmin, ok := s.callerIdentity(r)
+		if !ok {
+			httpError(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+		if req.HostPort <= 0 || req.HostPort > 65535 || req.GuestPort <= 0 || req.GuestPort > 65535 {
+			httpError(w, "host_port and guest_port must be between 1 and 65535", http.StatusBadRequest)
+			return
+		}
+
+		// Anti-collision guard: privileged host ports (< 1024) require administrator privileges
+		if req.HostPort < 1024 && !isAdmin {
+			httpError(w, fmt.Sprintf("privileged host port %d requires administrator privileges", req.HostPort), http.StatusForbidden)
+			return
+		}
+
+		// Wrap collision check, host port availability probe, and insert in s.portForwardMu to prevent check-then-use races
+		s.portForwardMu.Lock()
+		defer s.portForwardMu.Unlock()
+
+		// Conflict detection: ensure host port is not already allocated in SQLite
+		allPFs, err := st.ListPortForwards(ctx)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, existing := range allPFs {
+			if existing.HostPort == req.HostPort {
+				httpError(w, fmt.Sprintf("port conflict: host port %d is already allocated by port forward %s (sandbox: %s)", req.HostPort, existing.ID, existing.VMName), http.StatusConflict)
+				return
+			}
+		}
+
+		// Anti-collision guard: check if host port is currently bound or in use by a host service
+		if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", req.HostPort)); err == nil {
+			_ = ln.Close()
+		} else {
+			httpError(w, fmt.Sprintf("port conflict: host port %d is already in use by a host service: %v", req.HostPort, err), http.StatusConflict)
+			return
+		}
+
 		vmName := req.VMName
 		var targetVM *db.VM
-		if req.VMID != "" {
-			if v, _ := s.vmMgr.GetVM(ctx, req.VMID); v != nil {
+		lookup := req.VMID
+		if lookup == "" {
+			lookup = req.VMName
+		}
+		if lookup != "" {
+			v, _ := s.resolveAccessibleVM(ctx, r, lookup)
+			if v != nil {
+				if !s.canAccessOwner(r, v.OwnerID) {
+					httpError(w, "sandbox not found", http.StatusNotFound)
+					return
+				}
 				targetVM = v
 				if vmName == "" {
 					vmName = v.Name
 				}
+				if req.VMID == "" {
+					req.VMID = v.ID
+				}
+			} else if !isAdmin {
+				httpError(w, "sandbox not found", http.StatusNotFound)
+				return
 			} else if vmName == "" {
 				vmName = req.VMID
 			}
@@ -1250,8 +1448,19 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			status = "active"
 		}
 
+		pfOwner := ownerID
+		if targetVM != nil && targetVM.OwnerID != "" {
+			pfOwner = targetVM.OwnerID
+		}
+
+		isPublic := false
+		if req.Public != nil && *req.Public {
+			isPublic = true
+		}
+
 		pf := &db.PortForward{
 			ID:        "pf_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
+			OwnerID:   pfOwner,
 			HostPort:  req.HostPort,
 			VMID:      req.VMID,
 			VMName:    vmName,
@@ -1260,9 +1469,15 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			Subdomain: req.Subdomain,
 			PublicURL: publicURL,
 			Status:    status,
+			Public:    isPublic,
 			CreatedAt: time.Now().UTC(),
 		}
 		if err := st.SavePortForward(ctx, pf); err != nil {
+			errStr := strings.ToLower(err.Error())
+			if strings.Contains(errStr, "unique") || strings.Contains(errStr, "constraint") {
+				httpError(w, fmt.Sprintf("port conflict: host port %d is already allocated: %v", req.HostPort, err), http.StatusConflict)
+				return
+			}
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1294,15 +1509,20 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 	switch r.Method {
 	case http.MethodGet:
 		pf, err := st.GetPortForward(ctx, id)
-		if err != nil || pf == nil {
+		if err != nil || pf == nil || !s.canAccessOwner(r, pf.OwnerID) {
 			httpError(w, "port forward not found", http.StatusNotFound)
 			return
 		}
 		json.NewEncoder(w).Encode(pf)
 
 	case http.MethodDelete:
-		if pf, _ := st.GetPortForward(ctx, id); pf != nil {
-			if v, _ := s.vmMgr.GetVM(ctx, pf.VMID); v != nil && v.IPAddress != "" {
+		pf, err := st.GetPortForward(ctx, id)
+		if err != nil || pf == nil || !s.canAccessOwner(r, pf.OwnerID) {
+			httpError(w, "port forward not found", http.StatusNotFound)
+			return
+		}
+		if pf != nil {
+			if v, _ := st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID); v != nil && v.IPAddress != "" {
 				_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 			}
 		}

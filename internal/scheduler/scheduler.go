@@ -222,6 +222,7 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 					},
 					LeaseID:   leaseID,
 					AttemptID: attemptID,
+					OwnerID:   job.OwnerID,
 					Spec:      spec,
 				}
 				if err := s.registry.Send(ctx, w.ID, msg); err == nil {

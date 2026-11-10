@@ -11,6 +11,9 @@ services:
     volumes:
       - daemon-data:/var/lib/compute
       - ./config:/etc/compute:ro
+      - /dev/kvm:/dev/kvm
+    devices:
+      - /dev/kvm:/dev/kvm
     environment:
       - COMPUTE_DAEMON=0.0.0.0:18080
     restart: unless-stopped

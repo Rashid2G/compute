@@ -118,6 +118,11 @@ type ServerConfig struct {
 	AuthEnabled    bool   `json:"auth_enabled"`
 	AuthDBPath     string `json:"auth_db_path,omitempty"`
 	AdminSecret    string `json:"admin_secret,omitempty"`
+	AdminPassword  string `json:"admin_password,omitempty"`
+	JailerEnabled  bool   `json:"jailer_enabled,omitempty"`
+	JailerBinary   string `json:"jailer_binary,omitempty"`
+	JailerBaseDir  string `json:"jailer_base_dir,omitempty"`
+	CgroupEnforce  bool   `json:"cgroup_enforce,omitempty"`
 }
 
 // DefaultsConfig holds default microVM specifications
@@ -177,6 +182,9 @@ type GlobalConfig struct {
 	Jobs       JobsConfig     `json:"jobs"`
 }
 
+// Config is an alias for GlobalConfig for backward compatibility and package consistency.
+type Config = GlobalConfig
+
 // DefaultConfig returns standard out-of-the-box configuration
 func DefaultConfig() GlobalConfig {
 	return GlobalConfig{
@@ -184,6 +192,10 @@ func DefaultConfig() GlobalConfig {
 			ListenAddr:     "0.0.0.0:18080",
 			DBPath:         "/var/lib/compute/data/compute.db",
 			FirecrackerBin: "/usr/local/bin/firecracker",
+			JailerEnabled:  false,
+			JailerBinary:   "/usr/local/bin/jailer",
+			JailerBaseDir:  "/srv/jailer",
+			CgroupEnforce:  true,
 		},
 		Network: network.DefaultNATConfig(),
 		Defaults: DefaultsConfig{

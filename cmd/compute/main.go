@@ -372,6 +372,7 @@ func printSSHUsage() {
 	fmt.Fprintf(os.Stderr, "Connect to sandbox SSH via WebSocket connection through the daemon.\n\n")
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	fmt.Fprintf(os.Stderr, "  -u, --user <username>       SSH user (default: compute)\n")
+	fmt.Fprintf(os.Stderr, "      --proxy, --stdio        Run in raw stream mode bridging stdin/stdout (OpenSSH ProxyCommand)\n")
 	fmt.Fprintf(os.Stderr, "  -p, --password <password>   SSH password\n")
 	fmt.Fprintf(os.Stderr, "  -t                          Force pseudo-terminal allocation\n")
 	fmt.Fprintf(os.Stderr, "  -T                          Disable pseudo-terminal allocation\n")
@@ -387,6 +388,7 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 	var password string
 	var forcePTY bool
 	var disablePTY bool
+	var proxyMode bool
 	var command []string
 
 	for i := 0; i < len(args); i++ {
@@ -398,6 +400,10 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 		if arg == "-h" || arg == "--help" {
 			printSSHUsage()
 			return
+		}
+		if arg == "--proxy" || arg == "--stdio" {
+			proxyMode = true
+			continue
 		}
 		if arg == "-u" || arg == "--user" {
 			if i+1 < len(args) {
@@ -473,6 +479,70 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 	}
 
 	canonicalID := v.ID
+
+	if proxyMode {
+		query := url.Values{}
+		query.Set("stream", "raw")
+		query.Set("mode", "stdio")
+		if user != "" {
+			query.Set("user", user)
+		}
+
+		wsCtx, wsCancel := context.WithCancel(context.Background())
+		defer wsCancel()
+
+		wsConn, err := client.DialSSHWebSocket(wsCtx, canonicalID, query)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error connecting to sandbox SSH via daemon: %v\n", err)
+			os.Exit(1)
+		}
+		defer wsConn.Close(websocket.StatusNormalClosure, "client exit")
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		go func() {
+			<-sigCh
+			_ = wsConn.Close(websocket.StatusNormalClosure, "interrupted")
+			os.Exit(130)
+		}()
+
+		done := make(chan struct{})
+
+		// Stdin -> WebSocket
+		go func() {
+			defer close(done)
+			buf := make([]byte, 32768)
+			for {
+				n, rErr := os.Stdin.Read(buf)
+				if n > 0 {
+					if wErr := wsConn.Write(wsCtx, websocket.MessageBinary, buf[:n]); wErr != nil {
+						return
+					}
+				}
+				if rErr != nil {
+					_ = wsConn.Close(websocket.StatusNormalClosure, "stdin EOF")
+					return
+				}
+			}
+		}()
+
+		// WebSocket -> Stdout
+		for {
+			_, data, rErr := wsConn.Read(wsCtx)
+			if rErr != nil {
+				break
+			}
+			if len(data) > 0 {
+				if _, wErr := os.Stdout.Write(data); wErr != nil {
+					break
+				}
+			}
+		}
+
+		wsCancel()
+		<-done
+		return
+	}
 
 	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
 	usePTY := isTerminal
