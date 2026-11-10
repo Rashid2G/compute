@@ -54,6 +54,7 @@ Redact secrets, tokens, private keys, and env values.
 ## Linking work to issues
 - Branch name includes the issue: `fix/42-queue-starvation`.
 - PR body references it: `Closes #42` (only if the PR fully resolves it) or `Refs #42`.
+- **If the PR only partially satisfies the issue, leave a comment on the issue** describing what was done and what remains, and keep it open. See skill `using-skills` for the mandatory checklist.
 - Multiple issues: `Closes #12, #34`.
 - When only partially done, comment progress on the issue and keep it open.
 
