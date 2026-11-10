@@ -219,6 +219,9 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		}
 		if opts.UseNamespaces {
 			sysProcAttr.Cloneflags = CloneNewPID | CloneNewNS | CloneNewIPC | CloneNewUTS | CloneNewCgroup | CloneNewNet
+			if opts.NetNS == "" {
+				sysProcAttr.Cloneflags &^= CloneNewNet
+			}
 		}
 		cmd.SysProcAttr = sysProcAttr
 
@@ -339,6 +342,9 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 	}
 	if opts.UseNamespaces {
 		sysProcAttr.Cloneflags = CloneNewPID | CloneNewNS | CloneNewIPC | CloneNewUTS | CloneNewCgroup | CloneNewNet
+		if opts.NetNS == "" {
+			sysProcAttr.Cloneflags &^= CloneNewNet
+		}
 	}
 	cmd.SysProcAttr = sysProcAttr
 
