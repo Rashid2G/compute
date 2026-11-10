@@ -62,31 +62,31 @@ build-rootfs:
 	./scripts/build-rootfs.sh /var/lib/compute/images 1024
 
 deploy:
-	./scripts/deploy-t3-runner.sh
+	./scripts/deploy.sh
 
 deploy-ui:
-	./scripts/deploy-t3-runner.sh --ui
+	./scripts/deploy.sh --ui
 
 deploy-restart:
-	./scripts/deploy-t3-runner.sh --restart-only
+	./scripts/deploy.sh --restart-only
 
 remote-status:
-	./scripts/deploy-t3-runner.sh --status
+	./scripts/deploy.sh --status
 
 # Local lab VM (192.168.1.70) that serves the daemon, Web GUI and CLI tests.
 LAB_HOST ?= compute-lab
 
 deploy-lab:
-	T3_RUNNER_HOST=$(LAB_HOST) ./scripts/deploy-t3-runner.sh
+	./scripts/deploy.sh
 
 deploy-lab-ui:
-	T3_RUNNER_HOST=$(LAB_HOST) ./scripts/deploy-t3-runner.sh --ui
+	./scripts/deploy.sh --ui
 
 remote-status-lab:
-	T3_RUNNER_HOST=$(LAB_HOST) ./scripts/deploy-t3-runner.sh --status
+	./scripts/deploy.sh --status
 
 remote-logs:
-	ssh t3-runner "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"
+	ssh $(LAB_HOST) "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"
 
 clean:
 	rm -rf bin/ coverage.out benchmark-results.json

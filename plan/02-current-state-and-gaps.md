@@ -20,7 +20,7 @@ The repository already contains these foundations:
 | Async operations | `operations` table | Existing; needs attempts and reconciliation |
 | Audit logging | `internal/master/audit` | Existing; expand to worker/job actions |
 | CLI | `cmd/compute` | Existing; extend with worker/job/CI commands |
-| Deployment | `scripts/deploy-t3-runner.sh` | Existing for the local deployment target |
+| Deployment | `scripts/deploy.sh` | Automated deployment to compute-lab |
 
 ## What is missing
 

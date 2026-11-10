@@ -44,12 +44,12 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
 
 ## Deployment targets
 
-The current primary test/deployment host is `compute-lab` (`192.168.1.70`), serving UI on port 8080 and daemon API on port 18080. Prefer lab targets over legacy `t3-runner` targets:
+The primary deployment host is `compute-lab` (`192.168.1.70`), serving UI on port 8080 and daemon API on port 18080:
 
-- Go/config/scripts changes: `make deploy-lab`
-- Any `web/` source change: `make deploy-lab-ui`
-- Status: `make remote-status-lab`; SSH: `ssh compute-lab`
-- Legacy `t3-runner` targets remain available: `make deploy`, `make deploy-ui`, `make remote-status`.
+- Go/config/scripts changes: `make deploy` (or `make deploy-lab`)
+- Any `web/` source change: `make deploy-ui` (or `make deploy-lab-ui`)
+- Status: `make remote-status` (or `make remote-status-lab`); SSH: `ssh compute-lab`
+
 
 ### SSH access to `compute-lab`
 
