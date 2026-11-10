@@ -15,9 +15,11 @@ description: >
   - `dev-workflow` — worktrees, `dev` branch, PR-to-`dev`, approval-gated `main`.
   - `github-issues` — filing, linking, triage, resuming issues.
   - `deployment` — deploy to `compute-lab`, health checks, remote logs.
-  - `leader-evaluator-loop` — multi-agent adversarial implementation/review.
+  - `leader-evaluator-refinement` — multi-agent adversarial implementation/review.
+  - `system-context-learning` — autonomous context learning, leaving operational context for other agents, safe skill updates.
   - `using-skills` — this file.
 - Check `.agents/skills/` at task start in case new skills were added.
+- When operational realities change (e.g., build locations, host IPs, ports), follow `system-context-learning` to update skills safely.
 - A skill present in the conversation as `<skill_content>` is already loaded; do not reload it.
 
 ## Precedence
