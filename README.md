@@ -92,14 +92,17 @@ compute sandbox delete dev-box
 
 ## Deployment & Testing on `compute-lab`
 ```bash
-# Standard deploy (compiles Go binaries, syncs files, restarts services)
+# Fast containerized deployment with Docker Compose (default)
 make deploy
 
 # Deploy including Web UI rebuild
 make deploy-ui
 
-# Check status and logs on remote VM
+# Check status of remote containers, services, and endpoints
 make remote-status
+
+# Deploy using legacy systemd host units
+./scripts/deploy.sh --systemd
 ```
 
 See [AGENTS.md](file:///home/rashid/Projects/Repos/on-demand-vms/AGENTS.md) for automated workflows and agent guidance.
