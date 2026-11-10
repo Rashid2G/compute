@@ -246,11 +246,6 @@ func (m *Manager) deleteVMRecord(ctx context.Context, vmID string) error {
 	}
 	m.mu.Unlock()
 
-	m.vmLocks.Delete(vmID)
-	if internalID != "" {
-		m.vmLocks.Delete(internalID)
-	}
-
 	if m.store != nil {
 		if internalID != "" {
 			return m.store.DeleteVMByInternalID(ctx, internalID)
@@ -1693,6 +1688,24 @@ func (m *Manager) processQueue(ctx context.Context) {
 	}
 
 	m.queueMu.Lock()
+	queuedSet := make(map[string]struct{}, len(queuedIDs))
+	for _, id := range queuedIDs {
+		queuedSet[id] = struct{}{}
+	}
+	remainingSet := make(map[string]struct{}, len(remaining))
+	for _, id := range remaining {
+		remainingSet[id] = struct{}{}
+	}
+	for _, id := range m.runQueue {
+		if _, wasProcessed := queuedSet[id]; wasProcessed {
+			continue
+		}
+		if _, alreadyRemaining := remainingSet[id]; alreadyRemaining {
+			continue
+		}
+		remaining = append(remaining, id)
+		remainingSet[id] = struct{}{}
+	}
 	m.runQueue = remaining
 	m.queueMu.Unlock()
 }
