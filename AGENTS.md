@@ -80,6 +80,7 @@ Deployment restarts live services and affects shared infrastructure. Deploy only
 
 - Persist any out-of-scope problem, deferred work, or follow-up as a GitHub issue so it can be resumed later; see skill `github-issues`.
 - Reference issues from branches (`fix/<n>-<slug>`) and PR bodies (`Closes #n` when fully resolved, else `Refs #n`).
+- If a PR only partially satisfies an issue, leave a progress comment on the issue and keep it open; see skill `using-skills`.
 - Record reproduction steps, environment, affected paths, and testable acceptance criteria; redact secrets.
 - Do not close an issue without a linked commit/PR or a written reason.
 
@@ -93,4 +94,4 @@ Work independently unless the user or repository task explicitly requests delega
 
 ## Skills
 
-Use installed skills when their stated scope applies. The installed general skills do not currently provide a dedicated Compute repository workflow, so use the repository guidance in this file for codebase-specific architecture, testing, and deployment. Do not modify unrelated global skills. If a reusable project-specific workflow is needed, add it under `.agents/skills/<name>/SKILL.md` and document its trigger and limits; keep `AGENTS.md` as the authoritative entry point. Revisit this section when project skills are added.
+Use installed skills when their stated scope applies. Load them with the `skill` tool at task start; see the `using-skills` skill for discovery, precedence, and how to apply them. Repository skills live in `.agents/skills/<name>/SKILL.md`. Do not modify unrelated global skills. If a reusable project-specific workflow is needed, add it under `.agents/skills/<name>/SKILL.md` and document its trigger and limits; keep `AGENTS.md` as the authoritative entry point. Revisit this section when project skills are added.
