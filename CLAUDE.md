@@ -2,7 +2,7 @@
 
 ## Post-Change Deployment Workflow (MANDATORY)
 
-Whenever you finish modifying code, tests, or configurations in this repository, **you must deploy to the `ssh t3-runner` VM so changes take effect**:
+Whenever you finish modifying code, tests, or configurations in this repository, **you must deploy to the `ssh compute-lab` VM so changes take effect**:
 
 ```bash
 make deploy
