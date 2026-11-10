@@ -1,0 +1,16 @@
+.git
+.agents
+.github
+data
+images
+vms
+snapshots
+disks
+coverage.out
+benchmark-*.json
+*.test
+node_modules
+web/node_modules
+web/dist
+tmp
+bin

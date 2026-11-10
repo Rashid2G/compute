@@ -1,7 +1,8 @@
-# Multi-stage Dockerfile for Compute Central Daemon
-FROM golang:1.24-alpine AS builder
+# Multi-stage Dockerfile for Compute Central Daemon & Web UI
+FROM golang:alpine AS builder
 
 WORKDIR /src
+ENV GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git make gcc musl-dev
 
@@ -10,21 +11,45 @@ RUN go mod download
 
 COPY . .
 
-# Build daemon and CLI
+# Build central daemon, CLI, and worker binaries
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/computed ./cmd/computed
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute ./cmd/compute
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute-worker
 
-# Final minimal runtime image
+# Final minimal runtime image with Firecracker & network tooling
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables openssh-client bash socat tar gzip
+
+# Install Firecracker & Jailer static binaries
+ARG FIRECRACKER_VERSION=v1.7.0
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    if [ "${ARCH}" = "x86_64" ]; then \
+        FC_ARCH="x86_64"; \
+    elif [ "${ARCH}" = "aarch64" ]; then \
+        FC_ARCH="aarch64"; \
+    else \
+        FC_ARCH="x86_64"; \
+    fi; \
+    curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" | tar -xz; \
+    mv "release-${FIRECRACKER_VERSION}-${FC_ARCH}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}" /usr/local/bin/firecracker; \
+    mv "release-${FIRECRACKER_VERSION}-${FC_ARCH}/jailer-${FIRECRACKER_VERSION}-${FC_ARCH}" /usr/local/bin/jailer; \
+    chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer; \
+    rm -rf "release-${FIRECRACKER_VERSION}-${FC_ARCH}"
 
 WORKDIR /var/lib/compute
 
+# Pre-create data and image directories
+RUN mkdir -p /var/lib/compute/data /var/lib/compute/images/ssh /var/lib/compute/vms /etc/compute
+
 COPY --from=builder /bin/computed /usr/local/bin/computed
 COPY --from=builder /bin/compute /usr/local/bin/compute
+COPY --from=builder /bin/compute-worker /usr/local/bin/compute-worker
+COPY config/daemon.json /etc/compute/daemon.json
 
-EXPOSE 18080
+# Expose Central REST API (18080) and Web GUI (8080)
+EXPOSE 18080 8080
 
 VOLUME ["/var/lib/compute"]
 

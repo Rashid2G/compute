@@ -6,28 +6,46 @@ services:
       context: .
       dockerfile: Dockerfile.daemon
     container_name: computed
+    hostname: computed
+    restart: unless-stopped
+    privileged: true
     ports:
       - "18080:18080"
     volumes:
-      - daemon-data:/var/lib/compute
+      - ${COMPUTE_DATA_DIR:-./data}:/var/lib/compute
       - ./config:/etc/compute:ro
       - /dev/kvm:/dev/kvm
     devices:
       - /dev/kvm:/dev/kvm
     environment:
+      - COMPUTE_DATA_DIR=/var/lib/compute
       - COMPUTE_DAEMON=0.0.0.0:18080
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18080/api/v1/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  compute-gui:
+    build:
+      context: .
+      dockerfile: Dockerfile.daemon
+    container_name: compute-gui
+    restart: unless-stopped
+    depends_on:
+      computed:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    entrypoint: ["/usr/local/bin/compute", "gui", "--addr", "0.0.0.0", "--port", "8080", "--daemon", "http://computed:18080"]
 
   compute-worker:
     build:
       context: .
       dockerfile: Dockerfile.worker
     container_name: compute-worker
+    restart: unless-stopped
     depends_on:
       computed:
         condition: service_healthy
@@ -40,8 +58,6 @@ services:
       - COMPUTE_WORKER_NAME=docker-worker-primary
       - COMPUTE_WORKER_POOL=default
     command: ["run", "--control-plane", "http://computed:18080", "--name", "docker-worker-primary", "--pool", "default"]
-    restart: unless-stopped
 
 volumes:
-  daemon-data:
   worker-data:
