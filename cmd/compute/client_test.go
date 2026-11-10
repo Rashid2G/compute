@@ -528,3 +528,81 @@ func TestClientSSHWebSocket(t *testing.T) {
 		t.Fatalf("unexpected msg: %s", string(data))
 	}
 }
+
+func TestCreateAPIKeyParsesTokenResponse(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "standard token", body: `{"status":"ok","token":"cmp_live_abc_def","key":{"id":"key_1"}}`, want: "cmp_live_abc_def"},
+		{name: "legacy string key", body: `{"key":"mfk_legacy_secret"}`, want: "mfk_legacy_secret"},
+		{name: "legacy object key", body: `{"key":{"token":"mfk_obj_secret"}}`, want: "mfk_obj_secret"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v1/auth/keys" {
+					t.Fatalf("unexpected path %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			client := NewDaemonClient(srv.URL)
+			got, err := client.CreateAPIKey(context.Background(), "test", 0)
+			if err != nil {
+				t.Fatalf("CreateAPIKey failed: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("CreateAPIKey = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDialSSHWebSocket_ProxyRawMode(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/vms/vm-proxy-test/ssh", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("stream") != "raw" || r.URL.Query().Get("mode") != "stdio" {
+			http.Error(w, "expected stream=raw and mode=stdio", http.StatusBadRequest)
+			return
+		}
+		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+		conn, err := websocket.Accept(w, r, opts)
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_ = conn.Write(r.Context(), websocket.MessageBinary, []byte("raw-stream-binary-data"))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := NewDaemonClient(server.URL)
+	query := url.Values{
+		"stream": []string{"raw"},
+		"mode":   []string{"stdio"},
+		"user":   []string{"compute"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	conn, err := client.DialSSHWebSocket(ctx, "vm-proxy-test", query)
+	if err != nil {
+		t.Fatalf("DialSSHWebSocket failed: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	msgType, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("failed reading from ws: %v", err)
+	}
+	if msgType != websocket.MessageBinary || string(data) != "raw-stream-binary-data" {
+		t.Fatalf("unexpected message: type=%v, data=%s", msgType, string(data))
+	}
+}

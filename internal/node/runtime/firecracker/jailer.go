@@ -6,10 +6,31 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/Rashid2G/on-demand-vms/internal/storage"
 )
 
+// Linux namespace clone flags for isolation hardening
+const (
+	CloneNewPID    = syscall.CLONE_NEWPID
+	CloneNewNet    = syscall.CLONE_NEWNET
+	CloneNewNS     = syscall.CLONE_NEWNS
+	CloneNewIPC    = syscall.CLONE_NEWIPC
+	CloneNewUTS    = syscall.CLONE_NEWUTS
+	CloneNewCgroup = 0x02000000 // syscall.CLONE_NEWCGROUP / unix.CLONE_NEWCGROUP
+)
+
+// ExtraDrive specifies additional volumes attached to the jailer instance.
+type ExtraDrive struct {
+	DriveID    string
+	HostPath   string
+	IsReadOnly bool
+}
+
+// JailerOptions defines parameters for launching Firecracker inside Jailer.
 type JailerOptions struct {
 	ID            string
 	Firecracker   string
@@ -25,19 +46,68 @@ type JailerOptions struct {
 	TapName       string
 	MAC           string
 	Daemonize     bool
+	NetNS         string
+	UseNamespaces bool
+	ExtraDrives   []ExtraDrive
+
+	IsResume        bool
+	SnapshotSrcPath string
+	MemFileSrcPath  string
 }
 
+// InstanceProcess represents a microVM process launched inside Jailer.
 type InstanceProcess struct {
-	ID        string
-	ChrootDir string
-	Cmd       *exec.Cmd
-	PID       int
-	VsockUDS  string
-	APISock   string
+	ID               string
+	ChrootDir        string
+	Cmd              *exec.Cmd
+	PID              int
+	VsockUDS         string
+	APISock          string
+	SnapshotInChroot string
+	MemFileInChroot  string
+}
+
+// IsJailerAvailable checks if the jailer binary exists and is executable.
+func IsJailerAvailable(jailerPath string) bool {
+	if jailerPath == "" {
+		jailerPath = "/usr/local/bin/jailer"
+	}
+	if _, err := exec.LookPath(jailerPath); err == nil {
+		return true
+	}
+	if fi, err := os.Stat(jailerPath); err == nil && (fi.Mode()&0111 != 0) {
+		return true
+	}
+	return false
 }
 
 // LaunchJailer initializes the chroot jail, prepares files, and launches Firecracker inside Jailer.
 func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, error) {
+	// Validate opts.ID on raw input to prevent path traversal
+	if opts.ID == "" || strings.ContainsAny(opts.ID, "/\\") || strings.Contains(opts.ID, "..") {
+		return nil, fmt.Errorf("invalid jailer id: %s", opts.ID)
+	}
+	cleanID := filepath.Clean(opts.ID)
+	if cleanID == "." || cleanID == ".." {
+		return nil, fmt.Errorf("invalid jailer id: %s", opts.ID)
+	}
+
+	// Validate each drive.DriveID on raw input
+	for _, drive := range opts.ExtraDrives {
+		if drive.DriveID == "" || strings.ContainsAny(drive.DriveID, "/\\") || strings.Contains(drive.DriveID, "..") {
+			return nil, fmt.Errorf("invalid drive id: %s", drive.DriveID)
+		}
+		cleanDriveID := filepath.Clean(drive.DriveID)
+		if cleanDriveID == "." || cleanDriveID == ".." {
+			return nil, fmt.Errorf("invalid drive id: %s", drive.DriveID)
+		}
+	}
+
+	// Fail closed if namespace isolation was requested but process does not run as root
+	if opts.UseNamespaces && os.Geteuid() != 0 {
+		return nil, fmt.Errorf("root privileges (or CAP_SYS_ADMIN) are required for namespace isolation")
+	}
+
 	if opts.Firecracker == "" {
 		opts.Firecracker = "/usr/local/bin/firecracker"
 	}
@@ -45,40 +115,147 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		opts.Jailer = "/usr/local/bin/jailer"
 	}
 	if opts.ChrootBaseDir == "" {
-		opts.ChrootBaseDir = "/tmp/compute/jail"
+		opts.ChrootBaseDir = "/srv/jailer"
 	}
 	if opts.UID <= 0 {
-		opts.UID = 100001
+		opts.UID = 1000
 	}
 	if opts.GID <= 0 {
 		opts.GID = opts.UID
 	}
 
+	cleanBaseDir := filepath.Clean(opts.ChrootBaseDir)
 	execName := filepath.Base(opts.Firecracker)
-	chrootRoot := filepath.Join(opts.ChrootBaseDir, execName, opts.ID, "root")
+	chrootRoot := filepath.Clean(filepath.Join(cleanBaseDir, execName, opts.ID, "root"))
+
+	// Canonical path check inside ChrootBaseDir
+	rel, err := filepath.Rel(cleanBaseDir, chrootRoot)
+	if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+		return nil, fmt.Errorf("jailer chroot path escapes base directory: %s", chrootRoot)
+	}
 
 	if err := os.MkdirAll(chrootRoot, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create chroot directory %s: %w", chrootRoot, err)
 	}
 
-	// Hardlink or copy kernel into chroot
+	if opts.IsResume {
+		// Copy rootfs into chroot if provided
+		if opts.RootfsSrcPath != "" {
+			targetRootfs := filepath.Join(chrootRoot, "rootfs.ext4")
+			_ = os.Remove(targetRootfs)
+			if err := storage.CloneFileCOW(opts.RootfsSrcPath, targetRootfs); err != nil {
+				return nil, fmt.Errorf("failed to copy rootfs: %w", err)
+			}
+			_ = os.Chown(targetRootfs, opts.UID, opts.GID)
+		}
+
+		// Copy snapshot into chroot
+		targetSnap := filepath.Join(chrootRoot, "snapshot")
+		_ = os.Remove(targetSnap)
+		if opts.SnapshotSrcPath != "" {
+			if err := storage.CloneFileCOW(opts.SnapshotSrcPath, targetSnap); err != nil {
+				return nil, fmt.Errorf("failed to copy snapshot: %w", err)
+			}
+			_ = os.Chown(targetSnap, opts.UID, opts.GID)
+		}
+
+		// Copy mem file into chroot
+		targetMem := filepath.Join(chrootRoot, "mem")
+		_ = os.Remove(targetMem)
+		if opts.MemFileSrcPath != "" {
+			if err := storage.CloneFileCOW(opts.MemFileSrcPath, targetMem); err != nil {
+				return nil, fmt.Errorf("failed to copy mem file: %w", err)
+			}
+			_ = os.Chown(targetMem, opts.UID, opts.GID)
+		}
+
+		// Prepare attached extra data volumes
+		for _, ed := range opts.ExtraDrives {
+			targetDrive := filepath.Join(chrootRoot, ed.DriveID+".ext4")
+			_ = os.Remove(targetDrive)
+			if err := storage.CloneFileCOW(ed.HostPath, targetDrive); err != nil {
+				return nil, fmt.Errorf("failed to copy extra drive %s: %w", ed.DriveID, err)
+			}
+			_ = os.Chown(targetDrive, opts.UID, opts.GID)
+		}
+
+		// UDS socket paths inside and outside chroot
+		vsockUDSOnHost := filepath.Join(chrootRoot, "v.sock")
+		apiSockOnHost := filepath.Join(chrootRoot, "run", "fc.sock")
+		_ = os.MkdirAll(filepath.Join(chrootRoot, "run"), 0755)
+		_ = os.Chown(filepath.Join(chrootRoot, "run"), opts.UID, opts.GID)
+
+		// Cgroup v2 limits
+		cpuQuota := opts.VCPUs * 100000
+		memMaxBytes := int64(opts.MemoryMB+64) * 1024 * 1024
+
+		args := []string{
+			"--id", opts.ID,
+			"--exec-file", opts.Firecracker,
+			"--uid", fmt.Sprintf("%d", opts.UID),
+			"--gid", fmt.Sprintf("%d", opts.GID),
+			"--chroot-base-dir", opts.ChrootBaseDir,
+			"--cgroup-version", "2",
+			"--cgroup", fmt.Sprintf("cpu.max=%d 100000", cpuQuota),
+			"--cgroup", fmt.Sprintf("memory.max=%d", memMaxBytes),
+			"--cgroup", "pids.max=512",
+			"--new-pid-ns",
+		}
+
+		if opts.NetNS != "" {
+			args = append(args, "--netns", opts.NetNS)
+		}
+
+		if opts.Daemonize {
+			args = append(args, "--daemonize")
+		}
+
+		// Parameters passed to firecracker for snapshot resume
+		args = append(args, "--", "--api-sock", "/run/fc.sock")
+
+		cmd := exec.CommandContext(ctx, opts.Jailer, args...)
+		sysProcAttr := &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+		if opts.UseNamespaces {
+			sysProcAttr.Cloneflags = CloneNewPID | CloneNewNS | CloneNewIPC | CloneNewUTS | CloneNewCgroup | CloneNewNet
+			if opts.NetNS == "" {
+				sysProcAttr.Cloneflags &^= CloneNewNet
+			}
+		}
+		cmd.SysProcAttr = sysProcAttr
+
+		if err := cmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to spawn jailer for resume: %w", err)
+		}
+
+		pid := cmd.Process.Pid
+
+		return &InstanceProcess{
+			ID:               opts.ID,
+			ChrootDir:        chrootRoot,
+			Cmd:              cmd,
+			PID:              pid,
+			VsockUDS:         vsockUDSOnHost,
+			APISock:          apiSockOnHost,
+			SnapshotInChroot: "/snapshot",
+			MemFileInChroot:  "/mem",
+		}, nil
+	}
+
+	// Copy kernel into chroot (never hardlink golden kernel image to avoid chown mutation bleed)
 	targetKernel := filepath.Join(chrootRoot, "vmlinux")
 	_ = os.Remove(targetKernel)
-	if err := os.Link(opts.KernelSrcPath, targetKernel); err != nil {
-		// Fallback to copy if cross-device link
-		if err := copyFile(opts.KernelSrcPath, targetKernel); err != nil {
-			return nil, fmt.Errorf("failed to link/copy kernel: %w", err)
-		}
+	if err := storage.CloneFileCOW(opts.KernelSrcPath, targetKernel); err != nil {
+		return nil, fmt.Errorf("failed to copy kernel: %w", err)
 	}
 	_ = os.Chown(targetKernel, opts.UID, opts.GID)
 
-	// Hardlink or copy rootfs into chroot
+	// Copy rootfs into chroot via CoW (never hardlink rootfs)
 	targetRootfs := filepath.Join(chrootRoot, "rootfs.ext4")
 	_ = os.Remove(targetRootfs)
-	if err := os.Link(opts.RootfsSrcPath, targetRootfs); err != nil {
-		if err := copyFile(opts.RootfsSrcPath, targetRootfs); err != nil {
-			return nil, fmt.Errorf("failed to link/copy rootfs: %w", err)
-		}
+	if err := storage.CloneFileCOW(opts.RootfsSrcPath, targetRootfs); err != nil {
+		return nil, fmt.Errorf("failed to copy rootfs: %w", err)
 	}
 	_ = os.Chown(targetRootfs, opts.UID, opts.GID)
 
@@ -104,6 +281,22 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		return nil, fmt.Errorf("failed to build vm config: %w", err)
 	}
 
+	// Prepare attached extra data volumes
+	for _, ed := range opts.ExtraDrives {
+		targetDrive := filepath.Join(chrootRoot, ed.DriveID+".ext4")
+		_ = os.Remove(targetDrive)
+		if err := storage.CloneFileCOW(ed.HostPath, targetDrive); err != nil {
+			return nil, fmt.Errorf("failed to copy extra drive %s: %w", ed.DriveID, err)
+		}
+		_ = os.Chown(targetDrive, opts.UID, opts.GID)
+		cfg.Drives = append(cfg.Drives, Drive{
+			DriveID:      ed.DriveID,
+			PathOnHost:   "/" + ed.DriveID + ".ext4",
+			IsRootDevice: false,
+			IsReadOnly:   ed.IsReadOnly,
+		})
+	}
+
 	cfgBytes, err := cfg.ToJSON()
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal vm config: %w", err)
@@ -116,7 +309,7 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 	_ = os.Chown(configPath, opts.UID, opts.GID)
 
 	// Cgroup v2 limits
-	cpuQuota := opts.VCPUs*100000 + 25000
+	cpuQuota := opts.VCPUs * 100000
 	memMaxBytes := int64(opts.MemoryMB+64) * 1024 * 1024
 
 	args := []string{
@@ -128,8 +321,12 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		"--cgroup-version", "2",
 		"--cgroup", fmt.Sprintf("cpu.max=%d 100000", cpuQuota),
 		"--cgroup", fmt.Sprintf("memory.max=%d", memMaxBytes),
-		"--cgroup", "pids.max=128",
+		"--cgroup", "pids.max=512",
 		"--new-pid-ns",
+	}
+
+	if opts.NetNS != "" {
+		args = append(args, "--netns", opts.NetNS)
 	}
 
 	if opts.Daemonize {
@@ -140,9 +337,16 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 	args = append(args, "--", "--config-file", "/config.json", "--api-sock", "/run/fc.sock")
 
 	cmd := exec.CommandContext(ctx, opts.Jailer, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
+	sysProcAttr := &syscall.SysProcAttr{
 		Setpgid: true,
 	}
+	if opts.UseNamespaces {
+		sysProcAttr.Cloneflags = CloneNewPID | CloneNewNS | CloneNewIPC | CloneNewUTS | CloneNewCgroup | CloneNewNet
+		if opts.NetNS == "" {
+			sysProcAttr.Cloneflags &^= CloneNewNet
+		}
+	}
+	cmd.SysProcAttr = sysProcAttr
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to spawn jailer: %w", err)
@@ -190,18 +394,5 @@ func (ip *InstanceProcess) Cleanup() error {
 }
 
 func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = out.ReadFrom(in)
-	return err
+	return storage.CloneFileCOW(src, dst)
 }

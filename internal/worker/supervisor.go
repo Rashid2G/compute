@@ -57,14 +57,23 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 
 	streamLog("stdout", fmt.Sprintf("[compute-worker] launching isolated Firecracker microVM for job %s", a.JobID))
 
+	// Preserve the submitting job's owner so sandboxes, volumes, and quotas are
+	// attributed to the tenant that submitted the job.
+	ownerID := strings.TrimSpace(a.OwnerID)
+	if ownerID == "" {
+		ownerID = "worker-job"
+	}
+
 	// 1. Create VM
 	created, err := s.vmMgr.CreateVM(ctx, vm.CreateRequest{
-		Name:     vmName,
-		OwnerID:  "worker-job",
-		Image:    a.Spec.ImageID,
-		VCPUs:    a.Spec.VCPUs,
-		MemoryMB: a.Spec.MemoryMB,
-		DiskMB:   a.Spec.DiskMB,
+		Name:               vmName,
+		OwnerID:            ownerID,
+		Image:              a.Spec.ImageID,
+		VCPUs:              a.Spec.VCPUs,
+		MemoryMB:           a.Spec.MemoryMB,
+		DiskMB:             a.Spec.DiskMB,
+		AuthorizedOwnerIDs: a.Spec.AuthorizedOwnerIDs,
+		AllowCrossOwner:    a.Spec.AllowCrossOwner,
 	})
 	if err != nil {
 		return 1, fmt.Errorf("failed to create microVM: %w", err)

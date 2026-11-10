@@ -45,6 +45,7 @@ type WorkerAssignment struct {
 	WorkerMessage
 	LeaseID   string  `json:"lease_id"`
 	AttemptID string  `json:"attempt_id"`
+	OwnerID   string  `json:"owner_id,omitempty"`
 	Spec      JobSpec `json:"spec"`
 }
 type JobSpec struct {
@@ -59,6 +60,12 @@ type JobSpec struct {
 	Env            map[string]string `json:"env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 	NetworkPolicy  string            `json:"network_policy,omitempty"`
+
+	// AuthorizedOwnerIDs and AllowCrossOwner are populated by the control plane
+	// after authenticating the job submission. They are never trusted directly
+	// from client input and let the worker consume org-owned images.
+	AuthorizedOwnerIDs []string `json:"authorized_owner_ids,omitempty"`
+	AllowCrossOwner    bool     `json:"allow_cross_owner,omitempty"`
 }
 type WorkerAssignmentAck struct {
 	WorkerMessage

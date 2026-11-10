@@ -73,6 +73,30 @@ func (sm *SessionManager) CreateSession(ctx context.Context, userID, ip, userAge
 	return rawToken, csrfToken, sessionRecord, nil
 }
 
+// RevokeSession invalidates a raw session token, if it exists.
+func (sm *SessionManager) RevokeSession(ctx context.Context, rawToken string) error {
+	if rawToken == "" {
+		return nil
+	}
+	tokenHash := sha256.Sum256([]byte(rawToken))
+	sessionRecord, err := sm.queries.GetSessionByTokenHash(ctx, tokenHash[:])
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	return sm.queries.DeleteSession(ctx, sessionRecord.ID)
+}
+
+// RevokeSessionByID invalidates a session by its record ID.
+func (sm *SessionManager) RevokeSessionByID(ctx context.Context, id string) error {
+	if id == "" {
+		return nil
+	}
+	return sm.queries.DeleteSession(ctx, id)
+}
+
 // AuthenticateSession validates rawToken against the stored token_hash.
 func (sm *SessionManager) AuthenticateSession(ctx context.Context, rawToken string) (*db.User, *db.Session, error) {
 	tokenHash := sha256.Sum256([]byte(rawToken))

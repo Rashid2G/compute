@@ -1,4 +1,4 @@
-.PHONY: all build build-ui dev-ui test test-coverage test-features bench bench-unit clean setup-host build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab
+.PHONY: all build build-ui dev-ui dev run test test-coverage test-features bench bench-unit clean setup-host install systemd build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab
 
 all: build
 
@@ -22,6 +22,23 @@ build:
 	go build $(LDFLAGS) -o bin/compute-worker ./cmd/compute-worker
 	go build $(LDFLAGS) -o bin/compute-bench ./cmd/compute-bench
 
+dev: build setup-host
+	./bin/computed -listen 127.0.0.1:18080
+
+run: dev
+
+install: build
+	sudo install -d /usr/local/bin
+	sudo install -m 755 bin/compute /usr/local/bin/compute
+	sudo install -m 755 bin/computed /usr/local/bin/computed
+	@if [ -f bin/compute-worker ]; then sudo install -m 755 bin/compute-worker /usr/local/bin/compute-worker; fi
+
+systemd:
+	sudo install -d /etc/systemd/system
+	sudo install -m 644 config/systemd/computed.service /etc/systemd/system/computed.service
+	sudo install -m 644 config/systemd/user/compute-worker.service /etc/systemd/system/compute-worker.service
+	-sudo systemctl daemon-reload
+
 test:
 	go test -v ./...
 
@@ -39,7 +56,7 @@ test-features:
 	./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080
 
 setup-host:
-	sudo ./scripts/setup-host.sh
+	./scripts/setup-host.sh
 
 build-rootfs:
 	./scripts/build-rootfs.sh /var/lib/compute/images 1024

@@ -617,13 +617,40 @@ func (c *DaemonClient) CreateAPIKey(ctx context.Context, name string, expiresInS
 		req["expires_in_seconds"] = expiresInSec
 	}
 	var res struct {
-		Key string `json:"key"`
+		Token string          `json:"token"`
+		Key   json.RawMessage `json:"key"`
 	}
 	err := c.doRequest(ctx, http.MethodPost, "/api/v1/auth/keys", req, &res)
 	if err != nil {
 		return "", err
 	}
-	return res.Key, nil
+	if res.Token != "" {
+		return res.Token, nil
+	}
+	// Backwards compatibility: older daemons returned the secret in "key".
+	if len(res.Key) > 0 {
+		var keyStr string
+		if json.Unmarshal(res.Key, &keyStr) == nil && keyStr != "" {
+			return keyStr, nil
+		}
+		var keyObj struct {
+			Token  string `json:"token"`
+			Secret string `json:"secret"`
+			Value  string `json:"value"`
+		}
+		if json.Unmarshal(res.Key, &keyObj) == nil {
+			if keyObj.Token != "" {
+				return keyObj.Token, nil
+			}
+			if keyObj.Secret != "" {
+				return keyObj.Secret, nil
+			}
+			if keyObj.Value != "" {
+				return keyObj.Value, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("daemon returned no API key token")
 }
 
 func (c *DaemonClient) ListAPIKeys(ctx context.Context) ([]map[string]interface{}, error) {
