@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Rashid2G/on-demand-vms/internal/network"
+	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 )
 
 // Supported fixed VM tiers and limits (inspired by boat.dev)
@@ -153,6 +154,60 @@ type ImagesConfig struct {
 	Available     []AvailableImage `json:"available,omitempty"`
 }
 
+// TailscaleConfig controls the tailnet integration on the control-plane host.
+// When enabled, the daemon can assign tailnet addresses to sandboxes and
+// report its own MagicDNS identity. Every device Compute joins is tagged
+// (tag:compute:*) and named with the "compute-" prefix; the operator's
+// existing devices, routes and policy file are never modified.
+type TailscaleConfig struct {
+	// Enabled turns the integration on.
+	Enabled bool `json:"enabled,omitempty"`
+	// APIKey is a Tailscale admin API access token, required to mint
+	// sandbox auth keys and manage cleanup. Prefer the
+	// COMPUTE_TAILSCALE_API_KEY environment variable over committing it here.
+	APIKey string `json:"api_key,omitempty"`
+	// Tailnet selects the tailnet ("-" = the API key's default).
+	Tailnet string `json:"tailnet,omitempty"`
+	// NodeTag is the tag applied to the control plane device itself.
+	NodeTag string `json:"node_tag,omitempty"`
+	// SandboxTag is the tag applied to sandbox auth keys/devices.
+	SandboxTag string `json:"sandbox_tag,omitempty"`
+	// HostnamePrefix prepends to every hostname Compute assigns.
+	HostnamePrefix string `json:"hostname_prefix,omitempty"`
+	// KeyExpirySeconds is the lifetime of minted sandbox keys (default 90 days).
+	KeyExpirySeconds int `json:"key_expiry_seconds,omitempty"`
+	// AutoInstallGuest installs the tailscale binary inside sandboxes that
+	// lack it (via the SSH control channel). Default true.
+	AutoInstallGuest *bool `json:"auto_install_guest,omitempty"`
+	// DefaultSandboxes gives every new sandbox tailnet addressing unless the
+	// request explicitly opts out.
+	DefaultSandboxes bool `json:"default_sandboxes,omitempty"`
+}
+
+// ResolvedSandboxTag returns the sandbox tag with the Compute default applied.
+func (c TailscaleConfig) ResolvedSandboxTag() string {
+	if c.SandboxTag != "" {
+		return c.SandboxTag
+	}
+	return tailscale.TagSandbox
+}
+
+// ResolvedNodeTag returns the control-plane tag with the Compute default applied.
+func (c TailscaleConfig) ResolvedNodeTag() string {
+	if c.NodeTag != "" {
+		return c.NodeTag
+	}
+	return tailscale.TagMaster
+}
+
+// AutoInstallResolved defaults to true when unset.
+func (c TailscaleConfig) AutoInstallResolved() bool {
+	if c.AutoInstallGuest != nil {
+		return *c.AutoInstallGuest
+	}
+	return true
+}
+
 // JobsConfig controls local job execution on the control-plane host.
 type JobsConfig struct {
 	// LocalExecution runs queued jobs in local microVMs when no worker node is
@@ -175,13 +230,14 @@ type ResourceLimits struct {
 
 // GlobalConfig is the master configuration for the Compute daemon
 type GlobalConfig struct {
-	ConfigPath string         `json:"config_path,omitempty"`
-	Server     ServerConfig   `json:"server"`
-	Network    network.Config `json:"network"`
-	Defaults   DefaultsConfig `json:"defaults"`
-	Images     ImagesConfig   `json:"images"`
-	Resources  ResourceLimits `json:"resources"`
-	Jobs       JobsConfig     `json:"jobs"`
+	ConfigPath string          `json:"config_path,omitempty"`
+	Server     ServerConfig    `json:"server"`
+	Network    network.Config  `json:"network"`
+	Defaults   DefaultsConfig  `json:"defaults"`
+	Images     ImagesConfig    `json:"images"`
+	Resources  ResourceLimits  `json:"resources"`
+	Jobs       JobsConfig      `json:"jobs"`
+	Tailscale  TailscaleConfig `json:"tailscale,omitempty"`
 }
 
 // Config is an alias for GlobalConfig for backward compatibility and package consistency.
@@ -324,6 +380,21 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		if cfg.Images.SSHKeyPath == "/var/lib/compute/images/ssh/id_ed25519" || strings.HasPrefix(cfg.Images.SSHKeyPath, "/home/") {
 			cfg.Images.SSHKeyPath = filepath.Join(dataDir, "images", "ssh", "id_ed25519")
 		}
+	}
+
+	// Apply Tailscale environment overrides
+	if v := os.Getenv("COMPUTE_TAILSCALE_ENABLED"); v != "" {
+		cfg.Tailscale.Enabled = v == "true" || v == "1" || v == "on" || v == "yes"
+	}
+	if v := os.Getenv("COMPUTE_TAILSCALE_API_KEY"); v != "" {
+		cfg.Tailscale.APIKey = v
+	}
+	if v := os.Getenv("COMPUTE_TAILSCALE_TAILNET"); v != "" {
+		cfg.Tailscale.Tailnet = v
+	}
+	if cfg.Tailscale.Enabled && cfg.Tailscale.APIKey == "" && os.Getenv("COMPUTE_TAILSCALE_API_KEY") == "" {
+		// Enabling the integration without credentials still works for local
+		// status reporting; sandbox provisioning reports the missing key.
 	}
 
 	// Auto-locate Firecracker and Jailer if configured path doesn't exist
