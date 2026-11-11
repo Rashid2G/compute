@@ -50,11 +50,12 @@ func TestCreateAuthKey(t *testing.T) {
 	if key.Key != "tskey-auth-xyz" || key.ID != "k123456" || !key.Ephemeral {
 		t.Fatalf("unexpected key %+v", key)
 	}
-	if !gotBody.Ephemeral || !gotBody.Preauthorized || gotBody.Reusable {
-		t.Errorf("expected ephemeral preauth non-reusable key, got %+v", gotBody)
+	dev := gotBody.Capabilities.Devices.Create
+	if !dev.Ephemeral || !dev.Preauthorized || dev.Reusable {
+		t.Errorf("expected ephemeral preauth non-reusable key, got %+v", dev)
 	}
-	if len(gotBody.Tags) != 1 || gotBody.Tags[0] != TagSandbox {
-		t.Errorf("expected sandbox tag on key, got %v", gotBody.Tags)
+	if len(dev.Tags) != 1 || dev.Tags[0] != TagSandbox {
+		t.Errorf("expected sandbox tag on key, got %v", dev.Tags)
 	}
 	if gotBody.ExpirySeconds != 3600 {
 		t.Errorf("expected expiry 3600, got %d", gotBody.ExpirySeconds)

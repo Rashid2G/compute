@@ -780,8 +780,8 @@ func (m *Manager) ConfigureVMPublicIP(ctx context.Context, ip string, tapDev str
 
 	runIPCmd := func(name string, args ...string) {
 		out, err := m.runner.Run(ctx, name, args...)
-		if err != nil {
-			log.Printf("[ERROR] ConfigureVMPublicIP: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
+		if err != nil && !isBenignTeardownError(out, err) {
+			log.Printf("[WARN] ConfigureVMPublicIP: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
 		}
 	}
 
