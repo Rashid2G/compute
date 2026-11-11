@@ -108,7 +108,7 @@ func (s *Server) handleTailscalePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTailscaleCleanup removes stale Compute-owned sandbox devices from the
-// tailnet. A device is stale when it is tagged tag:compute:sandbox and has not
+// tailnet. A device is stale when it is tagged tag:compute-sandbox and has not
 // been seen for the given threshold. With dry_run=true (default) nothing is
 // deleted. Only devices tagged with the Compute sandbox tag are ever eligible;
 // the operator's own devices can never be touched by this endpoint.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -1446,6 +1447,16 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			status = "active"
+			// Publish a tailnet Service so the port has a stable MagicDNS name.
+			// Services are TCP-only (Tailscale limitation); failures leave the
+			// regular host-local URL in place.
+			if req.Subdomain == "" && protocol == "tcp" {
+				if svc, err := s.vmMgr.PublishTailscaleService(ctx, targetVM, req.GuestPort); err != nil {
+					log.Printf("[port-forward] %s: tailscale service publish for :%d failed: %v", targetVM.ID, req.GuestPort, err)
+				} else if svc != nil && svc.URL != "" {
+					publicURL = svc.URL
+				}
+			}
 		}
 
 		pfOwner := ownerID
@@ -1525,6 +1536,7 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 			if v, _ := st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID); v != nil && v.IPAddress != "" {
 				_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 			}
+			s.vmMgr.UnpublishTailscaleService(ctx, pf.VMID, pf.GuestPort)
 		}
 		if err := st.DeletePortForward(ctx, id); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)

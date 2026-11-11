@@ -10,7 +10,7 @@
 //   - generation of a scoped policy-file snippet the operator can review and
 //     apply manually.
 //
-// Everything Compute creates is tagged (tag:compute:*) and named with the
+// Everything Compute creates is tagged (tag:compute-*) and named with the
 // "compute-" prefix. This package never modifies the operator's policy file,
 // routes, DNS settings, or any device that is not tagged as Compute-owned.
 package tailscale
@@ -32,11 +32,26 @@ const DefaultAPIBaseURL = "https://api.tailscale.com"
 
 // Canonical tags used by Compute. All Compute-owned devices carry exactly one
 // of these (plus the operator may add more), and cleanup logic filters on them.
+// Note: Tailscale tag names must only contain alphanumeric characters, underscores,
+// hyphens, or periods after "tag:". Colons after the prefix are invalid.
 const (
-	TagMaster  = "tag:compute:master"
-	TagNode    = "tag:compute:node"
-	TagSandbox = "tag:compute:sandbox"
+	TagMaster  = "tag:compute-master"
+	TagNode    = "tag:compute-node"
+	TagSandbox = "tag:compute-sandbox"
 )
+
+// NormalizeTag migrates legacy tag names with internal colons (e.g. "tag:compute:sandbox")
+// to hyphenated forms ("tag:compute-sandbox") because Tailscale's ACL parser rejects
+// tag names containing multiple colons.
+func NormalizeTag(tag string) string {
+	if strings.HasPrefix(tag, "tag:") {
+		rest := strings.TrimPrefix(tag, "tag:")
+		if strings.Contains(rest, ":") {
+			return "tag:" + strings.ReplaceAll(rest, ":", "-")
+		}
+	}
+	return tag
+}
 
 // HostnamePrefix is prepended to every hostname Compute assigns on the tailnet.
 const HostnamePrefix = "compute"
@@ -97,25 +112,38 @@ func (d *Device) TailnetDomain() string {
 	return ""
 }
 
-// keyRequest is the body of POST /tailnet/{tailnet}/keys.
-type keyRequest struct {
-	Description   string   `json:"description,omitempty"`
+type keyDeviceCreate struct {
 	Reusable      bool     `json:"reusable"`
 	Ephemeral     bool     `json:"ephemeral"`
 	Preauthorized bool     `json:"preauthorized"`
-	ExpirySeconds int      `json:"expirySeconds,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
+}
+
+type keyDeviceCapabilities struct {
+	Create keyDeviceCreate `json:"create"`
+}
+
+type keyCapabilities struct {
+	Devices keyDeviceCapabilities `json:"devices"`
+}
+
+// keyRequest is the body of POST /tailnet/{tailnet}/keys.
+type keyRequest struct {
+	Capabilities  keyCapabilities `json:"capabilities"`
+	ExpirySeconds int             `json:"expirySeconds,omitempty"`
+	Description   string          `json:"description,omitempty"`
 }
 
 // AuthKey describes a key created via the admin API.
 type AuthKey struct {
-	ID        string    `json:"id"`
-	Key       string    `json:"key"`
-	Created   time.Time `json:"created"`
-	Expires   time.Time `json:"expires"`
-	Ephemeral bool      `json:"ephemeral"`
-	Reusable  bool      `json:"reusable"`
-	Tags      []string  `json:"tags,omitempty"`
+	ID           string          `json:"id"`
+	Key          string          `json:"key"`
+	Created      time.Time       `json:"created"`
+	Expires      time.Time       `json:"expires"`
+	Capabilities keyCapabilities `json:"capabilities,omitempty"`
+	Ephemeral    bool            `json:"ephemeral,omitempty"`
+	Reusable     bool            `json:"reusable,omitempty"`
+	Tags         []string        `json:"tags,omitempty"`
 }
 
 // KeyOptions controls the shape of a minted auth key.
@@ -128,16 +156,23 @@ type KeyOptions struct {
 	Tags          []string
 }
 
-// CreateAuthKey mints a new auth key.
+// CreateAuthKey mints a new auth key using Tailscale API v2 capabilities.
 func (c *Client) CreateAuthKey(ctx context.Context, opts KeyOptions) (*AuthKey, error) {
-	body, err := json.Marshal(keyRequest{
-		Description:   opts.Description,
-		Reusable:      opts.Reusable,
-		Ephemeral:     opts.Ephemeral,
-		Preauthorized: opts.Preauthorized,
+	req := keyRequest{
+		Capabilities: keyCapabilities{
+			Devices: keyDeviceCapabilities{
+				Create: keyDeviceCreate{
+					Reusable:      opts.Reusable,
+					Ephemeral:     opts.Ephemeral,
+					Preauthorized: opts.Preauthorized,
+					Tags:          opts.Tags,
+				},
+			},
+		},
 		ExpirySeconds: opts.ExpirySeconds,
-		Tags:          opts.Tags,
-	})
+		Description:   opts.Description,
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +181,15 @@ func (c *Client) CreateAuthKey(ctx context.Context, opts KeyOptions) (*AuthKey, 
 		fmt.Sprintf("/api/v2/tailnet/%s/keys", url.PathEscape(c.Tailnet)),
 		bytes.NewReader(body), &out); err != nil {
 		return nil, err
+	}
+	if !out.Ephemeral && out.Capabilities.Devices.Create.Ephemeral {
+		out.Ephemeral = true
+	}
+	if !out.Reusable && out.Capabilities.Devices.Create.Reusable {
+		out.Reusable = true
+	}
+	if len(out.Tags) == 0 {
+		out.Tags = out.Capabilities.Devices.Create.Tags
 	}
 	return &out, nil
 }
@@ -209,6 +253,38 @@ func (c *Client) ListServices(ctx context.Context) ([]Service, error) {
 		return nil, err
 	}
 	return out.Services, nil
+}
+
+// ServiceDefinition is the payload used to define or update a Tailscale
+// Service. Ports use the "tcp:<port>" syntax required by the admin API.
+type ServiceDefinition struct {
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Ports       []string `json:"ports,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// EnsureService creates or replaces a Tailscale Service definition. The call
+// is idempotent and is always scoped to the requested service name.
+func (c *Client) EnsureService(ctx context.Context, name string, ports, tags []string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("tailscale: service name is required")
+	}
+	body, err := json.Marshal(ServiceDefinition{Name: name, Ports: ports, Tags: tags})
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPut,
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(name)),
+		bytes.NewReader(body), nil)
+}
+
+// DeleteService removes a Tailscale Service definition. Callers must only use
+// Compute-owned service names (compute-*).
+func (c *Client) DeleteService(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete,
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(name)),
+		nil, nil)
 }
 
 // do performs an authenticated API request and decodes the JSON response.

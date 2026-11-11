@@ -522,6 +522,52 @@ type IsolationConfig struct {
 	AllowedPeerIPs  []string `json:"allowed_peer_ips,omitempty"`
 }
 
+var (
+	arpLimitationOnce sync.Once
+	ebLimitationOnce  sync.Once
+)
+
+// ensureChain creates a base chain for an xtables family when it does not
+// exist yet. "Chain already exists" is success. A missing binary or a kernel
+// that cannot create the chain is reported to the caller so anti-spoofing can
+// degrade explicitly instead of silently.
+func (m *Manager) ensureChain(ctx context.Context, binary, chain string) error {
+	out, err := m.runner.Run(ctx, binary, "-N", chain)
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(string(out) + " " + err.Error())
+	if strings.Contains(msg, "already exists") {
+		return nil
+	}
+	return fmt.Errorf("%s -N %s: %w (%s)", binary, chain, err, strings.TrimSpace(string(out)))
+}
+
+// isBenignTeardownError reports whether a failed delete/cleanup command means
+// the rule or device is already absent.
+func isBenignTeardownError(out []byte, err error) bool {
+	if err == nil {
+		return true
+	}
+	msg := strings.ToLower(string(out) + " " + err.Error())
+	for _, marker := range []string{
+		"bad rule",
+		"does a matching rule exist",
+		"no chain/target/match",
+		"no chain",
+		"not exist",
+		"cannot find device",
+		"cannot find bridge device",
+		"no such file or directory",
+		"executable file not found",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // ApplyAntiSpoofAndIsolation installs L2 MAC anti-spoofing, L3 IP anti-spoofing, DHCP server
 // impersonation blocking, and bridge port isolation for a microVM TAP interface.
 func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationConfig) error {
@@ -549,6 +595,24 @@ func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationC
 		}
 	}
 
+	// nft-backed arptables/ebtables do not auto-create their base chains, so a
+	// fresh host fails inserts with "No chain/target/match by that name". Create
+	// the chains we need first. Legacy xtables implementations accept the same
+	// commands; "Chain already exists" is expected and harmless.
+	arpAvailable := m.ensureChain(ctx, "arptables", "FORWARD") == nil
+	if !arpAvailable {
+		arpLimitationOnce.Do(func() {
+			log.Printf("[WARN] ApplyAntiSpoofAndIsolation: ARP anti-spoof rules unavailable on this host; ARP spoofing is not isolated (L2/L3 filtering continues)")
+		})
+	}
+	ebAvailable := m.ensureChain(ctx, "ebtables", "FORWARD") == nil &&
+		m.ensureChain(ctx, "ebtables", "INPUT") == nil
+	if !ebAvailable {
+		ebLimitationOnce.Do(func() {
+			log.Printf("[WARN] ApplyAntiSpoofAndIsolation: ebtables MAC anti-spoof rules unavailable on this host; MAC spoofing is not isolated")
+		})
+	}
+
 	// 1. Kernel Bridge Port Isolation (L2 lateral movement isolation on the bridge)
 	runSetup("bridge", "link", "set", "dev", cfg.TAPDevice, "isolated", "on")
 
@@ -563,13 +627,17 @@ func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationC
 	}
 
 	// 4. L2 MAC Anti-Spoofing & Rogue ARP Spoofing:
-	if cfg.MACAddress != "" {
-		runSetup("ebtables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-s", "!", cfg.MACAddress, "-j", "DROP")
-		runSetup("ebtables", "-I", "INPUT", "1", "-i", cfg.TAPDevice, "-s", "!", cfg.MACAddress, "-j", "DROP")
-		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "--source-mac", "!", cfg.MACAddress, "-j", "DROP")
+	// Use extrapositioned negation ("! -s"/"! --source-mac"), which both legacy
+	// and nft-backed xtables accept without deprecation noise.
+	if cfg.MACAddress != "" && ebAvailable {
+		runSetup("ebtables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-s", cfg.MACAddress, "-j", "DROP")
+		runSetup("ebtables", "-I", "INPUT", "1", "-i", cfg.TAPDevice, "!", "-s", cfg.MACAddress, "-j", "DROP")
 	}
-	if cfg.IPAddress != "" && cfg.IPAddress != "dhcp" {
-		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "--source-ip", "!", cfg.IPAddress, "-j", "DROP")
+	if cfg.MACAddress != "" && arpAvailable {
+		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "--source-mac", cfg.MACAddress, "-j", "DROP")
+	}
+	if cfg.IPAddress != "" && cfg.IPAddress != "dhcp" && arpAvailable {
+		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "--source-ip", cfg.IPAddress, "-j", "DROP")
 	}
 
 	// 5. Bridge Port Isolation & Intra-Tenant Lateral Communication:
@@ -632,10 +700,17 @@ func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg Iso
 	var errs []error
 	runTeardown := func(name string, args ...string) {
 		out, err := m.runner.Run(ctx, name, args...)
-		if err != nil {
-			log.Printf("[ERROR] removeAntiSpoofAndIsolation: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
-			errs = append(errs, fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err))
+		if err == nil {
+			return
 		}
+		// Teardown is best-effort and idempotent: a rule or device that is
+		// already gone is a success, not an error. Only unexpected failures
+		// (e.g. permission denied) are reported.
+		if isBenignTeardownError(out, err) {
+			return
+		}
+		log.Printf("[WARN] removeAntiSpoofAndIsolation: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
+		errs = append(errs, fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err))
 	}
 
 	// Delete bridge isolation drop rules
@@ -660,12 +735,12 @@ func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg Iso
 
 	// Delete ARP and MAC anti-spoof
 	if targetCfg.MACAddress != "" {
-		runTeardown("ebtables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-s", "!", targetCfg.MACAddress, "-j", "DROP")
-		runTeardown("ebtables", "-D", "INPUT", "-i", targetCfg.TAPDevice, "-s", "!", targetCfg.MACAddress, "-j", "DROP")
-		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "--source-mac", "!", targetCfg.MACAddress, "-j", "DROP")
+		runTeardown("ebtables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-s", targetCfg.MACAddress, "-j", "DROP")
+		runTeardown("ebtables", "-D", "INPUT", "-i", targetCfg.TAPDevice, "!", "-s", targetCfg.MACAddress, "-j", "DROP")
+		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "--source-mac", targetCfg.MACAddress, "-j", "DROP")
 	}
 	if targetCfg.IPAddress != "" && targetCfg.IPAddress != "dhcp" {
-		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "--source-ip", "!", targetCfg.IPAddress, "-j", "DROP")
+		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "--source-ip", targetCfg.IPAddress, "-j", "DROP")
 	}
 
 	// Reset bridge port isolation if link is still present
@@ -684,8 +759,10 @@ func (m *Manager) RemoveTAP(ctx context.Context, tapName string) error {
 	}
 	isoErr := m.removeAntiSpoofAndIsolationLocked(ctx, IsolationConfig{TAPDevice: tapName})
 	out, linkErr := m.runner.Run(ctx, "ip", "link", "del", "dev", tapName)
-	if linkErr != nil {
-		log.Printf("[ERROR] RemoveTAP: ip link del dev %s failed: %v (output: %s)", tapName, linkErr, string(out))
+	if linkErr != nil && !isBenignTeardownError(out, linkErr) {
+		log.Printf("[WARN] RemoveTAP: ip link del dev %s failed: %v (output: %s)", tapName, linkErr, string(out))
+	} else if linkErr != nil {
+		linkErr = nil
 	}
 	return errors.Join(isoErr, linkErr)
 }
@@ -703,8 +780,8 @@ func (m *Manager) ConfigureVMPublicIP(ctx context.Context, ip string, tapDev str
 
 	runIPCmd := func(name string, args ...string) {
 		out, err := m.runner.Run(ctx, name, args...)
-		if err != nil {
-			log.Printf("[ERROR] ConfigureVMPublicIP: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
+		if err != nil && !isBenignTeardownError(out, err) {
+			log.Printf("[WARN] ConfigureVMPublicIP: %s %s failed: %v (output: %s)", name, strings.Join(args, " "), err, string(out))
 		}
 	}
 

@@ -48,13 +48,13 @@ func TestAntiSpoofRuleGeneration(t *testing.T) {
 		if strings.Contains(line, "iptables -I FORWARD 1 -i mftap-vm1 ! -s 172.16.0.15 -j DROP") {
 			hasIPAntiSpoof = true
 		}
-		if strings.Contains(line, "ebtables -I FORWARD 1 -i mftap-vm1 -s ! 06:00:ac:10:00:0f -j DROP") {
+		if strings.Contains(line, "ebtables -I FORWARD 1 -i mftap-vm1 ! -s 06:00:ac:10:00:0f -j DROP") {
 			hasMACAntiSpoof = true
 		}
-		if strings.Contains(line, "arptables -I FORWARD 1 -i mftap-vm1 --source-mac ! 06:00:ac:10:00:0f -j DROP") {
+		if strings.Contains(line, "arptables -I FORWARD 1 -i mftap-vm1 ! --source-mac 06:00:ac:10:00:0f -j DROP") {
 			hasARPMACAntiSpoof = true
 		}
-		if strings.Contains(line, "arptables -I FORWARD 1 -i mftap-vm1 --source-ip ! 172.16.0.15 -j DROP") {
+		if strings.Contains(line, "arptables -I FORWARD 1 -i mftap-vm1 ! --source-ip 172.16.0.15 -j DROP") {
 			hasARPIPAntiSpoof = true
 		}
 		if strings.Contains(line, "iptables -A FORWARD -i mftap-vm1 -o mftap-+ -j DROP") {
@@ -178,7 +178,7 @@ func TestIsolationCleanupAndTeardown(t *testing.T) {
 		if strings.Contains(line, "iptables -D FORWARD -i mftap-vm1 ! -s 172.16.0.15 -j DROP") {
 			deletedIPAntiSpoof = true
 		}
-		if strings.Contains(line, "ebtables -D FORWARD -i mftap-vm1 -s ! 06:00:ac:10:00:0f -j DROP") {
+		if strings.Contains(line, "ebtables -D FORWARD -i mftap-vm1 ! -s 06:00:ac:10:00:0f -j DROP") {
 			deletedMACAntiSpoof = true
 		}
 		if strings.Contains(line, "bridge link set dev mftap-vm1 isolated off") {
@@ -300,13 +300,13 @@ func TestRemoveTAP_DeletesAllRulesAndHandlesStoreFallback(t *testing.T) {
 		if strings.Contains(line, "iptables -D FORWARD -i mftap-vm99 ! -s 172.16.0.99 -j DROP") {
 			hasIPDel = true
 		}
-		if strings.Contains(line, "ebtables -D FORWARD -i mftap-vm99 -s ! 06:00:ac:10:00:99 -j DROP") {
+		if strings.Contains(line, "ebtables -D FORWARD -i mftap-vm99 ! -s 06:00:ac:10:00:99 -j DROP") {
 			hasMACDel = true
 		}
-		if strings.Contains(line, "arptables -D FORWARD -i mftap-vm99 --source-mac ! 06:00:ac:10:00:99 -j DROP") {
+		if strings.Contains(line, "arptables -D FORWARD -i mftap-vm99 ! --source-mac 06:00:ac:10:00:99 -j DROP") {
 			hasARPMACDel = true
 		}
-		if strings.Contains(line, "arptables -D FORWARD -i mftap-vm99 --source-ip ! 172.16.0.99 -j DROP") {
+		if strings.Contains(line, "arptables -D FORWARD -i mftap-vm99 ! --source-ip 172.16.0.99 -j DROP") {
 			hasARPIPDel = true
 		}
 		if strings.Contains(line, "iptables -D FORWARD -i mftap-vm99 -p udp --sport 67 -j DROP") {
@@ -381,7 +381,7 @@ func TestRemoveTAP_DeletesAllRulesAndHandlesStoreFallback(t *testing.T) {
 		if strings.Contains(line, "iptables -D FORWARD -i mftap-reboot ! -s 172.16.0.88 -j DROP") {
 			hasFallbackIPDel = true
 		}
-		if strings.Contains(line, "ebtables -D FORWARD -i mftap-reboot -s ! 06:00:ac:10:00:88 -j DROP") {
+		if strings.Contains(line, "ebtables -D FORWARD -i mftap-reboot ! -s 06:00:ac:10:00:88 -j DROP") {
 			hasFallbackMACDel = true
 		}
 	}
@@ -390,5 +390,80 @@ func TestRemoveTAP_DeletesAllRulesAndHandlesStoreFallback(t *testing.T) {
 	}
 	if !hasFallbackMACDel {
 		t.Errorf("expected fallback MAC anti-spoof deletion via store lookup")
+	}
+}
+
+// failingTeardownRunner simulates an nft-backed host where the base chains
+// exist but every delete reports that no matching rule is present.
+type failingTeardownRunner struct {
+	commands [][]string
+}
+
+func (r *failingTeardownRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	r.commands = append(r.commands, append([]string{name}, args...))
+	if name == "iptables" && len(args) > 0 && args[0] == "-D" {
+		return []byte("iptables: Bad rule (does a matching rule exist in that chain?)."), errTestRuleAbsent
+	}
+	if name == "ebtables" || name == "arptables" {
+		if len(args) > 0 && args[0] == "-D" {
+			return []byte("Bad rule (does a matching rule exist in that chain?)"), errTestRuleAbsent
+		}
+	}
+	return []byte("ok"), nil
+}
+
+var errTestRuleAbsent = &testError{"exit status 1"}
+
+type testError struct{ s string }
+
+func (e *testError) Error() string { return e.s }
+
+func TestAntiSpoofCreatesBaseChains(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+	if err := mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:  "mftap-vm1",
+		IPAddress:  "172.16.0.15",
+		MACAddress: "06:00:ac:10:00:0f",
+	}); err != nil {
+		t.Fatalf("ApplyAntiSpoofAndIsolation failed: %v", err)
+	}
+	want := []string{
+		"arptables -N FORWARD",
+		"ebtables -N FORWARD",
+		"ebtables -N INPUT",
+	}
+	for _, w := range want {
+		found := false
+		for _, cmd := range runner.commands {
+			if strings.Join(cmd, " ") == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected chain setup command %q", w)
+		}
+	}
+}
+
+func TestRemoveAntiSpoofIgnoresAbsentRules(t *testing.T) {
+	ctx := context.Background()
+	runner := &failingTeardownRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+	cfg := IsolationConfig{
+		TAPDevice:  "mftap-vm1",
+		IPAddress:  "172.16.0.15",
+		MACAddress: "06:00:ac:10:00:0f",
+	}
+	if err := mgr.RemoveAntiSpoofAndIsolation(ctx, cfg); err != nil {
+		t.Fatalf("teardown of already-absent rules must be a no-op, got %v", err)
 	}
 }

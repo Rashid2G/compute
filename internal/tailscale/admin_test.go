@@ -50,11 +50,12 @@ func TestCreateAuthKey(t *testing.T) {
 	if key.Key != "tskey-auth-xyz" || key.ID != "k123456" || !key.Ephemeral {
 		t.Fatalf("unexpected key %+v", key)
 	}
-	if !gotBody.Ephemeral || !gotBody.Preauthorized || gotBody.Reusable {
-		t.Errorf("expected ephemeral preauth non-reusable key, got %+v", gotBody)
+	dev := gotBody.Capabilities.Devices.Create
+	if !dev.Ephemeral || !dev.Preauthorized || dev.Reusable {
+		t.Errorf("expected ephemeral preauth non-reusable key, got %+v", dev)
 	}
-	if len(gotBody.Tags) != 1 || gotBody.Tags[0] != TagSandbox {
-		t.Errorf("expected sandbox tag on key, got %v", gotBody.Tags)
+	if len(dev.Tags) != 1 || dev.Tags[0] != TagSandbox {
+		t.Errorf("expected sandbox tag on key, got %v", dev.Tags)
 	}
 	if gotBody.ExpirySeconds != 3600 {
 		t.Errorf("expected expiry 3600, got %d", gotBody.ExpirySeconds)
@@ -150,13 +151,29 @@ func TestSandboxServiceNameAndHostname(t *testing.T) {
 
 func TestRecommendedPolicy(t *testing.T) {
 	policy := RecommendedPolicy(TagSandbox, TagNode, TagMaster)
-	for _, want := range []string{"autoApprovers", `"tag:compute:sandbox": ["tag:compute:sandbox"]`, `"tag:compute:master"`, `"autogroup:member"`} {
+	for _, want := range []string{"autoApprovers", `"tag:compute-sandbox": ["tag:compute-sandbox"]`, `"tag:compute-master"`, `"autogroup:member"`} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("policy missing %q:\n%s", want, policy)
 		}
 	}
 	if strings.Contains(policy, "funnel") || strings.Contains(policy, "nodeAttrs") {
 		t.Error("policy must not touch funnel/nodeAttrs")
+	}
+}
+
+func TestNormalizeTag(t *testing.T) {
+	cases := map[string]string{
+		"tag:compute:sandbox": "tag:compute-sandbox",
+		"tag:compute:master":  "tag:compute-master",
+		"tag:compute:node":    "tag:compute-node",
+		"tag:compute-sandbox": "tag:compute-sandbox",
+		"tag:custom:a:b":      "tag:custom-a-b",
+		"untagged":            "untagged",
+	}
+	for in, want := range cases {
+		if got := NormalizeTag(in); got != want {
+			t.Errorf("NormalizeTag(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -188,5 +205,101 @@ func TestProvisionerMockedRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SSH not ready") && !strings.Contains(err.Error(), "join failed") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestEnsureAndDeleteService(t *testing.T) {
+	var putPath, deletePath string
+	var putBody ServiceDefinition
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPut:
+			putPath = r.URL.Path
+			_ = json.NewDecoder(r.Body).Decode(&putBody)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			deletePath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	if err := c.EnsureService(context.Background(), "svc:compute-vm1-8080", []string{"tcp:443"}, []string{TagSandbox}); err != nil {
+		t.Fatalf("EnsureService: %v", err)
+	}
+	if !strings.Contains(putPath, "compute-vm1-8080") {
+		t.Errorf("unexpected PUT path %q", putPath)
+	}
+	if putBody.Name != "svc:compute-vm1-8080" || len(putBody.Ports) != 1 || putBody.Tags[0] != TagSandbox {
+		t.Errorf("unexpected PUT body %+v", putBody)
+	}
+	if err := c.DeleteService(context.Background(), "svc:compute-vm1-8080"); err != nil {
+		t.Fatalf("DeleteService: %v", err)
+	}
+	if !strings.Contains(deletePath, "compute-vm1-8080") {
+		t.Errorf("unexpected DELETE path %q", deletePath)
+	}
+}
+
+type serviceRunner struct {
+	commands []string
+}
+
+func (r *serviceRunner) Run(ctx context.Context, host, cmd string) (string, string, int, error) {
+	r.commands = append(r.commands, cmd)
+	switch {
+	case strings.Contains(cmd, "command -v tailscale"):
+		return "/usr/bin/tailscale", "", 0, nil
+	case strings.Contains(cmd, "tailscale serve --service="):
+		return "", "", 0, nil
+	default:
+		return "", "", 0, nil
+	}
+}
+
+func TestPublishServiceRunsServeAndBuildsURL(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/services/"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/devices"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"devices": []Device{{Name: "compute-master.tail1234.ts.net"}},
+			})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	runner := &serviceRunner{}
+	p := &Provisioner{
+		Client:     c,
+		SandboxTag: TagSandbox,
+		NewRunner:  func(string) Runner { return runner },
+	}
+	res, err := p.PublishService(context.Background(), "vm-a1b2c3d4", "172.16.0.9", "/key", 8080)
+	if err != nil {
+		t.Fatalf("PublishService: %v", err)
+	}
+	if res.Name != "compute-vm-a1b2c3d4-8080" {
+		t.Errorf("name = %q", res.Name)
+	}
+	if res.DNSName != "compute-vm-a1b2c3d4-8080.tail1234.ts.net" {
+		t.Errorf("dns = %q", res.DNSName)
+	}
+	if res.URL != "https://"+res.DNSName {
+		t.Errorf("url = %q", res.URL)
+	}
+	var found bool
+	for _, cmd := range runner.commands {
+		if strings.Contains(cmd, "tailscale serve --service=") &&
+			strings.Contains(cmd, "svc:compute-vm-a1b2c3d4-8080") &&
+			strings.Contains(cmd, "--https=443") &&
+			strings.Contains(cmd, "http://127.0.0.1:8080") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected serve command, got %v", runner.commands)
 	}
 }
