@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -657,5 +658,92 @@ func TestStore_ConsumeWorkerTokenAtomic(t *testing.T) {
 	// 3. Non-existent token
 	if err := store.ConsumeWorkerTokenAtomic(ctx, "tok-non-existent"); err == nil {
 		t.Fatalf("expected ConsumeWorkerTokenAtomic on non-existent token to fail, but succeeded")
+	}
+}
+
+func TestStore_DeletionProtection(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "compute-test-protection-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test-protection.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// 1. Create a protected VM
+	vmProtected := &VM{
+		ID:         "vm-prot-1",
+		InternalID: "ins_prot_1",
+		OwnerID:    "tenant-a",
+		Name:       "doom",
+		Status:     StatusCreated,
+		VCPUs:      1,
+		MemoryMB:   2048,
+		Protected:  true,
+	}
+	if err := store.SaveVM(ctx, vmProtected); err != nil {
+		t.Fatalf("SaveVM protected failed: %v", err)
+	}
+
+	// Verify it was persisted as protected
+	got, err := store.GetVM(ctx, "vm-prot-1")
+	if err != nil || got == nil {
+		t.Fatalf("GetVM failed: %v", err)
+	}
+	if !got.Protected {
+		t.Fatalf("expected VM to be protected")
+	}
+
+	// 2. Attempt to delete protected VM via DeleteVMByOwner - MUST FAIL
+	err = store.DeleteVMByOwner(ctx, "tenant-a", "vm-prot-1")
+	if err == nil {
+		t.Fatalf("expected DeleteVMByOwner on protected VM to fail, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "protected against deletion") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 3. Attempt to delete protected VM via DeleteVMByInternalID - MUST FAIL
+	err = store.DeleteVMByInternalID(ctx, "ins_prot_1")
+	if err == nil {
+		t.Fatalf("expected DeleteVMByInternalID on protected VM to fail, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "protected against deletion") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// 4. Attempt direct SQL DELETE - MUST BE ABORTED BY TRIGGER
+	_, rawErr := store.db.Exec("DELETE FROM vms WHERE id = 'vm-prot-1'")
+	if rawErr == nil {
+		t.Fatalf("expected raw SQL DELETE to be aborted by SQLite trigger, but succeeded")
+	}
+	if !strings.Contains(rawErr.Error(), "protected against deletion") {
+		t.Fatalf("expected trigger abort error, got: %v", rawErr)
+	}
+
+	// Verify VM is still intact
+	stillThere, _ := store.GetVM(ctx, "vm-prot-1")
+	if stillThere == nil {
+		t.Fatalf("protected VM was deleted despite protection!")
+	}
+
+	// 5. Unprotect and delete
+	stillThere.Protected = false
+	if err := store.SaveVM(ctx, stillThere); err != nil {
+		t.Fatalf("SaveVM unprotect failed: %v", err)
+	}
+	if err := store.DeleteVM(ctx, "vm-prot-1"); err != nil {
+		t.Fatalf("DeleteVM on unprotected VM failed: %v", err)
+	}
+	gone, _ := store.GetVM(ctx, "vm-prot-1")
+	if gone != nil {
+		t.Fatalf("expected VM to be deleted after unprotecting")
 	}
 }
