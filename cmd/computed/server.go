@@ -31,6 +31,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/scheduler"
 	"github.com/Rashid2G/on-demand-vms/internal/store"
 	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
+	storedb "github.com/Rashid2G/on-demand-vms/internal/store/db"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/api"
 	"github.com/Rashid2G/on-demand-vms/pkg/version"
@@ -50,6 +51,17 @@ type Server struct {
 	metaStore    *store.Store
 	fcVersion    string
 	ingressProxy *network.IngressProxy
+	dns          *dnsRuntime
+
+	// DNS/ingress caches (daemon-owned, response only).
+	userIndexMu     sync.RWMutex
+	userIndex       map[string]*storedb.User
+	userIndexExpiry time.Time
+	vmListMu        sync.RWMutex
+	vmListCache     map[string]vmListEntry
+	dnsHostMu       sync.RWMutex
+	dnsHostIPs      []net.IP
+	dnsHostExpiry   time.Time
 
 	eventMu       sync.RWMutex
 	eventSubs     map[chan *db.AuditEvent]struct{}
@@ -234,21 +246,36 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	}
 
 	s := &Server{
-		vmMgr:     vmMgr,
-		cfg:       cfg,
-		mux:       http.NewServeMux(),
-		workers:   workers,
-		scheduler: sched,
-		jobRunner: jobRunner,
-		authMgr:   authMgr,
-		metaStore: metaStore,
-		fcVersion: fcVersion,
-		eventSubs: make(map[chan *db.AuditEvent]struct{}),
+		vmMgr:       vmMgr,
+		cfg:         cfg,
+		mux:         http.NewServeMux(),
+		workers:     workers,
+		scheduler:   sched,
+		jobRunner:   jobRunner,
+		authMgr:     authMgr,
+		metaStore:   metaStore,
+		fcVersion:   fcVersion,
+		eventSubs:   make(map[chan *db.AuditEvent]struct{}),
+		vmListCache: make(map[string]vmListEntry),
 	}
 
 	var domains []string
 	if cfg.Network.BaseDomain != "" {
 		domains = append(domains, cfg.Network.BaseDomain)
+	}
+	// The DNS zones double as ingress wildcard zones so HTTP requests to
+	// <sandbox>[.<port>][.<username>].<zone> route to guest ports.
+	for _, zone := range cfg.DNSBaseDomains() {
+		dup := false
+		for _, d := range domains {
+			if strings.EqualFold(d, zone) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			domains = append(domains, zone)
+		}
 	}
 	domains = append(domains, "preview.localhost", "compute.internal", "compute.dev", "localhost")
 
@@ -634,6 +661,9 @@ func (s *Server) routes() {
 	// Port Forwards
 	s.mux.HandleFunc("/api/v1/network/port-forwards", s.wrapAuth(s.handlePortForwards))
 	s.mux.HandleFunc("/api/v1/network/port-forwards/", s.wrapAuth(s.handlePortForwardActions))
+
+	// DNS responder status (sandbox hostname routing)
+	s.mux.HandleFunc("/api/v1/dns/status", s.wrapAuth(s.handleDNSStatus))
 }
 
 func (s *Server) SetGUIHandler(h http.Handler) {
@@ -661,6 +691,48 @@ func (s *Server) ResolveTarget(ctx context.Context, idOrName string) (*network.T
 		Status:    string(v.Status),
 		IPAddress: v.IPAddress,
 	}, nil
+}
+
+// ResolveTargetForOwner resolves a sandbox within a specific owner's
+// namespace, backing the "<sandbox>.<username>.<zone>" ingress wildcard form.
+// ownerLabel is the username DNS label; the resolved VM must belong to that
+// user (or their personal organization), keeping tenant isolation intact.
+func (s *Server) ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel string) (*network.TargetInfo, error) {
+	if s.vmMgr == nil {
+		return nil, fmt.Errorf("vm manager not available")
+	}
+	if strings.TrimSpace(idOrName) == "" || strings.TrimSpace(ownerLabel) == "" {
+		return nil, fmt.Errorf("sandbox %q not found", idOrName)
+	}
+
+	var ownerIDs []string
+	if !s.authEnabled() {
+		ownerIDs = []string{"default"}
+	} else {
+		user, ok := s.dnsUserForLabel(ownerLabel)
+		if !ok {
+			return nil, fmt.Errorf("unknown owner %q", ownerLabel)
+		}
+		ownerIDs = []string{user.ID, auth.PersonalOrgID(user.ID)}
+	}
+
+	want := strings.ToLower(strings.TrimSpace(idOrName))
+	for _, v := range s.listVMsForOwnersCached(ctx, ownerIDs) {
+		if v == nil {
+			continue
+		}
+		if strings.EqualFold(v.Name, idOrName) || strings.EqualFold(v.ID, idOrName) ||
+			strings.EqualFold(v.InternalID, idOrName) || sandboxLabelForVM(v) == want {
+			return &network.TargetInfo{
+				ID:        v.ID,
+				Name:      v.Name,
+				OwnerID:   v.OwnerID,
+				Status:    string(v.Status),
+				IPAddress: v.IPAddress,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("sandbox %q not found", idOrName)
 }
 
 // IsPortPublic checks whether a given guest port on a VM is configured for public exposure.
@@ -897,6 +969,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		if vms == nil {
 			vms = []*db.VM{}
 		}
+		s.decorateVMHostnames(vms)
 		json.NewEncoder(w).Encode(vms)
 
 	case http.MethodPost:
@@ -1029,7 +1102,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			json.NewEncoder(w).Encode(v)
+			s.encodeVM(w, v)
 		case http.MethodDelete:
 			if v.Protected {
 				httpError(w, fmt.Sprintf("item %s is protected against deletion", vmID), http.StatusBadRequest)
@@ -1144,7 +1217,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "save-state", "snapshot":
 		if err := s.vmMgr.SaveState(ctx, vmID); err != nil {
@@ -1153,7 +1226,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
 		s.recordEvent("snapshot.created", getActor(r), vmID, "delivered", 50, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "resume":
 		if err := s.enforceRunQuota(ctx, r, v); err != nil {
@@ -1172,7 +1245,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "stop":
 		if _, isAdmin := s.currentOwnerID(r); isAdmin {
@@ -1189,7 +1262,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.removePortForwardsForVM(ctx, v, false)
 		}
 		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "exec":
 		var req vm.ExecRequest
