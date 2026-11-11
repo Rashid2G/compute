@@ -10,7 +10,7 @@
 //   - generation of a scoped policy-file snippet the operator can review and
 //     apply manually.
 //
-// Everything Compute creates is tagged (tag:compute:*) and named with the
+// Everything Compute creates is tagged (tag:compute-*) and named with the
 // "compute-" prefix. This package never modifies the operator's policy file,
 // routes, DNS settings, or any device that is not tagged as Compute-owned.
 package tailscale
@@ -32,11 +32,26 @@ const DefaultAPIBaseURL = "https://api.tailscale.com"
 
 // Canonical tags used by Compute. All Compute-owned devices carry exactly one
 // of these (plus the operator may add more), and cleanup logic filters on them.
+// Note: Tailscale tag names must only contain alphanumeric characters, underscores,
+// hyphens, or periods after "tag:". Colons after the prefix are invalid.
 const (
-	TagMaster  = "tag:compute:master"
-	TagNode    = "tag:compute:node"
-	TagSandbox = "tag:compute:sandbox"
+	TagMaster  = "tag:compute-master"
+	TagNode    = "tag:compute-node"
+	TagSandbox = "tag:compute-sandbox"
 )
+
+// NormalizeTag migrates legacy tag names with internal colons (e.g. "tag:compute:sandbox")
+// to hyphenated forms ("tag:compute-sandbox") because Tailscale's ACL parser rejects
+// tag names containing multiple colons.
+func NormalizeTag(tag string) string {
+	if strings.HasPrefix(tag, "tag:") {
+		rest := strings.TrimPrefix(tag, "tag:")
+		if strings.Contains(rest, ":") {
+			return "tag:" + strings.ReplaceAll(rest, ":", "-")
+		}
+	}
+	return tag
+}
 
 // HostnamePrefix is prepended to every hostname Compute assigns on the tailnet.
 const HostnamePrefix = "compute"
@@ -209,6 +224,38 @@ func (c *Client) ListServices(ctx context.Context) ([]Service, error) {
 		return nil, err
 	}
 	return out.Services, nil
+}
+
+// ServiceDefinition is the payload used to define or update a Tailscale
+// Service. Ports use the "tcp:<port>" syntax required by the admin API.
+type ServiceDefinition struct {
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Ports       []string `json:"ports,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+}
+
+// EnsureService creates or replaces a Tailscale Service definition. The call
+// is idempotent and is always scoped to the requested service name.
+func (c *Client) EnsureService(ctx context.Context, name string, ports, tags []string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("tailscale: service name is required")
+	}
+	body, err := json.Marshal(ServiceDefinition{Name: name, Ports: ports, Tags: tags})
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPut,
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(name)),
+		bytes.NewReader(body), nil)
+}
+
+// DeleteService removes a Tailscale Service definition. Callers must only use
+// Compute-owned service names (compute-*).
+func (c *Client) DeleteService(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete,
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(name)),
+		nil, nil)
 }
 
 // do performs an authenticated API request and decodes the JSON response.
