@@ -13,8 +13,9 @@ named `myvm` owned by user `alice` is reachable at:
 ssh compute@myvm.alice.compute-lab.tailb1be99.ts.net
 ```
 
-The base domain is **generic** — it works for any domain (a Tailscale domain,
-a domain you own at any DNS provider, or a LAN zone), not just Tailscale.
+The base domain is **generic** — it works for any zone you can delegate (a
+custom/private zone via Tailscale split DNS, a domain at any DNS provider, or
+a LAN zone). It is not tied to Tailscale.
 
 ## Why routing happens in DNS
 
@@ -75,10 +76,16 @@ Notes:
 The zone needs to be *delegated* to the daemon so clients resolve the names.
 Pick whichever matches how the daemon is served:
 
-- **Tailscale**: in the [admin console](https://login.tailscale.com/admin/dns)
-  add a *custom nameserver* with the daemon host's tailnet IP, tick
-  **Restrict to search domain**, and set the domain to the base domain
-  (e.g. `compute-lab.tailb1be99.ts.net`). MagicDNS device names are unaffected.
+- **Tailscale (custom zone)**: in the
+  [admin console](https://login.tailscale.com/admin/dns) add a *custom
+  nameserver* with the daemon host's tailnet IP and tick **Restrict to search
+  domain** for a zone you control (for example `sandboxes.example.com`).
+  Split DNS works for arbitrary zones, but **not for subdomains of the
+  tailnet's own `ts.net` zone**: MagicDNS answers those authoritatively
+  (`NXDOMAIN` for names it does not know), so a
+  `compute-lab.<tailnet>.ts.net` base domain cannot be delegated this way.
+  Use a custom/private zone for per-user subdomains, or per-sandbox MagicDNS
+  device names (`<sandbox>-<username>.<tailnet>.ts.net`).
 - **Any DNS provider**: create an `NS` record for the base domain pointing at
   the daemon host (plus the needed `A`/glue records).
 - **Same LAN**: point clients' resolver at the daemon host, or add the daemon
