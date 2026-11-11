@@ -41,6 +41,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
 import {
   formatMemory,
@@ -136,6 +137,8 @@ export function InstancesPage({
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [unprotectOpen, setUnprotectOpen] = useState(false);
+  const [unprotectTargets, setUnprotectTargets] = useState<VM[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [splitMenuOpen, setSplitMenuOpen] = useState(false);
   // Critical-action confirmation: list of VMs pending a stop confirmation.
@@ -379,18 +382,56 @@ export function InstancesPage({
     }
   }
 
-  async function toggleProtection(targetVM: VM) {
-    const nextState = !targetVM.protected;
-    const actionLabel = nextState ? 'Enabling protection…' : 'Disabling protection…';
-    const toastID = toast.loading(actionLabel);
+  function requestUnprotect(targets: VM[]) {
+    const protectedTargets = targets.filter((vm) => vm.protected);
+    if (protectedTargets.length === 0) return;
+    setUnprotectTargets(protectedTargets);
+    setUnprotectOpen(true);
+  }
+
+  function handleBatchUnprotect() {
+    const protectedVMs = selectedVMs.filter((vm) => vm.protected);
+    if (protectedVMs.length === 0) {
+      toast.error('No selected sandboxes are deletion protected.');
+      return;
+    }
+    requestUnprotect(protectedVMs);
+  }
+
+  async function confirmUnprotect(ids: string[]) {
+    const targets = ids
+      .map((id) => vms.find((vm) => vm.id === id))
+      .filter((vm): vm is VM => !!vm);
+    const toastID = toast.loading(
+      targets.length === 1
+        ? 'Disabling protection…'
+        : `Disabling protection for ${targets.length} sandboxes…`,
+    );
     try {
-      if (nextState) {
-        await api.protectVM(targetVM.id);
-        toast.success(`Sandbox ${targetVM.name} is now deletion protected`, { id: toastID });
+      await Promise.all(ids.map((id) => api.unprotectVM(id)));
+      if (targets.length === 1) {
+        toast.success(`Sandbox ${targets[0].name} protection disabled`, { id: toastID });
       } else {
-        await api.unprotectVM(targetVM.id);
-        toast.success(`Sandbox ${targetVM.name} protection disabled`, { id: toastID });
+        toast.success(`Protection disabled for ${targets.length} sandboxes`, { id: toastID });
       }
+      onRefresh?.();
+    } catch (err) {
+      toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
+      throw err;
+    }
+  }
+
+  async function toggleProtection(targetVM: VM) {
+    if (targetVM.protected) {
+      // Removing a safety guard is deliberate: always require typed confirmation.
+      requestUnprotect([targetVM]);
+      return;
+    }
+
+    const toastID = toast.loading('Enabling protection…');
+    try {
+      await api.protectVM(targetVM.id);
+      toast.success(`Sandbox ${targetVM.name} is now deletion protected`, { id: toastID });
       onRefresh?.();
     } catch (err) {
       toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
@@ -595,6 +636,17 @@ export function InstancesPage({
               <Copy className="h-3 w-3" />
               <span>Clone</span>
             </button>
+            {selectedVMs.some((vm) => vm.protected) && (
+              <button
+                type="button"
+                onClick={handleBatchUnprotect}
+                title="Remove deletion protection from selected sandboxes"
+                className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-[#5e7ff5] hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+              >
+                <Shield className="h-3 w-3" />
+                <span>Unprotect</span>
+              </button>
+            )}
 
             <span className="h-4 w-px bg-border" />
             <button
@@ -1466,6 +1518,13 @@ export function InstancesPage({
         open={bulkDeleteOpen}
         onOpenChange={setBulkDeleteOpen}
         onConfirm={executeBulkDelete}
+      />
+
+      <UnprotectVMDialog
+        vms={unprotectTargets}
+        open={unprotectOpen}
+        onOpenChange={setUnprotectOpen}
+        onConfirm={confirmUnprotect}
       />
     </div>
   );
