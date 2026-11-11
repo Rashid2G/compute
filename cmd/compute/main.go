@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -80,6 +81,10 @@ func main() {
 
 	case "network", "net":
 		handleNetworkCommand(ctx, client, os.Args[2:])
+		return
+
+	case "tailscale", "ts":
+		handleTailscaleCommand(ctx, client, os.Args[2:])
 		return
 
 	case "worker", "workers":
@@ -234,8 +239,15 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		template := createCmd.String("template", "", "Template name or ID")
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
+		tailscale := createCmd.Bool("tailscale", false, "Join the operator's tailnet (ephemeral device with a 100.x IP and MagicDNS name)")
 		createCmd.Parse(subArgs)
 
+		var tsEnabled *bool
+		createCmd.Visit(func(f *flag.Flag) {
+			if f.Name == "tailscale" {
+				tsEnabled = tailscale
+			}
+		})
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
 			Name:      *name,
 			Tier:      *tier,
@@ -246,6 +258,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			Template:  *template,
 			SSHKeyID:  *sshKey,
 			Protected: protected,
+			Tailscale: tsEnabled,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
@@ -257,6 +270,11 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		}
 		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s%s (vCPUs=%d, RAM=%dMB)\n",
 			v.ID, v.Name, v.IPAddress, v.Status, protMsg, v.VCPUs, v.MemoryMB)
+		if v.TailnetIP != "" {
+			fmt.Printf("Tailnet:         IP=%s DNS=%s (reachable from any machine in your tailnet)\n", v.TailnetIP, v.TailnetDNS)
+		} else if v.TailscaleEnabled {
+			fmt.Println("Tailnet:         provisioning in progress; run 'compute sandbox info' shortly")
+		}
 
 	case "start", "run":
 		if len(subArgs) < 1 {
@@ -431,6 +449,14 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		fmt.Printf("  IP Address:    %s\n", v.IPAddress)
 		if v.PublicIP != "" {
 			fmt.Printf("  Public IP:     %s\n", v.PublicIP)
+		}
+		if v.TailnetIP != "" {
+			fmt.Printf("  Tailnet IP:    %s\n", v.TailnetIP)
+			if v.TailnetDNS != "" {
+				fmt.Printf("  Tailnet DNS:   %s\n", v.TailnetDNS)
+			}
+		} else if v.TailscaleEnabled {
+			fmt.Printf("  Tailnet:       provisioning in progress\n")
 		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
@@ -1589,6 +1615,122 @@ func handleNetworkCommand(ctx context.Context, client *DaemonClient, args []stri
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown network command %q.\n\n", args[0])
 		fmt.Fprintln(os.Stderr, "Usage: compute network status|list|inspect <id>|prune")
+		os.Exit(1)
+	}
+}
+
+func handleTailscaleCommand(ctx context.Context, client *DaemonClient, args []string) {
+	if len(args) == 0 {
+		args = []string{"status"}
+	}
+	switch args[0] {
+	case "status", "info", "show":
+		st, err := client.GetTailscaleStatus(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching tailscale status: %v\n", err)
+			os.Exit(1)
+		}
+		if !st.Enabled {
+			fmt.Println("Tailscale integration is disabled on this daemon.")
+			fmt.Println("Enable it with the 'tailscale' section in daemon config or COMPUTE_TAILSCALE_ENABLED=true.")
+			return
+		}
+		fmt.Printf("Integration:      enabled\n")
+		fmt.Printf("API key:          %s\n", map[bool]string{true: "configured", false: "missing"}[st.APIKeyConfigured])
+		if st.NodeTag != "" {
+			fmt.Printf("Master tag:       %s\n", st.NodeTag)
+		}
+		if st.SandboxTag != "" {
+			fmt.Printf("Sandbox tag:      %s\n", st.SandboxTag)
+		}
+		fmt.Printf("Sandboxes auto:   %t\n", st.DefaultSandboxes)
+		if st.Host != nil {
+			fmt.Printf("\nHost device:\n")
+			if !st.Host.Installed {
+				fmt.Printf("  tailscale:      not installed on this host\n")
+			} else if !st.Host.Running {
+				fmt.Printf("  tailscale:      installed but not connected (run 'sudo tailscale up --advertise-tags=%s --hostname=compute-master')\n", st.NodeTag)
+			} else {
+				fmt.Printf("  tailscale:      v%s\n", st.Host.Version)
+				if st.Host.TailnetIP != "" {
+					fmt.Printf("  tailnet IP:     %s\n", st.Host.TailnetIP)
+				}
+				if st.Host.DNSName != "" {
+					fmt.Printf("  MagicDNS name:  %s\n", st.Host.DNSName)
+				}
+				if len(st.Host.Tags) > 0 {
+					fmt.Printf("  tags:           %s\n", strings.Join(st.Host.Tags, ", "))
+				}
+			}
+		}
+		if st.WorkerControlPlaneURL != "" {
+			fmt.Printf("\nWorkers connect with:\n  --control-plane %s\n", st.WorkerControlPlaneURL)
+		}
+		if len(st.Sandboxes) > 0 {
+			fmt.Printf("\nTailnet sandboxes (%d):\n", len(st.Sandboxes))
+			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "  HOST\tTAILNET IP\tMAGICDNS NAME")
+			for _, sb := range st.Sandboxes {
+				fmt.Fprintf(w, "  %s\t%s\t%s\n", sb.ID, sb.TailnetIP, sb.TailnetDNS)
+			}
+			_ = w.Flush()
+		}
+
+	case "policy":
+		st, err := client.GetTailscaleStatus(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching tailscale policy: %v\n", err)
+			os.Exit(1)
+		}
+		if st.RecommendedPolicy == "" {
+			fmt.Fprintln(os.Stderr, "Policy recommendations require the tailscale integration with an API key on the daemon.")
+			os.Exit(1)
+		}
+		fmt.Println(st.RecommendedPolicy)
+		fmt.Println("Review the snippet above, then apply it in the tailnet policy file:")
+		fmt.Println("https://console.tailscale.com/admin/acls — Compute never edits it for you.")
+
+	case "cleanup":
+		confirm := false
+		fs := flag.NewFlagSet("tailscale cleanup", flag.ExitOnError)
+		fs.BoolVar(&confirm, "confirm", false, "Actually delete stale devices (default is a dry run)")
+		fs.Parse(args[1:])
+		var res struct {
+			DryRun bool `json:"dry_run"`
+			Stale  []struct {
+				ID       string `json:"id"`
+				Name     string `json:"name"`
+				LastSeen string `json:"last_seen"`
+			} `json:"stale"`
+			Deleted []string `json:"deleted"`
+		}
+		u := "/api/v1/tailscale/cleanup"
+		if confirm {
+			u += "?confirm=true"
+		}
+		if err := client.doRequest(ctx, http.MethodPost, u, nil, &res); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running tailscale cleanup: %v\n", err)
+			os.Exit(1)
+		}
+		if len(res.Stale) == 0 && len(res.Deleted) == 0 {
+			fmt.Println("No stale tagged sandbox devices found; the tailnet is clean.")
+			return
+		}
+		for _, s := range res.Stale {
+			fmt.Printf("Stale:  %s (last seen %s)\n", s.Name, s.LastSeen)
+		}
+		for _, name := range res.Deleted {
+			fmt.Printf("Deleted: %s\n", name)
+		}
+		if res.DryRun {
+			fmt.Printf("%d stale device(s) found. Re-run with --confirm to delete them.\n", len(res.Stale))
+		} else {
+			fmt.Printf("Deleted %d stale device(s).\n", len(res.Deleted))
+		}
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown tailscale command %q.\n\n", args[0])
+		fmt.Fprintln(os.Stderr, "Usage: compute tailscale status|policy|cleanup [--confirm]")
 		os.Exit(1)
 	}
 }

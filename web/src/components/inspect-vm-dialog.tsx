@@ -131,6 +131,7 @@ export function InspectVMDialog({
                 <Fact label="PID" value={vm.pid ? String(vm.pid) : '—'} />
                 <Fact label="Dedicated IP" value={vm.ip_address} />
                 <Fact label="Public IP" value={vm.public_ip_enabled ? (vm.public_ip || vm.ip_address) : 'Disabled (off)'} />
+                <Fact label="Tailnet IP" value={vm.tailnet_ip || (vm.tailscale_enabled ? 'Provisioning…' : '—')} mono />
                 <Fact label="MAC" value={vm.mac_address} />
                 <Fact label="TAP" value={vm.tap_device} />
                 <Fact label="SSH Key" value={vm.ssh_key_name || (vm.ssh_public_key ? 'Custom Key' : 'Default Key')} mono={false} />
@@ -195,6 +196,8 @@ export function InspectVMDialog({
                 <Fact label="Dedicated IP" value={vm.ip_address} />
                 <Fact label="Public IP" value={vm.public_ip_enabled ? (vm.public_ip || vm.ip_address) : 'Disabled (off)'} />
                 <Fact label="Public Access" value={vm.public_ip_enabled ? 'ON (Dedicated on main network)' : 'OFF (Private only)'} mono={false} />
+                <Fact label="Tailnet IP" value={vm.tailnet_ip || (vm.tailscale_enabled ? 'Provisioning…' : '—')} mono />
+                {vm.tailnet_dns ? <Fact label="Tailnet DNS" value={vm.tailnet_dns} mono /> : null}
                 <Fact label="MAC" value={vm.mac_address} />
                 <Fact label="TAP" value={vm.tap_device} />
                 <Fact label="Bridge" value={network?.bridge_name || '—'} />

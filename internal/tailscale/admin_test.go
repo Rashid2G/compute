@@ -1,0 +1,192 @@
+package tailscale
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestClient(t *testing.T, handler http.Handler) (*Client, *httptest.Server) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	c := NewClient("tskey-api-test", "-")
+	c.BaseURL = srv.URL
+	c.HTTPClient = srv.Client()
+	return c, srv
+}
+
+func TestCreateAuthKey(t *testing.T) {
+	var gotBody keyRequest
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/api/v2/tailnet/-/keys") {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer tskey-api-test" {
+			t.Errorf("missing bearer auth: %q", auth)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthKey{ID: "k123456", Key: "tskey-auth-xyz", Ephemeral: true})
+	}))
+
+	key, err := c.CreateAuthKey(context.Background(), KeyOptions{
+		Description:   "compute sandbox compute-a1b2c3d4",
+		Reusable:      false,
+		Ephemeral:     true,
+		Preauthorized: true,
+		ExpirySeconds: 3600,
+		Tags:          []string{TagSandbox},
+	})
+	if err != nil {
+		t.Fatalf("CreateAuthKey: %v", err)
+	}
+	if key.Key != "tskey-auth-xyz" || key.ID != "k123456" || !key.Ephemeral {
+		t.Fatalf("unexpected key %+v", key)
+	}
+	if !gotBody.Ephemeral || !gotBody.Preauthorized || gotBody.Reusable {
+		t.Errorf("expected ephemeral preauth non-reusable key, got %+v", gotBody)
+	}
+	if len(gotBody.Tags) != 1 || gotBody.Tags[0] != TagSandbox {
+		t.Errorf("expected sandbox tag on key, got %v", gotBody.Tags)
+	}
+	if gotBody.ExpirySeconds != 3600 {
+		t.Errorf("expected expiry 3600, got %d", gotBody.ExpirySeconds)
+	}
+}
+
+func TestListDevicesAndFilter(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/api/v2/tailnet/-/devices") {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"devices": []Device{
+				{ID: "1", Name: "compute-master.tail.ts.net", Hostname: "compute-master", Tags: []string{TagMaster}, Addresses: []string{"100.64.0.1"}},
+				{ID: "2", Name: "laptop.tail.ts.net", Hostname: "laptop", User: "alice@example.com", Addresses: []string{"100.64.0.2"}},
+				{ID: "3", Name: "compute-a1b2c3d4.tail.ts.net", Hostname: "compute-a1b2c3d4", Tags: []string{TagSandbox}, Addresses: []string{"100.64.0.3"}},
+			},
+		})
+	}))
+
+	devices, err := c.ListDevices(context.Background())
+	if err != nil {
+		t.Fatalf("ListDevices: %v", err)
+	}
+	if len(devices) != 3 {
+		t.Fatalf("expected 3 devices, got %d", len(devices))
+	}
+
+	owned := FilterComputeDevices(devices, TagMaster, TagSandbox)
+	if len(owned) != 2 {
+		t.Fatalf("expected 2 compute devices, got %d: %+v", len(owned), owned)
+	}
+	if owned[0].ID != "1" || owned[1].ID != "3" {
+		t.Errorf("unexpected filter result: %+v", owned)
+	}
+	if owned[1].TailscaleIP() != "100.64.0.3" {
+		t.Errorf("TailscaleIP: %q", owned[1].TailscaleIP())
+	}
+	if owned[0].TailnetDomain() != "tail.ts.net" {
+		t.Errorf("TailnetDomain: %q", owned[0].TailnetDomain())
+	}
+}
+
+func TestDeleteDevice(t *testing.T) {
+	deleted := false
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/api/v2/device/3") {
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	if err := c.DeleteDevice(context.Background(), "3"); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	if !deleted {
+		t.Error("delete request was not issued")
+	}
+}
+
+func TestAPIErrorSurfacesStatus(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "missing scopes", http.StatusBadRequest)
+	}))
+	_, err := c.ListDevices(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 400") || !strings.Contains(err.Error(), "missing scopes") {
+		t.Fatalf("expected descriptive error, got %v", err)
+	}
+}
+
+func TestMissingAPIKeyFailsClosed(t *testing.T) {
+	c := NewClient("", "-")
+	if _, err := c.ListDevices(context.Background()); err == nil {
+		t.Fatal("expected error when API key is missing")
+	}
+}
+
+func TestSandboxServiceNameAndHostname(t *testing.T) {
+	if got := SandboxHostname("vm-a1b2c3d4e5f6"); got != "compute-vm-a1b2c3d4e5f6" {
+		t.Errorf("SandboxHostname: %q", got)
+	}
+	if got := SandboxServiceName("VM_A1B2C3D4E5F6", 8080); got != "compute-vm-a1b2c3d4e5f6-8080" {
+		t.Errorf("SandboxServiceName: %q", got)
+	}
+	if got := SandboxHostname("weird name!"); got != "compute-weird-name" {
+		t.Errorf("sanitize fallback: %q", got)
+	}
+	if got := SandboxHostname(strings.Repeat("x", 60)); got != "compute-"+strings.Repeat("x", 32) {
+		t.Errorf("long-id cap: %q", got)
+	}
+}
+
+func TestRecommendedPolicy(t *testing.T) {
+	policy := RecommendedPolicy(TagSandbox, TagNode, TagMaster)
+	for _, want := range []string{"autoApprovers", `"tag:compute:sandbox": ["tag:compute:sandbox"]`, `"tag:compute:master"`, `"autogroup:member"`} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("policy missing %q:\n%s", want, policy)
+		}
+	}
+	if strings.Contains(policy, "funnel") || strings.Contains(policy, "nodeAttrs") {
+		t.Error("policy must not touch funnel/nodeAttrs")
+	}
+}
+
+func TestProvisionerMockedRun(t *testing.T) {
+	minted := 0
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/keys") {
+			minted++
+			_ = json.NewEncoder(w).Encode(AuthKey{ID: "k1", Key: "tskey-auth-k1", Ephemeral: true})
+			return
+		}
+		t.Errorf("unexpected admin request %s %s", r.Method, r.URL.Path)
+	}))
+
+	p := &Provisioner{
+		Client:      c,
+		AutoInstall: true,
+		SSHUser:     "root",
+		BootTimeout: 2 * time.Second,
+	}
+	// Runner is exercised through the SSHRunner only with a real ssh binary;
+	// here we validate the failure path when SSH is unreachable.
+	_, err := p.Provision(context.Background(), "vm-a1b2c3d4", "127.0.0.1", "/nonexistent-key")
+	if err == nil {
+		t.Fatal("expected error provisioning against unreachable sandbox")
+	}
+	if minted != 1 {
+		t.Errorf("expected exactly one key mint, got %d", minted)
+	}
+	if !strings.Contains(err.Error(), "SSH not ready") && !strings.Contains(err.Error(), "join failed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
