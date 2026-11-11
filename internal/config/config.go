@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/Rashid2G/on-demand-vms/internal/network"
@@ -87,15 +89,15 @@ func ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB int) (int, int, int, erro
 		return 0, 0, 0, fmt.Errorf("invalid memory '%d MB': minimum memory is 128 MB", memoryMB)
 	}
 
-	// Disks limited to 50GB or 100GB
+	// Disk size is customizable (defaults to 50 GB if omitted, supports values in GB or MB)
 	if diskMB <= 0 {
 		diskMB = DiskSize50GB
-	} else if diskMB == 50 || diskMB == 51200 || diskMB == 50000 {
-		diskMB = DiskSize50GB
-	} else if diskMB == 100 || diskMB == 102400 || diskMB == 100000 {
-		diskMB = DiskSize100GB
-	} else {
-		return 0, 0, 0, fmt.Errorf("invalid disk size '%d MB': disks are limited to 50gb (%d MB) or 100gb (%d MB)", diskMB, DiskSize50GB, DiskSize100GB)
+	} else if diskMB < 512 {
+		// Value was provided in GB (e.g. 10, 20, 50, 100)
+		diskMB = diskMB * 1024
+	}
+	if diskMB < 512 {
+		return 0, 0, 0, fmt.Errorf("invalid disk size '%d MB': minimum disk size is 512 MB", diskMB)
 	}
 
 	return vcpus, memoryMB, diskMB, nil
@@ -306,6 +308,36 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 	}
 	if cfg.Images.DefaultRootfs == "" {
 		cfg.Images.DefaultRootfs = DefaultRootfsName
+	}
+
+	// Apply COMPUTE_DATA_DIR environment variable if specified
+	if dataDir := os.Getenv("COMPUTE_DATA_DIR"); dataDir != "" {
+		if cfg.Server.DBPath == "/var/lib/compute/data/compute.db" || strings.HasPrefix(cfg.Server.DBPath, "/home/") {
+			cfg.Server.DBPath = filepath.Join(dataDir, "data", "compute.db")
+		}
+		if cfg.Images.ImagesDir == "/var/lib/compute/images" || strings.HasPrefix(cfg.Images.ImagesDir, "/home/") {
+			cfg.Images.ImagesDir = filepath.Join(dataDir, "images")
+		}
+		if cfg.Images.VMsDir == "/var/lib/compute/vms" || strings.HasPrefix(cfg.Images.VMsDir, "/home/") {
+			cfg.Images.VMsDir = filepath.Join(dataDir, "vms")
+		}
+		if cfg.Images.SSHKeyPath == "/var/lib/compute/images/ssh/id_ed25519" || strings.HasPrefix(cfg.Images.SSHKeyPath, "/home/") {
+			cfg.Images.SSHKeyPath = filepath.Join(dataDir, "images", "ssh", "id_ed25519")
+		}
+	}
+
+	// Auto-locate Firecracker and Jailer if configured path doesn't exist
+	if _, err := os.Stat(cfg.Server.FirecrackerBin); err != nil {
+		if path, err := exec.LookPath("firecracker"); err == nil {
+			cfg.Server.FirecrackerBin = path
+		}
+	}
+	if cfg.Server.JailerBinary != "" {
+		if _, err := os.Stat(cfg.Server.JailerBinary); err != nil {
+			if path, err := exec.LookPath("jailer"); err == nil {
+				cfg.Server.JailerBinary = path
+			}
+		}
 	}
 
 	return cfg, nil

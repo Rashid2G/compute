@@ -274,6 +274,31 @@ export default function App() {
     }
   }
 
+  async function bulkDeleteVMs(ids: string[]) {
+    const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
+    let deletedCount = 0;
+    try {
+      for (const id of ids) {
+        await api.deleteVM(id);
+        deletedCount++;
+        if (consoleVMID === id) setConsoleVMID(null);
+        if (inspectTarget?.id === id) setInspectTarget(null);
+      }
+      toast.success(`Deleted ${deletedCount} sandbox(es)`, {
+        id: toastID,
+        description: 'Processes, network leases, and overlay disks removed.',
+      });
+      await cluster.refresh(true);
+    } catch (error) {
+      toast.error('Failed to delete sandboxes', {
+        id: toastID,
+        description: errorMessage(error),
+      });
+      await cluster.refresh(true);
+      throw error;
+    }
+  }
+
   const openNew = useCallback(() => setCreateOpen(true), []);
 
   const quickCreate = useCallback(() => {
@@ -322,6 +347,7 @@ export default function App() {
             onSnapshot={snapshotVM}
             onResume={resumeVM}
             onDelete={setDeleteTarget}
+            onBulkDelete={bulkDeleteVMs}
             onInspect={setInspectTarget}
             onConsole={openConsole}
           />
