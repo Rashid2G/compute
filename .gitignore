@@ -28,6 +28,7 @@ benchmark-*.json
 # Node / Vite if any
 node_modules/
 dist/
+*.tsbuildinfo
 
 # Test binaries
 *.test

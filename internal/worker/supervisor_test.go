@@ -25,7 +25,9 @@ func TestLocalSandboxSupervisor_Execution(t *testing.T) {
 	}
 
 	assignment := api.WorkerAssignment{
-		JobID:     "job-test-1",
+		WorkerMessage: api.WorkerMessage{
+			JobID: "job-test-1",
+		},
 		AttemptID: "att-1",
 		Spec: api.JobSpec{
 			Command: []string{"sh", "-c", "echo 'hello from sandbox' && echo 'error line' >&2"},
@@ -84,7 +86,9 @@ func TestLocalSandboxSupervisor_FileExtraction(t *testing.T) {
 	}
 
 	assignment := api.WorkerAssignment{
-		JobID:     "job-test-2",
+		WorkerMessage: api.WorkerMessage{
+			JobID: "job-test-2",
+		},
 		AttemptID: "att-2",
 		Spec: api.JobSpec{
 			Files:   encoded,
@@ -119,7 +123,9 @@ func TestLocalSandboxSupervisor_Cancellation(t *testing.T) {
 	defer cancel()
 
 	assignment := api.WorkerAssignment{
-		JobID:     "job-test-timeout",
+		WorkerMessage: api.WorkerMessage{
+			JobID: "job-test-timeout",
+		},
 		AttemptID: "att-3",
 		Spec: api.JobSpec{
 			Command: []string{"sleep", "5"},

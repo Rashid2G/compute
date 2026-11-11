@@ -163,6 +163,76 @@ func TestCgroupManager_Lifecycle(t *testing.T) {
 	}
 }
 
+func TestCgroupManager_EnablesRequiredControllers(t *testing.T) {
+	tmpDir := t.TempDir()
+	cgroupRoot := filepath.Join(tmpDir, "cgroup", "compute")
+	if err := os.MkdirAll(cgroupRoot, 0755); err != nil {
+		t.Fatalf("failed to create cgroup root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroupRoot, "cgroup.controllers"), []byte("cpuset cpu io memory pids\n"), 0644); err != nil {
+		t.Fatalf("failed to write cgroup.controllers: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroupRoot, "cgroup.subtree_control"), []byte("\n"), 0644); err != nil {
+		t.Fatalf("failed to write cgroup.subtree_control: %v", err)
+	}
+
+	cm := NewCgroupManager(cgroupRoot)
+	_, err := cm.Setup("vm-controllers", CgroupLimits{
+		VCPUs:    2,
+		MemoryMB: 512,
+		IOMax:    "8:0 rbps=1048576",
+	})
+	if err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.subtree_control"))
+	if err != nil {
+		t.Fatalf("failed to read cgroup.subtree_control: %v", err)
+	}
+	got := strings.Fields(string(data))
+	want := map[string]bool{"+cpu": true, "+memory": true, "+pids": true, "+io": true}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected subtree_control %q; want %v", string(data), want)
+	}
+	for _, controller := range got {
+		if !want[controller] {
+			t.Errorf("unexpected controller %q in subtree_control %q", controller, string(data))
+		}
+	}
+}
+
+func TestCgroupManager_SkipsUnavailableControllers(t *testing.T) {
+	tmpDir := t.TempDir()
+	cgroupRoot := filepath.Join(tmpDir, "cgroup", "compute")
+	if err := os.MkdirAll(cgroupRoot, 0755); err != nil {
+		t.Fatalf("failed to create cgroup root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroupRoot, "cgroup.controllers"), []byte("cpu memory pids\n"), 0644); err != nil {
+		t.Fatalf("failed to write cgroup.controllers: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroupRoot, "cgroup.subtree_control"), []byte("\n"), 0644); err != nil {
+		t.Fatalf("failed to write cgroup.subtree_control: %v", err)
+	}
+
+	cm := NewCgroupManager(cgroupRoot)
+	if _, err := cm.Setup("vm-no-io", CgroupLimits{
+		VCPUs:    1,
+		MemoryMB: 256,
+		IOMax:    "8:0 rbps=1048576",
+	}); err != nil {
+		t.Fatalf("Setup failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(cgroupRoot, "cgroup.subtree_control"))
+	if err != nil {
+		t.Fatalf("failed to read cgroup.subtree_control: %v", err)
+	}
+	if strings.Contains(string(data), "+io") {
+		t.Errorf("subtree_control %q must not enable an unavailable controller", string(data))
+	}
+}
+
 func TestIsCgroupV2Supported(t *testing.T) {
 	// Function must execute safely without panicking
 	_ = IsCgroupV2Supported()
