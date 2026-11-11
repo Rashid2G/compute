@@ -243,3 +243,10 @@ paste it into the tailnet policy file yourself.
 - Automatic per-sandbox service provisioning is orchestrated via guest `tailscale serve`;
   a master-side orchestrator for services on worker-hosted sandboxes lands with remote
   sandbox scheduling.
+
+## Sandbox DNS names
+
+Sandboxes can additionally be reached by stable hostnames
+(`<sandbox>.<username>.<base-domain>`) served by the daemon's built-in DNS
+responder. This works with a `ts.net` base domain (via Tailscale split DNS) as
+well as any other domain; see `docs/dns-ssh.md` for the full setup.

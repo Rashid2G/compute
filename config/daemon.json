@@ -50,6 +50,13 @@
     "max_concurrent": 2,
     "boot_timeout_seconds": 90
   },
+  "dns": {
+    "enabled": true,
+    "listen": ":53",
+    "base_domain": "compute-lab.tailb1be99.ts.net",
+    "extra_base_domains": [],
+    "host_addresses": ["100.78.129.96", "192.168.1.70"]
+  },
   "tailscale": {
     "enabled": false,
     "api_key": "",
