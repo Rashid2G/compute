@@ -12,6 +12,7 @@ description: >
 - Repository skills live in `.agents/skills/<name>/SKILL.md` (some have `references/`).
 - Load a skill with the `skill` tool when its `description` matches the task. Load before acting on anything the skill covers.
 - Available skills (current):
+  - `compute` — isolated microVM sandboxes, distributed build jobs, per-PR preview deployments, and recursive dogfooding.
   - `dev-workflow` — worktrees, `dev` branch, PR-to-`dev`, approval-gated `main`.
   - `github-issues` — filing, linking, triage, resuming issues.
   - `deployment` — deploy to `compute-lab`, health checks, remote logs.
