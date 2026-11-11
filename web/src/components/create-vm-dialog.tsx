@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ChevronDown, Play, X } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Play, Shield, X } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import type {
@@ -57,6 +57,7 @@ export function CreateVMDialog({
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
   const [setupScript, setSetupScript] = useState('');
+  const [protectedVM, setProtectedVM] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -114,22 +115,19 @@ export function CreateVMDialog({
       const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
       const totalToCreate = Math.max(1, count);
 
-      for (let i = 0; i < totalToCreate; i++) {
-        let name: string;
+      const creationTasks = Array.from({ length: totalToCreate }, async (_, i) => {
+        let name: string | undefined;
         if (baseName) {
           name = totalToCreate > 1 ? `${baseName}-${i + 1}` : baseName;
-        } else {
-          name = `sbx-${PRESETS.find((p) => p.vcpus === vcpus)?.label ?? 'micro'}-${Math.random()
-            .toString(36)
-            .slice(2, 6)}`;
         }
 
         const payload: CreateVMRequest = {
-          name,
+          name: name || undefined,
           vcpus,
           memory_mb: memoryMb,
           disk_mb: calculatedDiskMb,
           public_ip_enabled: true,
+          protected: protectedVM,
         };
 
         if (fromSource.startsWith('tpl:')) {
@@ -140,14 +138,17 @@ export function CreateVMDialog({
           payload.image = 'ubuntu-24';
         }
 
-        await onCreate(payload, true, {
+        return onCreate(payload, true, {
           setupScript: setupScript.trim() || undefined,
         });
-      }
+      });
+
+      await Promise.all(creationTasks);
 
       onOpenChange(false);
       setSandboxName('');
       setSetupScript('');
+      setProtectedVM(false);
       setCount(1);
     } finally {
       setSubmitting(false);
@@ -373,6 +374,23 @@ export function CreateVMDialog({
               placeholder="#!/bin/bash&#10;apt-get update && apt-get install -y nginx"
               className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
+          </div>
+
+          <div className="flex items-center gap-2 pt-1 pb-1">
+            <input
+              id="enable-protection"
+              type="checkbox"
+              checked={protectedVM}
+              onChange={(e) => setProtectedVM(e.target.checked)}
+              className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+            />
+            <label
+              htmlFor="enable-protection"
+              className="text-[12px] text-foreground cursor-pointer select-none flex items-center gap-1.5"
+            >
+              <Shield className="h-3.5 w-3.5 text-[#5e7ff5]" />
+              <span>Enable deletion protection</span>
+            </label>
           </div>
 
           <div className="space-y-1 text-[11px] text-muted-foreground">

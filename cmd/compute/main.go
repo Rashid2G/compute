@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/term"
 
+	"github.com/Rashid2G/on-demand-vms/internal/db"
 	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/api"
@@ -205,10 +207,14 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			return
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tVCPUS\tMEM(MB)\tIP ADDRESS")
+		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tVCPUS\tMEM(MB)\tIP ADDRESS\tPROTECTED")
 		for _, v := range vms {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%s\n",
-				v.ID, v.Name, v.Status, v.VCPUs, v.MemoryMB, v.IPAddress)
+			prot := "no"
+			if v.Protected {
+				prot = "yes"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
+				v.ID, v.Name, v.Status, v.VCPUs, v.MemoryMB, v.IPAddress, prot)
 		}
 		w.Flush()
 		return
@@ -227,24 +233,30 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		image := createCmd.String("image", "", "Base image name")
 		template := createCmd.String("template", "", "Template name or ID")
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
+		protected := createCmd.Bool("protected", false, "Enable deletion protection")
 		createCmd.Parse(subArgs)
 
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:     *name,
-			Tier:     *tier,
-			VCPUs:    *vcpus,
-			MemoryMB: *mem,
-			DiskMB:   *disk,
-			Image:    *image,
-			Template: *template,
-			SSHKeyID: *sshKey,
+			Name:      *name,
+			Tier:      *tier,
+			VCPUs:     *vcpus,
+			MemoryMB:  *mem,
+			DiskMB:    *disk,
+			Image:     *image,
+			Template:  *template,
+			SSHKeyID:  *sshKey,
+			Protected: protected,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s (vCPUs=%d, RAM=%dMB)\n",
-			v.ID, v.Name, v.IPAddress, v.Status, v.VCPUs, v.MemoryMB)
+		protMsg := ""
+		if v.Protected {
+			protMsg = " [protected]"
+		}
+		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s%s (vCPUs=%d, RAM=%dMB)\n",
+			v.ID, v.Name, v.IPAddress, v.Status, protMsg, v.VCPUs, v.MemoryMB)
 
 	case "start", "run":
 		if len(subArgs) < 1 {
@@ -255,17 +267,37 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Fprintf(os.Stderr, "Error resolving sandbox targets: %v\n", err)
 			os.Exit(1)
 		}
-		for _, id := range targets {
-			v, err := client.RunVM(ctx, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting sandbox %s: %v\n", id, err)
-				os.Exit(1)
+		var wg sync.WaitGroup
+		type startResult struct {
+			v   *db.VM
+			err error
+			id  string
+		}
+		results := make([]startResult, len(targets))
+		for i, id := range targets {
+			wg.Add(1)
+			go func(idx int, targetID string) {
+				defer wg.Done()
+				v, err := client.RunVM(ctx, targetID)
+				results[idx] = startResult{v: v, err: err, id: targetID}
+			}(i, id)
+		}
+		wg.Wait()
+		hasErr := false
+		for _, res := range results {
+			if res.err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting sandbox %s: %v\n", res.id, res.err)
+				hasErr = true
+			} else if res.v != nil {
+				fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s", res.v.ID, res.v.Name, res.v.IPAddress, res.v.Status)
+				if res.v.PID > 0 {
+					fmt.Printf(" PID=%d", res.v.PID)
+				}
+				fmt.Println()
 			}
-			fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s", v.ID, v.Name, v.IPAddress, v.Status)
-			if v.PID > 0 {
-				fmt.Printf(" PID=%d", v.PID)
-			}
-			fmt.Println()
+		}
+		if hasErr {
+			os.Exit(1)
 		}
 
 	case "stop":
@@ -277,13 +309,33 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Fprintf(os.Stderr, "Error resolving sandbox targets: %v\n", err)
 			os.Exit(1)
 		}
-		for _, id := range targets {
-			v, err := client.StopVM(ctx, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error stopping sandbox %s: %v\n", id, err)
-				os.Exit(1)
+		var wg sync.WaitGroup
+		type stopResult struct {
+			v   *db.VM
+			err error
+			id  string
+		}
+		results := make([]stopResult, len(targets))
+		for i, id := range targets {
+			wg.Add(1)
+			go func(idx int, targetID string) {
+				defer wg.Done()
+				v, err := client.StopVM(ctx, targetID)
+				results[idx] = stopResult{v: v, err: err, id: targetID}
+			}(i, id)
+		}
+		wg.Wait()
+		hasErr := false
+		for _, res := range results {
+			if res.err != nil {
+				fmt.Fprintf(os.Stderr, "Error stopping sandbox %s: %v\n", res.id, res.err)
+				hasErr = true
+			} else if res.v != nil {
+				fmt.Printf("Sandbox Stopped: ID=%s Name=%s Status=%s\n", res.v.ID, res.v.Name, res.v.Status)
 			}
-			fmt.Printf("Sandbox Stopped: ID=%s Name=%s Status=%s\n", v.ID, v.Name, v.Status)
+		}
+		if hasErr {
+			os.Exit(1)
 		}
 
 	case "save-state", "snapshot":
@@ -328,12 +380,32 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Fprintf(os.Stderr, "Error resolving sandbox targets: %v\n", err)
 			os.Exit(1)
 		}
-		for _, id := range targets {
-			if err := client.DeleteVM(ctx, id); err != nil {
-				fmt.Fprintf(os.Stderr, "Error deleting sandbox %s: %v\n", id, err)
-				os.Exit(1)
+		var wg sync.WaitGroup
+		type deleteResult struct {
+			err error
+			id  string
+		}
+		results := make([]deleteResult, len(targets))
+		for i, id := range targets {
+			wg.Add(1)
+			go func(idx int, targetID string) {
+				defer wg.Done()
+				err := client.DeleteVM(ctx, targetID)
+				results[idx] = deleteResult{err: err, id: targetID}
+			}(i, id)
+		}
+		wg.Wait()
+		hasErr := false
+		for _, res := range results {
+			if res.err != nil {
+				fmt.Fprintf(os.Stderr, "Error deleting sandbox %s: %v\n", res.id, res.err)
+				hasErr = true
+			} else {
+				fmt.Printf("Sandbox Deleted: ID=%s\n", res.id)
 			}
-			fmt.Printf("Sandbox Deleted: ID=%s\n", id)
+		}
+		if hasErr {
+			os.Exit(1)
 		}
 
 	case "exec":
@@ -360,7 +432,32 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		if v.PublicIP != "" {
 			fmt.Printf("  Public IP:     %s\n", v.PublicIP)
 		}
+		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
+
+	case "protect":
+		if len(subArgs) < 1 {
+			printCommandError("missing required sandbox name or ID.", "Usage: compute sandbox protect <name|id>", "sandbox")
+		}
+		targetID := subArgs[0]
+		v, err := client.ProtectVM(ctx, targetID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error enabling protection for sandbox %s: %v\n", targetID, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Sandbox %s: deletion protection enabled\n", v.Name)
+
+	case "unprotect":
+		if len(subArgs) < 1 {
+			printCommandError("missing required sandbox name or ID.", "Usage: compute sandbox unprotect <name|id>", "sandbox")
+		}
+		targetID := subArgs[0]
+		v, err := client.UnprotectVM(ctx, targetID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error disabling protection for sandbox %s: %v\n", targetID, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Sandbox %s: deletion protection disabled\n", v.Name)
 
 	default:
 		printCommandError(fmt.Sprintf("unknown sandbox command '%s'.", sub), "", "sandbox")

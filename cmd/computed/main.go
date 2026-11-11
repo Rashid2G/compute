@@ -236,6 +236,9 @@ func main() {
 	server.ReconcileRunningVMState(pfCtx)
 	pfCancel()
 
+	// Start continuous background status monitor to detect microVM exits and maintain synced status
+	vmMgr.StartStatusMonitor(context.Background(), 3*time.Second)
+
 	// Mount embedded Web GUI
 	daemonTarget := globalCfg.Server.ListenAddr
 	if !strings.HasPrefix(daemonTarget, "unix://") {

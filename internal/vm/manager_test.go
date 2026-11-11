@@ -725,3 +725,130 @@ func TestVMDHCPModeWithLease(t *testing.T) {
 		t.Fatalf("expected public IP enabled")
 	}
 }
+
+func TestVMDeletionProtection(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+
+	prot := true
+	vm, err := m.CreateVM(ctx, CreateRequest{
+		Name:      "protected-vm",
+		Protected: &prot,
+	})
+	if err != nil {
+		t.Fatalf("CreateVM failed: %v", err)
+	}
+	if !vm.Protected {
+		t.Fatalf("expected vm.Protected to be true")
+	}
+
+	// Attempt deletion via DeleteVM - must fail
+	err = m.DeleteVM(ctx, vm.ID)
+	if err == nil || !strings.Contains(err.Error(), "protected against deletion") {
+		t.Fatalf("expected deletion to fail due to protection, got: %v", err)
+	}
+
+	// Attempt deletion via DeleteVMForOwner - must fail
+	err = m.DeleteVMForOwner(ctx, vm.OwnerID, vm.ID)
+	if err == nil || !strings.Contains(err.Error(), "protected against deletion") {
+		t.Fatalf("expected DeleteVMForOwner to fail due to protection, got: %v", err)
+	}
+
+	// Verify VM still exists in DB
+	loaded, err := store.GetVM(ctx, vm.ID)
+	if err != nil || loaded == nil {
+		t.Fatalf("expected VM to still exist in store, got err=%v", err)
+	}
+
+	// Unprotect VM via UpdateVMConfig
+	unprot := false
+	updated, err := m.UpdateVMConfig(ctx, vm.ID, UpdateVMConfigRequest{
+		Protected: &unprot,
+	})
+	if err != nil {
+		t.Fatalf("UpdateVMConfig failed: %v", err)
+	}
+	if updated.Protected {
+		t.Fatalf("expected updated.Protected to be false")
+	}
+
+	// DeleteVM should now succeed
+	if err := m.DeleteVM(ctx, vm.ID); err != nil {
+		t.Fatalf("DeleteVM failed after unprotecting: %v", err)
+	}
+
+	// Verify VM is deleted
+	deleted, err := store.GetVM(ctx, vm.ID)
+	if err != nil || deleted != nil {
+		t.Fatalf("expected VM to be deleted from store")
+	}
+}
+
+func TestVMNicknameAssignment(t *testing.T) {
+	ctx := context.Background()
+	m, _, _, _ := testManager(t)
+
+	// Create VM with empty name
+	vm1, err := m.CreateVM(ctx, CreateRequest{Name: ""})
+	if err != nil {
+		t.Fatalf("CreateVM failed: %v", err)
+	}
+	if vm1.Name == "" || vm1.ID == "" {
+		t.Fatalf("expected non-empty name and ID")
+	}
+
+	// Create another VM with empty name
+	vm2, err := m.CreateVM(ctx, CreateRequest{Name: ""})
+	if err != nil {
+		t.Fatalf("CreateVM failed: %v", err)
+	}
+	if vm2.Name == "" || vm2.Name == vm1.Name {
+		t.Fatalf("expected distinct nickname, got vm1=%s, vm2=%s", vm1.Name, vm2.Name)
+	}
+}
+
+func TestVMStatusOutageRecovery(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+
+	// Set process checker so pid 54321 is not alive
+	m.SetProcessChecker(func(pid int) bool {
+		return pid == 12345 // only 12345 is alive
+	})
+
+	vm := &db.VM{
+		ID:             "outage-vm",
+		Name:           "outage-vm",
+		OwnerID:        "default",
+		Status:         db.StatusRunning,
+		PID:            54321, // dead process
+		DesiredRunning: true,
+	}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatal(err)
+	}
+
+	// GetVM should detect dead process and reconcile to StatusStopped
+	reconciled, err := m.GetVM(ctx, vm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.Status != db.StatusStopped || reconciled.PID != 0 {
+		t.Fatalf("expected StatusStopped with PID 0, got status=%s pid=%d", reconciled.Status, reconciled.PID)
+	}
+
+	// Mock launcher to restart VM
+	var restarted bool
+	m.SetLauncher(func(ctx context.Context, v *db.VM) error {
+		restarted = true
+		v.PID = 12345
+		return nil
+	})
+
+	// StartDesiredVMs simulates daemon restart outage recovery
+	m.StartDesiredVMs(ctx)
+
+	if !restarted {
+		t.Fatalf("expected StartDesiredVMs to restart desired running VM after outage")
+	}
+}
