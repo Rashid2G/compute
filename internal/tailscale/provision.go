@@ -121,24 +121,36 @@ func (p *Provisioner) Provision(ctx context.Context, vmID, vmIP, sshKeyPath stri
 		if !p.AutoInstall {
 			return nil, fmt.Errorf("tailscale binary not found in sandbox %s; rebuild the image with TAILSCALE=1 or enable tailscale.auto_install_guest", vmID)
 		}
-		if _, _, code, err := runner.Run(ctx, vmIP, "curl -fsSL https://tailscale.com/install.sh | sh"); err != nil || code != 0 {
-			return nil, fmt.Errorf("tailscale: install in sandbox %s failed (exit %d)", vmID, code)
+		// Install static binaries suitable for minimal kernels without apt dependencies
+		installCmd := `ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && TS_ARCH="amd64" || TS_ARCH="arm64"
+curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_1.104.6_${TS_ARCH}.tgz" | sudo tar -xz -C /tmp && \
+sudo cp /tmp/tailscale_*/tailscale /tmp/tailscale_*/tailscaled /usr/local/bin/ && \
+sudo rm -rf /tmp/tailscale_*`
+		if _, stderr, code, err := runner.Run(ctx, vmIP, installCmd); err != nil || code != 0 {
+			if _, _, fCode, fErr := runner.Run(ctx, vmIP, "curl -fsSL https://tailscale.com/install.sh | sh"); fErr != nil || fCode != 0 {
+				return nil, fmt.Errorf("tailscale: install in sandbox %s failed (exit %d): %s", vmID, code, strings.TrimSpace(stderr))
+			}
 		}
 		installed = true
 	}
 
-	// 4. Join the tailnet as an ephemeral tagged device.
+	// 4. Ensure daemon directories and tailscaled background process are running.
+	daemonStartCmd := `sudo mkdir -p /var/lib/tailscale /run/tailscale && sudo ln -sf /run /var/run && ` +
+		`pgrep tailscaled >/dev/null 2>&1 || sudo nohup /usr/local/bin/tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state --socket=/run/tailscale/tailscaled.sock >/tmp/tailscaled.log 2>&1 &`
+	_, _, _, _ = runner.Run(ctx, vmIP, daemonStartCmd)
+
+	// 5. Join the tailnet as an ephemeral tagged device.
 	hostname := SandboxHostname(vmID)
 	upCmd := fmt.Sprintf(
-		"tailscale up --authkey=%s --hostname=%s --advertise-tags=%s --accept-dns=false",
+		"sudo tailscale up --authkey=%s --hostname=%s --advertise-tags=%s --accept-dns=false && sudo tailscale set --operator=compute || true",
 		shellQuote(key.Key), shellQuote(hostname), shellQuote(sandboxTag),
 	)
 	if out, stderr, code, err := runner.Run(ctx, vmIP, upCmd); err != nil || code != 0 {
 		return nil, fmt.Errorf("tailscale: sandbox %s join failed (exit %d): %s", vmID, code, strings.TrimSpace(stderr+" "+out))
 	}
 
-	// 5. Read back the assigned tailnet identity.
-	out, _, code, err := runner.Run(ctx, vmIP, "tailscale ip -4 -1")
+	// 6. Read back the assigned tailnet identity.
+	out, _, code, err := runner.Run(ctx, vmIP, "tailscale ip -4")
 	if err != nil || code != 0 {
 		return nil, fmt.Errorf("tailscale: sandbox %s ip read failed (exit %d)", vmID, code)
 	}
@@ -178,7 +190,7 @@ func (p *Provisioner) Teardown(ctx context.Context, vmIP, sshKeyPath string) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	_, _, _, _ = p.runner(sshKeyPath).Run(ctx, vmIP, "tailscale logout >/dev/null 2>&1 || true")
+	_, _, _, _ = p.runner(sshKeyPath).Run(ctx, vmIP, "sudo tailscale logout >/dev/null 2>&1 || tailscale logout >/dev/null 2>&1 || true; sudo pkill tailscaled >/dev/null 2>&1 || true")
 }
 
 // PublishService defines a Compute-owned Tailscale Service and advertises the
@@ -212,7 +224,9 @@ func (p *Provisioner) PublishService(ctx context.Context, vmID, vmIP, sshKeyPath
 		return nil, fmt.Errorf("tailscale binary not found in sandbox %s", vmID)
 	}
 	serveCmd := fmt.Sprintf(
-		"tailscale serve --service=%s --https=443 --yes %s",
+		"sudo tailscale serve --service=%s --https=443 --yes %s || tailscale serve --service=%s --https=443 --yes %s",
+		shellQuote("svc:"+name),
+		shellQuote(fmt.Sprintf("http://127.0.0.1:%d", guestPort)),
 		shellQuote("svc:"+name),
 		shellQuote(fmt.Sprintf("http://127.0.0.1:%d", guestPort)),
 	)
@@ -240,7 +254,7 @@ func (p *Provisioner) UnpublishService(ctx context.Context, vmID, vmIP, sshKeyPa
 
 	var errs []error
 	if _, _, code, err := p.runner(sshKeyPath).Run(ctx, vmIP, "command -v tailscale"); err == nil && code == 0 {
-		clearCmd := fmt.Sprintf("tailscale serve clear %s", shellQuote("svc:"+name))
+		clearCmd := fmt.Sprintf("sudo tailscale serve clear %s || tailscale serve clear %s", shellQuote("svc:"+name), shellQuote("svc:"+name))
 		if out, stderr, code, err := p.runner(sshKeyPath).Run(ctx, vmIP, clearCmd); err != nil || code != 0 {
 			errs = append(errs, fmt.Errorf("clear serve svc:%s (exit %d): %s", name, code, strings.TrimSpace(stderr+" "+out)))
 		}
