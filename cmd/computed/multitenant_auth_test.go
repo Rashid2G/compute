@@ -2263,7 +2263,7 @@ func TestMultiTenant_AdminScopedKeyRestrictedScopes(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Sign up an admin user and create a session
-	adminUser, err := env.authMgr.Signup(ctx, "admin-scoped@example.com", "admin_user", "Admin User", "AdminSecret123!", "admin")
+	adminUser, err := env.authMgr.Signup(ctx, "admin-scoped@example.com", "admin-user", "Admin User", "AdminSecret123!", "admin")
 	if err != nil {
 		t.Fatalf("signup admin: %v", err)
 	}
@@ -2271,7 +2271,7 @@ func TestMultiTenant_AdminScopedKeyRestrictedScopes(t *testing.T) {
 		t.Fatalf("expected admin user role, got %s", adminUser.Role)
 	}
 
-	adminSession, _ := mtLogin(t, ts, "admin_user", "AdminSecret123!")
+	adminSession, _ := mtLogin(t, ts, "admin-user", "AdminSecret123!")
 
 	// 2. Admin creates a VM so there is something to read
 	vmResp, createdVM := mtCreateVM(t, ts, adminSession, map[string]interface{}{
@@ -2575,12 +2575,12 @@ func TestMultiTenant_InactiveDisabledUserKeyInvalidation(t *testing.T) {
 	}
 
 	// 9. Test admin user deactivation blocks admin scoped keys
-	adminUser, err := env.authMgr.Signup(ctx, "admin-deact@example.com", "admin_deact", "Admin Deact", "AdminPassword123!", "admin")
+	adminUser, err := env.authMgr.Signup(ctx, "admin-deact@example.com", "admin-deact", "Admin Deact", "AdminPassword123!", "admin")
 	if err != nil {
 		t.Fatalf("signup admin: %v", err)
 	}
 	_ = adminUser
-	adminSession, _ := mtLogin(t, ts, "admin_deact", "AdminPassword123!")
+	adminSession, _ := mtLogin(t, ts, "admin-deact", "AdminPassword123!")
 	adminResp, adminKeyBody := mtRequest(t, ts, http.MethodPost, "/api/v1/api-keys", adminSession, map[string]string{
 		"name":  "admin-key",
 		"scope": "admin",
@@ -2598,7 +2598,7 @@ func TestMultiTenant_InactiveDisabledUserKeyInvalidation(t *testing.T) {
 	}
 
 	// Deactivate admin
-	if _, err := env.metaStore.Writer().ExecContext(ctx, "UPDATE users SET status = ? WHERE username = ?", "disabled", "admin_deact"); err != nil {
+	if _, err := env.metaStore.Writer().ExecContext(ctx, "UPDATE users SET status = ? WHERE username = ?", "disabled", "admin-deact"); err != nil {
 		t.Fatalf("failed to update admin status to disabled: %v", err)
 	}
 
