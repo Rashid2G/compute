@@ -465,3 +465,44 @@ export interface PortForwardRecord {
   status: 'active' | 'inactive' | string;
   created_at: string;
 }
+
+export interface TailscaleHostStatus {
+  installed: boolean;
+  running: boolean;
+  hostname: string;
+  dns_name: string;
+  tailnet_ip: string;
+  tailnet_name: string;
+  tags: string[] | null;
+  version: string;
+}
+
+export interface TailscaleSandboxRecord {
+  id: string;
+  name: string;
+  owner_id?: string;
+  status: string;
+  tailnet_ip?: string;
+  tailnet_dns?: string;
+  tailscale_device_id?: string;
+}
+
+export interface TailscaleServiceRecord {
+  name: string;
+  description?: string;
+  tags?: string[];
+}
+
+export interface TailscaleStatus {
+  enabled: boolean;
+  api_key_configured: boolean;
+  tailnet?: string;
+  node_tag?: string;
+  sandbox_tag?: string;
+  default_sandboxes: boolean;
+  host?: TailscaleHostStatus;
+  worker_control_plane_url?: string;
+  recommended_policy?: string;
+  sandboxes?: TailscaleSandboxRecord[];
+  services?: TailscaleServiceRecord[];
+}

@@ -13,6 +13,12 @@ named `myvm` owned by user `alice` is reachable at:
 ssh compute@myvm.alice.compute-lab.tailb1be99.ts.net
 ```
 
+> **Note:** the `compute-lab.tailb1be99.ts.net` example above is the current
+> lab config, but it is **not resolvable from tailnet clients**: MagicDNS owns
+> `*.ts.net` and answers it authoritatively. See the delegation section below
+> and `docs/tailscale.md`. A custom domain is required for the per-user
+> subdomain scheme.
+
 The base domain is **generic** — it works for any zone you can delegate (a
 custom/private zone via Tailscale split DNS, a domain at any DNS provider, or
 a LAN zone). It is not tied to Tailscale.

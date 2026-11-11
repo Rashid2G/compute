@@ -56,6 +56,8 @@ type Config struct {
 type TailscaleProvisioner interface {
 	Provision(ctx context.Context, vmID, vmIP, sshKeyPath string) (*tailscale.ProvisionResult, error)
 	Teardown(ctx context.Context, vmIP, sshKeyPath string)
+	PublishService(ctx context.Context, vmID, vmIP, sshKeyPath string, guestPort int) (*tailscale.ServiceResult, error)
+	UnpublishService(ctx context.Context, vmID, vmIP, sshKeyPath string, guestPort int) error
 }
 
 type Manager struct {
@@ -181,6 +183,43 @@ func (m *Manager) SetTailscaleProvisioner(p TailscaleProvisioner) {
 	m.mu.Lock()
 	m.tsProvisioner = p
 	m.mu.Unlock()
+}
+
+// PublishTailscaleService exposes one guest port as a Tailscale Service and
+// returns its MagicDNS URL. It is a no-op for sandboxes without tailnet
+// addressing or when the integration is not configured.
+func (m *Manager) PublishTailscaleService(ctx context.Context, vm *db.VM, guestPort int) (*tailscale.ServiceResult, error) {
+	if vm == nil || !vm.TailscaleEnabled {
+		return nil, nil
+	}
+	m.mu.RLock()
+	prov := m.tsProvisioner
+	m.mu.RUnlock()
+	if prov == nil {
+		return nil, nil
+	}
+	return prov.PublishService(ctx, vm.ID, vm.IPAddress, vm.SSHKeyPath, guestPort)
+}
+
+// UnpublishTailscaleService removes a previously published Service endpoint.
+// It is best-effort and never fails the caller's delete path.
+func (m *Manager) UnpublishTailscaleService(ctx context.Context, vmID string, guestPort int) {
+	if vmID == "" || guestPort <= 0 {
+		return
+	}
+	vm, err := m.GetVM(ctx, vmID)
+	if err != nil || vm == nil || !vm.TailscaleEnabled {
+		return
+	}
+	m.mu.RLock()
+	prov := m.tsProvisioner
+	m.mu.RUnlock()
+	if prov == nil {
+		return
+	}
+	if err := prov.UnpublishService(ctx, vm.ID, vm.IPAddress, vm.SSHKeyPath, guestPort); err != nil {
+		log.Printf("[vm-manager] %s: tailscale service cleanup failed: %v", vm.ID, err)
+	}
 }
 
 func (m *Manager) getVMLock(vmID string) *sync.RWMutex {

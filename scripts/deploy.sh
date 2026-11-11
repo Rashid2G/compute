@@ -179,6 +179,8 @@ if [ "${RESTART_ONLY}" = false ]; then
     if command -v rsync >/dev/null 2>&1; then
         rsync -avz --delete-after \
             --exclude='.git' \
+            --exclude='.env' \
+            --exclude='.env.*' \
             --exclude='node_modules' \
             --exclude='.cache' \
             --exclude='.env' \

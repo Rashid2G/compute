@@ -58,12 +58,13 @@
     "host_addresses": ["100.78.129.96", "192.168.1.70"]
   },
   "tailscale": {
-    "enabled": false,
+    "enabled": true,
     "api_key": "",
     "tailnet": "-",
-    "node_tag": "tag:compute:master",
-    "sandbox_tag": "tag:compute:sandbox",
+    "node_tag": "tag:compute-master",
+    "sandbox_tag": "tag:compute-sandbox",
     "hostname_prefix": "compute",
-    "default_sandboxes": false
+    "auto_install_guest": true,
+    "default_sandboxes": true
   }
 }

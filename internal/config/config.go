@@ -192,7 +192,7 @@ type ImagesConfig struct {
 // TailscaleConfig controls the tailnet integration on the control-plane host.
 // When enabled, the daemon can assign tailnet addresses to sandboxes and
 // report its own MagicDNS identity. Every device Compute joins is tagged
-// (tag:compute:*) and named with the "compute-" prefix; the operator's
+// (tag:compute-*) and named with the "compute-" prefix; the operator's
 // existing devices, routes and policy file are never modified.
 type TailscaleConfig struct {
 	// Enabled turns the integration on.
@@ -222,7 +222,7 @@ type TailscaleConfig struct {
 // ResolvedSandboxTag returns the sandbox tag with the Compute default applied.
 func (c TailscaleConfig) ResolvedSandboxTag() string {
 	if c.SandboxTag != "" {
-		return c.SandboxTag
+		return tailscale.NormalizeTag(c.SandboxTag)
 	}
 	return tailscale.TagSandbox
 }
@@ -230,7 +230,7 @@ func (c TailscaleConfig) ResolvedSandboxTag() string {
 // ResolvedNodeTag returns the control-plane tag with the Compute default applied.
 func (c TailscaleConfig) ResolvedNodeTag() string {
 	if c.NodeTag != "" {
-		return c.NodeTag
+		return tailscale.NormalizeTag(c.NodeTag)
 	}
 	return tailscale.TagMaster
 }

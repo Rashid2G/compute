@@ -34,6 +34,12 @@ services:
     environment:
       - COMPUTE_DATA_DIR=/var/lib/compute
       - COMPUTE_DAEMON=0.0.0.0:18080
+      # Tailscale integration. The API key is supplied by the untracked
+      # ${COMPUTE_DIR:-.}/.env file (see scripts/deploy.sh, which excludes it
+      # from --delete-after syncs). Never commit the key to daemon.json.
+      - COMPUTE_TAILSCALE_ENABLED=${COMPUTE_TAILSCALE_ENABLED:-true}
+      - COMPUTE_TAILSCALE_API_KEY=${COMPUTE_TAILSCALE_API_KEY:-}
+      - COMPUTE_TAILSCALE_TAILNET=${COMPUTE_TAILSCALE_TAILNET:--}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:18080/api/v1/health"]
       interval: 5s

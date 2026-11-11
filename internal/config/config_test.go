@@ -267,8 +267,14 @@ func TestTailscaleConfigParsing(t *testing.T) {
 	if cfg.Tailscale.AutoInstallResolved() {
 		t.Error("expected auto_install_guest=false honored")
 	}
-	if cfg.Tailscale.ResolvedSandboxTag() != "tag:compute:sandbox" {
-		t.Errorf("sandbox tag = %q", cfg.Tailscale.ResolvedSandboxTag())
+	if cfg.Tailscale.ResolvedSandboxTag() != "tag:compute-sandbox" {
+		t.Errorf("sandbox tag = %q, want tag:compute-sandbox", cfg.Tailscale.ResolvedSandboxTag())
+	}
+
+	// Legacy colons should be normalized
+	legacyCfg := TailscaleConfig{SandboxTag: "tag:compute:custom"}
+	if legacyCfg.ResolvedSandboxTag() != "tag:compute-custom" {
+		t.Errorf("legacy sandbox tag = %q, want tag:compute-custom", legacyCfg.ResolvedSandboxTag())
 	}
 }
 
