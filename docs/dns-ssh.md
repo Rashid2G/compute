@@ -74,7 +74,8 @@ Notes:
 ## Making the zone reachable
 
 The zone needs to be *delegated* to the daemon so clients resolve the names.
-Pick whichever matches how the daemon is served:
+Pick whichever matches how the daemon is served (see `docs/domain-options.md`
+for a tested comparison of zone choices):
 
 - **Tailscale (custom zone)**: in the
   [admin console](https://login.tailscale.com/admin/dns) add a *custom
