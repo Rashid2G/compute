@@ -67,6 +67,10 @@ func main() {
 		handleSandboxSSH(context.Background(), client, os.Args[2:])
 		return
 
+	case "url":
+		handleSandboxURL(ctx, client, os.Args[2:])
+		return
+
 	case "auth":
 		handleAuthCommand(ctx, client, os.Args[2:])
 		return
@@ -183,6 +187,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Tools & Utilities:")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
+	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
 	fmt.Fprintln(w, "  version, -v        Display version, build, and release information (--client, --short, --json)")
 	fmt.Fprintln(w, "  gui, web, ui       Launch the Web UI dashboard (--port, --addr, --daemon)")
 	fmt.Fprintln(w, "  completion         Generate shell autocompletion script (bash, zsh, fish)")
@@ -211,17 +216,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Println("No sandboxes found. Create one with: compute sandbox create --name <name>")
 			return
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tVCPUS\tMEM(MB)\tIP ADDRESS\tPROTECTED")
-		for _, v := range vms {
-			prot := "no"
-			if v.Protected {
-				prot = "yes"
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-				v.ID, v.Name, v.Status, v.VCPUs, v.MemoryMB, v.IPAddress, prot)
-		}
-		w.Flush()
+		writeSandboxList(os.Stdout, vms)
 		return
 	}
 
@@ -434,9 +429,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 
 	case "info", "inspect", "show":
 		if len(subArgs) < 1 {
-			printCommandError("missing required sandbox name or ID.", "Usage: compute sandbox info <name|id>", "sandbox")
+			printCommandError("missing required sandbox name or ID.", "Usage: compute sandbox info <name|id|hostname>", "sandbox")
 		}
-		v, err := client.GetVM(ctx, subArgs[0])
+		v, err := resolveSandboxReference(ctx, client, subArgs[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error inspecting sandbox: %v\n", err)
 			os.Exit(1)
@@ -452,14 +447,17 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		}
 		if v.TailnetIP != "" {
 			fmt.Printf("  Tailnet IP:    %s\n", v.TailnetIP)
-			if v.TailnetDNS != "" {
-				fmt.Printf("  Tailnet DNS:   %s\n", v.TailnetDNS)
-			}
 		} else if v.TailscaleEnabled {
 			fmt.Printf("  Tailnet:       provisioning in progress\n")
 		}
+		for _, line := range sandboxAccessLines(sandboxAccessForVM(v, "compute", 0)) {
+			fmt.Println(line)
+		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
+
+	case "url":
+		handleSandboxURL(ctx, client, subArgs)
 
 	case "protect":
 		if len(subArgs) < 1 {
@@ -491,7 +489,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 }
 
 func printSSHUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: compute [sandbox] ssh [options] [user@]<name|id> [-- <cmd...> ]\n\n")
+	fmt.Fprintf(os.Stderr, "Usage: compute [sandbox] ssh [options] [user@]<name|id|hostname> [-- <cmd...> ]\n\n")
 	fmt.Fprintf(os.Stderr, "Connect to sandbox SSH via WebSocket connection through the daemon.\n\n")
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	fmt.Fprintf(os.Stderr, "  -u, --user <username>       SSH user (default: compute)\n")
@@ -503,7 +501,7 @@ func printSSHUsage() {
 
 func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) {
 	if len(args) < 1 {
-		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id> [-- <cmd...> ]", "ssh")
+		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id|hostname> [-- <cmd...> ]", "ssh")
 	}
 
 	var user string
@@ -573,7 +571,7 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 	}
 
 	if target == "" {
-		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id> [-- <cmd...> ]", "ssh")
+		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id|hostname> [-- <cmd...> ]", "ssh")
 	}
 
 	vmID := target
@@ -589,7 +587,7 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 	}
 
 	quickCtx, quickCancel := context.WithTimeout(ctx, 10*time.Second)
-	v, err := client.GetVM(quickCtx, vmID)
+	v, err := resolveSandboxReference(quickCtx, client, vmID)
 	quickCancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting sandbox %s: %v\n", vmID, err)
