@@ -194,6 +194,24 @@ func (c *DaemonClient) DeleteVM(ctx context.Context, id string) error {
 	return c.doRequest(ctx, http.MethodDelete, "/api/v1/vms/"+id, nil, nil)
 }
 
+func (c *DaemonClient) UpdateVMConfig(ctx context.Context, id string, req vm.UpdateVMConfigRequest) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPatch, "/api/v1/vms/"+id, req, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) ProtectVM(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/protect", nil, &vm)
+	return &vm, err
+}
+
+func (c *DaemonClient) UnprotectVM(ctx context.Context, id string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/unprotect", nil, &vm)
+	return &vm, err
+}
+
 func (c *DaemonClient) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, error) {
 	var info network.NetworkInfo
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network", nil, &info)

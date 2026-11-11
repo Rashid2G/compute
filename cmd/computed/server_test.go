@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/coder/websocket"
+	"io"
 	"net/http"
 	"net/http/httptest"
+
+	"github.com/coder/websocket"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,6 +254,91 @@ func TestVMEndpoints(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("delete status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
+}
+
+func TestServer_DeletionProtectionEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	client := server.Client()
+
+	request := func(method, path string, body interface{}) (*http.Response, error) {
+		var r io.Reader
+		if body != nil {
+			data, err := json.Marshal(body)
+			if err != nil {
+				return nil, err
+			}
+			r = bytes.NewReader(data)
+		}
+		req, err := http.NewRequest(method, server.URL+path, r)
+		if err != nil {
+			return nil, err
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return client.Do(req)
+	}
+
+	prot := true
+	createReq := vm.CreateRequest{Name: "api-prot", VCPUs: 1, MemoryMB: 512, Protected: &prot}
+	resp, err := request(http.MethodPost, "/api/v1/vms", createReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	var created db.VM
+	_ = json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	if !created.Protected {
+		t.Fatalf("expected created VM to be protected")
+	}
+
+	// DELETE should be rejected with 400 Bad Request
+	resp, err = request(http.MethodDelete, "/api/v1/vms/"+created.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("delete protected status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+	resp.Body.Close()
+
+	// POST /protect should be idempotent
+	resp, err = request(http.MethodPost, "/api/v1/vms/"+created.ID+"/protect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("protect status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// POST /unprotect should unprotect
+	resp, err = request(http.MethodPost, "/api/v1/vms/"+created.ID+"/unprotect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unprotect status = %d", resp.StatusCode)
+	}
+	var unprotVM db.VM
+	_ = json.NewDecoder(resp.Body).Decode(&unprotVM)
+	resp.Body.Close()
+	if unprotVM.Protected {
+		t.Fatalf("expected unprotect to set Protected = false")
+	}
+
+	// DELETE should now succeed
+	resp, err = request(http.MethodDelete, "/api/v1/vms/"+created.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete unprotected status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	resp.Body.Close()
 }
 
 func TestNetworkEndpoints(t *testing.T) {
