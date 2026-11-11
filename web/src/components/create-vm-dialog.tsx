@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ChevronDown, Play, Shield, X } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Globe, Play, Shield, X } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import type {
@@ -58,6 +58,7 @@ export function CreateVMDialog({
   const [fromSource, setFromSource] = useState('fresh');
   const [setupScript, setSetupScript] = useState('');
   const [protectedVM, setProtectedVM] = useState(false);
+  const [tailscaleVM, setTailscaleVM] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -128,6 +129,7 @@ export function CreateVMDialog({
           disk_mb: calculatedDiskMb,
           public_ip_enabled: true,
           protected: protectedVM,
+          tailscale: tailscaleVM,
         };
 
         if (fromSource.startsWith('tpl:')) {
@@ -390,6 +392,23 @@ export function CreateVMDialog({
             >
               <Shield className="h-3.5 w-3.5 text-[#5e7ff5]" />
               <span>Enable deletion protection</span>
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2 pb-1">
+            <input
+              id="enable-tailscale"
+              type="checkbox"
+              checked={tailscaleVM}
+              onChange={(e) => setTailscaleVM(e.target.checked)}
+              className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+            />
+            <label
+              htmlFor="enable-tailscale"
+              className="text-[12px] text-foreground cursor-pointer select-none flex items-center gap-1.5"
+            >
+              <Globe className="h-3.5 w-3.5 text-[#5e7ff5]" />
+              <span>Join tailnet (reachable at a 100.x IP from any machine in your tailnet)</span>
             </label>
           </div>
 

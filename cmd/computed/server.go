@@ -576,6 +576,9 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
 	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
+	s.mux.HandleFunc("/api/v1/tailscale/status", s.wrapAuth(s.handleTailscaleStatus))
+	s.mux.HandleFunc("/api/v1/tailscale/policy", s.wrapAuth(s.handleTailscalePolicy))
+	s.mux.HandleFunc("/api/v1/tailscale/cleanup", s.wrapAuth(s.handleTailscaleCleanup))
 	s.mux.HandleFunc("/api/v1/network", s.wrapAuth(s.handleNetworkInfo))
 	s.mux.HandleFunc("/api/v1/network/allocations", s.wrapAuth(s.handleNetworkAllocations))
 	s.mux.HandleFunc("/api/v1/network/inspect/", s.wrapAuth(s.handleNetworkInspect))
@@ -2838,7 +2841,7 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 			Arch:             hello.Architecture,
 			AgentVersion:     hello.AgentVersion,
 			FCVersion:        s.fcVersion,
-			UnderlayIP:       "127.0.0.1",
+			UnderlayIP:       workerUnderlayIP(hello.Capabilities),
 			CapabilitiesJSON: string(capJSON),
 			LastHeartbeat:    &now,
 			CreatedAt:        now,
@@ -2969,6 +2972,7 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 		fallbackVCPUs, fallbackMemMB, fallbackDiskMB = getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
 	}
 	for _, n := range nodes {
+		var capTailscaleIP string
 		if n.TotalVCPUs == 0 && n.CapabilitiesJSON != "" {
 			var cap struct {
 				VCPUs        int    `json:"vcpus"`
@@ -2976,6 +2980,7 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				MemoryMB     int    `json:"memory_mb"`
 				DiskMB       int    `json:"disk_mb"`
 				Architecture string `json:"architecture"`
+				TailscaleIP  string `json:"tailscale_ip"`
 			}
 			if err := json.Unmarshal([]byte(n.CapabilitiesJSON), &cap); err == nil {
 				if cap.VCPUs > 0 {
@@ -2992,6 +2997,7 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				if n.Arch == "" && cap.Architecture != "" {
 					n.Arch = cap.Architecture
 				}
+				capTailscaleIP = cap.TailscaleIP
 			}
 		}
 		if n.TotalVCPUs == 0 && fallbackVCPUs > 0 {
@@ -3013,7 +3019,13 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 			n.FCVersion = s.fcVersion
 		}
 		if n.UnderlayIP == "" {
-			n.UnderlayIP = "127.0.0.1"
+			// Prefer the node's real tailnet address from its capabilities
+			// before falling back to loopback.
+			if capTailscaleIP != "" {
+				n.UnderlayIP = capTailscaleIP
+			} else {
+				n.UnderlayIP = "127.0.0.1"
+			}
 		}
 	}
 }
