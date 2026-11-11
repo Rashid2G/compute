@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Rashid2G/on-demand-vms/internal/db"
 )
@@ -151,7 +152,9 @@ type Manager struct {
 	runner           Runner
 	store            AllocationStore
 	isolationConfigs map[string]IsolationConfig
-	mu               sync.Mutex
+	mu               sync.RWMutex
+	inFlightIPs      map[string]bool
+	inFlightMu       sync.Mutex
 }
 
 // NewManager creates a network manager instance
@@ -185,6 +188,7 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 		ipam:             ipam,
 		runner:           runner,
 		isolationConfigs: make(map[string]IsolationConfig),
+		inFlightIPs:      make(map[string]bool),
 	}, nil
 }
 
@@ -197,8 +201,8 @@ func (m *Manager) SetStore(store AllocationStore) {
 
 // GetConfig returns the active configuration
 func (m *Manager) GetConfig() Config {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.cfg
 }
 
@@ -222,7 +226,7 @@ func (m *Manager) EnsureNetwork(ctx context.Context) error {
 
 	// 2. Assign IP to bridge if not already assigned
 	if m.cfg.BridgeIP != "" {
-		gwIP := m.GetGatewayIP()
+		gwIP := m.getGatewayIPLocked()
 		addrOut, _ := m.runner.Run(ctx, "ip", "-o", "-4", "addr", "show", "dev", m.cfg.BridgeName)
 		if !strings.Contains(string(addrOut), gwIP) {
 			_, _ = m.runner.Run(ctx, "ip", "addr", "add", m.cfg.BridgeIP, "dev", m.cfg.BridgeName)
@@ -872,10 +876,12 @@ func (m *Manager) IsIPInUse(ctx context.Context, ipStr string, allowedMAC string
 
 	// 4. Active probing via busybox arping, arping, or ping
 	nic := m.getDHCPInterface(ctx)
+	probeCtx, probeCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer probeCancel()
 	if nic != "" {
-		out, err := m.runner.Run(ctx, "busybox", "arping", "-c", "1", "-w", "1", "-I", nic, ipStr)
+		out, err := m.runner.Run(probeCtx, "busybox", "arping", "-c", "1", "-w", "1", "-I", nic, ipStr)
 		if err != nil {
-			out, err = m.runner.Run(ctx, "arping", "-c", "1", "-w", "1", "-I", nic, ipStr)
+			out, err = m.runner.Run(probeCtx, "arping", "-c", "1", "-w", "1", "-I", nic, ipStr)
 		}
 		if err == nil {
 			outStr := string(out)
@@ -883,10 +889,11 @@ func (m *Manager) IsIPInUse(ctx context.Context, ipStr string, allowedMAC string
 				return true
 			}
 		}
+		return false
 	}
 
-	// Fallback to ping
-	out, err := m.runner.Run(ctx, "ping", "-c", "1", "-W", "1", ipStr)
+	// Fallback to ping only if no physical/bridged NIC was present
+	out, err := m.runner.Run(probeCtx, "ping", "-c", "1", "-W", "1", ipStr)
 	if err == nil && strings.Contains(string(out), "1 received") {
 		return true
 	}
@@ -1017,13 +1024,17 @@ func (m *Manager) PruneOrphanTAPs(ctx context.Context, activeTAPs map[string]boo
 
 // AllocateIP delegates to IPAM with comprehensive conflict detection against host IPs, neighbor devices, and active network devices
 func (m *Manager) AllocateIP(usedIPs map[string]bool) (string, string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	mergedUsed := make(map[string]bool)
 	for k, v := range usedIPs {
 		mergedUsed[k] = v
 	}
+
+	// Also mark currently in-flight allocated IPs as used so concurrent requests do not collide
+	m.inFlightMu.Lock()
+	for ip := range m.inFlightIPs {
+		mergedUsed[ip] = true
+	}
+	m.inFlightMu.Unlock()
 
 	// Mark host IPs as used
 	for hIP := range m.GetHostIPs() {
@@ -1047,16 +1058,42 @@ func (m *Manager) AllocateIP(usedIPs map[string]bool) (string, string, error) {
 			return "", "", err
 		}
 
-		// Double-check active reachability/conflict
+		// Optimistically reserve in-flight so parallel allocators immediately try another IP
+		m.inFlightMu.Lock()
+		if m.inFlightIPs[candidateIP] {
+			m.inFlightMu.Unlock()
+			mergedUsed[candidateIP] = true
+			continue
+		}
+		m.inFlightIPs[candidateIP] = true
+		m.inFlightMu.Unlock()
+
+		// Double-check active reachability/conflict without holding global manager lock
 		if m.IsIPInUse(context.Background(), candidateIP, mac) {
+			m.inFlightMu.Lock()
+			delete(m.inFlightIPs, candidateIP)
+			m.inFlightMu.Unlock()
+
 			mergedUsed[candidateIP] = true
 			continue
 		}
 
+		// Automatically release in-flight reservation after 30 seconds
+		// allowing DB persistence to record it in usedIPs permanently
+		go func(reservedIP string) {
+			time.Sleep(30 * time.Second)
+			m.inFlightMu.Lock()
+			delete(m.inFlightIPs, reservedIP)
+			m.inFlightMu.Unlock()
+		}(candidateIP)
+
 		return candidateIP, mac, nil
 	}
 
-	return "", "", fmt.Errorf("no available unconflicted IP addresses in subnet %s", m.cfg.SubnetCIDR)
+	m.mu.RLock()
+	sub := m.cfg.SubnetCIDR
+	m.mu.RUnlock()
+	return "", "", fmt.Errorf("no available unconflicted IP addresses in subnet %s", sub)
 }
 
 // ValidateIP validates if a user-supplied IP is valid and available
@@ -1073,8 +1110,7 @@ func (m *Manager) ValidateIP(ip string, usedIPs map[string]bool) error {
 	return nil
 }
 
-// GetGatewayIP returns the configured gateway IPv4 address, or extracts it from bridge IP
-func (m *Manager) GetGatewayIP() string {
+func (m *Manager) getGatewayIPLocked() string {
 	if m.cfg.GatewayIP != "" {
 		return m.cfg.GatewayIP
 	}
@@ -1085,6 +1121,13 @@ func (m *Manager) GetGatewayIP() string {
 	return ip.String()
 }
 
+// GetGatewayIP returns the configured gateway IPv4 address, or extracts it from bridge IP
+func (m *Manager) GetGatewayIP() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.getGatewayIPLocked()
+}
+
 // GetNetmask returns the netmask of the configured bridge/subnet
 func (m *Manager) GetNetmask() string {
 	return m.ipam.GetNetmask()
@@ -1092,29 +1135,30 @@ func (m *Manager) GetNetmask() string {
 
 // GetInfo returns a complete snapshot of current network topology and state
 func (m *Manager) GetInfo(ctx context.Context, allocatedCount int, activeTAPs []string) NetworkInfo {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	cfg := m.cfg
+	m.mu.RUnlock()
 
 	var bridgeActive bool
-	out, err := m.runner.Run(ctx, "ip", "link", "show", m.cfg.BridgeName)
+	out, err := m.runner.Run(ctx, "ip", "link", "show", cfg.BridgeName)
 	if err == nil && strings.Contains(string(out), "UP") {
 		bridgeActive = true
 	}
 
 	info := NetworkInfo{
-		Mode:           m.cfg.Mode,
-		BridgeName:     m.cfg.BridgeName,
-		BridgeIP:       m.cfg.BridgeIP,
-		SubnetCIDR:     m.cfg.SubnetCIDR,
+		Mode:           cfg.Mode,
+		BridgeName:     cfg.BridgeName,
+		BridgeIP:       cfg.BridgeIP,
+		SubnetCIDR:     cfg.SubnetCIDR,
 		GatewayIP:      m.GetGatewayIP(),
 		Netmask:        m.GetNetmask(),
-		PhysicalNIC:    m.cfg.PhysicalNIC,
+		PhysicalNIC:    cfg.PhysicalNIC,
 		BridgeActive:   bridgeActive,
-		NATEnabled:     m.cfg.Mode == ModeNAT,
-		WiredDedicated: m.cfg.Mode == ModeNIC || m.cfg.Mode == ModeWired,
+		NATEnabled:     cfg.Mode == ModeNAT,
+		WiredDedicated: cfg.Mode == ModeNIC || cfg.Mode == ModeWired,
 		ActiveTAPs:     activeTAPs,
 		AllocatedIPs:   allocatedCount,
-		LinkedBridges:  m.cfg.LinkedBridges,
+		LinkedBridges:  cfg.LinkedBridges,
 	}
 
 	return info

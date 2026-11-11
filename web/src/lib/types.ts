@@ -35,6 +35,7 @@ export interface VM {
   ssh_public_key?: string;
   pid?: number;
   socket_path?: string;
+  protected?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -74,7 +75,7 @@ export interface VMTier {
 }
 
 export interface CreateVMRequest {
-  name: string;
+  name?: string;
   tier?: string;
   vcpus: number;
   memory_mb?: number;
@@ -87,6 +88,7 @@ export interface CreateVMRequest {
   public_ip?: boolean;
   public_ip_enabled?: boolean;
   dedicated_ip?: boolean;
+  protected?: boolean;
   ssh_key_id?: string;
   ssh_public_key?: string;
 }

@@ -425,6 +425,8 @@ type CreateRequest struct {
 	SSHKeyID        string `json:"ssh_key_id,omitempty"`
 	SSHPublicKey    string `json:"ssh_public_key,omitempty"`
 
+	Protected       *bool  `json:"protected,omitempty"`
+
 	// AuthorizedOwnerIDs lists every owner whose templates, images, clone
 	// sources, and SSH keys the caller may use. It is populated by the control
 	// plane after authentication and is never decoded from request JSON.
@@ -440,6 +442,7 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 		RawPublicIP    interface{} `json:"public_ip,omitempty"`
 		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
 		RawDHCP        interface{} `json:"dhcp,omitempty"`
+		RawProtected   interface{} `json:"protected,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -480,6 +483,9 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 	}
 	if b := parseBool(aux.RawDHCP); b != nil {
 		r.DHCP = b
+	}
+	if b := parseBool(aux.RawProtected); b != nil {
+		r.Protected = b
 	}
 	return nil
 }
@@ -791,21 +797,27 @@ func (m *Manager) lookupVMForRequest(ctx context.Context, req *CreateRequest, id
 	return nil, nil
 }
 
+func (m *Manager) generateNickname(ctx context.Context, ownerID string) string {
+	// Pick from the 100 curated random nicknames, ensuring it does not collide for this owner
+	for i := 0; i < 50; i++ {
+		nick := RandomNickname()
+		if m.store != nil {
+			if existing, _ := m.store.GetVMByOwner(ctx, ownerID, nick); existing == nil {
+				return nick
+			}
+		} else {
+			return nick
+		}
+	}
+	uid := strings.ReplaceAll(uuid.New().String(), "-", "")
+	return fmt.Sprintf("%s-%s", RandomNickname(), uid[:4])
+}
+
 // CreateVM reserves networking, validates disk space and images, and registers a created VM
 func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, error) {
 	uid := uuid.New().String()
 	cleanU := strings.ReplaceAll(uid, "-", "")
 	internalID := fmt.Sprintf("ins_%s", cleanU[:16])
-
-	var externalID, name string
-	if strings.TrimSpace(req.Name) != "" {
-		name = strings.TrimSpace(req.Name)
-		externalID = name
-	} else {
-		shortID := cleanU[:8]
-		externalID = fmt.Sprintf("vm-%s", shortID)
-		name = externalID
-	}
 
 	ownerID := req.OwnerID
 	if ownerID == "" {
@@ -818,9 +830,17 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		imageLookupOwner = "default"
 	}
 
-	existing, _ := m.store.GetVMByOwner(ctx, ownerID, name)
-	if existing != nil {
-		return nil, fmt.Errorf("a VM named %q already exists for owner %q", name, ownerID)
+	var externalID, name string
+	if strings.TrimSpace(req.Name) != "" {
+		name = strings.TrimSpace(req.Name)
+		externalID = name
+		existing, _ := m.store.GetVMByOwner(ctx, ownerID, name)
+		if existing != nil {
+			return nil, fmt.Errorf("a VM named %q already exists for owner %q", name, ownerID)
+		}
+	} else {
+		name = m.generateNickname(ctx, ownerID)
+		externalID = name
 	}
 
 	// Check if launching from a saved template. The template must belong to one
@@ -1149,12 +1169,18 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		publicIP = ip // Dedicated IP on main network is considered as the public IP
 	}
 
+	protected := false
+	if req.Protected != nil {
+		protected = *req.Protected
+	}
+
 	vm := &db.VM{
 		ID:              externalID,
 		InternalID:      internalID,
 		OwnerID:         ownerID,
 		Name:            name,
 		Status:          db.StatusCreated,
+		Protected:       protected,
 		VCPUs:           vcpus,
 		MemoryMB:        memoryMB,
 		DiskMB:          diskMB,
@@ -1189,11 +1215,15 @@ func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest
 	defer srcLock.RUnlock()
 
 	req.CloneFrom = srcVMID
+	srcVM, _ := m.getVMUnsafe(ctx, srcVMID)
 	if req.PublicIP == nil && req.PublicIPEnabled == nil && req.DedicatedIP == nil {
-		if srcVM, _ := m.getVMUnsafe(ctx, srcVMID); srcVM != nil {
+		if srcVM != nil {
 			req.PublicIP = &srcVM.PublicIPEnabled
 			req.PublicIPEnabled = &srcVM.PublicIPEnabled
 		}
+	}
+	if req.Protected == nil && srcVM != nil {
+		req.Protected = &srcVM.Protected
 	}
 	return m.CreateVM(ctx, req)
 }
@@ -1232,6 +1262,9 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 
 	m.dequeue(vm.ID)
 	vm.Status = db.StatusRunning
+	if vm.PID > 0 {
+		go m.watchProcessExit(vm.ID, vm.PID, nil)
+	}
 	return m.saveVMRecord(ctx, vm)
 }
 
@@ -1411,6 +1444,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 				if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 					go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 				}
+				go m.watchProcessExit(vm.ID, vm.PID, cmd)
 				return nil
 			}
 
@@ -1512,6 +1546,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 		go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 	}
+	go m.watchProcessExit(vm.ID, vm.PID, cmd)
 	return nil
 }
 
@@ -2002,6 +2037,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	vm.SocketPath = sockPath
 	vm.DesiredRunning = true
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
+	go m.watchProcessExit(vm.ID, vm.PID, cmd)
 	return m.saveVMRecord(ctx, vm)
 }
 
@@ -2137,6 +2173,9 @@ func (m *Manager) DeleteVMForOwner(ctx context.Context, ownerID, vmID string) er
 	if vm == nil || vm.OwnerID != ownerID {
 		return fmt.Errorf("vm %s not found", vmID)
 	}
+	if vm.Protected {
+		return fmt.Errorf("item %s is protected against deletion", vmID)
+	}
 	key := vm.InternalID
 	if key == "" {
 		key = vm.ID
@@ -2150,6 +2189,10 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 	vmLock.Lock()
 
 	vm, _ := m.getVMUnsafe(ctx, vmID)
+	if vm != nil && vm.Protected {
+		vmLock.Unlock()
+		return fmt.Errorf("item %s is protected against deletion", vmID)
+	}
 	if vm != nil {
 		_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
 	}
@@ -2277,7 +2320,7 @@ func (m *Manager) StartDesiredVMs(ctx context.Context) {
 		if !vm.DesiredRunning {
 			continue
 		}
-		if vm.Status == db.StatusRunning {
+		if vm.Status == db.StatusRunning && m.isAlive(vm.PID) {
 			continue
 		}
 		var startErr error
@@ -2389,6 +2432,7 @@ type UpdateVMConfigRequest struct {
 	PublicIP        *bool `json:"public_ip,omitempty"`
 	PublicIPEnabled *bool `json:"public_ip_enabled,omitempty"`
 	DedicatedIP     *bool `json:"dedicated_ip,omitempty"`
+	Protected       *bool `json:"protected,omitempty"`
 }
 
 func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
@@ -2396,6 +2440,7 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 	aux := struct {
 		RawPublicIP    interface{} `json:"public_ip,omitempty"`
 		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
+		RawProtected   interface{} `json:"protected,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -2433,6 +2478,9 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 			r.PublicIP = b
 			r.PublicIPEnabled = b
 		}
+	}
+	if b := parseBool(aux.RawProtected); b != nil {
+		r.Protected = b
 	}
 	return nil
 }
@@ -2472,6 +2520,15 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 		if vm.Status == db.StatusRunning {
 			_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
 		}
+	}
+
+	if req.Protected != nil {
+		vm.Protected = *req.Protected
+		changed = true
+	}
+
+	if changed {
+		vm.UpdatedAt = time.Now().UTC()
 		if err := m.saveVMRecord(ctx, vm); err != nil {
 			return nil, fmt.Errorf("failed to save vm config: %w", err)
 		}
@@ -2975,10 +3032,12 @@ func (m *Manager) GetStats(ctx context.Context) (*StatsResult, error) {
 	return stats, nil
 }
 
-// GetVM retrieves VM details from in-memory registry or underlying store
+// GetVM retrieves VM details from in-memory registry or underlying store and reconciles liveness
 func (m *Manager) GetVM(ctx context.Context, vmID string) (*db.VM, error) {
+	var v *db.VM
+	var err error
 	if m.store != nil {
-		v, err := m.store.GetVM(ctx, vmID)
+		v, err = m.store.GetVM(ctx, vmID)
 		if err == nil && v != nil {
 			m.mu.Lock()
 			m.vms[v.ID] = v
@@ -2990,20 +3049,105 @@ func (m *Manager) GetVM(ctx context.Context, vmID string) (*db.VM, error) {
 			}
 			m.mu.Unlock()
 		}
-		return v, err
+	} else {
+		m.mu.RLock()
+		if cached, ok := m.vms[vmID]; ok && cached != nil {
+			v = cached
+		}
+		m.mu.RUnlock()
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if v, ok := m.vms[vmID]; ok && v != nil {
-		return v, nil
+	if v != nil && v.Status == db.StatusRunning && v.PID > 0 && !m.isAlive(v.PID) {
+		m.handleProcessExit(v.ID, v.PID)
+		// Reload updated state
+		if m.store != nil {
+			v, err = m.store.GetVM(ctx, vmID)
+		}
 	}
-	return nil, nil
+
+	return v, err
 }
 
-// ListVMs lists all VMs
+// ListVMs lists all VMs and reconciles running status against process liveness
 func (m *Manager) ListVMs(ctx context.Context) ([]*db.VM, error) {
-	return m.store.ListVMs(ctx)
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range vms {
+		if v.Status == db.StatusRunning && v.PID > 0 && !m.isAlive(v.PID) {
+			m.handleProcessExit(v.ID, v.PID)
+			v.Status = db.StatusStopped
+			v.PID = 0
+		}
+	}
+	return vms, nil
+}
+
+// watchProcessExit waits for a microVM process to terminate and reconciles state immediately
+func (m *Manager) watchProcessExit(vmID string, pid int, cmd *exec.Cmd) {
+	go func() {
+		if cmd != nil {
+			_ = cmd.Wait()
+		} else if pid > 0 {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for range ticker.C {
+				if !m.isAlive(pid) {
+					break
+				}
+			}
+		}
+		m.handleProcessExit(vmID, pid)
+	}()
+}
+
+// handleProcessExit handles a dead VM process by transitioning state to db.StatusStopped,
+// cleaning runtime network artifacts, and triggering queue processing.
+func (m *Manager) handleProcessExit(vmID string, pid int) {
+	vmLock := m.getVMLock(vmID)
+	vmLock.Lock()
+	defer vmLock.Unlock()
+
+	ctx := context.Background()
+	vm, err := m.getVMUnsafe(ctx, vmID)
+	if err != nil || vm == nil {
+		return
+	}
+
+	if vm.Status == db.StatusRunning && ((pid > 0 && vm.PID == pid) || (vm.PID > 0 && !m.isAlive(vm.PID))) {
+		log.Printf("[vm-manager] VM %s (pid %d) exited, marking stopped", vmID, vm.PID)
+		vm.Status = db.StatusStopped
+		vm.PID = 0
+		vm.UpdatedAt = time.Now().UTC()
+		_ = m.saveVMRecord(ctx, vm)
+		if vm.TAPDevice != "" {
+			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
+		}
+		if vm.PublicIPEnabled && vm.IPAddress != "" {
+			_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
+		}
+		go m.processQueue(context.Background())
+	}
+}
+
+// StartStatusMonitor starts a periodic ticker reconciling VM statuses against process liveness
+func (m *Manager) StartStatusMonitor(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_, _ = m.ReconcileAndPrune(context.Background())
+			}
+		}
+	}()
 }
 
 // sanitizeFirecrackerID returns an instance ID accepted by Firecracker

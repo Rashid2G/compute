@@ -276,15 +276,15 @@ export default function App() {
 
   async function bulkDeleteVMs(ids: string[]) {
     const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
-    let deletedCount = 0;
     try {
-      for (const id of ids) {
-        await api.deleteVM(id);
-        deletedCount++;
-        if (consoleVMID === id) setConsoleVMID(null);
-        if (inspectTarget?.id === id) setInspectTarget(null);
-      }
-      toast.success(`Deleted ${deletedCount} sandbox(es)`, {
+      await Promise.all(
+        ids.map(async (id) => {
+          await api.deleteVM(id);
+          if (consoleVMID === id) setConsoleVMID(null);
+          if (inspectTarget?.id === id) setInspectTarget(null);
+        })
+      );
+      toast.success(`Deleted ${ids.length} sandbox(es)`, {
         id: toastID,
         description: 'Processes, network leases, and overlay disks removed.',
       });
@@ -302,10 +302,8 @@ export default function App() {
   const openNew = useCallback(() => setCreateOpen(true), []);
 
   const quickCreate = useCallback(() => {
-    const name = `sbx-default-${Math.random().toString(36).slice(2, 6)}`;
     void createVM(
       {
-        name,
         vcpus: cluster.config?.defaults?.vcpus || 2,
         memory_mb: cluster.config?.defaults?.memory_mb || 2048,
         public_ip_enabled: true,
@@ -350,6 +348,7 @@ export default function App() {
             onBulkDelete={bulkDeleteVMs}
             onInspect={setInspectTarget}
             onConsole={openConsole}
+            onRefresh={() => void cluster.refresh(true)}
           />
         );
       case 'workers':

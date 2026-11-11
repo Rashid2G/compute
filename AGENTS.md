@@ -63,9 +63,31 @@ The alias must be configured in `~/.ssh/config` and a non-interactive SSH key mu
 
 Deployment restarts live services and affects shared infrastructure. Deploy only when the user explicitly requests deployment or the active task/operating instructions require it. Confirm the correct target from current repository guidance; after deployment verify service health and report any failure. Never infer that a local test VM is safe to modify if it contains user workloads.
 
+## Branch, worktree, and release workflow
+
+- Agents must interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
+- `main` is production and is maintained separately from agent work. Changes may reach it only through a maintainer-approved promotion from `dev`.
+- `dev` is the sole integration branch. All agent work targets `dev`.
+- Work happens in git worktrees checked out from `dev`:
+  - `git fetch origin && git worktree add ../on-demand-vms-<topic> -b <type>/<topic> origin/dev`
+  - prefixes: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`
+  - clean up with `git worktree remove` after merge.
+- Push branch and open PR against `dev`: `git push -u origin <branch>` then `gh pr create --base dev`.
+- Promoting `dev` -> `main` is maintainer-only and requires explicit user approval.
+- Never force-push or rewrite published history on `main`/`dev`.
+- See skill `dev-workflow` for full details and `deployment` for lab deploy steps.
+
+## Issue-driven tracking
+
+- Persist any out-of-scope problem, deferred work, or follow-up as a GitHub issue so it can be resumed later; see skill `github-issues`.
+- Reference issues from branches (`fix/<n>-<slug>`) and PR bodies (`Closes #n` when fully resolved, else `Refs #n`).
+- If a PR only partially satisfies an issue, leave a progress comment on the issue and keep it open; see skill `using-skills`.
+- Record reproduction steps, environment, affected paths, and testable acceptance criteria; redact secrets.
+- Do not close an issue without a linked commit/PR or a written reason.
+
 ## Change completion and Git
 
-Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
+Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. End the work with concrete evidence for the result: summarize the checks or observations that support the completion claim, and include screenshots when they are useful or needed to demonstrate visual behavior. Capture screenshots only when relevant, and keep them out of commits unless requested. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
 
 ## Agent delegation and issues
 
@@ -73,4 +95,4 @@ Work independently unless the user or repository task explicitly requests delega
 
 ## Skills
 
-Use installed skills when their stated scope applies. The installed general skills do not currently provide a dedicated Compute repository workflow, so use the repository guidance in this file for codebase-specific architecture, testing, and deployment. Do not modify unrelated global skills. If a reusable project-specific workflow is needed, add it under `.agents/skills/<name>/SKILL.md` and document its trigger and limits; keep `AGENTS.md` as the authoritative entry point. Revisit this section when project skills are added.
+Use installed skills when their stated scope applies. Load them with the `skill` tool at task start; see the `using-skills` skill for discovery, precedence, and how to apply them. Repository skills live in `.agents/skills/<name>/SKILL.md`. Do not modify unrelated global skills. When operational or environmental facts change (e.g. build locations, host IPs, ports, tooling flags), update the relevant skill in-place per `system-context-learning` so subsequent agents inherit ground truth. Strictly adhere to boundaries: factual/operational changes may be updated autonomously as context-only; any change that alters development workflows, safety guardrails, branching policies, or test requirements must be approved by the user first. If a reusable project-specific workflow is needed, add it under `.agents/skills/<name>/SKILL.md` and document its trigger and limits; keep `AGENTS.md` as the authoritative entry point.

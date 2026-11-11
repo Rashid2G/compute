@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Camera,
@@ -9,11 +9,13 @@ import {
   FolderOpen,
   HardDrive,
   HelpCircle,
+  MoreHorizontal,
   Play,
   RefreshCw,
   RotateCcw,
   Search,
   Server,
+  Shield,
   Square,
   Terminal,
   Trash2,
@@ -21,7 +23,25 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { BulkDeleteVMDialog } from '@/components/bulk-delete-vm-dialog';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
 import {
   formatMemory,
@@ -51,6 +71,7 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole: (vm: VM) => void;
+  onRefresh?: () => void;
 }
 
 type DeepDiveTab =
@@ -108,6 +129,7 @@ export function InstancesPage({
   onBulkDelete,
   onInspect,
   onConsole,
+  onRefresh,
 }: InstancesPageProps) {
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<string>('all');
@@ -115,8 +137,13 @@ export function InstancesPage({
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [unprotectOpen, setUnprotectOpen] = useState(false);
+  const [unprotectTargets, setUnprotectTargets] = useState<VM[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [splitMenuOpen, setSplitMenuOpen] = useState(false);
+  // Critical-action confirmation: list of VMs pending a stop confirmation.
+  const [stopConfirmTargets, setStopConfirmTargets] = useState<VM[] | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   const selectedVMs = useMemo(
     () => vms.filter((v) => selectedIds.includes(v.id)),
@@ -138,6 +165,7 @@ export function InstancesPage({
   // Real Filesystem state
   const [currentDir, setCurrentDir] = useState('/home/compute');
   const [files, setFiles] = useState<FileEntry[]>([]);
+  const [filesDir, setFilesDir] = useState('/home/compute');
   const [filesLoading, setFilesLoading] = useState(false);
 
   // Real Processes state
@@ -204,32 +232,122 @@ export function InstancesPage({
     setTimeout(() => setCopiedId(null), 1500);
   };
 
-  // Load tab-specific real telemetry when selectedVM or deepDiveTab changes
-  useEffect(() => {
-    if (!selectedVM) return;
-    if (deepDiveTab === 'files' && selectedVM.status === 'running') {
-      setFilesLoading(true);
-      api
-        .listVMFiles(selectedVM.id, currentDir)
-        .then((res) => setFiles(res || []))
-        .catch(() => setFiles([]))
-        .finally(() => setFilesLoading(false));
-    } else if (deepDiveTab === 'processes' && selectedVM.status === 'running') {
-      setProcessesLoading(true);
-      api
-        .listVMProcesses(selectedVM.id)
-        .then((res) => setProcesses(res || []))
-        .catch(() => setProcesses([]))
-        .finally(() => setProcessesLoading(false));
-    } else if (deepDiveTab === 'network') {
-      setNetInspectLoading(true);
-      api
-        .inspectNetwork(selectedVM.id)
-        .then((res) => setNetInspect(res))
-        .catch(() => setNetInspect(null))
-        .finally(() => setNetInspectLoading(false));
+  // Open the SSH terminal in a dedicated popup browser window. The window
+  // loads the standalone terminal route and connects straight to the daemon
+  // over its own WebSocket, independent of the main dashboard tab.
+  function openSSHTerminal(vm: VM) {
+    const base = `${window.location.origin}${window.location.pathname}`;
+    const url = `${base}#/terminal/${encodeURIComponent(vm.id)}`;
+    const width = Math.min(1100, Math.max(560, window.screen.width - 120));
+    const height = Math.min(760, Math.max(400, window.screen.height - 120));
+    const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+    const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+    window.open(
+      url,
+      `ssh-terminal-${vm.id}`,
+      `popup,width=${width},height=${height},left=${left},top=${top}`,
+    );
+  }
+
+  async function cloneOne(vm: VM) {
+    const toastID = toast.loading(`Cloning ${vm.name}…`);
+    try {
+      await api.cloneVM(vm.id, {
+        name: `${vm.name}-clone`,
+        vcpus: vm.vcpus,
+        memory_mb: vm.memory_mb,
+      });
+      toast.success(`Cloned ${vm.name}`, { id: toastID });
+    } catch (err) {
+      toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
     }
-  }, [selectedVM, deepDiveTab, currentDir]);
+  }
+
+  async function confirmStop() {
+    const targets = stopConfirmTargets ?? [];
+    if (targets.length === 0 || stopping) return;
+    setStopping(true);
+    try {
+      await Promise.all(targets.map((vm) => onStop(vm)));
+      setSelectedIds((prev) =>
+        prev.filter((id) => !targets.some((vm) => vm.id === id)),
+      );
+    } finally {
+      setStopping(false);
+      setStopConfirmTargets(null);
+    }
+  }
+
+  // Load tab-specific real telemetry when the selected sandbox or tab changes.
+  // Depend on stable primitives (vm id, status) rather than the selectedVM
+  // object: the sandbox list is polled every few seconds, which recreates the
+  // object identity and would otherwise re-trigger these fetches and flash the
+  // loading placeholder over already-rendered content.
+  const selectedVMKey = selectedVM?.id ?? null;
+  const selectedVMStatus = selectedVM?.status ?? null;
+
+  const fetchFiles = useCallback((vmId: string, dir: string) => {
+    setFilesLoading(true);
+    return api
+      .listVMFiles(vmId, dir)
+      .then((res) => {
+        setFiles(res || []);
+        setFilesDir(dir);
+      })
+      .catch(() => setFiles([]))
+      .finally(() => setFilesLoading(false));
+  }, []);
+
+  const fetchProcesses = useCallback((vmId: string) => {
+    setProcessesLoading(true);
+    return api
+      .listVMProcesses(vmId)
+      .then((res) => setProcesses(res || []))
+      .catch(() => setProcesses([]))
+      .finally(() => setProcessesLoading(false));
+  }, []);
+
+  const fetchNetInspect = useCallback((vmId: string) => {
+    setNetInspectLoading(true);
+    return api
+      .inspectNetwork(vmId)
+      .then((res) => setNetInspect(res))
+      .catch(() => setNetInspect(null))
+      .finally(() => setNetInspectLoading(false));
+  }, []);
+
+  const prevVMIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedVMKey || selectedVMStatus !== 'running') return;
+    // Switching to a different sandbox: drop data fetched for the previous
+    // sandbox so nothing from it renders under the new one.
+    if (prevVMIdRef.current !== selectedVMKey) {
+      prevVMIdRef.current = selectedVMKey;
+      setFiles([]);
+      setFilesDir(currentDir);
+      setProcesses([]);
+      setNetInspect(null);
+    }
+    if (deepDiveTab === 'files') {
+      // Navigating to a different directory: drop the stale listing so the
+      // old path's entries never render under the new path.
+      setFiles((prevFiles) => (filesDir === currentDir ? prevFiles : []));
+      void fetchFiles(selectedVMKey, currentDir);
+    } else if (deepDiveTab === 'processes') {
+      void fetchProcesses(selectedVMKey);
+    } else if (deepDiveTab === 'network') {
+      void fetchNetInspect(selectedVMKey);
+    }
+  }, [
+    selectedVMKey,
+    selectedVMStatus,
+    deepDiveTab,
+    currentDir,
+    fetchFiles,
+    fetchProcesses,
+    fetchNetInspect,
+  ]);
 
   async function handleRunExec() {
     if (!selectedVM || !execCommand.trim()) return;
@@ -251,32 +369,37 @@ export function InstancesPage({
   }
 
   async function handleBatchStart() {
-    for (const id of selectedIds) {
-      const vm = vms.find((v) => v.id === id);
-      if (vm && (vm.status === 'stopped' || vm.status === 'failed')) {
-        onRun(vm);
-      }
+    const toStart = selectedIds
+      .map((id) => vms.find((v) => v.id === id))
+      .filter((vm): vm is VM => !!vm && (vm.status === 'stopped' || vm.status === 'failed'));
+    if (toStart.length === 0) {
+      toast.info('None of the selected sandboxes can be started.');
+      return;
     }
+    await Promise.all(toStart.map((vm) => onRun(vm)));
     setSelectedIds([]);
   }
 
-  async function handleBatchStop() {
-    for (const id of selectedIds) {
-      const vm = vms.find((v) => v.id === id);
-      if (vm && vm.status === 'running') {
-        onStop(vm);
-      }
+  function requestBatchStop() {
+    const toStop = selectedIds
+      .map((id) => vms.find((v) => v.id === id))
+      .filter((vm): vm is VM => !!vm && vm.status === 'running');
+    if (toStop.length === 0) {
+      toast.info('None of the selected sandboxes are running.');
+      return;
     }
-    setSelectedIds([]);
+    setStopConfirmTargets(toStop);
   }
 
   async function handleBatchSnapshot() {
-    for (const id of selectedIds) {
-      const vm = vms.find((v) => v.id === id);
-      if (vm && vm.status === 'running') {
-        onSnapshot(vm);
-      }
+    const toSnap = selectedIds
+      .map((id) => vms.find((v) => v.id === id))
+      .filter((vm): vm is VM => !!vm && vm.status === 'running');
+    if (toSnap.length === 0) {
+      toast.info('Only running sandboxes can be snapshotted.');
+      return;
     }
+    await Promise.all(toSnap.map((vm) => onSnapshot(vm)));
     setSelectedIds([]);
   }
 
@@ -284,15 +407,17 @@ export function InstancesPage({
     if (selectedIds.length === 0) return;
     const toastID = toast.loading(`Cloning ${selectedIds.length} sandbox(es)…`);
     try {
-      for (const id of selectedIds) {
-        const source = vms.find((v) => v.id === id);
-        const cloneName = source ? `${source.name}-clone` : `sbx-clone-${id.slice(0, 6)}`;
-        await api.cloneVM(id, {
-          name: cloneName,
-          vcpus: source?.vcpus || 1,
-          memory_mb: source?.memory_mb,
-        });
-      }
+      await Promise.all(
+        selectedIds.map(async (id) => {
+          const source = vms.find((v) => v.id === id);
+          const cloneName = source ? `${source.name}-clone` : `sbx-clone-${id.slice(0, 6)}`;
+          await api.cloneVM(id, {
+            name: cloneName,
+            vcpus: source?.vcpus || 1,
+            memory_mb: source?.memory_mb,
+          });
+        })
+      );
       toast.success(`Successfully cloned ${selectedIds.length} sandbox(es)`, {
         id: toastID,
       });
@@ -302,15 +427,78 @@ export function InstancesPage({
     }
   }
 
+  function requestUnprotect(targets: VM[]) {
+    const protectedTargets = targets.filter((vm) => vm.protected);
+    if (protectedTargets.length === 0) return;
+    setUnprotectTargets(protectedTargets);
+    setUnprotectOpen(true);
+  }
+
+  function handleBatchUnprotect() {
+    const protectedVMs = selectedVMs.filter((vm) => vm.protected);
+    if (protectedVMs.length === 0) {
+      toast.error('No selected sandboxes are deletion protected.');
+      return;
+    }
+    requestUnprotect(protectedVMs);
+  }
+
+  async function confirmUnprotect(ids: string[]) {
+    const targets = ids
+      .map((id) => vms.find((vm) => vm.id === id))
+      .filter((vm): vm is VM => !!vm);
+    const toastID = toast.loading(
+      targets.length === 1
+        ? 'Disabling protection…'
+        : `Disabling protection for ${targets.length} sandboxes…`,
+    );
+    try {
+      await Promise.all(ids.map((id) => api.unprotectVM(id)));
+      if (targets.length === 1) {
+        toast.success(`Sandbox ${targets[0].name} protection disabled`, { id: toastID });
+      } else {
+        toast.success(`Protection disabled for ${targets.length} sandboxes`, { id: toastID });
+      }
+      onRefresh?.();
+    } catch (err) {
+      toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
+      throw err;
+    }
+  }
+
+  async function toggleProtection(targetVM: VM) {
+    if (targetVM.protected) {
+      // Removing a safety guard is deliberate: always require typed confirmation.
+      requestUnprotect([targetVM]);
+      return;
+    }
+
+    const toastID = toast.loading('Enabling protection…');
+    try {
+      await api.protectVM(targetVM.id);
+      toast.success(`Sandbox ${targetVM.name} is now deletion protected`, { id: toastID });
+      onRefresh?.();
+    } catch (err) {
+      toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
   async function executeBulkDelete(ids: string[]) {
+    const protectedIds = ids.filter((id) => vms.find((v) => v.id === id)?.protected);
+    if (protectedIds.length > 0) {
+      toast.error(`Cannot delete ${protectedIds.length} protected sandbox(es). Unprotect them first.`);
+      ids = ids.filter((id) => !vms.find((v) => v.id === id)?.protected);
+      if (ids.length === 0) {
+        setSelectedIds([]);
+        return;
+      }
+    }
     if (onBulkDelete) {
       await onBulkDelete(ids);
     } else {
       const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
       try {
-        for (const id of ids) {
-          await api.deleteVM(id);
-        }
+        await Promise.all(ids.map((id) => api.deleteVM(id)));
         toast.success(`Deleted ${ids.length} sandbox(es)`, { id: toastID });
       } catch (err) {
         toast.error(`Delete failed: ${errorMessage(err)}`, { id: toastID });
@@ -450,45 +638,79 @@ export function InstancesPage({
         </div>
 
         {selectedIds.length > 0 && (
-          <div className="ml-auto flex items-center gap-2 border border-[#263fa9] bg-[#0f1634]/40 px-2.5 py-1 text-[11px]">
-            <span className="font-mono text-foreground">
+          <div className="ml-auto flex flex-wrap items-center gap-1.5 border border-[#263fa9]/60 bg-[#0f1634]/50 px-2.5 py-1.5 shadow-sm">
+            <span className="mr-1 inline-flex items-center gap-1.5 font-mono text-[11px] text-foreground">
+              <span className="h-1.5 w-1.5 bg-[#5e7ff5]" />
               {selectedIds.length} selected
             </span>
+            <span className="h-4 w-px bg-border" />
+
             <button
               type="button"
               onClick={() => void handleBatchStart()}
-              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
+              title="Start all selected stopped sandboxes"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-success hover:text-success transition-colors cursor-pointer"
             >
-              Start
+              <Play className="h-3 w-3" />
+              <span>Start</span>
+            </button>
+            <button
+              type="button"
+              onClick={requestBatchStop}
+              title="Stop all selected running sandboxes"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-warning hover:text-warning transition-colors cursor-pointer"
+            >
+              <Square className="h-3 w-3" />
+              <span>Stop</span>
             </button>
             <button
               type="button"
               onClick={() => void handleBatchSnapshot()}
-              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
+              title="Snapshot all selected running sandboxes"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
             >
-              Snapshot
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleBatchStop()}
-              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
-            >
-              Stop
+              <Camera className="h-3 w-3" />
+              <span>Snapshot</span>
             </button>
             <button
               type="button"
               onClick={() => void handleBatchClone()}
-              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
+              title="Clone all selected sandboxes"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
             >
-              Clone
+              <Copy className="h-3 w-3" />
+              <span>Clone</span>
             </button>
+            {selectedVMs.some((vm) => vm.protected) && (
+              <button
+                type="button"
+                onClick={handleBatchUnprotect}
+                title="Remove deletion protection from selected sandboxes"
+                className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-[#5e7ff5] hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+              >
+                <Shield className="h-3 w-3" />
+                <span>Unprotect</span>
+              </button>
+            )}
+
+            <span className="h-4 w-px bg-border" />
             <button
               type="button"
               onClick={() => setBulkDeleteOpen(true)}
-              className="text-destructive font-medium hover:underline flex items-center gap-1 cursor-pointer"
+              title="Delete all selected sandboxes"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-destructive/40 bg-destructive/10 px-2.5 text-[11px] font-medium text-destructive hover:bg-destructive/20 transition-colors cursor-pointer"
             >
               <Trash2 className="h-3 w-3" />
               <span>Delete</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedIds([])}
+              title="Clear selection"
+              aria-label="Clear selection"
+              className="inline-flex h-6.5 w-6.5 items-center justify-center text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
             </button>
           </div>
         )}
@@ -629,8 +851,17 @@ export function InstancesPage({
 
                       {/* Name / Subdomain */}
                       <td className="py-2 px-1.5">
-                        <div className="font-medium text-foreground">
-                          {vm.name}
+                        <div className="flex items-center gap-1.5 font-medium text-foreground">
+                          <span>{vm.name}</span>
+                          {vm.protected && (
+                            <span
+                              title="Deletion protected"
+                              className="inline-flex items-center gap-0.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.2 text-[9px] font-mono text-[#5e7ff5] uppercase"
+                            >
+                              <Shield className="h-2.5 w-2.5" />
+                              prot
+                            </span>
+                          )}
                         </div>
                         <div className="font-mono text-[10px] text-muted-foreground">
                           {subdomain}
@@ -724,69 +955,86 @@ export function InstancesPage({
                         {vm.ip_address || '—'}
                       </td>
 
-                      {/* Actions */}
+                      {/* Actions: primary lifecycle button + overflow menu */}
                       <td
                         className="py-2 pl-1.5 pr-2.5 text-right"
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="inline-flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => onConsole(vm)}
-                            title="Open SSH Web Terminal"
-                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-foreground hover:border-[#263fa9]"
-                          >
-                            <Terminal className="h-2.5 w-2.5" />
-                            <span>SSH</span>
-                          </button>
-
                           {vm.status === 'running' ? (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => onSnapshot(vm)}
-                                title="Pause & Snapshot Memory"
-                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:text-foreground"
-                              >
-                                <Camera className="h-2.5 w-2.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onStop(vm)}
-                                title="Stop Sandbox"
-                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:text-destructive"
-                              >
-                                <Square className="h-2.5 w-2.5" />
-                              </button>
-                            </>
+                            <button
+                              type="button"
+                              onClick={() => setStopConfirmTargets([vm])}
+                              title="Stop Sandbox"
+                              className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-warning hover:text-warning transition-colors"
+                            >
+                              <Square className="h-2.5 w-2.5" />
+                              <span>Stop</span>
+                            </button>
                           ) : vm.status === 'paused' ? (
                             <button
                               type="button"
                               onClick={() => onResume(vm)}
                               title="Resume from Snapshot"
-                              className="flex h-6 w-6 items-center justify-center border border-border bg-background text-success hover:border-success"
+                              className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-success hover:border-success transition-colors"
                             >
                               <RotateCcw className="h-2.5 w-2.5" />
+                              <span>Resume</span>
                             </button>
                           ) : (
                             <button
                               type="button"
                               onClick={() => onRun(vm)}
                               title="Start Sandbox"
-                              className="flex h-6 w-6 items-center justify-center border border-border bg-background text-success hover:border-success"
+                              className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-success hover:border-success transition-colors"
                             >
                               <Play className="h-2.5 w-2.5" />
+                              <span>Start</span>
                             </button>
                           )}
 
-                          <button
-                            type="button"
-                            onClick={() => onDelete(vm)}
-                            title="Delete Sandbox"
-                            className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-destructive hover:text-destructive"
-                          >
-                            <Trash2 className="h-2.5 w-2.5" />
-                          </button>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                title="More actions"
+                                aria-label={`More actions for ${vm.name}`}
+                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors outline-none data-[state=open]:border-[#263fa9] data-[state=open]:text-foreground"
+                              >
+                                <MoreHorizontal className="h-3 w-3" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-48">
+                              <DropdownMenuItem onSelect={() => openSSHTerminal(vm)}>
+                                <Terminal className="h-3.5 w-3.5" />
+                                SSH Terminal
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => onSnapshot(vm)}
+                                disabled={vm.status !== 'running'}
+                              >
+                                <Camera className="h-3.5 w-3.5" />
+                                Snapshot
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void cloneOne(vm)}>
+                                <Copy className="h-3.5 w-3.5" />
+                                Clone
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void toggleProtection(vm)}>
+                                <Shield className="h-3.5 w-3.5" />
+                                {vm.protected ? 'Unprotect' : 'Protect'}
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={() => onDelete(vm)}
+                                disabled={vm.protected}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                                {vm.protected ? 'Delete (protected)' : 'Delete'}
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       </td>
                     </tr>
@@ -833,6 +1081,20 @@ export function InstancesPage({
                 className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:bg-muted/50"
               >
                 <span>JSON Spec</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void toggleProtection(selectedVM)}
+                className={cn(
+                  'flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] transition-colors',
+                  selectedVM.protected
+                    ? 'border-[#5e7ff5]/50 text-[#5e7ff5] hover:bg-[#5e7ff5]/10'
+                    : 'text-foreground hover:bg-muted/50',
+                )}
+                title={selectedVM.protected ? 'Unprotect sandbox' : 'Protect sandbox against deletion'}
+              >
+                <Shield className="h-3 w-3" />
+                <span>{selectedVM.protected ? 'Protected' : 'Protect'}</span>
               </button>
               <button
                 type="button"
@@ -998,12 +1260,7 @@ export function InstancesPage({
                     type="button"
                     onClick={() => {
                       if (selectedVM.status === 'running') {
-                        setFilesLoading(true);
-                        api
-                          .listVMFiles(selectedVM.id, currentDir)
-                          .then((r) => setFiles(r || []))
-                          .catch(() => setFiles([]))
-                          .finally(() => setFilesLoading(false));
+                        void fetchFiles(selectedVM.id, currentDir);
                       }
                     }}
                     className="flex h-7 items-center gap-1 border border-border px-2.5 text-[11px] text-foreground hover:bg-muted/50"
@@ -1016,11 +1273,11 @@ export function InstancesPage({
                   <p className="text-[12px] text-muted-foreground">
                     Sandbox must be running to browse guest filesystem.
                   </p>
-                ) : filesLoading ? (
+                ) : filesLoading && files.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     Reading guest directory {currentDir}…
                   </p>
-                ) : files.length === 0 ? (
+                ) : !filesLoading && files.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     No files found in {currentDir}.
                   </p>
@@ -1056,11 +1313,11 @@ export function InstancesPage({
                   <p className="text-[12px] text-muted-foreground">
                     Sandbox must be running to inspect live guest processes.
                   </p>
-                ) : processesLoading ? (
+                ) : processesLoading && processes.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     Querying guest process table…
                   </p>
-                ) : processes.length === 0 ? (
+                ) : !processesLoading && processes.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     No process entries returned.
                   </p>
@@ -1121,10 +1378,10 @@ export function InstancesPage({
                     Reachability & Gateway
                   </div>
                   <div className="text-foreground font-medium">
-                    {netInspectLoading
-                      ? 'Probing…'
-                      : netInspect
-                        ? `${netInspect.connectivity} (GW ${netInspect.gateway})`
+                    {netInspect
+                      ? `${netInspect.connectivity} (GW ${netInspect.gateway})`
+                      : netInspectLoading
+                        ? 'Probing…'
                         : 'Bridge NAT Active'}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
@@ -1231,11 +1488,83 @@ export function InstancesPage({
         </div>
       )}
 
+      {/* Critical action confirmation: stop one or many running sandboxes */}
+      <AlertDialog
+        open={stopConfirmTargets !== null}
+        onOpenChange={(open) => !open && setStopConfirmTargets(null)}
+      >
+        <AlertDialogContent className="max-w-md w-[calc(100%-2rem)]">
+          <AlertDialogHeader>
+            <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-lg border border-warning/40 bg-warning/10 text-warning">
+              <Square className="h-4 w-4 fill-current" />
+            </div>
+            <AlertDialogTitle>
+              {stopConfirmTargets && stopConfirmTargets.length > 1
+                ? `Stop ${stopConfirmTargets.length} running sandboxes?`
+                : `Stop ${stopConfirmTargets?.[0]?.name ?? 'sandbox'}?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Running microVM processes will be shut down and their resources
+              released. Unsaved work inside the guest will be lost.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {stopConfirmTargets && stopConfirmTargets.length > 1 && (
+            <div className="my-2 max-h-40 space-y-1 overflow-y-auto border border-border bg-secondary/30 p-2.5 text-xs">
+              {stopConfirmTargets.map((vm) => (
+                <div
+                  key={vm.id}
+                  className="flex items-center justify-between gap-2 border-b border-border/40 py-1 last:border-b-0"
+                >
+                  <span className="truncate font-medium text-foreground">
+                    {vm.name}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                    {vm.ip_address || vm.id.slice(0, 8)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <AlertDialogFooter className="mt-3 flex flex-row justify-end gap-2">
+            <AlertDialogCancel
+              disabled={stopping}
+              className="border-border bg-background hover:bg-muted text-foreground px-4"
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void confirmStop();
+              }}
+              disabled={stopping}
+              className="bg-warning text-[#1c1400] hover:bg-warning/90 font-medium px-4 inline-flex items-center"
+            >
+              {stopping ? (
+                <span className="mr-1.5 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              ) : (
+                <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
+              )}
+              {stopping ? 'Stopping…' : 'Stop sandbox'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <BulkDeleteVMDialog
         vms={selectedVMs}
         open={bulkDeleteOpen}
         onOpenChange={setBulkDeleteOpen}
         onConfirm={executeBulkDelete}
+      />
+
+      <UnprotectVMDialog
+        vms={unprotectTargets}
+        open={unprotectOpen}
+        onOpenChange={setUnprotectOpen}
+        onConfirm={confirmUnprotect}
       />
     </div>
   );
