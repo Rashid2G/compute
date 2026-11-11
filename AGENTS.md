@@ -87,7 +87,7 @@ Deployment restarts live services and affects shared infrastructure. Deploy only
 
 ## Change completion and Git
 
-Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
+Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. End the work with concrete evidence for the result: summarize the checks or observations that support the completion claim, and include screenshots when they are useful or needed to demonstrate visual behavior. Capture screenshots only when relevant, and keep them out of commits unless requested. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
 
 ## Agent delegation and issues
 
