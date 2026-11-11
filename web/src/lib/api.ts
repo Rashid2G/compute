@@ -148,6 +148,21 @@ export const api = {
     });
   },
 
+  updateVMConfig(id: string, payload: { public_ip?: boolean; protected?: boolean }): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  protectVM(id: string): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/protect`, { method: 'POST' });
+  },
+
+  unprotectVM(id: string): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/unprotect`, { method: 'POST' });
+  },
+
   execVM(id: string, payload: ExecRequest): Promise<ExecResponse> {
     return request<ExecResponse>(`/vms/${encodeURIComponent(id)}/exec`, {
       method: 'POST',

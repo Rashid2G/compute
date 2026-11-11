@@ -217,6 +217,7 @@ func (s *Store) initSchema() error {
 		ssh_key_path TEXT DEFAULT '',
 		pid INTEGER DEFAULT 0,
 		socket_path TEXT DEFAULT '',
+		protected INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMP NOT NULL,
 		updated_at TIMESTAMP NOT NULL
 	);
@@ -395,8 +396,8 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN disk_mb INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 
-	// Migrate existing tables to ensure internal_id, owner_id, public_ip, and public_ip_enabled columns exist
-	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled"})
+	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, and protected columns exist
+	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "protected"})
 	_ = s.migrateTableColumns("images", []string{"internal_id", "owner_id"})
 	_ = s.migrateTableColumns("templates", []string{"internal_id", "owner_id"})
 	_ = s.migrateTableColumns("volumes", []string{"owner_id"})
@@ -411,6 +412,15 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_vms_status ON vms(status);
 	CREATE INDEX IF NOT EXISTS idx_vms_ip ON vms(ip_address);
 	CREATE INDEX IF NOT EXISTS idx_vms_public_ip ON vms(public_ip);
+	CREATE INDEX IF NOT EXISTS idx_vms_protected ON vms(protected);
+
+	CREATE TRIGGER IF NOT EXISTS trg_prevent_protected_vm_delete
+	BEFORE DELETE ON vms
+	FOR EACH ROW
+	WHEN OLD.protected = 1
+	BEGIN
+		SELECT RAISE(ABORT, 'item is protected against deletion');
+	END;
 
 	CREATE INDEX IF NOT EXISTS idx_images_internal_id ON images(internal_id);
 	CREATE INDEX IF NOT EXISTS idx_images_id ON images(id);
@@ -458,6 +468,8 @@ func (s *Store) migrateTableColumns(tableName string, cols []string) error {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT 'default';", tableName, col))
 			} else if col == "public_ip_enabled" {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 1;", tableName, col))
+			} else if col == "protected" {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 0;", tableName, col))
 			} else if col == "public" {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 0;", tableName, col))
 			} else if col == "public_ip" {
@@ -517,7 +529,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		ip_address = ?, public_ip = ?, public_ip_enabled = ?,
 		mac_address = ?, tap_device = ?, rootfs_path = ?,
 		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
-		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, pid = ?, socket_path = ?, owner_id = ?, updated_at = ?
+		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, pid = ?, socket_path = ?, protected = ?, owner_id = ?, updated_at = ?
 	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
 	`
 	res, err := s.db.ExecContext(ctx, updateQuery,
@@ -525,7 +537,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		vm.IPAddress, vm.PublicIP, pubEnabledInt,
 		vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, vm.OwnerID, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.OwnerID, vm.UpdatedAt,
 		vm.InternalID, vm.OwnerID, vm.ID, vm.Name,
 	)
 	if err != nil {
@@ -541,14 +553,14 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb,
 		ip_address, public_ip, public_ip_enabled, mac_address, tap_device, rootfs_path, kernel_path,
 		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
-		pid, socket_path, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		pid, socket_path, protected, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err = s.db.ExecContext(ctx, insertQuery,
 		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt, vm.MACAddress, vm.TAPDevice, vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, vm.CreatedAt, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.CreatedAt, vm.UpdatedAt,
 	)
 	return err
 }
@@ -566,7 +578,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	query := `
 	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
-	       pid, socket_path, created_at, updated_at
+	       pid, socket_path, protected, created_at, updated_at
 	FROM vms
 	WHERE (internal_id = ? OR id = ? OR name = ? OR ip_address = ? OR public_ip = ?)
 	  AND (? = '' OR owner_id = ? OR owner_id = '')
@@ -588,11 +600,12 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	var status string
 	var pubEnabledInt int
 	var desiredRunning int
+	var protectedInt int
 	err := row.Scan(
 		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
 		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
+		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &protectedInt, &vm.CreatedAt, &vm.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -603,6 +616,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	vm.Status = VMStatus(status)
 	vm.DesiredRunning = desiredRunning != 0
 	vm.PublicIPEnabled = pubEnabledInt != 0
+	vm.Protected = protectedInt != 0
 	if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
 		vm.PublicIP = vm.IPAddress
 	}
@@ -622,7 +636,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	query := `
 	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key,
-	       pid, socket_path, created_at, updated_at
+	       pid, socket_path, protected, created_at, updated_at
 	FROM vms
 	WHERE (? = '' OR owner_id = ?)
 	ORDER BY created_at DESC;
@@ -640,11 +654,12 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		var status string
 		var pubEnabledInt int
 		var desiredRunning int
+		var protectedInt int
 		err := rows.Scan(
 			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
 			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &vm.CreatedAt, &vm.UpdatedAt,
+			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &vm.PID, &vm.SocketPath, &protectedInt, &vm.CreatedAt, &vm.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -652,6 +667,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		vm.Status = VMStatus(status)
 		vm.DesiredRunning = desiredRunning != 0
 		vm.PublicIPEnabled = pubEnabledInt != 0
+		vm.Protected = protectedInt != 0
 		if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
 			vm.PublicIP = vm.IPAddress
 		}
@@ -665,25 +681,37 @@ func (s *Store) DeleteVM(ctx context.Context, idOrName string) error {
 	return s.DeleteVMByOwner(ctx, "", idOrName)
 }
 
-// DeleteVMByOwner removes a VM record for a specific owner by internal ID, external ID, or Name
+// DeleteVMByOwner removes a VM record for a specific owner by internal ID, external ID, or Name.
+// If the VM has deletion protection enabled, it is never removable.
 func (s *Store) DeleteVMByOwner(ctx context.Context, ownerID, idOrName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	var protected int
+	checkQuery := `SELECT protected FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?) LIMIT 1;`
+	if err := s.db.QueryRowContext(ctx, checkQuery, idOrName, idOrName, idOrName, ownerID, ownerID).Scan(&protected); err == nil && protected != 0 {
+		return fmt.Errorf("item %s is protected against deletion", idOrName)
+	}
 
 	query := `DELETE FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?);`
 	_, err := s.db.ExecContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID)
 	return err
 }
 
-// DeleteVMByInternalID removes exactly one VM row by its globally unique
-// internal ID. Unlike id/name (which tenants may reuse), internal IDs are never
-// shared, so this cannot affect another tenant's VM.
+// DeleteVMByInternalID removes exactly one VM row by its globally unique internal ID.
+// If the VM has deletion protection enabled, it is never removable.
 func (s *Store) DeleteVMByInternalID(ctx context.Context, internalID string) error {
 	if strings.TrimSpace(internalID) == "" {
 		return fmt.Errorf("internal vm id is required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	var protected int
+	checkQuery := `SELECT protected FROM vms WHERE internal_id = ? LIMIT 1;`
+	if err := s.db.QueryRowContext(ctx, checkQuery, internalID).Scan(&protected); err == nil && protected != 0 {
+		return fmt.Errorf("item %s is protected against deletion", internalID)
+	}
 
 	_, err := s.db.ExecContext(ctx, `DELETE FROM vms WHERE internal_id = ?;`, internalID)
 	return err

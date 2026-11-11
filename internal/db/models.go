@@ -51,6 +51,7 @@ type VM struct {
 	SSHPublicKey    string    `json:"ssh_public_key,omitempty"`
 	PID             int       `json:"pid,omitempty"`
 	SocketPath      string    `json:"socket_path,omitempty"`
+	Protected       bool      `json:"protected"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
