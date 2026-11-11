@@ -43,7 +43,7 @@ export function DeleteVMDialog({
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent className="max-w-lg w-[calc(100%-2rem)] overflow-hidden">
+      <AlertDialogContent>
         <AlertDialogHeader>
           <div className="mb-1 flex h-10 w-10 items-center justify-center rounded-lg border border-destructive/25 bg-destructive/10 text-destructive">
             <TriangleAlert className="h-5 w-5" />
@@ -55,34 +55,26 @@ export function DeleteVMDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
 
-        <div className="my-2 space-y-2 rounded-lg border border-border bg-secondary/40 p-3.5 text-xs text-muted-foreground w-full min-w-0 overflow-hidden">
-          <div className="flex items-center justify-between gap-3 min-w-0">
-            <span className="shrink-0">Firecracker process</span>
+        <div className="my-2 space-y-1.5 rounded-lg border bg-secondary/40 p-4 text-xs text-muted-foreground">
+          <div className="flex justify-between gap-3 py-0.5">
+            <span>Firecracker process</span>
             <span className="font-mono text-foreground">{vm?.pid ? `PID ${vm.pid}` : 'not running'}</span>
           </div>
-          <div className="flex items-center justify-between gap-3 min-w-0">
-            <span className="shrink-0">Network lease</span>
-            <span className="font-mono text-foreground truncate text-right">
+          <div className="flex justify-between gap-3 py-0.5">
+            <span>Network lease</span>
+            <span className="font-mono text-foreground">
               {vm?.ip_address || 'none'} &middot; {vm?.tap_device || 'no tap'}
             </span>
           </div>
-          <div className="flex items-center justify-between gap-3 min-w-0">
-            <span className="shrink-0">Overlay disk</span>
-            <span className="min-w-0 truncate font-mono text-foreground text-right" title={vm?.disk_path || 'none'}>
-              {vm?.disk_path || 'none'}
-            </span>
+          <div className="flex justify-between gap-3 py-0.5">
+            <span>Overlay disk</span>
+            <span className="truncate font-mono text-foreground">{vm?.disk_path || 'none'}</span>
           </div>
         </div>
 
-        <AlertDialogFooter className="mt-3 flex flex-row justify-end gap-2">
-          <AlertDialogCancel disabled={deleting} className="border-border bg-background hover:bg-muted text-foreground px-4">
-            Cancel
-          </AlertDialogCancel>
-          <AlertDialogAction
-            onClick={confirm}
-            disabled={deleting}
-            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground font-medium px-4 inline-flex items-center"
-          >
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+          <AlertDialogAction onClick={confirm} disabled={deleting}>
             {deleting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
             {deleting ? 'Deleting…' : 'Delete instance'}
           </AlertDialogAction>

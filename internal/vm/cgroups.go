@@ -139,58 +139,6 @@ func FormatPidsMax(pids int) string {
 	return fmt.Sprintf("%d", pids)
 }
 
-// requiredControllers returns the cgroup v2 controllers needed to expose the
-// limit files written by Setup.
-func requiredControllers(limits CgroupLimits) []string {
-	controllers := []string{"cpu", "memory", "pids"}
-	if strings.TrimSpace(limits.IOMax) != "" {
-		controllers = append(controllers, "io")
-	}
-	return controllers
-}
-
-// ensureControllers enables the controllers required by limits in the base
-// cgroup so its VM child cgroups expose cpu.max, memory.max and friends.
-//
-// Cgroup v2 does not delegate controllers to children automatically: a parent
-// must list them in cgroup.subtree_control first. Without this, writing to
-// <vm>/cpu.max fails with EACCES even though the directory was created.
-//
-// Base paths that are not cgroup v2 hierarchies (for example test fixtures or
-// cgroup v1 hosts) are left untouched.
-func (cm *CgroupManager) ensureControllers(limits CgroupLimits) error {
-	baseDir := cm.baseDir
-	if baseDir == "" {
-		baseDir = cm.basePath
-	}
-
-	data, err := os.ReadFile(filepath.Join(baseDir, "cgroup.controllers"))
-	if err != nil {
-		return nil
-	}
-
-	available := make(map[string]bool)
-	for _, controller := range strings.Fields(string(data)) {
-		available[controller] = true
-	}
-
-	var enable []string
-	for _, controller := range requiredControllers(limits) {
-		if available[controller] {
-			enable = append(enable, "+"+controller)
-		}
-	}
-	if len(enable) == 0 {
-		return nil
-	}
-
-	subtreeControl := filepath.Join(baseDir, "cgroup.subtree_control")
-	if err := os.WriteFile(subtreeControl, []byte(strings.Join(enable, " ")+"\n"), 0644); err != nil {
-		return fmt.Errorf("failed to enable cgroup controllers (%s) in %s: %w", strings.Join(enable, " "), baseDir, err)
-	}
-	return nil
-}
-
 // Setup creates the VM's cgroup directory and applies CPU, Memory, PIDs, and IO limits.
 // Returns the cgroup path.
 func (cm *CgroupManager) Setup(vmID string, limits CgroupLimits) (string, error) {
@@ -204,19 +152,6 @@ func (cm *CgroupManager) Setup(vmID string, limits CgroupLimits) (string, error)
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return "", fmt.Errorf("cgroup path %s is a symlink", cgPath)
 		}
-	}
-
-	// Ensure the base cgroup exists and delegates the controllers required by
-	// this VM, otherwise its limit files do not exist.
-	baseDir := cm.baseDir
-	if baseDir == "" {
-		baseDir = cm.basePath
-	}
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create cgroup base directory %s: %w", baseDir, err)
-	}
-	if err := cm.ensureControllers(limits); err != nil {
-		return "", err
 	}
 
 	if err := os.MkdirAll(cgPath, 0755); err != nil {

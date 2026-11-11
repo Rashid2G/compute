@@ -52,8 +52,7 @@ export function CreateVMDialog({
 }: CreateVMDialogProps) {
   const [vcpus, setVcpus] = useState<1 | 2 | 4>(1);
   const [memoryMb, setMemoryMb] = useState(512);
-  const [diskGb, setDiskGb] = useState<number>(50);
-  const [count, setCount] = useState<number>(1);
+  const [diskGb, setDiskGb] = useState(50);
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
   const [setupScript, setSetupScript] = useState('');
@@ -110,45 +109,34 @@ export function CreateVMDialog({
     e.preventDefault();
     setSubmitting(true);
     try {
-      const baseName = sandboxName.trim();
-      const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
-      const totalToCreate = Math.max(1, count);
+      const generatedName =
+        sandboxName.trim() ||
+        `sbx-${PRESETS.find((p) => p.vcpus === vcpus)?.label ?? 'micro'}-${Math.random()
+          .toString(36)
+          .slice(2, 6)}`;
 
-      for (let i = 0; i < totalToCreate; i++) {
-        let name: string;
-        if (baseName) {
-          name = totalToCreate > 1 ? `${baseName}-${i + 1}` : baseName;
-        } else {
-          name = `sbx-${PRESETS.find((p) => p.vcpus === vcpus)?.label ?? 'micro'}-${Math.random()
-            .toString(36)
-            .slice(2, 6)}`;
-        }
+      const payload: CreateVMRequest = {
+        name: generatedName,
+        vcpus,
+        memory_mb: memoryMb,
+        disk_mb: diskGb === 100 ? 102400 : 51200,
+        public_ip_enabled: true,
+      };
 
-        const payload: CreateVMRequest = {
-          name,
-          vcpus,
-          memory_mb: memoryMb,
-          disk_mb: calculatedDiskMb,
-          public_ip_enabled: true,
-        };
-
-        if (fromSource.startsWith('tpl:')) {
-          payload.template = fromSource.slice(4);
-        } else if (fromSource.startsWith('img:')) {
-          payload.image = fromSource.slice(4);
-        } else {
-          payload.image = 'ubuntu-24';
-        }
-
-        await onCreate(payload, true, {
-          setupScript: setupScript.trim() || undefined,
-        });
+      if (fromSource.startsWith('tpl:')) {
+        payload.template = fromSource.slice(4);
+      } else if (fromSource.startsWith('img:')) {
+        payload.image = fromSource.slice(4);
+      } else {
+        payload.image = 'ubuntu-24';
       }
 
+      await onCreate(payload, true, {
+        setupScript: setupScript.trim() || undefined,
+      });
       onOpenChange(false);
       setSandboxName('');
       setSetupScript('');
-      setCount(1);
     } finally {
       setSubmitting(false);
     }
@@ -195,40 +183,6 @@ export function CreateVMDialog({
               onChange={(e) => setSandboxName(e.target.value)}
               placeholder="sbx-prod-api-01"
               className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between">
-              <label className="block text-[12px] text-muted-foreground">
-                Quantity (bulk create)
-              </label>
-              <div className="flex items-center gap-1">
-                {[1, 2, 3, 5, 10].map((qty) => (
-                  <button
-                    key={qty}
-                    type="button"
-                    onClick={() => setCount(qty)}
-                    className={cn(
-                      'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
-                      count === qty
-                        ? 'border-[#263fa9] bg-[#0f1634] text-white'
-                        : 'border-border text-muted-foreground hover:text-foreground',
-                    )}
-                  >
-                    {qty}x
-                  </button>
-                ))}
-              </div>
-            </div>
-            <input
-              type="number"
-              aria-label="Quantity of sandboxes to create"
-              min={1}
-              max={20}
-              value={count}
-              onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
             />
           </div>
 
@@ -286,41 +240,20 @@ export function CreateVMDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="block text-[12px] text-muted-foreground">
-                  Disk size
-                </label>
-                <div className="flex items-center gap-1">
-                  {[10, 20, 50, 100].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => setDiskGb(preset)}
-                      className={cn(
-                        'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
-                        diskGb === preset
-                          ? 'border-[#263fa9] bg-[#0f1634] text-white'
-                          : 'border-border text-muted-foreground hover:text-foreground',
-                      )}
-                    >
-                      {preset}G
-                    </button>
-                  ))}
-                </div>
-              </div>
+              <label className="block text-[12px] text-muted-foreground">
+                Disk
+              </label>
               <div className="relative">
-                <input
-                  type="number"
-                  aria-label="Disk size in GB"
-                  min={1}
-                  max={2048}
+                <select
+                  aria-label="Disk size"
                   value={diskGb}
-                  onChange={(e) => setDiskGb(Math.max(1, Number(e.target.value) || 1))}
-                  className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
-                />
-                <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">
-                  GB
-                </span>
+                  onChange={(e) => setDiskGb(Number(e.target.value))}
+                  className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                >
+                  <option value={50}>50 GB</option>
+                  <option value={100}>100 GB</option>
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               </div>
             </div>
           </div>
@@ -398,13 +331,7 @@ export function CreateVMDialog({
               className="flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
             >
               <Play className="h-3 w-3 fill-current" />
-              <span>
-                {submitting
-                  ? 'Creating…'
-                  : count > 1
-                    ? `Create ${count} sandboxes`
-                    : 'Create'}
-              </span>
+              <span>{submitting ? 'Creating…' : 'Create'}</span>
             </button>
           </div>
         </form>

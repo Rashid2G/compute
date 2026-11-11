@@ -1,7 +1,7 @@
 {
   "server": {
     "listen": "0.0.0.0:18080",
-    "db_path": "/var/lib/compute/data/compute.db",
+    "db_path": "/home/rashid/on-demand-vms/data/compute.db",
     "firecracker_bin": "/usr/local/bin/firecracker"
   },
   "network": {
@@ -18,11 +18,11 @@
     "image": "ubuntu-24"
   },
   "images": {
-    "images_dir": "/var/lib/compute/images",
-    "vms_dir": "/var/lib/compute/vms",
+    "images_dir": "/home/rashid/on-demand-vms/data/images",
+    "vms_dir": "/home/rashid/on-demand-vms/data/vms",
     "default_kernel": "vmlinux",
     "default_rootfs": "ubuntu-24.04.ext4",
-    "ssh_key_path": "/var/lib/compute/images/ssh/id_ed25519",
+    "ssh_key_path": "/home/rashid/on-demand-vms/data/images/ssh/id_ed25519",
     "available": [
       {
         "name": "ubuntu-24",

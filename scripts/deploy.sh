@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # scripts/deploy.sh
-# Automated build, upload, and deployment for on-demand-vms (compute-lab VM).
-# Default deployment method: Docker Compose (fast, containerized, out-of-the-box).
-# Legacy systemd deployment available via --systemd flag.
+# Automated build, upload, and service restart for the compute-lab VM.
+# Can be run directly or via 'make deploy'.
 
 set -euo pipefail
 
@@ -12,7 +11,6 @@ BUILD_LOCAL=true
 BUILD_UI=false
 RESTART_ONLY=false
 CHECK_STATUS_ONLY=false
-DEPLOY_MODE="docker" # Default deployment method is docker compose
 
 # ANSI colors
 GREEN='\033[0;32m'
@@ -27,15 +25,13 @@ usage() {
 Usage: $(basename "$0") [options] [target-host]
 
 Deploy on-demand-vms changes to the remote VM (default: compute-lab),
-upload updated sources/configs, launch services via Docker Compose, and verify health.
+upload updated binaries/configs, restart services, and verify health.
 
 Options:
   --ui             Build Web GUI frontend before compiling Go binaries
   --skip-build     Skip building binaries locally, only sync and restart
   --restart-only   Only restart services on remote and verify health (no build/sync)
   --status         Check current status and recent logs of remote services
-  --docker         Use Docker Compose deployment method (default)
-  --systemd        Use legacy host systemd units deployment method
   --host <host>    Specify target SSH host (default: compute-lab)
   --dir <dir>      Specify target working directory (default: /home/rashid/on-demand-vms)
   -h, --help       Show this help message
@@ -45,11 +41,10 @@ Environment Variables:
   COMPUTE_DIR      Override default target directory
 
 Examples:
-  ./scripts/deploy.sh             # Fast Docker Compose deployment to compute-lab
-  ./scripts/deploy.sh --ui        # Build UI + deploy via Docker Compose
-  ./scripts/deploy.sh --status    # Check remote container and service health
-  ./scripts/deploy.sh --systemd   # Deploy via host systemd units
-  make deploy                     # Standard workflow for developers
+  ./scripts/deploy.sh             # Build, upload, and restart services on compute-lab
+  ./scripts/deploy.sh --ui        # Build UI + Go binaries, upload, and restart
+  ./scripts/deploy.sh --status    # Check remote service health and logs
+  make deploy                     # Standard workflow for agents and developers
 EOF
     exit 0
 }
@@ -72,14 +67,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --status)
             CHECK_STATUS_ONLY=true
-            shift
-            ;;
-        --docker)
-            DEPLOY_MODE="docker"
-            shift
-            ;;
-        --systemd)
-            DEPLOY_MODE="systemd"
             shift
             ;;
         --host)
@@ -116,39 +103,28 @@ check_ssh() {
 
 if [ "${CHECK_STATUS_ONLY}" = true ]; then
     check_ssh
-    printf "\n${BLUE}==>${NC} ${BOLD}Checking remote status on %s...${NC}\n" "${TARGET_HOST}"
+    printf "\n${BLUE}==>${NC} ${BOLD}Checking remote service status on %s...${NC}\n" "${TARGET_HOST}"
     ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
-        echo \"=== Docker Containers ===\"
-        if command -v docker >/dev/null 2>&1; then
-            sudo docker ps -a --filter \"name=compute\" --format \"table {{.Names}}\t{{.Status}}\t{{.Ports}}\" || true
-        fi
-        echo \"\"
         echo \"=== Systemd Units ===\"
-        systemctl status computed.service compute-gui.service --no-pager 2>/dev/null || true
+        systemctl status computed.service compute-gui.service --no-pager || true
         echo \"\"
         echo \"=== API Health Check ===\"
-        curl -s http://127.0.0.1:18080/api/v1/health || echo \"API Unreachable on :18080\"
+        curl -s http://127.0.0.1:18080/api/v1/health || echo \"API Unreachable\"
         echo \"\"
         echo \"=== Web GUI Check ===\"
-        curl -s -I http://127.0.0.1:8080 2>/dev/null | head -n 1 || echo \"GUI Unreachable on :8080\"
+        curl -s -I http://127.0.0.1:8080 2>/dev/null | head -n 1 || echo \"GUI Unreachable\"
         echo \"\"
-        echo \"=== Recent Container / Service Logs ===\"
-        if sudo docker ps -q --filter \"name=computed\" | grep -q .; then
-            echo \"--- Docker Logs: computed ---\"
-            sudo docker logs --tail 15 computed || true
-        else
-            echo \"--- Systemd Journal: computed ---\"
-            sudo journalctl -u computed.service -n 15 --no-pager 2>/dev/null || true
-        fi
+        echo \"=== Recent computed Logs ===\"
+        sudo journalctl -u computed.service -n 15 --no-pager
     '"
     exit 0
 fi
 
-# Step 1: Build locally (if requested/enabled)
+# Step 1: Build (if needed)
 if [ "${BUILD_LOCAL}" = true ]; then
     if [ "${BUILD_UI}" = true ]; then
         printf "${BLUE}==>${NC} ${BOLD}Building Web UI frontend...${NC}\n"
-        (cd "${REPO_ROOT}/web" && (npm run build || bun run build))
+        (cd "${REPO_ROOT}/web" && (bun run build || npm run build))
     fi
 
     VERSION="${VERSION:-2.0.0}"
@@ -173,7 +149,7 @@ check_ssh
 # Step 2: Upload changes
 if [ "${RESTART_ONLY}" = false ]; then
     printf "${BLUE}==>${NC} ${BOLD}Ensuring remote directories exist on %s...${NC}\n" "${TARGET_HOST}"
-    ssh -o BatchMode=yes "${TARGET_HOST}" "mkdir -p '${TARGET_DIR}'"
+    ssh -o BatchMode=yes "${TARGET_HOST}" "mkdir -p '${TARGET_DIR}/bin' '${TARGET_DIR}/config' '${TARGET_DIR}/scripts'"
 
     printf "${BLUE}==>${NC} ${BOLD}Synchronizing files to %s:%s...${NC}\n" "${TARGET_HOST}" "${TARGET_DIR}"
     if command -v rsync >/dev/null 2>&1; then
@@ -188,70 +164,42 @@ if [ "${RESTART_ONLY}" = false ]; then
             "${REPO_ROOT}/" "${TARGET_HOST}:${TARGET_DIR}/"
     else
         printf "${YELLOW}rsync not found locally, falling back to scp...${NC}\n"
-        scp -r "${REPO_ROOT}/bin" "${REPO_ROOT}/config" "${REPO_ROOT}/scripts" "${REPO_ROOT}/docker-compose.yml" "${REPO_ROOT}/Dockerfile.daemon" "${REPO_ROOT}/Dockerfile.worker" "${TARGET_HOST}:${TARGET_DIR}/"
+        scp -r "${REPO_ROOT}/bin" "${TARGET_HOST}:${TARGET_DIR}/"
+        scp -r "${REPO_ROOT}/config" "${TARGET_HOST}:${TARGET_DIR}/"
+        scp -r "${REPO_ROOT}/scripts" "${TARGET_HOST}:${TARGET_DIR}/"
     fi
 
     # Ensure executable permissions on remote binaries and scripts
     ssh -o BatchMode=yes "${TARGET_HOST}" "chmod +x '${TARGET_DIR}'/bin/* '${TARGET_DIR}'/scripts/* 2>/dev/null || true"
+    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo install -m 0644 '${TARGET_DIR}/config/systemd/computed.service' /etc/systemd/system/computed.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-gui.service' /etc/systemd/system/compute-gui.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-net.service' /etc/systemd/system/compute-net.service && sudo systemctl daemon-reload && sudo systemctl enable computed.service compute-gui.service compute-net.service >/dev/null"
     printf "${GREEN}✓${NC} Files synchronized successfully.\n"
 fi
 
-# Step 3: Launch / Restart services using selected deployment method
-if [ "${DEPLOY_MODE}" = "docker" ]; then
-    printf "${BLUE}==>${NC} ${BOLD}Deploying via Docker Compose on %s...${NC}\n" "${TARGET_HOST}"
+# Ensure the host bridge/NAT exists before starting workloads
+printf "${BLUE}==>${NC} ${BOLD}Ensuring host network bridge is configured...${NC}\n"
+ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl start compute-net.service"
 
-    # Ensure Docker and Docker Compose are available on remote host
-    ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
-        if ! command -v docker >/dev/null 2>&1; then
-            echo \"Docker is required for Docker Compose deployment. Installing docker.io...\"
-            sudo apt-get update && sudo apt-get install -y docker.io docker-compose
-        elif ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
-            echo \"Installing docker-compose...\"
-            sudo apt-get update && sudo apt-get install -y docker-compose || true
-        fi
-        # Stop conflicting systemd services if running
-        sudo systemctl stop computed.service compute-gui.service 2>/dev/null || true
-        sudo systemctl disable computed.service compute-gui.service 2>/dev/null || true
-    '"
-
-    printf "${BLUE}==>${NC} ${BOLD}Starting containers with Docker Compose...${NC}\n"
-    ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
-        cd \"${TARGET_DIR}\"
-        mkdir -p data
-        if docker compose version >/dev/null 2>&1; then
-            sudo docker compose up -d --build
-        else
-            sudo docker-compose up -d --build
-        fi
-    '"
-    printf "${GREEN}✓${NC} Docker Compose deployment launched.\n"
-
-else
-    # Legacy systemd deployment
-    printf "${BLUE}==>${NC} ${BOLD}Deploying via Systemd Units on %s...${NC}\n" "${TARGET_HOST}"
-    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo install -m 0644 '${TARGET_DIR}/config/systemd/computed.service' /etc/systemd/system/computed.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-gui.service' /etc/systemd/system/compute-gui.service && sudo install -m 0644 '${TARGET_DIR}/config/systemd/compute-net.service' /etc/systemd/system/compute-net.service && sudo systemctl daemon-reload && sudo systemctl enable computed.service compute-gui.service compute-net.service >/dev/null"
-    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl start compute-net.service"
-    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl restart computed.service compute-gui.service"
-    printf "${GREEN}✓${NC} Systemd services restarted.\n"
-fi
+# Step 3: Restart services
+printf "${BLUE}==>${NC} ${BOLD}Restarting services on %s (computed.service, compute-gui.service)...${NC}\n" "${TARGET_HOST}"
+ssh -o BatchMode=yes "${TARGET_HOST}" "sudo systemctl restart computed.service compute-gui.service"
 
 # Step 4: Health Verification
-printf "${BLUE}==>${NC} ${BOLD}Verifying service health (up to 20s)...${NC}\n"
+printf "${BLUE}==>${NC} ${BOLD}Verifying service health...${NC}\n"
 HEALTHY=false
-for i in $(seq 1 20); do
+for i in $(seq 1 12); do
     STATUS_OUT=$(ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
         DAEMON_OK=false
         GUI_OK=false
-        if curl -s -f http://127.0.0.1:18080/api/v1/health >/dev/null 2>&1; then
+        if systemctl is-active --quiet computed.service && curl -s -f http://127.0.0.1:18080/api/v1/health >/dev/null 2>&1; then
             DAEMON_OK=true
         fi
-        if curl -s -f -I http://127.0.0.1:8080 >/dev/null 2>&1; then
+        if systemctl is-active --quiet compute-gui.service && curl -s -f -I http://127.0.0.1:8080 >/dev/null 2>&1; then
             GUI_OK=true
         fi
         echo \"daemon:\$DAEMON_OK gui:\$GUI_OK\"
-    '" 2>/dev/null || echo "daemon:false gui:false")
+    '")
 
-    if [[ "$STATUS_OUT" =~ "daemon:true gui:true" ]] || [[ "$STATUS_OUT" =~ "daemon:true" ]]; then
+    if [[ "$STATUS_OUT" =~ "daemon:true gui:true" ]]; then
         HEALTHY=true
         break
     fi
@@ -270,16 +218,11 @@ if [ "$HEALTHY" = true ]; then
     printf "${BOLD}Service Endpoints:${NC}\n"
     printf "  • Compute Daemon API: ${BLUE}http://%s:18080/api/v1/health${NC}\n" "${REMOTE_IP}"
     printf "  • Compute Web GUI:    ${BLUE}http://%s:8080${NC}\n" "${REMOTE_IP}"
-    printf "  • Deployment Method:  ${BOLD}%s${NC}\n" "${DEPLOY_MODE}"
-    printf "  • Target Working Dir: ${TARGET_DIR}\n"
-    printf "\n${GREEN}Deployment complete! Your changes are live on %s.${NC}\n" "${TARGET_HOST}"
+    printf "  • VM Working Directory:  ${TARGET_DIR}\n"
+    printf "\n${GREEN}Deployment complete! Your changes are now live on %s.${NC}\n" "${TARGET_HOST}"
 else
-    printf "${RED}Warning: Health check did not pass within 20 seconds.${NC}\n"
+    printf "${RED}Warning: Health check did not pass within 12 seconds.${NC}\n"
     printf "Checking logs from remote VM:\n"
-    if [ "${DEPLOY_MODE}" = "docker" ]; then
-        ssh -o BatchMode=yes "${TARGET_HOST}" "cd '${TARGET_DIR}' && (sudo docker compose logs --tail 25 || sudo docker-compose logs --tail 25)"
-    else
-        ssh -o BatchMode=yes "${TARGET_HOST}" "sudo journalctl -u computed.service -u compute-gui.service -n 25 --no-pager"
-    fi
+    ssh -o BatchMode=yes "${TARGET_HOST}" "sudo journalctl -u computed.service -u compute-gui.service -n 25 --no-pager"
     exit 1
 fi

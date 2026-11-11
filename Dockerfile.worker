@@ -1,8 +1,7 @@
 # Multi-stage Dockerfile for Compute Worker Client
-FROM golang:alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /src
-ENV GOTOOLCHAIN=auto
 
 RUN apk add --no-cache git make gcc musl-dev
 
@@ -17,24 +16,7 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute
 # Final runtime image
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables tar gzip bash socat openssh-client
-
-# Install Firecracker & Jailer static binaries for worker microVM execution
-ARG FIRECRACKER_VERSION=v1.17.0
-RUN set -eux; \
-    ARCH="$(uname -m)"; \
-    if [ "${ARCH}" = "x86_64" ]; then \
-        FC_ARCH="x86_64"; \
-    elif [ "${ARCH}" = "aarch64" ]; then \
-        FC_ARCH="aarch64"; \
-    else \
-        FC_ARCH="x86_64"; \
-    fi; \
-    curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" | tar -xz; \
-    mv "release-${FIRECRACKER_VERSION}-${FC_ARCH}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}" /usr/local/bin/firecracker; \
-    mv "release-${FIRECRACKER_VERSION}-${FC_ARCH}/jailer-${FIRECRACKER_VERSION}-${FC_ARCH}" /usr/local/bin/jailer; \
-    chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer; \
-    rm -rf "release-${FIRECRACKER_VERSION}-${FC_ARCH}"
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables tar gzip bash
 
 WORKDIR /var/lib/compute-worker
 

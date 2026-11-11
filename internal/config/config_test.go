@@ -81,22 +81,10 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("expected error for 8 vcpus, got nil")
 	}
 
-	// Custom disk sizes: 2048 MB, 20 GB, 100 GB
-	v, m, d, err = ValidateAndNormalizeSpecs(1, 0, 2048)
-	if err != nil || v != 1 || m != 2048 || d != 2048 {
-		t.Fatalf("custom 2048 MB disk normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
-	}
-
-	v, m, d, err = ValidateAndNormalizeSpecs(2, 0, 20)
-	if err != nil || v != 2 || m != 4096 || d != 20480 {
-		t.Fatalf("custom 20 GB disk normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
-	}
-
-	// Invalid disk size (< 512 MB or negative)
-	_, _, _, err = ValidateAndNormalizeSpecs(1, 0, -10)
-	// negative defaults to DiskSize50GB
-	if err != nil {
-		t.Fatalf("expected negative disk to default, got err: %v", err)
+	// Invalid disk size
+	_, _, _, err = ValidateAndNormalizeSpecs(1, 0, 2048)
+	if err == nil {
+		t.Fatalf("expected error for 2048 MB disk size, got nil")
 	}
 
 	// ValidateImage
