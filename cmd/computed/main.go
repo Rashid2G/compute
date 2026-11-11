@@ -18,6 +18,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/version"
 )
@@ -202,15 +203,33 @@ func main() {
 
 	// 5. Initialize VM Manager with Defaults, Resource Limits, Jailer, and Cgroups
 	vmMgr := vm.NewManager(vm.Config{
-		FirecrackerBinary: globalCfg.Server.FirecrackerBin,
-		JailerBinary:      globalCfg.Server.JailerBinary,
-		JailerEnabled:     globalCfg.Server.JailerEnabled,
-		JailerBaseDir:     globalCfg.Server.JailerBaseDir,
-		CgroupEnforce:     globalCfg.Server.CgroupEnforce,
-		CgroupDevOverride: !globalCfg.Server.CgroupEnforce,
-		Defaults:          globalCfg.Defaults,
-		Resources:         globalCfg.Resources,
+		FirecrackerBinary:         globalCfg.Server.FirecrackerBin,
+		JailerBinary:              globalCfg.Server.JailerBinary,
+		JailerEnabled:             globalCfg.Server.JailerEnabled,
+		JailerBaseDir:             globalCfg.Server.JailerBaseDir,
+		CgroupEnforce:             globalCfg.Server.CgroupEnforce,
+		CgroupDevOverride:         !globalCfg.Server.CgroupEnforce,
+		Defaults:                  globalCfg.Defaults,
+		Resources:                 globalCfg.Resources,
+		TailscaleDefaultSandboxes: globalCfg.Tailscale.Enabled && globalCfg.Tailscale.DefaultSandboxes,
 	}, store, netMgr, storMgr)
+
+	// Wire the tailnet sandbox provisioner when the integration is configured.
+	// Without an API key the daemon still reports local tailnet status but
+	// cannot mint sandbox keys; provisioning fails closed with a clear error.
+	if globalCfg.Tailscale.Enabled && globalCfg.Tailscale.APIKey != "" {
+		tsClient := tailscale.NewClient(globalCfg.Tailscale.APIKey, globalCfg.Tailscale.Tailnet)
+		vmMgr.SetTailscaleProvisioner(&tailscale.Provisioner{
+			Client:        tsClient,
+			SandboxTag:    globalCfg.Tailscale.ResolvedSandboxTag(),
+			KeyExpirySecs: globalCfg.Tailscale.KeyExpirySeconds,
+			AutoInstall:   globalCfg.Tailscale.AutoInstallResolved(),
+			Logger:        log.Default(),
+		})
+		log.Printf("[computed] Tailscale integration enabled (sandbox tag %s)", globalCfg.Tailscale.ResolvedSandboxTag())
+	} else if globalCfg.Tailscale.Enabled {
+		log.Printf("[computed] Tailscale enabled but no API key configured; sandbox tailnet addressing unavailable")
+	}
 
 	// Reconcile and prune any leftover orphan TAPs from previous runs
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 10*time.Second)

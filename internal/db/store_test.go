@@ -747,3 +747,62 @@ func TestStore_DeletionProtection(t *testing.T) {
 		t.Fatalf("expected VM to be deleted after unprotecting")
 	}
 }
+
+func TestStore_VMTailnetFields(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "compute-db-tailnet-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	vm := &VM{
+		ID:                "vm-ts-1",
+		Name:              "ts-box",
+		Status:            StatusRunning,
+		IPAddress:         "172.16.0.9",
+		TailscaleEnabled:  true,
+		TailnetIP:         "100.64.7.7",
+		TailnetDNS:        "compute-vm-ts-1.tail1234.ts.net",
+		TailscaleDeviceID: "dev123",
+		CreatedAt:         time.Now().UTC(),
+		UpdatedAt:         time.Now().UTC(),
+	}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatalf("failed to save VM: %v", err)
+	}
+
+	got, err := store.GetVM(ctx, "vm-ts-1")
+	if err != nil || got == nil {
+		t.Fatalf("failed to get VM: %v", err)
+	}
+	if !got.TailscaleEnabled || got.TailnetIP != "100.64.7.7" || got.TailnetDNS != "compute-vm-ts-1.tail1234.ts.net" || got.TailscaleDeviceID != "dev123" {
+		t.Fatalf("tailnet fields lost on read: %+v", got)
+	}
+
+	// Update path must persist the fields too.
+	got.TailnetIP = "100.64.7.8"
+	got.TailscaleEnabled = false
+	if err := store.SaveVM(ctx, got); err != nil {
+		t.Fatalf("failed to update VM: %v", err)
+	}
+	updated, _ := store.GetVM(ctx, "vm-ts-1")
+	if updated.TailnetIP != "100.64.7.8" || updated.TailscaleEnabled {
+		t.Fatalf("tailnet update not persisted: %+v", updated)
+	}
+
+	// List path must expose them as well.
+	all, err := store.ListVMs(ctx)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("list: %v", err)
+	}
+	if all[0].TailnetIP != "100.64.7.8" {
+		t.Fatalf("tailnet_ip missing in list: %+v", all[0])
+	}
+}

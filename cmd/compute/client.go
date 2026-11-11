@@ -239,6 +239,41 @@ func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, e
 	return &cfg, err
 }
 
+// TailscaleStatus mirrors GET /api/v1/tailscale/status.
+type TailscaleStatus struct {
+	Enabled               bool   `json:"enabled"`
+	APIKeyConfigured      bool   `json:"api_key_configured"`
+	Tailnet               string `json:"tailnet,omitempty"`
+	NodeTag               string `json:"node_tag,omitempty"`
+	SandboxTag            string `json:"sandbox_tag,omitempty"`
+	DefaultSandboxes      bool   `json:"default_sandboxes"`
+	WorkerControlPlaneURL string `json:"worker_control_plane_url,omitempty"`
+	RecommendedPolicy     string `json:"recommended_policy,omitempty"`
+	Host                  *struct {
+		Installed bool     `json:"installed"`
+		Running   bool     `json:"running"`
+		Hostname  string   `json:"hostname"`
+		DNSName   string   `json:"dns_name"`
+		TailnetIP string   `json:"tailnet_ip"`
+		Tailnet   string   `json:"tailnet_name"`
+		Tags      []string `json:"tags"`
+		Version   string   `json:"version"`
+	} `json:"host,omitempty"`
+	Sandboxes []struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		TailnetIP  string `json:"tailnet_ip,omitempty"`
+		TailnetDNS string `json:"tailnet_dns,omitempty"`
+	} `json:"sandboxes,omitempty"`
+}
+
+func (c *DaemonClient) GetTailscaleStatus(ctx context.Context) (*TailscaleStatus, error) {
+	var st TailscaleStatus
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/tailscale/status", nil, &st)
+	return &st, err
+}
+
 func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {
 	var cfg config.GlobalConfig
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/config", nil, &cfg)
