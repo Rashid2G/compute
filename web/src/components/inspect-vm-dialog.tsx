@@ -147,8 +147,13 @@ export function InspectVMDialog({
                     SSH Quick Connect
                   </div>
                   <div className="mt-1 font-mono text-xs text-muted-foreground select-all">
-                    ssh compute@{vm.ip_address || '<ip>'}
+                    {vm.hostname ? `ssh compute@${vm.hostname}` : `ssh compute@${vm.ip_address || '<ip>'}`}
                   </div>
+                  {vm.hostname ? (
+                    <div className="mt-0.5 font-mono text-[10px] text-muted-foreground/70 select-all">
+                      ssh compute@{vm.ip_address || '<ip>'}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -160,7 +165,7 @@ export function InspectVMDialog({
                     <ExternalLink className="h-3.5 w-3.5" />
                     Open Terminal Window
                   </Button>
-                  <CopyButton value={`ssh compute@${vm.ip_address}`} label="Copy SSH" />
+                  <CopyButton value={vm.hostname ? `ssh compute@${vm.hostname}` : `ssh compute@${vm.ip_address}`} label="Copy SSH" />
                   <CopyButton value={`compute ssh ${vm.name}`} label="Copy CLI" />
                 </div>
               </div>

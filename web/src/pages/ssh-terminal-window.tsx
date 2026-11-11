@@ -57,6 +57,7 @@ export function SSHTerminalWindow({
 
   const sshCommand = useMemo(() => {
     if (!vm) return `ssh ${currentUser}@<ip>`;
+    if (vm.hostname) return `ssh ${currentUser}@${vm.hostname}`;
     const ip = vm.ip_address || vm.public_ip || '<ip>';
     return `ssh ${currentUser}@${ip}`;
   }, [vm, currentUser]);
@@ -155,7 +156,7 @@ export function SSHTerminalWindow({
               className="h-7 w-7"
               title="Open in native desktop SSH client (ssh://)"
             >
-              <a href={`ssh://${currentUser}@${vm.ip_address}`} target="_blank" rel="noopener noreferrer">
+              <a href={`ssh://${currentUser}@${vm.hostname || vm.ip_address}`} target="_blank" rel="noopener noreferrer">
                 <ExternalLink className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
               </a>
             </Button>

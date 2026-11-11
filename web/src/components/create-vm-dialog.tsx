@@ -195,7 +195,7 @@ export function CreateVMDialog({
               type="text"
               aria-label="Sandbox name"
               value={sandboxName}
-              onChange={(e) => setSandboxName(e.target.value)}
+              onChange={(e) => setSandboxName(e.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').slice(0, 63))}
               placeholder="sbx-prod-api-01"
               className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />

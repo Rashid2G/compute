@@ -37,6 +37,7 @@ export interface VM {
   ssh_key_path?: string;
   ssh_key_name?: string;
   ssh_public_key?: string;
+  hostname?: string;
   pid?: number;
   socket_path?: string;
   protected?: boolean;
