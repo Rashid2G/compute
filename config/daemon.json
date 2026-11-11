@@ -49,5 +49,14 @@
     "local_execution": true,
     "max_concurrent": 2,
     "boot_timeout_seconds": 90
+  },
+  "tailscale": {
+    "enabled": false,
+    "api_key": "",
+    "tailnet": "-",
+    "node_tag": "tag:compute:master",
+    "sandbox_tag": "tag:compute:sandbox",
+    "hostname_prefix": "compute",
+    "default_sandboxes": false
   }
 }
