@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { SSHTerminal } from '@/components/ssh-terminal';
 import { StatusBadge } from '@/components/status-badge';
 import { api, errorMessage } from '@/lib/api';
+import { sandboxAccess } from '@/lib/sandbox-access';
 import type { VM } from '@/lib/types';
 import { toast } from 'sonner';
 
@@ -55,12 +56,12 @@ export function SSHTerminalWindow({
     return () => clearInterval(interval);
   }, [fetchVM]);
 
+  const access = useMemo(() => sandboxAccess(vm, { user: currentUser }), [vm, currentUser]);
+
   const sshCommand = useMemo(() => {
-    if (!vm) return `ssh ${currentUser}@<ip>`;
-    if (vm.hostname) return `ssh ${currentUser}@${vm.hostname}`;
-    const ip = vm.ip_address || vm.public_ip || '<ip>';
-    return `ssh ${currentUser}@${ip}`;
-  }, [vm, currentUser]);
+    if (access.ssh) return access.ssh;
+    return `ssh ${currentUser}@<ip>`;
+  }, [access, currentUser]);
 
   const copySSH = useCallback(() => {
     void navigator.clipboard.writeText(sshCommand);
@@ -68,6 +69,12 @@ export function SSHTerminalWindow({
     toast.success('SSH command copied to clipboard');
     setTimeout(() => setCopied(false), 2000);
   }, [sshCommand]);
+
+  const copyURL = useCallback(() => {
+    if (!access.url) return;
+    void navigator.clipboard.writeText(access.url);
+    toast.success('URL copied to clipboard');
+  }, [access.url]);
 
   const startInstance = useCallback(async () => {
     if (!vm) return;
@@ -102,8 +109,8 @@ export function SSHTerminalWindow({
             {vm ? <StatusBadge status={vm.status} /> : null}
           </div>
 
-          <span className="hidden sm:inline-block font-mono text-[11px] text-muted-foreground">
-            {vm?.ip_address || vm?.public_ip || 'no-ip'}
+          <span className="hidden sm:inline-block font-mono text-[11px] text-muted-foreground" title={vm?.hostname || vm?.tailnet_dns || undefined}>
+            {access.sshHost || vm?.ip_address || vm?.public_ip || 'no-address'}
           </span>
         </div>
 
@@ -148,7 +155,7 @@ export function SSHTerminalWindow({
           </Button>
 
           {/* Native SSH protocol link */}
-          {vm?.ip_address && (
+          {access.sshHost && (
             <Button
               variant="ghost"
               size="icon-xs"
@@ -156,11 +163,38 @@ export function SSHTerminalWindow({
               className="h-7 w-7"
               title="Open in native desktop SSH client (ssh://)"
             >
-              <a href={`ssh://${currentUser}@${vm.hostname || vm.ip_address}`} target="_blank" rel="noopener noreferrer">
+              <a href={`ssh://${currentUser}@${access.sshHost}`} target="_blank" rel="noopener noreferrer">
                 <ExternalLink className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
               </a>
             </Button>
           )}
+
+          {/* Sandbox HTTP URL: hidden when no resolvable name exists */}
+          {access.url ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={copyURL}
+                className="h-7 px-2 text-xs gap-1 font-mono hidden lg:inline-flex"
+                title="Copy sandbox URL"
+              >
+                <Copy className="h-3.5 w-3.5" />
+                <span className="max-w-[220px] truncate">{access.url}</span>
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                asChild
+                className="h-7 w-7"
+                title="Open sandbox URL"
+              >
+                <a href={access.url} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" />
+                </a>
+              </Button>
+            </>
+          ) : null}
 
           {/* Reconnect button */}
           <Button
@@ -223,6 +257,17 @@ export function SSHTerminalWindow({
                 <span className="font-semibold text-amber-400">{vm?.status || 'stopped'}</span>. Start it to open an SSH
                 session.
               </p>
+            </div>
+            <div className="w-full max-w-md space-y-1.5 rounded-md border border-border bg-secondary/15 p-3 text-left">
+              <div className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+                Access
+              </div>
+              <div className="break-all font-mono text-[11px] text-foreground">{sshCommand}</div>
+              {access.url ? (
+                <div className="break-all font-mono text-[11px] text-muted-foreground">{access.url}</div>
+              ) : (
+                <div className="text-[10px] leading-relaxed text-muted-foreground">{access.urlNote}</div>
+              )}
             </div>
             <Button
               size="sm"

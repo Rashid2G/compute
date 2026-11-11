@@ -181,6 +181,7 @@ if [ "${RESTART_ONLY}" = false ]; then
             --exclude='.git' \
             --exclude='node_modules' \
             --exclude='.cache' \
+            --exclude='.env' \
             --exclude='data/' \
             --exclude='coverage.out' \
             --exclude='benchmark-results.json' \
