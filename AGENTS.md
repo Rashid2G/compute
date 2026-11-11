@@ -52,7 +52,6 @@ The primary deployment host is `compute-lab` (`192.168.1.70`), serving UI on por
 
 DNS/edge facts (docker-compose deployment): the daemon also runs the authoritative DNS responder for the sandbox zone `compute-lab.tailb1be99.ts.net` on port 53 (UDP+TCP) and an HTTP edge listener on port 80, published only on `192.168.1.70` and the tailnet IP `100.78.129.96` (systemd-resolved owns the wildcard :53 on loopback). Sandbox hostnames are `<sandbox>.<username>.compute-lab.tailb1be99.ts.net`; reserved labels `api`/`gui`/`www` and the zone apex route to the daemon. See `docs/dns-ssh.md` for the full setup and delegation options.
 
-
 ### SSH access to `compute-lab`
 
 The deployment VM is reachable through the SSH host alias `compute-lab` (currently `192.168.1.70`). Agents and developers may connect directly with:
