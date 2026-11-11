@@ -21,6 +21,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/dns"
 	"github.com/Rashid2G/on-demand-vms/internal/firecracker"
 	"github.com/Rashid2G/on-demand-vms/internal/image"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
@@ -857,6 +858,13 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	var externalID, name string
 	if strings.TrimSpace(req.Name) != "" {
 		name = strings.TrimSpace(req.Name)
+		// Sandbox names are exposed as DNS names
+		// (<sandbox>.<username>.<base-domain>), so new names must be
+		// valid DNS labels. Existing sandboxes keep working: their names
+		// are sanitized for DNS purposes at lookup time.
+		if !dns.ValidLabel(name) {
+			return nil, fmt.Errorf("invalid sandbox name %q: names must be lowercase letters, digits, and dashes (a DNS label, max %d chars) so they can be used as <name>.<username>.<base-domain> hostnames", name, dns.MaxLabelLength)
+		}
 		externalID = name
 		existing, _ := m.store.GetVMByOwner(ctx, ownerID, name)
 		if existing != nil {

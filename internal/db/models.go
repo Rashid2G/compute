@@ -27,37 +27,41 @@ const (
 
 // VM represents a managed microVM
 type VM struct {
-	ID                string    `json:"id"`                    // External ID (identical to Name, or user-assigned ID)
-	InternalID        string    `json:"internal_id,omitempty"` // Distinct internal ID in the global store
-	OwnerID           string    `json:"owner_id,omitempty"`    // Owner / user ID for tenant isolation
-	Name              string    `json:"name"`                  // VM Name (also serves as the external VM ID)
-	Status            VMStatus  `json:"status"`
-	DesiredRunning    bool      `json:"desired_running"`
-	VCPUs             int       `json:"vcpus"`
-	MemoryMB          int       `json:"memory_mb"`
-	DiskMB            int       `json:"disk_mb"`
-	IPAddress         string    `json:"ip_address"`
-	PublicIP          string    `json:"public_ip"`
-	PublicIPEnabled   bool      `json:"public_ip_enabled"`
-	MACAddress        string    `json:"mac_address"`
-	TAPDevice         string    `json:"tap_device"`
-	TailscaleEnabled  bool      `json:"tailscale_enabled"`
-	TailnetIP         string    `json:"tailnet_ip"`
-	TailnetDNS        string    `json:"tailnet_dns,omitempty"`
-	TailscaleDeviceID string    `json:"tailscale_device_id,omitempty"`
-	RootfsPath        string    `json:"rootfs_path"`
-	KernelPath        string    `json:"kernel_path"`
-	DiskPath          string    `json:"disk_path"`
-	SnapshotPath      string    `json:"snapshot_path,omitempty"`
-	MemFilePath       string    `json:"mem_file_path,omitempty"`
-	SSHKeyPath        string    `json:"ssh_key_path,omitempty"`
-	SSHKeyName        string    `json:"ssh_key_name,omitempty"`
-	SSHPublicKey      string    `json:"ssh_public_key,omitempty"`
-	PID               int       `json:"pid,omitempty"`
-	SocketPath        string    `json:"socket_path,omitempty"`
-	Protected         bool      `json:"protected"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string   `json:"id"`                    // External ID (identical to Name, or user-assigned ID)
+	InternalID        string   `json:"internal_id,omitempty"` // Distinct internal ID in the global store
+	OwnerID           string   `json:"owner_id,omitempty"`    // Owner / user ID for tenant isolation
+	Name              string   `json:"name"`                  // VM Name (also serves as the external VM ID)
+	Status            VMStatus `json:"status"`
+	DesiredRunning    bool     `json:"desired_running"`
+	VCPUs             int      `json:"vcpus"`
+	MemoryMB          int      `json:"memory_mb"`
+	DiskMB            int      `json:"disk_mb"`
+	IPAddress         string   `json:"ip_address"`
+	PublicIP          string   `json:"public_ip"`
+	PublicIPEnabled   bool     `json:"public_ip_enabled"`
+	MACAddress        string   `json:"mac_address"`
+	TAPDevice         string   `json:"tap_device"`
+	TailscaleEnabled  bool     `json:"tailscale_enabled"`
+	TailnetIP         string   `json:"tailnet_ip"`
+	TailnetDNS        string   `json:"tailnet_dns,omitempty"`
+	TailscaleDeviceID string   `json:"tailscale_device_id,omitempty"`
+	RootfsPath        string   `json:"rootfs_path"`
+	KernelPath        string   `json:"kernel_path"`
+	DiskPath          string   `json:"disk_path"`
+	SnapshotPath      string   `json:"snapshot_path,omitempty"`
+	MemFilePath       string   `json:"mem_file_path,omitempty"`
+	SSHKeyPath        string   `json:"ssh_key_path,omitempty"`
+	SSHKeyName        string   `json:"ssh_key_name,omitempty"`
+	SSHPublicKey      string   `json:"ssh_public_key,omitempty"`
+	PID               int      `json:"pid,omitempty"`
+	SocketPath        string   `json:"socket_path,omitempty"`
+	Protected         bool     `json:"protected"`
+	// Hostname is transient and response-only: the DNS-safe fully qualified
+	// sandbox name "<sandbox>.<username>.<base-domain>" populated by the API
+	// layer when DNS naming is configured. It is never persisted.
+	Hostname  string    `json:"hostname,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // CustomImage represents a user-created OS image with pre-installed packages

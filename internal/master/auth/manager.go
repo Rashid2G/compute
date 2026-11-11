@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Rashid2G/on-demand-vms/internal/dns"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth/quota"
 	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
 	"github.com/Rashid2G/on-demand-vms/internal/store"
@@ -91,6 +93,11 @@ func (m *Manager) Signup(ctx context.Context, email, username, displayName, pass
 	username = strings.TrimSpace(strings.ToLower(username))
 	if email == "" || username == "" || password == "" {
 		return nil, errors.New("email, username, and password are required")
+	}
+	// Usernames become the tenant label in sandbox DNS names
+	// (<sandbox>.<username>.<base-domain>), so they must be DNS-safe.
+	if !dns.ValidLabel(username) {
+		return nil, fmt.Errorf("invalid username: must be lowercase letters, digits, and dashes (a DNS label, max %d chars) so sandboxes are reachable at <sandbox>.<username>.<base-domain>", dns.MaxLabelLength)
 	}
 	if role == "" {
 		role = "user"
@@ -328,6 +335,52 @@ func (m *Manager) AuthenticateRequest(r *http.Request) (*AuthContext, error) {
 // personalOrgIDFor returns the deterministic personal organization ID for a user.
 func personalOrgIDFor(userID string) string {
 	return "org_" + strings.TrimPrefix(userID, "usr_")
+}
+
+// PersonalOrgID returns the deterministic personal organization ID for a user.
+// Resources may be owned directly by the user or by their personal
+// organization, so tenant lookups must consider both.
+func PersonalOrgID(userID string) string {
+	return personalOrgIDFor(userID)
+}
+
+// UserByUsername resolves a user by username or email (case-insensitive for
+// email, exact for username). It returns (nil, nil) when no user matches.
+func (m *Manager) UserByUsername(ctx context.Context, identifier string) (*db.User, error) {
+	if m.queries == nil || strings.TrimSpace(identifier) == "" {
+		return nil, nil
+	}
+	user, err := m.queries.GetUserByEmailOrUsername(ctx, identifier)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup user %q: %w", identifier, err)
+	}
+	return user, nil
+}
+
+// UserByID resolves a user by ID. It returns (nil, nil) when no user matches.
+func (m *Manager) UserByID(ctx context.Context, id string) (*db.User, error) {
+	if m.queries == nil || strings.TrimSpace(id) == "" {
+		return nil, nil
+	}
+	user, err := m.queries.GetUserByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup user %q: %w", id, err)
+	}
+	return user, nil
+}
+
+// Users lists every user account.
+func (m *Manager) Users(ctx context.Context) ([]*db.User, error) {
+	if m.queries == nil {
+		return nil, fmt.Errorf("auth store unavailable")
+	}
+	return m.queries.ListUsers(ctx)
 }
 
 // resolveOrgID returns the organization a request may act within. A caller may

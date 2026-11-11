@@ -113,6 +113,35 @@ func ValidateImage(image string) (string, error) {
 	return "", fmt.Errorf("unsupported image '%s': only 'ubuntu-24' (Ubuntu 24.04 LTS) is supported; users can clone disks to run other VMs from their existing images", image)
 }
 
+// DNSConfig configures the built-in authoritative DNS responder that gives
+// every sandbox a stable hostname of the form
+//
+//	<sandbox>.<username>.<base-domain>
+//
+// SSH connections carry no hostname, so the wildcard dispatch for SSH happens
+// at the DNS layer: each sandbox name resolves to the sandbox's own address
+// (tailnet IP first, guest IP second) and the network does the routing. The
+// zone works for any base domain — Tailscale split DNS, any DNS provider's
+// delegation, or a LAN resolver — as long as queries for the zone reach the
+// daemon. Queries outside the zone are forwarded upstream.
+type DNSConfig struct {
+	// Enabled turns the responder on.
+	Enabled bool `json:"enabled,omitempty"`
+	// Listen is the UDP/TCP listen address (default ":53").
+	Listen string `json:"listen,omitempty"`
+	// BaseDomain is the primary zone, e.g. "compute-lab.tail1234.ts.net".
+	// Empty falls back to network.base_domain.
+	BaseDomain string `json:"base_domain,omitempty"`
+	// ExtraBaseDomains optionally serves additional zones.
+	ExtraBaseDomains []string `json:"extra_base_domains,omitempty"`
+	// HostAddresses overrides the addresses the zone apex and reserved
+	// service labels (api/gui/www) resolve to — the host running the GUI/API.
+	// Useful when the daemon runs in a container where auto-detection (the
+	// outbound route, or the host's tailnet IP) yields a non-routable address.
+	// Empty falls back to the host's tailnet IP, else the primary outbound IP.
+	HostAddresses []string `json:"host_addresses,omitempty"`
+}
+
 // ServerConfig holds daemon server settings
 type ServerConfig struct {
 	ListenAddr     string `json:"listen"`
@@ -126,6 +155,12 @@ type ServerConfig struct {
 	JailerBinary   string `json:"jailer_binary,omitempty"`
 	JailerBaseDir  string `json:"jailer_base_dir,omitempty"`
 	CgroupEnforce  bool   `json:"cgroup_enforce,omitempty"`
+	// EdgeListen optionally starts an HTTP edge listener (default ":80" when
+	// DNS is enabled) that dispatches by Host header: the reserved "api" and
+	// apex/gui/www subdomains of the base domain are served by the daemon
+	// itself, every other subdomain goes to the sandbox ingress wildcard.
+	// Set to "" (or "-") to disable.
+	EdgeListen string `json:"edge_listen,omitempty"`
 }
 
 // DefaultsConfig holds default microVM specifications
@@ -238,10 +273,57 @@ type GlobalConfig struct {
 	Resources  ResourceLimits  `json:"resources"`
 	Jobs       JobsConfig      `json:"jobs"`
 	Tailscale  TailscaleConfig `json:"tailscale,omitempty"`
+	DNS        DNSConfig       `json:"dns,omitempty"`
 }
 
 // Config is an alias for GlobalConfig for backward compatibility and package consistency.
 type Config = GlobalConfig
+
+// DNSBaseDomains returns the effective DNS zones in priority order (primary
+// first, longest-suffix matching is applied by the DNS server). An empty
+// result means DNS naming is not configured.
+func (c GlobalConfig) DNSBaseDomains() []string {
+	var zones []string
+	primary := c.DNS.BaseDomain
+	if primary == "" {
+		primary = c.Network.BaseDomain
+	}
+	if primary = strings.ToLower(strings.TrimSpace(primary)); primary != "" {
+		zones = append(zones, primary)
+	}
+	for _, z := range c.DNS.ExtraBaseDomains {
+		if z = strings.ToLower(strings.TrimSpace(z)); z != "" && z != primary {
+			zones = append(zones, z)
+		}
+	}
+	return zones
+}
+
+// PrimaryDNSBaseDomain returns the first configured DNS zone ("" when none).
+func (c GlobalConfig) PrimaryDNSBaseDomain() string {
+	zones := c.DNSBaseDomains()
+	if len(zones) == 0 {
+		return ""
+	}
+	return zones[0]
+}
+
+// EdgeListenResolved returns the edge listener address, or "" when the edge
+// should not start. Default ":80" while DNS is enabled; "-" explicitly
+// disables.
+func (c GlobalConfig) EdgeListenResolved() string {
+	v := strings.TrimSpace(c.Server.EdgeListen)
+	if v == "-" {
+		return ""
+	}
+	if v != "" {
+		return v
+	}
+	if c.DNS.Enabled && c.PrimaryDNSBaseDomain() != "" {
+		return ":80"
+	}
+	return ""
+}
 
 // DefaultConfig returns standard out-of-the-box configuration
 func DefaultConfig() GlobalConfig {
