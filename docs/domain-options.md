@@ -191,7 +191,7 @@ public IP/port forwarding.
 ### C. Per-sandbox MagicDNS names (fallback)
 
 Enable Tailscale provisioning for sandboxes (`tailscale.enabled`,
-`COMPUTE_TAILSCALE_API_KEY`, `tag:compute:sandbox` ownership and a grant), and
+`COMPUTE_TAILSCALE_API_KEY`, `tag:compute-sandbox` ownership and a grant), and
 each sandbox joins the tailnet as an ephemeral device. MagicDNS then resolves
 its single-label device name:
 
@@ -306,13 +306,20 @@ test.
 
 Two prerequisites apply to A and B regardless of the zone:
 
-- The lab's tailnet data plane must allow client → `100.78.129.96` TCP/53,80
-  (issue #16, owned by the ACL thread; from `runner` the TCP path is currently
-  blocked while disco ping works).
-- Sandboxes must be reachable: either join them to the tailnet (then DNS
-  answers their `100.x` address) or route `172.16.0.0/16` to the sandboxes.
-  Today the lab advertises only an exit node (`0.0.0.0/0`, `::/0`), not the
-  guest subnet, and the guest bridge exists in both the host and container
+- **Tailnet ACL grants:** The lab's tailnet data plane must allow client →
+  `100.78.129.96` TCP/53,80 (issue #16). Today, the live ACL policy contains
+  only one grant (`operator email -> *`). Tagged devices such as the agent runner
+  (`tag:t3-vm`) are *not* covered by `autogroup:member`, which is why TCP from
+  `runner` to `compute-lab` is dropped at the sender even though disco ping works.
+  Additionally, Tailscale tag names may only contain letters, numbers, hyphens,
+  underscores, or periods — colons are rejected by `POST /acl/validate`
+  (e.g. `tag:compute:sandbox` errors). The policy must define hyphenated tags
+  (`tag:compute-master`, `tag:compute-node`, `tag:compute-sandbox`) and explicit
+  grants for both `autogroup:member` and `tag:t3-vm` to reach those tags.
+- **Sandbox reachability:** Sandboxes must be reachable: either join them to the
+  tailnet (then DNS answers their `100.x` address) or route `172.16.0.0/16` to
+  the sandboxes. Today the lab advertises only an exit node (`0.0.0.0/0`, `::/0`),
+  not the guest subnet, and the guest bridge exists in both the host and container
   network namespaces (the host's copy cannot reach guests; the container's
   can). Enabling Tailscale provisioning is the smaller change.
 
@@ -364,7 +371,7 @@ Assumes the user approves the zone name; do not apply until then.
    `DNSBaseDomains()` is the primary).
 
 5. **Make sandboxes reachable.** Either enable tailnet provisioning
-   (`tailscale.enabled`, `COMPUTE_TAILSCALE_API_KEY`, `tag:compute:sandbox`
+   (`tailscale.enabled`, `COMPUTE_TAILSCALE_API_KEY`, `tag:compute-sandbox`
    owner + grant) so DNS answers `100.x`, or advertise `172.16.0.0/16` from the
    container's `tailscaled` and approve the route.
 
@@ -422,8 +429,10 @@ The daemon has no TLS listener (plain HTTP on `:80`). Options by zone type:
   (MagicDNS intercepts it). It was left untouched by this research and can be
   removed.
 - ACL data-plane work (issue #16) is owned by another thread; this proposal
-  does not depend on it for the DNS evidence, but tailnet clients will not
-  reach the lab until it lands.
+  does not depend on it for the DNS evidence, but tailnet clients (including
+  tagged runners) will not reach the lab until the ACL grant additions land
+  (`autogroup:member` and `tag:t3-vm` -> `tag:compute-master`, `tag:compute-node`,
+  `tag:compute-sandbox`).
 
 ## Test hygiene
 
