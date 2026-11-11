@@ -258,6 +258,16 @@ func main() {
 	// Start continuous background status monitor to detect microVM exits and maintain synced status
 	vmMgr.StartStatusMonitor(context.Background(), 3*time.Second)
 
+	// Built-in DNS responder: gives every sandbox a routable
+	// <sandbox>.<username>.<base-domain> name. SSH carries no hostname, so the
+	// wildcard dispatch for SSH happens here, at the DNS layer.
+	server.startDNS()
+
+	// HTTP edge listener (default :80 with DNS enabled): dispatches by Host
+	// header — the reserved "api" and apex/gui/www labels are served by the
+	// daemon, every other subdomain goes to the sandbox ingress wildcard.
+	startEdge(server, globalCfg)
+
 	// Mount embedded Web GUI
 	daemonTarget := globalCfg.Server.ListenAddr
 	if !strings.HasPrefix(daemonTarget, "unix://") {

@@ -26,6 +26,10 @@ type TargetInfo struct {
 // TargetResolver resolves a VM ID or name to its target information and port exposure.
 type TargetResolver interface {
 	ResolveTarget(ctx context.Context, idOrName string) (*TargetInfo, error)
+	// ResolveTargetForOwner resolves a sandbox within a specific owner's
+	// namespace (the "<sandbox>.<username>.<zone>" wildcard form). The owner
+	// is the username DNS label.
+	ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel string) (*TargetInfo, error)
 	IsPortPublic(ctx context.Context, idOrName string, port int) bool
 }
 
@@ -85,11 +89,20 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 type RouteMatch struct {
 	Target  string // VM ID or VM Name
 	Port    int    // Upstream guest port
+	Owner   string // Username DNS label for "<sandbox>.<username>.<zone>" routes
 	SubPath string // Rewritten path to forward upstream
 	IsMatch bool
 }
 
 // ParseRoute extracts target microVM ID/name, port, and subpath from either subdomain or URL path.
+//
+// Subdomain formats supported (for a base domain like sandbox.example.com):
+//
+//	<port>-<vm_id_or_name>.<domain>        e.g. 8080-myvm.sandbox.example.com
+//	<vm_name>-<port>.<domain>              e.g. myvm-8080.sandbox.example.com
+//	<vm>.<username>.<domain>               e.g. myvm.alice.sandbox.example.com (guest port 80)
+//	<port>-<vm>.<username>.<domain>        e.g. 8080-myvm.alice.sandbox.example.com
+//	<vm>-<port>.<username>.<domain>        e.g. myvm-8080.alice.sandbox.example.com
 func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	if r == nil {
 		return RouteMatch{}
@@ -113,7 +126,7 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 		suffix := "." + domain
 		if strings.HasSuffix(host, suffix) {
 			subdomain := strings.TrimSuffix(host, suffix)
-			if m, ok := parseSubdomainPrefix(subdomain, r.URL.Path); ok {
+			if m, ok := parseSubdomain(subdomain, r.URL.Path); ok {
 				return m
 			}
 		}
@@ -130,6 +143,84 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	}
 
 	return RouteMatch{IsMatch: false}
+}
+
+// parseSubdomain parses the labels preceding a base domain. A single label is
+// the legacy "<port>-<vm>" / "<vm>-<port>" form; two labels are the tenant
+// wildcard form "<vm>[.<port>].<username>" (guest port 80 when no port is
+// given).
+func parseSubdomain(subdomain, rawPath string) (RouteMatch, bool) {
+	if subdomain == "" {
+		return RouteMatch{}, false
+	}
+	// Apex and reserved host-service labels are served by the daemon/edge, not
+	// by sandbox ingress.
+	if len(strings.Split(subdomain, ".")) == 1 && networkReservedLabels[strings.ToLower(subdomain)] {
+		return RouteMatch{}, false
+	}
+
+	labels := strings.Split(subdomain, ".")
+	if len(labels) == 2 && labels[0] != "" && labels[1] != "" {
+		head := labels[0]
+		owner := strings.ToLower(labels[1])
+		if m, ok := parseHeadLabel(head, rawPath); ok {
+			m.Owner = owner
+			return m, true
+		}
+		// Plain "<vm>.<username>" → guest port 80.
+		if m, ok := plainRoute(head, 80, rawPath); ok {
+			m.Owner = owner
+			return m, true
+		}
+		return RouteMatch{}, false
+	}
+	return parseSubdomainPrefix(subdomain, rawPath)
+}
+
+// networkReservedLabels are zone-root labels that belong to the host itself
+// (GUI, API) and never resolve to a sandbox.
+var networkReservedLabels = map[string]bool{"api": true, "gui": true, "www": true}
+
+// parseHeadLabel parses the sandbox-side label, supporting the port-prefixed
+// and port-suffixed variants ("<port>-<vm>", "<vm>-<port>") and falling back
+// to the plain name when the label parses as neither.
+func parseHeadLabel(head, rawPath string) (RouteMatch, bool) {
+	dashIdx := strings.Index(head, "-")
+	if dashIdx > 0 {
+		portCandidate, err := strconv.Atoi(head[:dashIdx])
+		if err == nil && portCandidate > 0 && portCandidate <= 65535 {
+			target := head[dashIdx+1:]
+			if target != "" {
+				return portRoute(target, portCandidate, rawPath), true
+			}
+		}
+	}
+	lastDashIdx := strings.LastIndex(head, "-")
+	if lastDashIdx > 0 && lastDashIdx < len(head)-1 {
+		portCandidate, err := strconv.Atoi(head[lastDashIdx+1:])
+		if err == nil && portCandidate > 0 && portCandidate <= 65535 {
+			target := head[:lastDashIdx]
+			if target != "" {
+				return portRoute(target, portCandidate, rawPath), true
+			}
+		}
+	}
+	return RouteMatch{}, false
+}
+
+func portRoute(target string, port int, rawPath string) RouteMatch {
+	subPath := rawPath
+	if subPath == "" {
+		subPath = "/"
+	}
+	return RouteMatch{Target: target, Port: port, SubPath: subPath, IsMatch: true}
+}
+
+func plainRoute(target string, port int, rawPath string) (RouteMatch, bool) {
+	if target == "" {
+		return RouteMatch{}, false
+	}
+	return portRoute(target, port, rawPath), true
 }
 
 func parseSubdomainPrefix(subdomain, rawPath string) (RouteMatch, bool) {
@@ -280,7 +371,13 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	targetInfo, err := p.resolver.ResolveTarget(ctx, match.Target)
+	var targetInfo *TargetInfo
+	var err error
+	if match.Owner != "" {
+		targetInfo, err = p.resolver.ResolveTargetForOwner(ctx, match.Target, match.Owner)
+	} else {
+		targetInfo, err = p.resolver.ResolveTarget(ctx, match.Target)
+	}
 	if err != nil || targetInfo == nil {
 		http.Error(w, fmt.Sprintf("sandbox %q not found", match.Target), http.StatusNotFound)
 		return

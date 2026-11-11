@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Rashid2G/on-demand-vms/internal/dns"
 	"github.com/Rashid2G/on-demand-vms/internal/master/audit"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
@@ -132,6 +133,12 @@ func runAdminUser(args []string) {
 
 	if *username == "" || *email == "" || *password == "" {
 		fmt.Fprintf(os.Stderr, "Error: --username, --email, and --password are required\n")
+		os.Exit(1)
+	}
+	// Usernames become the tenant label in sandbox DNS names
+	// (<sandbox>.<username>.<base-domain>), so they must be DNS-safe.
+	if !dns.ValidLabel(*username) {
+		fmt.Fprintf(os.Stderr, "Error: invalid username %q: must be lowercase letters, digits, and dashes (a DNS label, max %d chars)\n", *username, dns.MaxLabelLength)
 		os.Exit(1)
 	}
 
