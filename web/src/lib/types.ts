@@ -23,6 +23,10 @@ export interface VM {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
+  tailscale_enabled?: boolean;
+  tailnet_ip?: string;
+  tailnet_dns?: string;
+  tailscale_device_id?: string;
   mac_address: string;
   tap_device: string;
   rootfs_path: string;
@@ -89,6 +93,7 @@ export interface CreateVMRequest {
   public_ip_enabled?: boolean;
   dedicated_ip?: boolean;
   protected?: boolean;
+  tailscale?: boolean;
   ssh_key_id?: string;
   ssh_public_key?: string;
 }
