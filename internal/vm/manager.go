@@ -26,6 +26,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	jailer "github.com/Rashid2G/on-demand-vms/internal/node/runtime/firecracker"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 	"github.com/google/uuid"
 )
 
@@ -44,6 +45,16 @@ type Config struct {
 	CgroupDevOverride   bool
 	Defaults            config.DefaultsConfig
 	Resources           config.ResourceLimits
+	// TailscaleDefaultSandboxes gives every new sandbox tailnet addressing
+	// unless the create request explicitly opts out.
+	TailscaleDefaultSandboxes bool
+}
+
+// TailscaleProvisioner joins a running sandbox to the operator's tailnet as an
+// ephemeral, tagged device and reports the assigned identity back.
+type TailscaleProvisioner interface {
+	Provision(ctx context.Context, vmID, vmIP, sshKeyPath string) (*tailscale.ProvisionResult, error)
+	Teardown(ctx context.Context, vmIP, sshKeyPath string)
 }
 
 type Manager struct {
@@ -62,6 +73,7 @@ type Manager struct {
 	queueMu               sync.Mutex
 	processChecker        func(pid int) bool
 	launcher              func(ctx context.Context, vm *db.VM) error
+	tsProvisioner         TailscaleProvisioner
 	mu                    sync.RWMutex
 	vms                   map[string]*db.VM
 	templates             map[string]*db.Template
@@ -160,6 +172,14 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 	}
 
 	return m
+}
+
+// SetTailscaleProvisioner wires the tailnet sandbox provisioner. When unset,
+// sandboxes still boot normally but tailnet addressing is skipped.
+func (m *Manager) SetTailscaleProvisioner(p TailscaleProvisioner) {
+	m.mu.Lock()
+	m.tsProvisioner = p
+	m.mu.Unlock()
 }
 
 func (m *Manager) getVMLock(vmID string) *sync.RWMutex {
@@ -422,10 +442,14 @@ type CreateRequest struct {
 	PublicIPEnabled *bool  `json:"public_ip_enabled,omitempty"`
 	DedicatedIP     *bool  `json:"dedicated_ip,omitempty"`
 	DHCP            *bool  `json:"dhcp,omitempty"`
-	SSHKeyID        string `json:"ssh_key_id,omitempty"`
-	SSHPublicKey    string `json:"ssh_public_key,omitempty"`
+	// Tailscale requests tailnet addressing for the sandbox: it joins the
+	// operator's tailnet as an ephemeral tagged device and gets a 100.x IP
+	// plus a MagicDNS name. Nil falls back to the daemon-wide default.
+	Tailscale    *bool  `json:"tailscale,omitempty"`
+	SSHKeyID     string `json:"ssh_key_id,omitempty"`
+	SSHPublicKey string `json:"ssh_public_key,omitempty"`
 
-	Protected       *bool  `json:"protected,omitempty"`
+	Protected *bool `json:"protected,omitempty"`
 
 	// AuthorizedOwnerIDs lists every owner whose templates, images, clone
 	// sources, and SSH keys the caller may use. It is populated by the control
@@ -1169,34 +1193,48 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		publicIP = ip // Dedicated IP on main network is considered as the public IP
 	}
 
+	// Resolve tailnet addressing: request flag wins, then the daemon default.
+	tailscaleEnabled := m.cfg.TailscaleDefaultSandboxes
+	if req.Tailscale != nil {
+		tailscaleEnabled = *req.Tailscale
+	}
+	if tailscaleEnabled {
+		if m.tsProvisioner == nil {
+			log.Printf("[vm-manager] %s: tailscale requested but no provisioner configured; skipping tailnet addressing", externalID)
+		} else {
+			log.Printf("[vm-manager] %s: tailnet addressing requested", externalID)
+		}
+	}
+
 	protected := false
 	if req.Protected != nil {
 		protected = *req.Protected
 	}
 
 	vm := &db.VM{
-		ID:              externalID,
-		InternalID:      internalID,
-		OwnerID:         ownerID,
-		Name:            name,
-		Status:          db.StatusCreated,
-		Protected:       protected,
-		VCPUs:           vcpus,
-		MemoryMB:        memoryMB,
-		DiskMB:          diskMB,
-		IPAddress:       ip,
-		PublicIP:        publicIP,
-		PublicIPEnabled: publicIPEnabled,
-		MACAddress:      mac,
-		TAPDevice:       tapDev,
-		RootfsPath:      rootfsPath,
-		KernelPath:      kernelPath,
-		DiskPath:        diskPath,
-		SSHKeyPath:      sshKeyPath,
-		SSHKeyName:      embeddedKeyName,
-		SSHPublicKey:    embeddedPubKey,
-		CreatedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
+		ID:               externalID,
+		InternalID:       internalID,
+		OwnerID:          ownerID,
+		Name:             name,
+		Status:           db.StatusCreated,
+		Protected:        protected,
+		VCPUs:            vcpus,
+		MemoryMB:         memoryMB,
+		DiskMB:           diskMB,
+		IPAddress:        ip,
+		PublicIP:         publicIP,
+		PublicIPEnabled:  publicIPEnabled,
+		MACAddress:       mac,
+		TAPDevice:        tapDev,
+		TailscaleEnabled: tailscaleEnabled,
+		RootfsPath:       rootfsPath,
+		KernelPath:       kernelPath,
+		DiskPath:         diskPath,
+		SSHKeyPath:       sshKeyPath,
+		SSHKeyName:       embeddedKeyName,
+		SSHPublicKey:     embeddedPubKey,
+		CreatedAt:        time.Now().UTC(),
+		UpdatedAt:        time.Now().UTC(),
 	}
 
 	if err := m.saveVMRecord(ctx, vm); err != nil {
@@ -1444,6 +1482,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 				if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 					go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 				}
+				m.maybeProvisionTailscale(vm)
 				go m.watchProcessExit(vm.ID, vm.PID, cmd)
 				return nil
 			}
@@ -1546,6 +1585,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 		go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 	}
+	m.maybeProvisionTailscale(vm)
 	go m.watchProcessExit(vm.ID, vm.PID, cmd)
 	return nil
 }
@@ -1596,6 +1636,68 @@ func (m *Manager) pollDHCPLease(vmID, mac string, publicIPEnabled bool) {
 			}
 		}
 	}
+}
+
+// maybeProvisionTailscale kicks off async tailnet provisioning after a
+// successful VM launch. It never blocks the launch path and never fails the VM.
+func (m *Manager) maybeProvisionTailscale(vm *db.VM) {
+	if vm == nil || !vm.TailscaleEnabled {
+		return
+	}
+	m.mu.RLock()
+	prov := m.tsProvisioner
+	m.mu.RUnlock()
+	if prov == nil {
+		return
+	}
+	go m.provisionTailscale(vm.ID, prov)
+}
+
+func (m *Manager) provisionTailscale(vmID string, prov TailscaleProvisioner) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	// Wait for a routable IP (DHCP lease resolution may still be in flight).
+	var vm *db.VM
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		v, _ := m.getVMUnsafe(context.Background(), vmID)
+		if v == nil {
+			return
+		}
+		if v.IPAddress != "" && v.IPAddress != "dhcp" {
+			vm = v
+			break
+		}
+		if time.Now().After(deadline) {
+			log.Printf("[vm-manager] %s: tailscale provisioning skipped (no routable IP resolved)", vmID)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	res, err := prov.Provision(ctx, vm.ID, vm.IPAddress, vm.SSHKeyPath)
+	if err != nil {
+		log.Printf("[vm-manager] %s: tailscale provisioning failed: %v", vm.ID, err)
+		return
+	}
+
+	// Persist the assigned tailnet identity on the VM record.
+	vmLock := m.getVMLock(vm.ID)
+	vmLock.Lock()
+	updated, _ := m.getVMUnsafe(context.Background(), vm.ID)
+	if updated != nil && updated.Status == db.StatusRunning {
+		updated.TailnetIP = res.TailnetIP
+		updated.TailnetDNS = res.DNSName
+		updated.TailscaleDeviceID = res.DeviceID
+		_ = m.saveVMRecord(context.Background(), updated)
+	}
+	vmLock.Unlock()
+	log.Printf("[vm-manager] %s: joined tailnet at %s (%s)", vm.ID, res.TailnetIP, res.DNSName)
 }
 
 // canRunVM checks if the candidate VM can run without violating resource limits
@@ -2070,6 +2172,16 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string) error {
 	if vm.PID > 0 && m.isAlive(vm.PID) {
 		// 1. Try graceful sync over SSH if accessible
 		if vm.IPAddress != "" && vm.SSHKeyPath != "" {
+			// Best-effort: leave the tailnet before poweroff so the ephemeral
+			// device is removed immediately rather than timing out.
+			if vm.TailscaleEnabled {
+				m.mu.RLock()
+				prov := m.tsProvisioner
+				m.mu.RUnlock()
+				if prov != nil {
+					prov.Teardown(ctx, vm.IPAddress, vm.SSHKeyPath)
+				}
+			}
 			syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Second)
 			sshCmd := exec.CommandContext(syncCtx, "ssh",
 				"-i", vm.SSHKeyPath,

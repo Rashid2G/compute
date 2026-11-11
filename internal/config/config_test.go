@@ -230,3 +230,72 @@ func TestResolveConfigPath(t *testing.T) {
 		t.Fatalf("expected cfg.ConfigPath %s, got %s", customPath, cfg.ConfigPath)
 	}
 }
+
+func TestTailscaleConfigParsing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.json")
+	if err := os.WriteFile(path, []byte(`{
+		"tailscale": {
+			"enabled": true,
+			"api_key": "tskey-api-test",
+			"tailnet": "mytailnet",
+			"default_sandboxes": true,
+			"auto_install_guest": false
+		}
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("COMPUTE_TAILSCALE_ENABLED", "")
+	t.Setenv("COMPUTE_TAILSCALE_API_KEY", "")
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile error = %v", err)
+	}
+	if !cfg.Tailscale.Enabled {
+		t.Error("expected tailscale.enabled=true")
+	}
+	if cfg.Tailscale.APIKey != "tskey-api-test" {
+		t.Errorf("api key = %q", cfg.Tailscale.APIKey)
+	}
+	if cfg.Tailscale.Tailnet != "mytailnet" {
+		t.Errorf("tailnet = %q", cfg.Tailscale.Tailnet)
+	}
+	if !cfg.Tailscale.DefaultSandboxes {
+		t.Error("expected default_sandboxes=true")
+	}
+	if cfg.Tailscale.AutoInstallResolved() {
+		t.Error("expected auto_install_guest=false honored")
+	}
+	if cfg.Tailscale.ResolvedSandboxTag() != "tag:compute:sandbox" {
+		t.Errorf("sandbox tag = %q", cfg.Tailscale.ResolvedSandboxTag())
+	}
+}
+
+func TestTailscaleEnvOverrides(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.json")
+	if err := os.WriteFile(path, []byte(`{"tailscale": {"enabled": false}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("COMPUTE_TAILSCALE_ENABLED", "true")
+	t.Setenv("COMPUTE_TAILSCALE_API_KEY", "tskey-api-env")
+	t.Setenv("COMPUTE_TAILSCALE_TAILNET", "envtailnet")
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile error = %v", err)
+	}
+	if !cfg.Tailscale.Enabled {
+		t.Error("expected env to enable tailscale")
+	}
+	if cfg.Tailscale.APIKey != "tskey-api-env" {
+		t.Errorf("api key from env = %q", cfg.Tailscale.APIKey)
+	}
+	if cfg.Tailscale.Tailnet != "envtailnet" {
+		t.Errorf("tailnet from env = %q", cfg.Tailscale.Tailnet)
+	}
+	if !cfg.Tailscale.AutoInstallResolved() {
+		t.Error("auto_install_guest should default to true")
+	}
+}
