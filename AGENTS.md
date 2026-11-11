@@ -65,8 +65,9 @@ Deployment restarts live services and affects shared infrastructure. Deploy only
 
 ## Branch, worktree, and release workflow
 
-- `main` is production. Never push directly; changes arrive only via approved PRs.
-- `dev` is the integration branch. All agent work targets `dev`.
+- Agents must interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
+- `main` is production and is maintained separately from agent work. Changes may reach it only through a maintainer-approved promotion from `dev`.
+- `dev` is the sole integration branch. All agent work targets `dev`.
 - Work happens in git worktrees checked out from `dev`:
   - `git fetch origin && git worktree add ../on-demand-vms-<topic> -b <type>/<topic> origin/dev`
   - prefixes: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`
