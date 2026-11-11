@@ -20,7 +20,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables tar gzip bash socat openssh-client
 
 # Install Firecracker & Jailer static binaries for worker microVM execution
-ARG FIRECRACKER_VERSION=v1.7.0
+ARG FIRECRACKER_VERSION=v1.17.0
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     if [ "${ARCH}" = "x86_64" ]; then \
