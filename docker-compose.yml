@@ -9,11 +9,15 @@ services:
     hostname: computed
     restart: unless-stopped
     privileged: true
+    # Manage host cgroups v2 (per-VM CPU/memory/pids limits) instead of the
+    # container's private cgroup namespace, where controllers cannot be enabled.
+    cgroup: host
     ports:
       - "18080:18080"
     volumes:
       - ${COMPUTE_DATA_DIR:-./data}:/var/lib/compute
       - ./config:/etc/compute:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - /dev/kvm:/dev/kvm
     devices:
       - /dev/kvm:/dev/kvm
