@@ -9,8 +9,9 @@ description: >
 # Development Workflow (on-demand-vms)
 
 ## Branch model
-- `main` — production branch. **Never push directly.** Changes arrive only via approved PRs.
-- `dev` — integration branch. All agent work merges here first.
+- Agents interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
+- `main` — production branch maintained separately from agent work. It changes only through a maintainer-approved promotion from `dev`.
+- `dev` — the sole integration branch. All agent work merges here first.
 - Feature work happens in **git worktrees** checked out from `dev`.
 
 ## Worktree workflow
@@ -29,7 +30,7 @@ description: >
 
 ## Promoting dev -> main
 - Only the maintainer opens PRs from `dev` to `main`.
-- PRs to `main` require explicit user approval.
+- Promotion PRs to `main` require explicit user approval; agents must not create, modify, or merge them.
 - Never force-push or rewrite published history on `main`/`dev`.
 
 ## Rules
