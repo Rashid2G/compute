@@ -16,12 +16,13 @@ Usage:
   compute sandbox create [flags]
   compute sandbox start|stop|save-state|resume|delete <name|id|pattern>...
   compute sandbox protect|unprotect <name|id>
-  compute sandbox info <name|id>
+  compute sandbox info <name|id|hostname>
+  compute sandbox url [flags] <name|id|hostname>
   compute sandbox exec [flags] [user@]<name|id> -- <command...>
-  compute sandbox ssh [user@]<name|id> [<command...>]
+  compute sandbox ssh [user@]<name|id|hostname> [<command...>]
 
 Commands:
-  list, ls                 List sandboxes.
+  list, ls                 List sandboxes with their URL or SSH name.
   create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key, --protected).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
@@ -30,7 +31,8 @@ Commands:
   delete, rm               Delete one or more sandboxes.
   protect                  Enable deletion protection on a sandbox.
   unprotect                Disable deletion protection on a sandbox.
-  info, inspect, show      Display sandbox details.
+  info, inspect, show      Display sandbox details, hostname, SSH command and URLs.
+  url                      Print the best HTTP URL, or the SSH name when no URL resolves.
   exec                     Execute a command inside a sandbox, streaming output live.
   ssh                      Open an SSH session to a sandbox.
 
@@ -40,9 +42,30 @@ Exec flags (place before the sandbox target):
   --timeout <seconds>      Command timeout (0 = no timeout while streaming).
   --user <username>        SSH user (default: compute, or the user@target prefix).
 
+URL flags:
+  --json                   Print the full access model as JSON.
+  --port <n>               Include the port-scoped ingress URL for guest port <n>.
+  -u, --user <name>        SSH user (default: compute).
+  -v, --verbose            Show every sandbox name plus SSH/URL hints.
+
 Target patterns support shell-style matching. Quote '*' or other patterns:
   compute sandbox delete '*'
   compute sandbox stop 'dev-*'`,
+
+	"url": `Print the best HTTP URL or SSH target for a sandbox.
+
+Usage:
+  compute url [flags] [user@]<name|id|hostname>
+
+Flags:
+  --json              Print the full access model as JSON.
+  --port <n>          Include the port-scoped ingress URL for guest port <n>.
+  -u, --user <name>   SSH user (default: compute).
+  -v, --verbose       Show every sandbox name plus SSH/URL hints.
+
+The HTTP URL is only printed when the sandbox DNS zone is expected to resolve.
+Names under Tailscale's *.ts.net zone are answered by MagicDNS, so the command
+prints the tailnet DNS name or sandbox IP instead and explains why.`,
 
 	"job": `Run and monitor distributed jobs.
 

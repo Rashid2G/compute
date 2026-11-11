@@ -20,8 +20,8 @@ _compute_completion() {
     fi
     local completion_command="${words[0]}"
 
-    local commands="sandbox vm ssh job jobs worker workers pool pools image images template templates gui completion help"
-    local sandbox_subcommands="list create start stop delete exec ssh info"
+    local commands="sandbox vm ssh job jobs worker workers pool pools image images template templates url gui completion help"
+    local sandbox_subcommands="list create start stop delete exec ssh info url"
     local job_subcommands="run list info logs cancel"
     local worker_subcommands="token list info cordon drain delete"
     local pool_subcommands="list create delete"
@@ -55,6 +55,7 @@ _compute_completion() {
                         return 0
                         ;;
                     start|run|stop|delete|rm|info|inspect|show|exec) COMPREPLY=( $(compgen -W "--help" -- "$cur") ) ;;
+                    url) COMPREPLY=( $(compgen -W "$("$completion_command" __complete vms 2>/dev/null) --json --port --user -u --verbose -v --help" -- "$cur") ) ;;
                 esac
                 return 0
             fi
@@ -135,6 +136,7 @@ _compute() {
         'pool:Manage worker pools'
         'image:Manage base and custom rootfs images'
         'template:Manage VM disk templates'
+        'url:Print a sandbox URL or SSH target'
         'gui:Launch Web UI dashboard'
         'completion:Generate shell autocompletion script'
         'help:Show help documentation'
@@ -146,7 +148,7 @@ _compute() {
     fi
     local -a subcommands
     case "${words[2]}" in
-        sandbox|vm) subcommands=('list:List sandboxes' 'create:Create a sandbox' 'start:Start sandboxes' 'stop:Stop sandboxes' 'delete:Delete sandboxes' 'exec:Execute a command' 'ssh:Open SSH' 'info:Inspect a sandbox') ;;
+        sandbox|vm) subcommands=('list:List sandboxes' 'create:Create a sandbox' 'start:Start sandboxes' 'stop:Stop sandboxes' 'delete:Delete sandboxes' 'exec:Execute a command' 'ssh:Open SSH' 'info:Inspect a sandbox' 'url:Print a sandbox URL or SSH target') ;;
         job|jobs) subcommands=('run:Run a job' 'list:List jobs' 'info:Inspect a job' 'logs:Show job logs' 'cancel:Cancel a job') ;;
         worker|workers) subcommands=('token:Manage enrollment tokens' 'list:List workers' 'info:Inspect a worker' 'cordon:Cordon a worker' 'drain:Drain a worker' 'delete:Delete a worker') ;;
         pool|pools) subcommands=('list:List pools' 'create:Create a pool' 'delete:Delete a pool') ;;
@@ -164,7 +166,7 @@ _compute "$@"
 `
 
 const fishCompletionScript = `# fish completion for compute
-set -l commands sandbox vm job jobs worker workers pool pools image images template templates gui completion help
+set -l commands sandbox vm job jobs worker workers pool pools image images template templates url gui completion help
 
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a sandbox -d "Manage isolated compute sandboxes"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a vm -d "Manage isolated compute sandboxes (alias)"
@@ -173,10 +175,11 @@ complete -c compute -n "not __fish_seen_subcommand_from $commands" -a worker -d 
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a pool -d "Manage worker pools"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a image -d "Manage base and custom rootfs images"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a template -d "Manage VM disk templates"
+complete -c compute -n "not __fish_seen_subcommand_from $commands" -a url -d "Print a sandbox URL or SSH target"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a gui -d "Launch Web UI dashboard"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a completion -d "Generate completion script"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a help -d "Show help documentation"
-complete -c compute -n "__fish_seen_subcommand_from sandbox vm; and not __fish_seen_subcommand_from list create start stop delete exec ssh info" -a "list create start stop delete exec ssh info"
+complete -c compute -n "__fish_seen_subcommand_from sandbox vm; and not __fish_seen_subcommand_from list create start stop delete exec ssh info url" -a "list create start stop delete exec ssh info url"
 complete -c compute -n "__fish_seen_subcommand_from job jobs; and not __fish_seen_subcommand_from run list info logs cancel" -a "run list info logs cancel"
 complete -c compute -n "__fish_seen_subcommand_from worker workers; and not __fish_seen_subcommand_from token list info cordon drain delete" -a "token list info cordon drain delete"
 complete -c compute -n "__fish_seen_subcommand_from pool pools; and not __fish_seen_subcommand_from list create delete" -a "list create delete"

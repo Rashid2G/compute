@@ -34,6 +34,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { BulkDeleteVMDialog } from '@/components/bulk-delete-vm-dialog';
+import { CopyButton } from '@/components/copy-button';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +44,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
+import { primarySandboxAddress, sandboxAccess } from '@/lib/sandbox-access';
 import {
   formatMemory,
   formatRelativeTime,
@@ -181,16 +183,27 @@ export function InstancesPage({
     [vms, selectedVMId],
   );
 
+  const selectedAccess = useMemo(() => sandboxAccess(selectedVM), [selectedVM]);
+
   const filteredVMs = useMemo(() => {
     return vms.filter((vm) => {
       const q = search.trim().toLowerCase();
-      const subdomain = `${vm.name}.sbx.compute.dev`.toLowerCase();
-      const matchesSearch =
-        !q ||
-        vm.name.toLowerCase().includes(q) ||
-        subdomain.includes(q) ||
-        vm.id.toLowerCase().includes(q) ||
-        (vm.ip_address && vm.ip_address.toLowerCase().includes(q));
+      const access = sandboxAccess(vm);
+      const matchable = [
+        vm.name,
+        vm.id,
+        vm.internal_id,
+        vm.ip_address,
+        vm.hostname,
+        vm.tailnet_dns,
+        vm.tailnet_ip,
+        access.url,
+        access.sshHost,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      const matchesSearch = !q || matchable.includes(q);
 
       const matchesState =
         stateFilter === 'all' || vm.status.toLowerCase() === stateFilter;
@@ -582,7 +595,7 @@ export function InstancesPage({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, subdomain, id"
+            placeholder="Search name, URL, hostname, id"
             className="h-8 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
           />
         </div>
@@ -731,7 +744,7 @@ export function InstancesPage({
                     className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
                   />
                 </th>
-                <th className="py-2 px-1 font-normal">Name / Subdomain</th>
+                <th className="py-2 px-1 font-normal">Name / URL</th>
                 <th className="py-2 px-1 font-normal">Sandbox ID</th>
                 <th className="py-2 px-1 font-normal">State</th>
                 <th className="py-2 px-1 font-normal">Created</th>
@@ -755,6 +768,12 @@ export function InstancesPage({
                     <HelpCircle className="h-3 w-3 text-muted-foreground/70" />
                   </span>
                 </th>
+                <th className="py-2 px-1 font-normal">
+                  <span className="inline-flex items-center gap-0.5">
+                    URL / SSH
+                    <HelpCircle className="h-3 w-3 text-muted-foreground/70" />
+                  </span>
+                </th>
                 <th className="py-2 pl-1.5 pr-2.5 text-right font-normal">
                   Actions
                 </th>
@@ -764,7 +783,7 @@ export function InstancesPage({
             {filteredVMs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={11} className="py-20 text-center">
+                  <td colSpan={12} className="py-20 text-center">
                     <div className="mx-auto flex max-w-xs flex-col items-center justify-center space-y-3.5">
                       {/* Cobalt Blue Dithered Dot-Matrix Sailboat matching boat.dev/dashboard 1:1 */}
                       <svg
@@ -817,7 +836,12 @@ export function InstancesPage({
                 {filteredVMs.map((vm) => {
                   const isChecked = selectedIds.includes(vm.id);
                   const isSelected = selectedVM?.id === vm.id;
-                  const subdomain = `${vm.name}.sbx.compute.dev`;
+                  const access = sandboxAccess(vm);
+                  const addressLabel = access.urlHost || access.sshHost || '—';
+                  const addressHint = access.urlResolvable
+                    ? access.urlNote
+                    : access.sshNote || access.urlNote;
+                  const primaryAddress = primarySandboxAddress(access);
                   const snapTag = vm.snapshot_path
                     ? vm.snapshot_path.split('/').pop() || 'snapshot'
                     : 'base:v1';
@@ -849,7 +873,7 @@ export function InstancesPage({
                         />
                       </td>
 
-                      {/* Name / Subdomain */}
+                      {/* Name / URL */}
                       <td className="py-2 px-1.5">
                         <div className="flex items-center gap-1.5 font-medium text-foreground">
                           <span>{vm.name}</span>
@@ -863,8 +887,23 @@ export function InstancesPage({
                             </span>
                           )}
                         </div>
-                        <div className="font-mono text-[10px] text-muted-foreground">
-                          {subdomain}
+                        <div
+                          className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
+                          title={addressHint}
+                        >
+                          <span className="max-w-[220px] truncate">{addressLabel}</span>
+                          {primaryAddress ? (
+                            <CopyButton
+                              value={primaryAddress}
+                              label={access.url ? 'Copy URL' : 'Copy SSH name'}
+                              className="h-4 w-4"
+                            />
+                          ) : null}
+                          {access.sshHost && !access.sshResolvable ? (
+                            <span className="text-warning" aria-label="DNS delegation required">
+                              DNS
+                            </span>
+                          ) : null}
                         </div>
                       </td>
 
@@ -955,6 +994,36 @@ export function InstancesPage({
                         {vm.ip_address || '—'}
                       </td>
 
+                      {/* URL / SSH */}
+                      <td
+                        className="py-2 px-1.5"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center gap-1" title={addressHint}>
+                          {access.url ? (
+                            <a
+                              href={access.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="max-w-[220px] truncate font-mono text-[10.5px] text-[color:var(--link)] hover:underline"
+                            >
+                              {access.url}
+                            </a>
+                          ) : (
+                            <span className="max-w-[220px] truncate font-mono text-[10.5px] text-muted-foreground">
+                              {access.ssh || '—'}
+                            </span>
+                          )}
+                          {primaryAddress ? (
+                            <CopyButton
+                              value={primaryAddress}
+                              label={access.url ? 'Copy URL' : 'Copy SSH command'}
+                              className="h-5 w-5 shrink-0"
+                            />
+                          ) : null}
+                        </div>
+                      </td>
+
                       {/* Actions: primary lifecycle button + overflow menu */}
                       <td
                         className="py-2 pl-1.5 pr-2.5 text-right"
@@ -1008,6 +1077,20 @@ export function InstancesPage({
                               <DropdownMenuItem onSelect={() => openSSHTerminal(vm)}>
                                 <Terminal className="h-3.5 w-3.5" />
                                 SSH Terminal
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => access.ssh && copyText(access.ssh)}
+                                disabled={!access.ssh}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                                Copy SSH command
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => access.url && copyText(access.url)}
+                                disabled={!access.url}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                                Copy URL
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 onSelect={() => onSnapshot(vm)}
@@ -1187,7 +1270,50 @@ export function InstancesPage({
                     Created {formatTimestamp(selectedVM.created_at)}
                   </div>
                   <div className="font-mono text-[11px] text-muted-foreground">
-                    SSH Command: ssh compute@{selectedVM.ip_address}
+                    Status: {selectedVM.status}
+                  </div>
+                </div>
+
+                <div className="border border-border p-3 space-y-1">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>Access</span>
+                    <Terminal className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="flex items-center gap-1 font-mono text-[12px] font-medium text-foreground">
+                    <span className="min-w-0 flex-1 truncate" title={selectedAccess.ssh}>
+                      {selectedAccess.ssh || 'No SSH target yet'}
+                    </span>
+                    {selectedAccess.ssh ? (
+                      <CopyButton
+                        value={selectedAccess.ssh}
+                        label="Copy SSH command"
+                        className="h-5 w-5 shrink-0"
+                      />
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
+                    {selectedAccess.url ? (
+                      <>
+                        <a
+                          href={selectedAccess.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="min-w-0 flex-1 truncate text-[color:var(--link)] hover:underline"
+                          title={selectedAccess.url}
+                        >
+                          {selectedAccess.url}
+                        </a>
+                        <CopyButton
+                          value={selectedAccess.url}
+                          label="Copy URL"
+                          className="h-5 w-5 shrink-0"
+                        />
+                      </>
+                    ) : (
+                      <span className="min-w-0 flex-1 truncate" title={selectedAccess.urlNote}>
+                        No HTTP URL — see JSON Spec for the reason
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

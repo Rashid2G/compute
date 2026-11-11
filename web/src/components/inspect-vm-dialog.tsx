@@ -13,8 +13,10 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/copy-button';
+import { SandboxAccessCard } from '@/components/sandbox-access-card';
 import { StatusBadge } from '@/components/status-badge';
 import { openSSHTerminalWindow } from '@/lib/terminal';
+import { splitSandboxHostname } from '@/lib/sandbox-access';
 import {
   Dialog,
   DialogContent,
@@ -52,6 +54,10 @@ function Fact({
       </div>
     </div>
   );
+}
+
+function sandboxZoneLabel(vm: VM): string {
+  return splitSandboxHostname(vm.hostname)?.zone || '—';
 }
 
 export function InspectVMDialog({
@@ -140,20 +146,23 @@ export function InspectVMDialog({
                 <Fact label="Snapshot" value={vm.snapshot_path ? 'Available' : 'None'} mono={false} />
               </div>
 
+              <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-4 rounded-md border p-4 sm:grid-cols-3">
+                <Fact label="Hostname" value={vm.hostname || '—'} />
+                <Fact label="Tailnet DNS" value={vm.tailnet_dns || '—'} />
+                <Fact label="Zone" value={sandboxZoneLabel(vm)} mono />
+              </div>
+
+              <SandboxAccessCard vm={vm} className="mt-4" />
+
               <div className="mt-4 flex items-center justify-between rounded-md border p-3.5 bg-secondary/15">
                 <div>
                   <div className="text-xs font-medium flex items-center gap-1.5">
                     <Terminal className="h-3.5 w-3.5 text-primary" />
-                    SSH Quick Connect
+                    SSH Terminal Window
                   </div>
-                  <div className="mt-1 font-mono text-xs text-muted-foreground select-all">
-                    {vm.hostname ? `ssh compute@${vm.hostname}` : `ssh compute@${vm.ip_address || '<ip>'}`}
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    Opens the browser terminal connected through the daemon (no local SSH client needed).
                   </div>
-                  {vm.hostname ? (
-                    <div className="mt-0.5 font-mono text-[10px] text-muted-foreground/70 select-all">
-                      ssh compute@{vm.ip_address || '<ip>'}
-                    </div>
-                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -165,8 +174,6 @@ export function InspectVMDialog({
                     <ExternalLink className="h-3.5 w-3.5" />
                     Open Terminal Window
                   </Button>
-                  <CopyButton value={vm.hostname ? `ssh compute@${vm.hostname}` : `ssh compute@${vm.ip_address}`} label="Copy SSH" />
-                  <CopyButton value={`compute ssh ${vm.name}`} label="Copy CLI" />
                 </div>
               </div>
             </TabsContent>
