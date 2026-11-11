@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { BulkDeleteVMDialog } from '@/components/bulk-delete-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
 import {
   formatMemory,
@@ -47,6 +48,7 @@ interface InstancesPageProps {
   onSnapshot: (vm: VM) => void;
   onResume: (vm: VM) => void;
   onDelete: (vm: VM) => void;
+  onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole: (vm: VM) => void;
 }
@@ -103,6 +105,7 @@ export function InstancesPage({
   onSnapshot,
   onResume,
   onDelete,
+  onBulkDelete,
   onInspect,
   onConsole,
 }: InstancesPageProps) {
@@ -111,8 +114,14 @@ export function InstancesPage({
   const [snapshotFilter, setSnapshotFilter] = useState<string>('all');
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [splitMenuOpen, setSplitMenuOpen] = useState(false);
+
+  const selectedVMs = useMemo(
+    () => vms.filter((v) => selectedIds.includes(v.id)),
+    [vms, selectedIds],
+  );
 
   const [selectedVMId, setSelectedVMId] = useState<string | null>(null);
   const [deepDiveTab, setDeepDiveTab] = useState<DeepDiveTab>('overview');
@@ -241,6 +250,16 @@ export function InstancesPage({
     }
   }
 
+  async function handleBatchStart() {
+    for (const id of selectedIds) {
+      const vm = vms.find((v) => v.id === id);
+      if (vm && (vm.status === 'stopped' || vm.status === 'failed')) {
+        onRun(vm);
+      }
+    }
+    setSelectedIds([]);
+  }
+
   async function handleBatchStop() {
     for (const id of selectedIds) {
       const vm = vms.find((v) => v.id === id);
@@ -256,6 +275,46 @@ export function InstancesPage({
       const vm = vms.find((v) => v.id === id);
       if (vm && vm.status === 'running') {
         onSnapshot(vm);
+      }
+    }
+    setSelectedIds([]);
+  }
+
+  async function handleBatchClone() {
+    if (selectedIds.length === 0) return;
+    const toastID = toast.loading(`Cloning ${selectedIds.length} sandbox(es)…`);
+    try {
+      for (const id of selectedIds) {
+        const source = vms.find((v) => v.id === id);
+        const cloneName = source ? `${source.name}-clone` : `sbx-clone-${id.slice(0, 6)}`;
+        await api.cloneVM(id, {
+          name: cloneName,
+          vcpus: source?.vcpus || 1,
+          memory_mb: source?.memory_mb,
+        });
+      }
+      toast.success(`Successfully cloned ${selectedIds.length} sandbox(es)`, {
+        id: toastID,
+      });
+      setSelectedIds([]);
+    } catch (err) {
+      toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
+  async function executeBulkDelete(ids: string[]) {
+    if (onBulkDelete) {
+      await onBulkDelete(ids);
+    } else {
+      const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
+      try {
+        for (const id of ids) {
+          await api.deleteVM(id);
+        }
+        toast.success(`Deleted ${ids.length} sandbox(es)`, { id: toastID });
+      } catch (err) {
+        toast.error(`Delete failed: ${errorMessage(err)}`, { id: toastID });
+        throw err;
       }
     }
     setSelectedIds([]);
@@ -397,17 +456,39 @@ export function InstancesPage({
             </span>
             <button
               type="button"
+              onClick={() => void handleBatchStart()}
+              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
+            >
+              Start
+            </button>
+            <button
+              type="button"
               onClick={() => void handleBatchSnapshot()}
-              className="text-muted-foreground hover:text-foreground underline"
+              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
             >
               Snapshot
             </button>
             <button
               type="button"
               onClick={() => void handleBatchStop()}
-              className="text-destructive hover:underline"
+              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
             >
               Stop
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleBatchClone()}
+              className="text-muted-foreground hover:text-foreground underline cursor-pointer"
+            >
+              Clone
+            </button>
+            <button
+              type="button"
+              onClick={() => setBulkDeleteOpen(true)}
+              className="text-destructive font-medium hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <Trash2 className="h-3 w-3" />
+              <span>Delete</span>
             </button>
           </div>
         )}
@@ -1149,6 +1230,13 @@ export function InstancesPage({
           </div>
         </div>
       )}
+
+      <BulkDeleteVMDialog
+        vms={selectedVMs}
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        onConfirm={executeBulkDelete}
+      />
     </div>
   );
 }
