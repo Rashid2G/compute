@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Camera,
@@ -165,6 +165,7 @@ export function InstancesPage({
   // Real Filesystem state
   const [currentDir, setCurrentDir] = useState('/home/compute');
   const [files, setFiles] = useState<FileEntry[]>([]);
+  const [filesDir, setFilesDir] = useState('/home/compute');
   const [filesLoading, setFilesLoading] = useState(false);
 
   // Real Processes state
@@ -277,32 +278,76 @@ export function InstancesPage({
     }
   }
 
-  // Load tab-specific real telemetry when selectedVM or deepDiveTab changes
+  // Load tab-specific real telemetry when the selected sandbox or tab changes.
+  // Depend on stable primitives (vm id, status) rather than the selectedVM
+  // object: the sandbox list is polled every few seconds, which recreates the
+  // object identity and would otherwise re-trigger these fetches and flash the
+  // loading placeholder over already-rendered content.
+  const selectedVMKey = selectedVM?.id ?? null;
+  const selectedVMStatus = selectedVM?.status ?? null;
+
+  const fetchFiles = useCallback((vmId: string, dir: string) => {
+    setFilesLoading(true);
+    return api
+      .listVMFiles(vmId, dir)
+      .then((res) => {
+        setFiles(res || []);
+        setFilesDir(dir);
+      })
+      .catch(() => setFiles([]))
+      .finally(() => setFilesLoading(false));
+  }, []);
+
+  const fetchProcesses = useCallback((vmId: string) => {
+    setProcessesLoading(true);
+    return api
+      .listVMProcesses(vmId)
+      .then((res) => setProcesses(res || []))
+      .catch(() => setProcesses([]))
+      .finally(() => setProcessesLoading(false));
+  }, []);
+
+  const fetchNetInspect = useCallback((vmId: string) => {
+    setNetInspectLoading(true);
+    return api
+      .inspectNetwork(vmId)
+      .then((res) => setNetInspect(res))
+      .catch(() => setNetInspect(null))
+      .finally(() => setNetInspectLoading(false));
+  }, []);
+
+  const prevVMIdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (!selectedVM) return;
-    if (deepDiveTab === 'files' && selectedVM.status === 'running') {
-      setFilesLoading(true);
-      api
-        .listVMFiles(selectedVM.id, currentDir)
-        .then((res) => setFiles(res || []))
-        .catch(() => setFiles([]))
-        .finally(() => setFilesLoading(false));
-    } else if (deepDiveTab === 'processes' && selectedVM.status === 'running') {
-      setProcessesLoading(true);
-      api
-        .listVMProcesses(selectedVM.id)
-        .then((res) => setProcesses(res || []))
-        .catch(() => setProcesses([]))
-        .finally(() => setProcessesLoading(false));
-    } else if (deepDiveTab === 'network') {
-      setNetInspectLoading(true);
-      api
-        .inspectNetwork(selectedVM.id)
-        .then((res) => setNetInspect(res))
-        .catch(() => setNetInspect(null))
-        .finally(() => setNetInspectLoading(false));
+    if (!selectedVMKey || selectedVMStatus !== 'running') return;
+    // Switching to a different sandbox: drop data fetched for the previous
+    // sandbox so nothing from it renders under the new one.
+    if (prevVMIdRef.current !== selectedVMKey) {
+      prevVMIdRef.current = selectedVMKey;
+      setFiles([]);
+      setFilesDir(currentDir);
+      setProcesses([]);
+      setNetInspect(null);
     }
-  }, [selectedVM, deepDiveTab, currentDir]);
+    if (deepDiveTab === 'files') {
+      // Navigating to a different directory: drop the stale listing so the
+      // old path's entries never render under the new path.
+      setFiles((prevFiles) => (filesDir === currentDir ? prevFiles : []));
+      void fetchFiles(selectedVMKey, currentDir);
+    } else if (deepDiveTab === 'processes') {
+      void fetchProcesses(selectedVMKey);
+    } else if (deepDiveTab === 'network') {
+      void fetchNetInspect(selectedVMKey);
+    }
+  }, [
+    selectedVMKey,
+    selectedVMStatus,
+    deepDiveTab,
+    currentDir,
+    fetchFiles,
+    fetchProcesses,
+    fetchNetInspect,
+  ]);
 
   async function handleRunExec() {
     if (!selectedVM || !execCommand.trim()) return;
@@ -1215,12 +1260,7 @@ export function InstancesPage({
                     type="button"
                     onClick={() => {
                       if (selectedVM.status === 'running') {
-                        setFilesLoading(true);
-                        api
-                          .listVMFiles(selectedVM.id, currentDir)
-                          .then((r) => setFiles(r || []))
-                          .catch(() => setFiles([]))
-                          .finally(() => setFilesLoading(false));
+                        void fetchFiles(selectedVM.id, currentDir);
                       }
                     }}
                     className="flex h-7 items-center gap-1 border border-border px-2.5 text-[11px] text-foreground hover:bg-muted/50"
@@ -1233,11 +1273,11 @@ export function InstancesPage({
                   <p className="text-[12px] text-muted-foreground">
                     Sandbox must be running to browse guest filesystem.
                   </p>
-                ) : filesLoading ? (
+                ) : filesLoading && files.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     Reading guest directory {currentDir}…
                   </p>
-                ) : files.length === 0 ? (
+                ) : !filesLoading && files.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     No files found in {currentDir}.
                   </p>
@@ -1273,11 +1313,11 @@ export function InstancesPage({
                   <p className="text-[12px] text-muted-foreground">
                     Sandbox must be running to inspect live guest processes.
                   </p>
-                ) : processesLoading ? (
+                ) : processesLoading && processes.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     Querying guest process table…
                   </p>
-                ) : processes.length === 0 ? (
+                ) : !processesLoading && processes.length === 0 ? (
                   <p className="font-mono text-[12px] text-muted-foreground">
                     No process entries returned.
                   </p>
@@ -1338,10 +1378,10 @@ export function InstancesPage({
                     Reachability & Gateway
                   </div>
                   <div className="text-foreground font-medium">
-                    {netInspectLoading
-                      ? 'Probing…'
-                      : netInspect
-                        ? `${netInspect.connectivity} (GW ${netInspect.gateway})`
+                    {netInspect
+                      ? `${netInspect.connectivity} (GW ${netInspect.gateway})`
+                      : netInspectLoading
+                        ? 'Probing…'
                         : 'Bridge NAT Active'}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
