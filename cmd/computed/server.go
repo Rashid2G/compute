@@ -1028,6 +1028,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		case http.MethodGet:
 			json.NewEncoder(w).Encode(v)
 		case http.MethodDelete:
+			if v.Protected {
+				httpError(w, fmt.Sprintf("item %s is protected against deletion", vmID), http.StatusBadRequest)
+				return
+			}
 			s.removePortForwardsForVM(ctx, v, true)
 			var delErr error
 			if _, isAdmin := s.currentOwnerID(r); isAdmin {
@@ -1036,6 +1040,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				delErr = s.vmMgr.DeleteVMForOwner(ctx, v.OwnerID, vmID)
 			}
 			if delErr != nil {
+				if strings.Contains(delErr.Error(), "protected against deletion") {
+					httpError(w, delErr.Error(), http.StatusBadRequest)
+					return
+				}
 				httpError(w, delErr.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -1267,6 +1275,26 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		json.NewEncoder(w).Encode(updated)
+
+	case "protect":
+		t := true
+		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, vm.UpdateVMConfigRequest{Protected: &t})
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("sandbox.protected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": true})
+		json.NewEncoder(w).Encode(updated)
+
+	case "unprotect":
+		f := false
+		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, vm.UpdateVMConfigRequest{Protected: &f})
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("sandbox.unprotected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": false})
 		json.NewEncoder(w).Encode(updated)
 
 	default:

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Loader2, TriangleAlert } from 'lucide-react';
+import { Loader2, Shield, TriangleAlert } from 'lucide-react';
 
 import {
   AlertDialog,
@@ -28,7 +28,7 @@ export function DeleteVMDialog({
 
   async function confirm(event: React.MouseEvent) {
     event.preventDefault();
-    if (!vm || deleting) return;
+    if (!vm || deleting || vm.protected) return;
 
     setDeleting(true);
     try {
@@ -55,6 +55,15 @@ export function DeleteVMDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
 
+        {vm?.protected && (
+          <div className="my-2 flex items-start gap-2 border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
+            <Shield className="h-4 w-4 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold">Deletion Protected:</span> This sandbox has deletion protection enabled and cannot be deleted. Unprotect it first to remove it.
+            </div>
+          </div>
+        )}
+
         <div className="my-2 space-y-2 rounded-lg border border-border bg-secondary/40 p-3.5 text-xs text-muted-foreground w-full min-w-0 overflow-hidden">
           <div className="flex items-center justify-between gap-3 min-w-0">
             <span className="shrink-0">Firecracker process</span>
@@ -80,8 +89,8 @@ export function DeleteVMDialog({
           </AlertDialogCancel>
           <AlertDialogAction
             onClick={confirm}
-            disabled={deleting}
-            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground font-medium px-4 inline-flex items-center"
+            disabled={deleting || !!vm?.protected}
+            className="bg-destructive hover:bg-destructive/90 text-destructive-foreground font-medium px-4 inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {deleting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
             {deleting ? 'Deleting…' : 'Delete instance'}

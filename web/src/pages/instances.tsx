@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Search,
   Server,
+  Shield,
   Square,
   Terminal,
   Trash2,
@@ -51,6 +52,7 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole: (vm: VM) => void;
+  onRefresh?: () => void;
 }
 
 type DeepDiveTab =
@@ -108,6 +110,7 @@ export function InstancesPage({
   onBulkDelete,
   onInspect,
   onConsole,
+  onRefresh,
 }: InstancesPageProps) {
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<string>('all');
@@ -251,32 +254,26 @@ export function InstancesPage({
   }
 
   async function handleBatchStart() {
-    for (const id of selectedIds) {
-      const vm = vms.find((v) => v.id === id);
-      if (vm && (vm.status === 'stopped' || vm.status === 'failed')) {
-        onRun(vm);
-      }
-    }
+    const toStart = selectedIds
+      .map((id) => vms.find((v) => v.id === id))
+      .filter((vm): vm is VM => !!vm && (vm.status === 'stopped' || vm.status === 'failed'));
+    await Promise.all(toStart.map((vm) => onRun(vm)));
     setSelectedIds([]);
   }
 
   async function handleBatchStop() {
-    for (const id of selectedIds) {
-      const vm = vms.find((v) => v.id === id);
-      if (vm && vm.status === 'running') {
-        onStop(vm);
-      }
-    }
+    const toStop = selectedIds
+      .map((id) => vms.find((v) => v.id === id))
+      .filter((vm): vm is VM => !!vm && vm.status === 'running');
+    await Promise.all(toStop.map((vm) => onStop(vm)));
     setSelectedIds([]);
   }
 
   async function handleBatchSnapshot() {
-    for (const id of selectedIds) {
-      const vm = vms.find((v) => v.id === id);
-      if (vm && vm.status === 'running') {
-        onSnapshot(vm);
-      }
-    }
+    const toSnap = selectedIds
+      .map((id) => vms.find((v) => v.id === id))
+      .filter((vm): vm is VM => !!vm && vm.status === 'running');
+    await Promise.all(toSnap.map((vm) => onSnapshot(vm)));
     setSelectedIds([]);
   }
 
@@ -284,15 +281,17 @@ export function InstancesPage({
     if (selectedIds.length === 0) return;
     const toastID = toast.loading(`Cloning ${selectedIds.length} sandbox(es)…`);
     try {
-      for (const id of selectedIds) {
-        const source = vms.find((v) => v.id === id);
-        const cloneName = source ? `${source.name}-clone` : `sbx-clone-${id.slice(0, 6)}`;
-        await api.cloneVM(id, {
-          name: cloneName,
-          vcpus: source?.vcpus || 1,
-          memory_mb: source?.memory_mb,
-        });
-      }
+      await Promise.all(
+        selectedIds.map(async (id) => {
+          const source = vms.find((v) => v.id === id);
+          const cloneName = source ? `${source.name}-clone` : `sbx-clone-${id.slice(0, 6)}`;
+          await api.cloneVM(id, {
+            name: cloneName,
+            vcpus: source?.vcpus || 1,
+            memory_mb: source?.memory_mb,
+          });
+        })
+      );
       toast.success(`Successfully cloned ${selectedIds.length} sandbox(es)`, {
         id: toastID,
       });
@@ -302,15 +301,40 @@ export function InstancesPage({
     }
   }
 
+  async function toggleProtection(targetVM: VM) {
+    const nextState = !targetVM.protected;
+    const actionLabel = nextState ? 'Enabling protection…' : 'Disabling protection…';
+    const toastID = toast.loading(actionLabel);
+    try {
+      if (nextState) {
+        await api.protectVM(targetVM.id);
+        toast.success(`Sandbox ${targetVM.name} is now deletion protected`, { id: toastID });
+      } else {
+        await api.unprotectVM(targetVM.id);
+        toast.success(`Sandbox ${targetVM.name} protection disabled`, { id: toastID });
+      }
+      onRefresh?.();
+    } catch (err) {
+      toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
   async function executeBulkDelete(ids: string[]) {
+    const protectedIds = ids.filter((id) => vms.find((v) => v.id === id)?.protected);
+    if (protectedIds.length > 0) {
+      toast.error(`Cannot delete ${protectedIds.length} protected sandbox(es). Unprotect them first.`);
+      ids = ids.filter((id) => !vms.find((v) => v.id === id)?.protected);
+      if (ids.length === 0) {
+        setSelectedIds([]);
+        return;
+      }
+    }
     if (onBulkDelete) {
       await onBulkDelete(ids);
     } else {
       const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
       try {
-        for (const id of ids) {
-          await api.deleteVM(id);
-        }
+        await Promise.all(ids.map((id) => api.deleteVM(id)));
         toast.success(`Deleted ${ids.length} sandbox(es)`, { id: toastID });
       } catch (err) {
         toast.error(`Delete failed: ${errorMessage(err)}`, { id: toastID });
@@ -629,8 +653,17 @@ export function InstancesPage({
 
                       {/* Name / Subdomain */}
                       <td className="py-2 px-1.5">
-                        <div className="font-medium text-foreground">
-                          {vm.name}
+                        <div className="flex items-center gap-1.5 font-medium text-foreground">
+                          <span>{vm.name}</span>
+                          {vm.protected && (
+                            <span
+                              title="Deletion protected"
+                              className="inline-flex items-center gap-0.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.2 text-[9px] font-mono text-[#5e7ff5] uppercase"
+                            >
+                              <Shield className="h-2.5 w-2.5" />
+                              prot
+                            </span>
+                          )}
                         </div>
                         <div className="font-mono text-[10px] text-muted-foreground">
                           {subdomain}
@@ -781,9 +814,32 @@ export function InstancesPage({
 
                           <button
                             type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void toggleProtection(vm);
+                            }}
+                            title={vm.protected ? 'Unprotect sandbox' : 'Protect sandbox against deletion'}
+                            className={cn(
+                              'flex h-6 w-6 items-center justify-center border border-border bg-background transition-colors',
+                              vm.protected
+                                ? 'border-[#5e7ff5]/40 text-[#5e7ff5] hover:bg-[#5e7ff5]/10'
+                                : 'text-muted-foreground hover:text-foreground',
+                            )}
+                          >
+                            <Shield className="h-2.5 w-2.5" />
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() => onDelete(vm)}
-                            title="Delete Sandbox"
-                            className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-destructive hover:text-destructive"
+                            disabled={vm.protected}
+                            title={vm.protected ? 'Sandbox is protected against deletion' : 'Delete Sandbox'}
+                            className={cn(
+                              'flex h-6 w-6 items-center justify-center border border-border bg-background transition-colors',
+                              vm.protected
+                                ? 'cursor-not-allowed opacity-30 text-muted-foreground'
+                                : 'text-muted-foreground hover:border-destructive hover:text-destructive',
+                            )}
                           >
                             <Trash2 className="h-2.5 w-2.5" />
                           </button>
@@ -833,6 +889,20 @@ export function InstancesPage({
                 className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:bg-muted/50"
               >
                 <span>JSON Spec</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void toggleProtection(selectedVM)}
+                className={cn(
+                  'flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] transition-colors',
+                  selectedVM.protected
+                    ? 'border-[#5e7ff5]/50 text-[#5e7ff5] hover:bg-[#5e7ff5]/10'
+                    : 'text-foreground hover:bg-muted/50',
+                )}
+                title={selectedVM.protected ? 'Unprotect sandbox' : 'Protect sandbox against deletion'}
+              >
+                <Shield className="h-3 w-3" />
+                <span>{selectedVM.protected ? 'Protected' : 'Protect'}</span>
               </button>
               <button
                 type="button"
