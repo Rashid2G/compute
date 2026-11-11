@@ -45,3 +45,4 @@ description: >
 - `make test` or focused `go test ./path/...`
 - For web: `cd web && npm run typecheck && npm run build`
 - `git diff --check`
+- End each task with evidence supporting the completion claim: list checks run and relevant observed results. Include screenshots when they are useful or needed to demonstrate visual behavior; do not commit screenshots unless requested.
