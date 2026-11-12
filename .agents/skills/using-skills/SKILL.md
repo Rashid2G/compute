@@ -55,7 +55,7 @@ Every PR that references an issue must resolve it explicitly.
 - [ ] Requirements planned and implemented in a git worktree based on `dev`.
 - [ ] Tests written and passing locally (`make test`).
 - [ ] Concrete evidence of the end change provided (screenshots for UI, verified command outputs for CLI).
-- [ ] Temporary deployment preview sandbox named with the PR number (`pr-<PR_NUMBER>`) launched in the background on the main `dev` deployment on `compute-lab` (`make preview-deploy PR=<PR_NUMBER>`), and its Tailscale URL linked.
+- [ ] Temporary deployment preview sandbox named with the PR number (`pr-<PR_NUMBER>`) launched in the background on the main `dev` deployment on `compute-lab` (`make preview-deploy PR=<PR_NUMBER>`), with only the PR's changed services deployed into the sandbox (unchanged services reused from compute-lab), and its Tailscale URL linked.
 - [ ] PR targets `dev` per `dev-workflow`.
 - [ ] `Closes #n` if fully resolved, else `Refs #n`.
 - [ ] Partial work has a progress comment on each referenced issue.
