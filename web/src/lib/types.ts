@@ -99,6 +99,8 @@ export interface CreateVMRequest {
   ssh_key_id?: string;
   ssh_public_key?: string;
   ssh_password?: string;
+  /** Opts out of embedding the account's default key when no ssh_key_id is set. */
+  ssh_no_default_key?: boolean;
 }
 
 export interface ExecRequest {
@@ -286,7 +288,8 @@ export interface SSHKey {
   name: string;
   public_key: string;
   fingerprint: string;
-  all_sandboxes: boolean;
+  all_sandboxes?: boolean;
+  is_default?: boolean;
   created_at: string;
 }
 

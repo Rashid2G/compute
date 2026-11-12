@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -884,6 +885,128 @@ func TestSSHKeyEndpoints(t *testing.T) {
 	respCheck, _ := http.Get(server.URL + "/api/v1/keys/my-laptop")
 	if respCheck.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 after deletion, got %d", respCheck.StatusCode)
+	}
+}
+
+func TestSSHKeyDefaultSelection(t *testing.T) {
+	server := newTestServer(t)
+
+	key1Pub := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKVMQHURyGt9mXytbJpOeTM4z4jIIhwMQ+aeXq/vDwAj test@laptop"
+	key2Pub := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKVMQHURyGt9mXytbJpOeTM4z4jIIhwMQ+aeXq/vDwAj test@workstation"
+
+	createKey := func(name, pub string) db.SSHKey {
+		req, _ := json.Marshal(map[string]string{"name": name, "public_key": pub})
+		resp, err := http.Post(server.URL+"/api/v1/keys", "application/json", bytes.NewReader(req))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 for key %s, got %d", name, resp.StatusCode)
+		}
+		var key db.SSHKey
+		_ = json.NewDecoder(resp.Body).Decode(&key)
+		return key
+	}
+	createVM := func(noDefaultKey bool) db.VM {
+		body := map[string]interface{}{"name": fmt.Sprintf("def-vm-%d", time.Now().UnixNano()), "vcpus": 1, "memory_mb": 512}
+		if noDefaultKey {
+			body["ssh_no_default_key"] = true
+		}
+		req, _ := json.Marshal(body)
+		resp, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(req))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 for sandbox create, got %d", resp.StatusCode)
+		}
+		var created db.VM
+		_ = json.NewDecoder(resp.Body).Decode(&created)
+		return created
+	}
+
+	// The first key on the account becomes the default automatically.
+	key1 := createKey("laptop", key1Pub)
+	if !key1.IsDefault {
+		t.Fatalf("expected first key to become the default, got %+v", key1)
+	}
+	key2 := createKey("workstation", key2Pub)
+	if key2.IsDefault {
+		t.Fatalf("expected later keys to not steal the default, got %+v", key2)
+	}
+
+	// A sandbox created without a key embeds the account default.
+	vm1 := createVM(false)
+	if vm1.SSHKeyName != key1.Name || vm1.SSHPublicKey != key1Pub {
+		t.Fatalf("expected default key embedded, got name=%q pubkey=%q", vm1.SSHKeyName, vm1.SSHPublicKey)
+	}
+
+	// Opting out leaves the sandbox without an account key.
+	vm2 := createVM(true)
+	if vm2.SSHKeyName != "" || vm2.SSHPublicKey != "" {
+		t.Fatalf("expected no key after opt-out, got name=%q pubkey=%q", vm2.SSHKeyName, vm2.SSHPublicKey)
+	}
+
+	// An explicit key always wins over the default.
+	vmReq, _ := json.Marshal(vm.CreateRequest{Name: "explicit-key-vm", VCPUs: 1, MemoryMB: 512, SSHKeyID: key2.Name})
+	respVM, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(vmReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respVM.Body.Close()
+	var vm3 db.VM
+	_ = json.NewDecoder(respVM.Body).Decode(&vm3)
+	if vm3.SSHKeyName != key2.Name || vm3.SSHPublicKey != key2Pub {
+		t.Fatalf("expected explicit key embedded, got name=%q pubkey=%q", vm3.SSHKeyName, vm3.SSHPublicKey)
+	}
+
+	// Promoting key2 to default moves the flag off key1 and future creations
+	// embed key2.
+	patchBody, _ := json.Marshal(map[string]interface{}{"is_default": true})
+	patchReq, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/keys/"+key2.ID, bytes.NewReader(patchBody))
+	respPatch, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respPatch.Body.Close()
+	var patched db.SSHKey
+	_ = json.NewDecoder(respPatch.Body).Decode(&patched)
+	if !patched.IsDefault {
+		t.Fatalf("expected key2 to be default after patch, got %+v", patched)
+	}
+	vm4 := createVM(false)
+	if vm4.SSHKeyName != key2.Name || vm4.SSHPublicKey != key2Pub {
+		t.Fatalf("expected new default key embedded, got name=%q pubkey=%q", vm4.SSHKeyName, vm4.SSHPublicKey)
+	}
+	respStale, err := http.Get(server.URL + "/api/v1/keys/" + key1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respStale.Body.Close()
+	var stale db.SSHKey
+	_ = json.NewDecoder(respStale.Body).Decode(&stale)
+	if stale.IsDefault {
+		t.Fatalf("expected old default flag to be cleared, got %+v", stale)
+	}
+
+	// Clearing the default returns creation to keyless behavior.
+	clearBody, _ := json.Marshal(map[string]interface{}{"is_default": false})
+	clearReq, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/keys/"+key2.ID, bytes.NewReader(clearBody))
+	respClear, err := http.DefaultClient.Do(clearReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respClear.Body.Close()
+	var cleared db.SSHKey
+	_ = json.NewDecoder(respClear.Body).Decode(&cleared)
+	if cleared.IsDefault {
+		t.Fatalf("expected default flag cleared, got %+v", cleared)
+	}
+	vm5 := createVM(false)
+	if vm5.SSHKeyName != "" || vm5.SSHPublicKey != "" {
+		t.Fatalf("expected no key with no default set, got name=%q pubkey=%q", vm5.SSHKeyName, vm5.SSHPublicKey)
 	}
 }
 

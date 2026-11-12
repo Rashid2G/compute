@@ -328,7 +328,7 @@ export const api = {
 
   updateKey(
     id: string,
-    payload: { name?: string; public_key?: string; all_sandboxes?: boolean },
+    payload: { name?: string; public_key?: string; all_sandboxes?: boolean; is_default?: boolean },
   ): Promise<SSHKey> {
     return request<SSHKey>(`/keys/${encodeURIComponent(id)}`, {
       method: 'PATCH',

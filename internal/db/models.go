@@ -123,8 +123,13 @@ type SSHKey struct {
 	Fingerprint string `json:"fingerprint"`
 	// AllSandboxes marks the key as account-wide: it is embedded into every
 	// sandbox owned by the key's owner, including existing and future ones.
-	AllSandboxes bool      `json:"all_sandboxes"`
-	CreatedAt    time.Time `json:"created_at"`
+	AllSandboxes bool `json:"all_sandboxes"`
+	// IsDefault marks the key that is embedded automatically into a new
+	// sandbox when its creation request does not choose a key. The creator
+	// can override the choice per sandbox. At most one key per owner carries
+	// the flag.
+	IsDefault bool      `json:"is_default,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // WorkerPool groups remote workers with shared placement policy.

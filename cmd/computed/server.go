@@ -979,8 +979,17 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		if ownerID, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
+		} else if req.SSHPublicKey == "" && req.SSHKeyID == "" && !req.SSHNoDefaultKey && req.OwnerID == ownerID {
+			// Include the caller's default account key unless the request
+			// chose a key explicitly or opted out. Admins creating sandboxes
+			// for another owner do not get their own default key injected.
+			if def, err := s.vmMgr.GetStore().GetDefaultSSHKey(ctx, ownerID); err != nil {
+				log.Printf("[ssh-keys] default key lookup for %s: %v", ownerID, err)
+			} else if def != nil {
+				req.SSHKeyID = def.ID
+			}
 		}
 
 		if req.CloneFrom != "" {
@@ -1961,12 +1970,17 @@ type CreateKeyRequest struct {
 	Name         string `json:"name"`
 	PublicKey    string `json:"public_key"`
 	AllSandboxes bool   `json:"all_sandboxes"`
+	// IsDefault makes the new key the owner's default: it is embedded into
+	// every new sandbox unless the creation request chooses otherwise. When
+	// omitted, the first key on an account becomes the default automatically.
+	IsDefault bool `json:"is_default,omitempty"`
 }
 
 type UpdateKeyRequest struct {
 	Name         *string `json:"name"`
 	PublicKey    *string `json:"public_key"`
 	AllSandboxes *bool   `json:"all_sandboxes"`
+	IsDefault    *bool   `json:"is_default"`
 }
 
 // syncAccountSSHKeys reconciles account-wide keys for a key's owner. It never
@@ -2049,6 +2063,18 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 		_, _ = rand.Read(b)
 		keyID := fmt.Sprintf("ssh_%s", hex.EncodeToString(b))
 
+		// The first key an account saves becomes its default automatically so
+		// new sandboxes embed it without any extra configuration.
+		isDefault := req.IsDefault
+		if !isDefault {
+			existing, err := s.vmMgr.GetStore().ListSSHKeys(r.Context(), ownerID)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to list keys: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
+			isDefault = len(existing) == 0
+		}
+
 		key := &db.SSHKey{
 			ID:           keyID,
 			OwnerID:      ownerID,
@@ -2056,12 +2082,19 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 			PublicKey:    req.PublicKey,
 			Fingerprint:  fingerprint,
 			AllSandboxes: req.AllSandboxes,
+			IsDefault:    isDefault,
 			CreatedAt:    time.Now().UTC(),
 		}
 
 		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
 			return
+		}
+		if key.IsDefault {
+			if err := s.vmMgr.GetStore().SetDefaultSSHKey(r.Context(), key.OwnerID, key.ID); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to set default key: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		if key.AllSandboxes {
@@ -2071,6 +2104,7 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 			"name":          key.Name,
 			"fingerprint":   key.Fingerprint,
 			"all_sandboxes": key.AllSandboxes,
+			"is_default":    key.IsDefault,
 		})
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(key)
@@ -2168,9 +2202,20 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 		if req.AllSandboxes != nil {
 			key.AllSandboxes = *req.AllSandboxes
 		}
+		if req.IsDefault != nil {
+			key.IsDefault = *req.IsDefault
+		}
 		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
 			return
+		}
+		if req.IsDefault != nil && *req.IsDefault {
+			// Clear the flag from the owner's other keys; SaveSSHKey above
+			// already persisted is_default for this row.
+			if err := s.vmMgr.GetStore().SetDefaultSSHKey(r.Context(), key.OwnerID, key.ID); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to set default key: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// Keep existing sandboxes in sync: update per-sandbox references when the
@@ -2190,7 +2235,7 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 			s.syncAccountSSHKeys(r.Context(), key)
 		}
 		s.recordEvent("ssh_key.updated", getActor(r), key.Name, "delivered", 15, map[string]interface{}{
-			"id": key.ID, "name": key.Name, "all_sandboxes": key.AllSandboxes,
+			"id": key.ID, "name": key.Name, "all_sandboxes": key.AllSandboxes, "is_default": key.IsDefault,
 		})
 		json.NewEncoder(w).Encode(key)
 
