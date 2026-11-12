@@ -1456,6 +1456,11 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 				} else if svc != nil && svc.URL != "" {
 					publicURL = svc.URL
 				}
+				// Single-host Service gateway: the sandbox port is published by
+				// the host's own Service, whose name/VIP are deterministic.
+				if svcURL := s.gatewayServiceURL(ctx, targetVM, req.GuestPort); svcURL != "" {
+					publicURL = svcURL
+				}
 			}
 		}
 
@@ -1494,6 +1499,7 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.recordEvent("port_forward.created", getActor(r), fmt.Sprintf("%d->%d", pf.HostPort, pf.GuestPort), "delivered", 15, pf)
+		s.kickTailscaleGateway()
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pf)
 
@@ -1543,6 +1549,7 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 			return
 		}
 		s.recordEvent("port_forward.deleted", getActor(r), id, "delivered", 15, nil)
+		s.kickTailscaleGateway()
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	default:

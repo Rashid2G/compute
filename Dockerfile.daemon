@@ -41,6 +41,23 @@ RUN set -eux; \
     chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer; \
     rm -rf "release-${FIRECRACKER_VERSION}-${FC_ARCH}"
 
+# Install the Tailscale CLI. The daemon uses it to configure Service endpoints
+# on the host's tailscaled (the control socket is mounted by docker-compose).
+# Only the client binary is needed; tailscaled itself runs on the host.
+ARG TAILSCALE_VERSION=1.104.6
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "${ARCH}" in \
+        x86_64) TS_ARCH="amd64" ;; \
+        aarch64) TS_ARCH="arm64" ;; \
+        *) echo "unsupported arch ${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}.tgz" -o /tmp/tailscale.tgz; \
+    tar -xzf /tmp/tailscale.tgz -C /tmp; \
+    mv "/tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}/tailscale" /usr/local/bin/tailscale; \
+    chmod +x /usr/local/bin/tailscale; \
+    rm -rf /tmp/tailscale.tgz "/tmp/tailscale_${TAILSCALE_VERSION}_${TS_ARCH}"
+
 WORKDIR /var/lib/compute
 
 # Pre-create data and image directories

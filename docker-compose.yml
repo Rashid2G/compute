@@ -29,6 +29,10 @@ services:
       - ./config:/etc/compute:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - /dev/kvm:/dev/kvm
+      # Host tailscaled control socket: the daemon runs `tailscale serve` for
+      # per-sandbox Services, and tailscaled (on the host) forwards Service
+      # traffic to the daemon's local gateway listeners.
+      - /var/run/tailscale:/var/run/tailscale
     devices:
       - /dev/kvm:/dev/kvm
     environment:
