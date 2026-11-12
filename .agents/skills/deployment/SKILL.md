@@ -36,7 +36,7 @@ make preview-deploy PR=<pr-number>
   - `computed` daemon — runs in the guest (:18080) only when daemon-side code changed (`cmd/computed`, `internal/**`, `pkg/**`, `go.mod`, `config/**`); otherwise the shared compute-lab daemon is reused.
   - `compute-worker` — runs in the guest only when worker code changed (needs `COMPUTE_WORKER_TOKEN` to register against a control plane).
   - Docs/scripts/SDK-only changes — no service rebuild; the GUI front door is deployed so the preview URL always serves the working app.
-- **Tailscale addressing**: Sandboxes join the tailnet with an ephemeral address (`http://compute-pr-<pr-number>.<tailnet>.ts.net:<port>` or `http://100.x.y.z:<port>`).
+- **Per-sandbox Tailscale enrollment (one URL per preview)**: The daemon mints a scoped, ephemeral, preauthorized auth key **per sandbox** and joins each guest to the tailnet as its own ephemeral, tagged device (`tag:compute-sandbox`, userspace networking — see `internal/tailscale/provision.go`). Every preview sandbox therefore has its **own** Tailscale identity and its **own unique URL** (`http://compute-<sandbox-name>.<tailnet>.ts.net:<port>` or its own `http://100.x.y.z:<port>`); URLs are never shared between sandboxes. On teardown the sandbox logs out of the tailnet and the ephemeral node expires automatically.
 - **Non-blocking**: Designed to be launched in the background without holding up PR creation.
 - **Teardown**: `ssh compute-lab "~/on-demand-vms/bin/compute sandbox stop pr-<pr-number> && ~/on-demand-vms/bin/compute sandbox delete pr-<pr-number>"`
 
