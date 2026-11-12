@@ -64,6 +64,19 @@ The alias must be configured in `~/.ssh/config` and a non-interactive SSH key mu
 
 Deployment restarts live services and affects shared infrastructure. Deploy only when the user explicitly requests deployment or the active task/operating instructions require it. Confirm the correct target from current repository guidance; after deployment verify service health and report any failure. Never infer that a local test VM is safe to modify if it contains user workloads.
 
+For pull requests and feature verification, do NOT redeploy or restart the main host deployment; instead, spin up a temporary preview sandbox in the background (`make preview-deploy` or `./scripts/temp-deploy-sandbox.sh`) which serves an isolated microVM on the tailnet.
+
+## Standard agent execution workflow
+
+All coding agents modifying code, tests, or configurations in this repository must strictly adhere to the following 6-step flow:
+
+1. **Plan the changes**: Inspect relevant packages, tests, configuration, and architecture. Check `git status --short` to preserve unrelated user work. Formulate a minimal, focused plan before editing.
+2. **Implement**: Carry out implementation in a dedicated git worktree branched from `dev`. Follow Go, React/TypeScript, and configuration standards without introducing unnecessary dependencies.
+3. **Write tests and run them**: Add or update focused tests covering new behavior. Execute tests (`make test`, focused `go test ./...`, or `npm run typecheck && npm run build` for web) and ensure all pass.
+4. **Provide evidence of the end change**: If the change is visible or verifiable (such as a web UI update, CLI command output, or status display), provide concrete evidence (e.g. screenshots of the rendered UI or verified command output). Keep screenshots out of commits unless explicitly requested.
+5. **Run the updated version on a separate temp deployment (in the background)**: Run the new changes on an isolated microVM sandbox on `ssh compute-lab` using the project's own sandbox infrastructure (`./scripts/temp-deploy-sandbox.sh <name> <port>` or `make preview-deploy`). Retrieve and link the Tailscale URL (`http://<tailnet-dns>:<port>` or `http://<tailnet-ip>:<port>`) in your response so the user can inspect the live changes on the tailnet. Run this in the background so it does not block PR creation.
+6. **Create the PR**: Push the branch to `origin` and open a PR targeting `dev` (`gh pr create --base dev`). Include the linked Tailscale sandbox URL in the PR description, and reference any relevant GitHub issues (`Closes #n` or `Refs #n`).
+
 ## Branch, worktree, and release workflow
 
 - Agents must interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
@@ -88,7 +101,7 @@ Deployment restarts live services and affects shared infrastructure. Deploy only
 
 ## Change completion and Git
 
-Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. End the work with concrete evidence for the result: summarize the checks or observations that support the completion claim, and include screenshots when they are useful or needed to demonstrate visual behavior. Capture screenshots only when relevant, and keep them out of commits unless requested. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
+Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, evidence of visual/functional behavior, background temp deployment status with Tailscale URL, and known gaps. End the work with concrete evidence for the result. Do not commit or push unless requested or following the authorized PR flow. Use descriptive, scoped commits (`feat: ...`, `fix: ...`, `docs: ...`); do not amend or force-push without explicit direction.
 
 ## Agent delegation and issues
 

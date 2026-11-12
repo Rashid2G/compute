@@ -52,10 +52,13 @@ Every PR that references an issue must resolve it explicitly.
 4. Never claim an issue is fixed unless the PR demonstrably meets its acceptance criteria. Never close an issue without a linked commit/PR or a written reason.
 
 ### Checklist before opening/updating a PR
+- [ ] Requirements planned and implemented in a git worktree based on `dev`.
+- [ ] Tests written and passing locally (`make test`).
+- [ ] Concrete evidence of the end change provided (screenshots for UI, verified command outputs for CLI).
+- [ ] Temporary deployment preview sandbox launched on `compute-lab` in the background (`make preview-deploy`), and its Tailscale URL linked.
+- [ ] PR targets `dev` per `dev-workflow`.
 - [ ] `Closes #n` if fully resolved, else `Refs #n`.
 - [ ] Partial work has a progress comment on each referenced issue.
-- [ ] PR targets `dev` per `dev-workflow`.
-- [ ] Tests/checks and any deployment status reported.
 
 ## Reminders
 - Redact secrets, keys, tokens, and env values in PRs, comments, and issue bodies.
