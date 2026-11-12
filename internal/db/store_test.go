@@ -357,6 +357,75 @@ func TestStore_SSHKeys(t *testing.T) {
 	}
 }
 
+func TestStore_SSHKeyDefault(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "compute-db-key-default-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	key1 := &SSHKey{ID: "ssh-key-1", OwnerID: "default", Name: "laptop", PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey1 test@laptop", Fingerprint: "SHA256:fp1"}
+	key2 := &SSHKey{ID: "ssh-key-2", OwnerID: "default", Name: "workstation", PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey2 test@workstation", Fingerprint: "SHA256:fp2"}
+	if err := store.SaveSSHKey(ctx, key1); err != nil {
+		t.Fatalf("failed to save key1: %v", err)
+	}
+	if err := store.SaveSSHKey(ctx, key2); err != nil {
+		t.Fatalf("failed to save key2: %v", err)
+	}
+
+	// No default until one is chosen.
+	def, err := store.GetDefaultSSHKey(ctx, "default")
+	if err != nil || def != nil {
+		t.Fatalf("expected no default key, got %+v err=%v", def, err)
+	}
+
+	// Setting the default flags exactly one key per owner.
+	if err := store.SetDefaultSSHKey(ctx, "default", key1.ID); err != nil {
+		t.Fatalf("SetDefaultSSHKey failed: %v", err)
+	}
+	def, err = store.GetDefaultSSHKey(ctx, "default")
+	if err != nil || def == nil || def.ID != key1.ID {
+		t.Fatalf("expected key1 as default, got %+v err=%v", def, err)
+	}
+	got1, _ := store.GetSSHKey(ctx, key1.ID)
+	if got1 == nil || !got1.IsDefault {
+		t.Fatalf("expected key1 to carry is_default, got %+v", got1)
+	}
+
+	// Promoting key2 clears key1's flag.
+	if err := store.SetDefaultSSHKey(ctx, "default", key2.ID); err != nil {
+		t.Fatalf("SetDefaultSSHKey(key2) failed: %v", err)
+	}
+	got1, _ = store.GetSSHKey(ctx, key1.ID)
+	got2, _ := store.GetSSHKey(ctx, key2.ID)
+	if got1 == nil || got1.IsDefault {
+		t.Fatalf("expected key1 to lose is_default, got %+v", got1)
+	}
+	if got2 == nil || !got2.IsDefault {
+		t.Fatalf("expected key2 to carry is_default, got %+v", got2)
+	}
+
+	// Defaults are owner-scoped: another owner's key cannot be flagged, and
+	// clearing only removes the flag from the exact key.
+	if err := store.SetDefaultSSHKey(ctx, "other-owner", key2.ID); err == nil {
+		t.Fatalf("expected error flagging a foreign owner's key as default")
+	}
+	if err := store.ClearDefaultSSHKey(ctx, "default", key2.ID); err != nil {
+		t.Fatalf("ClearDefaultSSHKey failed: %v", err)
+	}
+	def, err = store.GetDefaultSSHKey(ctx, "default")
+	if err != nil || def != nil {
+		t.Fatalf("expected no default key after clearing, got %+v err=%v", def, err)
+	}
+}
+
 func TestStore_FailStaleJobs(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(filepath.Join(tmpDir, "test.db"))

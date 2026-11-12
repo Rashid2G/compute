@@ -123,6 +123,9 @@ export function CreateVMDialog({
 
   const availableImages = config?.images?.available ?? [];
   const willQueue = maxUsableMb !== null && memoryMb > maxUsableMb;
+  // The account's default key is embedded automatically by the daemon when
+  // the request carries no ssh_key_id, so "" means "use the default key".
+  const defaultKey = sshKeys.find((k) => k.is_default) ?? null;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -146,7 +149,8 @@ export function CreateVMDialog({
           public_ip_enabled: true,
           protected: protectedVM,
           tailscale: tailscaleVM,
-          ssh_key_id: sshKeyId || undefined,
+          ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
+          ssh_no_default_key: sshKeyId === 'none' || undefined,
           ssh_password: sshPassword || undefined,
         };
 
@@ -385,16 +389,23 @@ export function CreateVMDialog({
 
           <div className="space-y-1.5">
             <label className="block text-[12px] text-muted-foreground">
-              SSH public key (optional)
+              SSH key
             </label>
             <div className="relative">
               <select
-                aria-label="SSH public key"
+                aria-label="SSH key"
                 value={sshKeyId}
                 onChange={(e) => setSshKeyId(e.target.value)}
                 className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
               >
-                <option value="">Account-wide keys only</option>
+                <option value="">
+                  {defaultKey
+                    ? `Default: ${defaultKey.name} (added automatically)`
+                    : 'Account-wide keys only'}
+                </option>
+                {defaultKey ? (
+                  <option value="none">No account key</option>
+                ) : null}
                 {sshKeys.map((key) => (
                   <option key={key.id} value={key.id}>
                     {key.name}
@@ -405,8 +416,9 @@ export function CreateVMDialog({
               <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             </div>
             <p className="text-[10.5px] text-muted-foreground">
-              Keys marked "all sandboxes" are always embedded. Select another key
-              here to add it to this sandbox only.
+              {defaultKey
+                ? `Your default key "${defaultKey.name}" is embedded automatically. Choose another key, or "No account key", to override.`
+                : 'Add a default key from Account SSH Keys and it will be embedded automatically here. Keys marked "all sandboxes" are always embedded.'}
             </p>
           </div>
 

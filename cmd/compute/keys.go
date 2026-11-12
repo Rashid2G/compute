@@ -33,13 +33,17 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 			return
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tALL SANDBOXES\tFINGERPRINT")
+		fmt.Fprintln(w, "ID\tNAME\tALL SANDBOXES\tDEFAULT\tFINGERPRINT")
 		for _, k := range keys {
 			all := "no"
 			if k.AllSandboxes {
 				all = "yes"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", k.ID, k.Name, all, k.Fingerprint)
+			def := "no"
+			if k.IsDefault {
+				def = "yes"
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", k.ID, k.Name, all, def, k.Fingerprint)
 		}
 		w.Flush()
 		return
@@ -51,6 +55,7 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 		name := addCmd.String("name", "", "Descriptive key name")
 		keyFile := addCmd.String("key-file", "", "Path to a public key file (or '-' for stdin)")
 		all := addCmd.Bool("all", false, "Apply this key to all current and future sandboxes")
+		def := addCmd.Bool("default", false, "Make this key the account default for new sandboxes")
 		addCmd.Parse(reorderKeyFlags(args[1:], map[string]bool{"name": true, "key-file": true}))
 
 		pubKey, err := readPublicKey(addCmd.Args(), *keyFile)
@@ -62,12 +67,12 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 		if keyName == "" {
 			keyName = "cli-key"
 		}
-		key, err := client.CreateKey(ctx, keyName, pubKey, *all)
+		key, err := client.CreateKey(ctx, keyName, pubKey, *all, *def)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error adding SSH key: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("SSH key added: ID=%s Name=%s AllSandboxes=%t\n", key.ID, key.Name, key.AllSandboxes)
+		fmt.Printf("SSH key added: ID=%s Name=%s AllSandboxes=%t Default=%t\n", key.ID, key.Name, key.AllSandboxes, key.IsDefault)
 		if key.AllSandboxes {
 			fmt.Println("Applied to all existing sandboxes; new sandboxes will embed it automatically.")
 		}
@@ -90,13 +95,19 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 		keyFile := updateCmd.String("key-file", "", "Path to a replacement public key file (or '-' for stdin)")
 		all := updateCmd.Bool("all", false, "Apply this key to all current and future sandboxes")
 		noAll := updateCmd.Bool("no-all", false, "Stop applying this key to all sandboxes")
+		def := updateCmd.Bool("default", false, "Make this key the account default for new sandboxes")
+		noDef := updateCmd.Bool("no-default", false, "Stop using this key as the account default for new sandboxes")
 		updateCmd.Parse(reorderKeyFlags(args[1:], map[string]bool{"name": true, "key-file": true}))
 		if updateCmd.NArg() < 1 {
-			fmt.Fprintln(os.Stderr, "Usage: compute keys update <name|id> [--name <name>] [--key-file <path>] [--all|--no-all]")
+			fmt.Fprintln(os.Stderr, "Usage: compute keys update <name|id> [--name <name>] [--key-file <path>] [--all|--no-all] [--default|--no-default]")
 			os.Exit(1)
 		}
 		if *all && *noAll {
 			fmt.Fprintln(os.Stderr, "Error: --all and --no-all are mutually exclusive")
+			os.Exit(1)
+		}
+		if *def && *noDef {
+			fmt.Fprintln(os.Stderr, "Error: --default and --no-default are mutually exclusive")
 			os.Exit(1)
 		}
 		req := UpdateKeyRequest{}
@@ -106,6 +117,10 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 		if *all || *noAll {
 			v := *all
 			req.AllSandboxes = &v
+		}
+		if *def || *noDef {
+			v := *def
+			req.IsDefault = &v
 		}
 		if strings.TrimSpace(*keyFile) != "" {
 			pubKey, err := readPublicKey(nil, *keyFile)
@@ -121,6 +136,20 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 			os.Exit(1)
 		}
 		fmt.Printf("SSH key updated: ID=%s Name=%s AllSandboxes=%t\n", key.ID, key.Name, key.AllSandboxes)
+
+	case "set-default":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: compute keys set-default <name|id>")
+			os.Exit(1)
+		}
+		yes := true
+		key, err := client.UpdateKey(ctx, args[1], UpdateKeyRequest{IsDefault: &yes})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error setting default SSH key: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Default SSH key set: ID=%s Name=%s\n", key.ID, key.Name)
+		fmt.Println("New sandboxes will embed it automatically unless another key is chosen at creation.")
 
 	case "show", "info", "get":
 		if len(args) < 2 {
@@ -160,6 +189,7 @@ func printKeyDetails(key *db.SSHKey) {
 	fmt.Printf("Name:          %s\n", key.Name)
 	fmt.Printf("Fingerprint:   %s\n", key.Fingerprint)
 	fmt.Printf("All sandboxes: %t\n", key.AllSandboxes)
+	fmt.Printf("Default:       %t\n", key.IsDefault)
 	fmt.Printf("Created:       %s\n", key.CreatedAt.Format("2006-01-02 15:04:05 MST"))
 	fmt.Printf("Public key:    %s\n", key.PublicKey)
 }
