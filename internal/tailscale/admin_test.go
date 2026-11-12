@@ -303,3 +303,143 @@ func TestPublishServiceRunsServeAndBuildsURL(t *testing.T) {
 		t.Errorf("expected serve command, got %v", runner.commands)
 	}
 }
+
+func TestProvisionerDeleteDevice_Direct(t *testing.T) {
+	var deletedDevice string
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v2/device/"):
+			deletedDevice = strings.TrimPrefix(r.URL.Path, "/api/v2/device/")
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/services"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"services": []Service{}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	p := &Provisioner{Client: c, SandboxTag: TagSandbox}
+	if err := p.DeleteDevice(context.Background(), "dev-12345", "vm-test", "100.64.0.5"); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	if deletedDevice != "dev-12345" {
+		t.Errorf("expected device dev-12345 to be deleted, got %q", deletedDevice)
+	}
+}
+
+func TestProvisionerDeleteDevice_404Ignored(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v2/device/"):
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/services"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"services": []Service{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	p := &Provisioner{Client: c, SandboxTag: TagSandbox}
+	if err := p.DeleteDevice(context.Background(), "dev-already-gone", "vm-test", ""); err != nil {
+		t.Fatalf("expected 404 to be treated as success, got: %v", err)
+	}
+}
+
+func TestProvisionerDeleteDevice_FallbackLookup(t *testing.T) {
+	var deletedDevice string
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/devices"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"devices": []Device{
+					{
+						ID:        "node-target-99",
+						Hostname:  SandboxHostname("vm-fallback"),
+						Tags:      []string{TagSandbox},
+						Addresses: []string{"100.64.9.9"},
+					},
+					{
+						ID:        "node-other-1",
+						Hostname:  "unrelated",
+						Tags:      []string{"tag:other"},
+						Addresses: []string{"100.64.1.1"},
+					},
+				},
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v2/device/"):
+			deletedDevice = strings.TrimPrefix(r.URL.Path, "/api/v2/device/")
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/services"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"services": []Service{}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	p := &Provisioner{Client: c, SandboxTag: TagSandbox}
+	// Pass empty deviceID so it exercises fallback resolution by vmID / hostname
+	if err := p.DeleteDevice(context.Background(), "", "vm-fallback", "100.64.9.9"); err != nil {
+		t.Fatalf("DeleteDevice fallback: %v", err)
+	}
+	if deletedDevice != "node-target-99" {
+		t.Errorf("expected node-target-99 deleted via fallback, got %q", deletedDevice)
+	}
+}
+
+func TestProvisionerDeleteDevice_CleansServices(t *testing.T) {
+	var deletedServices []string
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v2/device/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/services"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"services": []Service{
+					{Name: SandboxServiceName("vm-svc", 8080)},
+					{Name: SandboxServiceName("vm-svc", 3000)},
+					{Name: "unrelated-service"},
+				},
+			})
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/services/"):
+			svc := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			deletedServices = append(deletedServices, svc)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	p := &Provisioner{Client: c, SandboxTag: TagSandbox}
+	if err := p.DeleteDevice(context.Background(), "dev-svc-vm", "vm-svc", ""); err != nil {
+		t.Fatalf("DeleteDevice with services: %v", err)
+	}
+	if len(deletedServices) == 0 {
+		t.Fatal("expected published services to be deleted")
+	}
+	found8080 := false
+	found3000 := false
+	for _, s := range deletedServices {
+		if strings.Contains(s, "8080") {
+			found8080 = true
+		}
+		if strings.Contains(s, "3000") {
+			found3000 = true
+		}
+		if strings.Contains(s, "unrelated") {
+			t.Errorf("unrelated service was deleted: %s", s)
+		}
+	}
+	if !found8080 || !found3000 {
+		t.Errorf("expected both ports 8080 and 3000 services deleted, got %v", deletedServices)
+	}
+}
+
+func TestProvisionerDeleteDevice_NilClientNoOp(t *testing.T) {
+	var p *Provisioner
+	if err := p.DeleteDevice(context.Background(), "dev", "vm", "100.64.0.1"); err != nil {
+		t.Fatalf("expected nil from nil provisioner, got %v", err)
+	}
+	p2 := &Provisioner{Client: nil}
+	if err := p2.DeleteDevice(context.Background(), "dev", "vm", "100.64.0.1"); err != nil {
+		t.Fatalf("expected nil from provisioner without client, got %v", err)
+	}
+}
