@@ -154,6 +154,10 @@ if [[ -n "${BASE_COMMIT}" ]]; then
             *)                     : ;;  # docs, scripts, sdk, .agents, Makefile: no runtime change
         esac
     done <<< "${CHANGED_FILES}"
+    if [[ "${NEED_GUI}" -eq 0 && "${NEED_DAEMON}" -eq 0 && "${NEED_WORKER}" -eq 0 ]]; then
+        warn "No runtime service changes detected (docs/scripts/SDK only); deploying the GUI front door so the preview URL serves a working app."
+        NEED_GUI=1
+    fi
 else
     NEED_GUI=1 NEED_DAEMON=1
 fi
@@ -276,25 +280,49 @@ ssh -o BatchMode=yes "${TARGET_HOST}" "
     ${CLI_BIN} sandbox start '${SANDBOX_NAME}'
 "
 
-# 4. Wait for Tailnet IP and DNS to be assigned
-log "Waiting for Tailscale provisioning (this takes ~20-30s)..."
+# 4. Wait for guest addresses. The bridge IP (lab-host-local) is available
+# immediately and is used for all provisioning; the Tailnet IP is only needed
+# for the reportable preview URL, so missing it is a warning, not an error.
+log "Waiting for guest addresses (bridge IP first, then Tailscale)..."
+GUEST_MGMT_IP=""
 TAILNET_IP=""
 TAILNET_DNS=""
-for i in $(seq 1 25); do
+for i in $(seq 1 75); do
     INFO_OUT="$(ssh -o BatchMode=yes "${TARGET_HOST}" "${CLI_BIN} sandbox info '${SANDBOX_NAME}'" 2>/dev/null || true)"
-    TAILNET_IP="$(echo "${INFO_OUT}" | awk '/Tailnet IP:/ {print $3}' | tr -d '\r')"
-    TAILNET_DNS="$(echo "${INFO_OUT}" | awk '/Tailnet DNS:/ {print $3}' | tr -d '\r')"
-
-    if [[ -n "${TAILNET_IP}" && "${TAILNET_IP}" != "—" && "${TAILNET_IP}" != "" ]]; then
+    if [[ -z "${GUEST_MGMT_IP}" ]]; then
+        GUEST_MGMT_IP="$(echo "${INFO_OUT}" | awk '/IP Address:/ {print $3}' | tr -d '\r')"
+        if [[ "${GUEST_MGMT_IP}" == "—" || "${GUEST_MGMT_IP}" == "172.16."*"/"* ]]; then
+            GUEST_MGMT_IP=""
+        fi
+    fi
+    if [[ -z "${TAILNET_IP}" ]]; then
+        TAILNET_IP="$(echo "${INFO_OUT}" | awk '/Tailnet IP:/ {print $3}' | tr -d '\r')"
+        [[ "${TAILNET_IP}" == "—" ]] && TAILNET_IP=""
+        TAILNET_DNS="$(echo "${INFO_OUT}" | awk '/Tailnet DNS:/ {print $3}' | tr -d '\r')"
+        [[ "${TAILNET_DNS}" == "—" ]] && TAILNET_DNS=""
+    fi
+    if [[ -n "${GUEST_MGMT_IP}" && -n "${TAILNET_IP}" ]]; then
+        break
+    fi
+    # Bridge IP alone is enough to start provisioning; keep polling Tailscale
+    # in the background of the loop but never block the install on it.
+    if [[ -n "${GUEST_MGMT_IP}" && "${i}" -ge 5 ]]; then
         break
     fi
     sleep 2
 done
 
-if [[ -z "${TAILNET_IP}" || "${TAILNET_IP}" == "—" ]]; then
-    echo "Error: sandbox '${SANDBOX_NAME}' never received a Tailnet IP; cannot install services." >&2
+if [[ -z "${GUEST_MGMT_IP}" && -n "${TAILNET_IP}" ]]; then
+    GUEST_MGMT_IP="${TAILNET_IP}"
+fi
+if [[ -z "${GUEST_MGMT_IP}" ]]; then
+    echo "Error: sandbox '${SANDBOX_NAME}' has no reachable IP (bridge or tailnet); cannot install services." >&2
     exit 1
 fi
+if [[ -z "${TAILNET_IP}" ]]; then
+    warn "Tailnet IP not assigned yet; provisioning via bridge IP ${GUEST_MGMT_IP}. The Tailscale URL may need a minute before it works."
+fi
+log "Guest management IP: ${GUEST_MGMT_IP}"
 
 # ---------------------------------------------------------------------------
 # 5. Locate the daemon SSH key on the lab host (used to provision guests)
@@ -317,17 +345,17 @@ fi
 GUEST_SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -i ${GUEST_SSH_KEY}"
 
 # Wait for guest SSH to accept connections
-log "Waiting for guest SSH on ${GUEST_USER}@${TAILNET_IP}..."
+log "Waiting for guest SSH on ${GUEST_USER}@${GUEST_MGMT_IP}..."
 GUEST_READY=0
 for i in $(seq 1 30); do
-    if ssh -o BatchMode=yes "${TARGET_HOST}" "sudo -n ssh ${GUEST_SSH_OPTS} ${GUEST_USER}@${TAILNET_IP} true 2>/dev/null" >/dev/null 2>&1; then
+    if ssh -o BatchMode=yes "${TARGET_HOST}" "sudo -n ssh ${GUEST_SSH_OPTS} ${GUEST_USER}@${GUEST_MGMT_IP} true 2>/dev/null" >/dev/null 2>&1; then
         GUEST_READY=1
         break
     fi
     sleep 2
 done
 if [[ "${GUEST_READY}" -ne 1 ]]; then
-    echo "Error: guest SSH never became reachable at ${GUEST_USER}@${TAILNET_IP}." >&2
+    echo "Error: guest SSH never became reachable at ${GUEST_USER}@${GUEST_MGMT_IP}." >&2
     exit 1
 fi
 success "Guest SSH reachable."
@@ -339,10 +367,10 @@ log "Staging binaries on ${TARGET_HOST}..."
 ssh -o BatchMode=yes "${TARGET_HOST}" "rm -rf '${STAGE_DIR}' && mkdir -p '${STAGE_DIR}'"
 scp -o BatchMode=yes ${BUILD_DIR}/* "${TARGET_HOST}:${STAGE_DIR}/" >/dev/null
 
-log "Installing services into guest ${SANDBOX_NAME} (${TAILNET_IP})..."
+log "Installing services into guest ${SANDBOX_NAME} (${GUEST_MGMT_IP})..."
 ssh -o BatchMode=yes "${TARGET_HOST}" "
-    sudo -n ssh ${GUEST_SSH_OPTS} ${GUEST_USER}@${TAILNET_IP} 'mkdir -p ${PREVIEW_DIR}/bin ${PREVIEW_DIR}/logs'
-    sudo -n scp ${GUEST_SSH_OPTS} ${STAGE_DIR}/* ${GUEST_USER}@${TAILNET_IP}:${PREVIEW_DIR}/bin/ >/dev/null
+    sudo -n ssh ${GUEST_SSH_OPTS} ${GUEST_USER}@${GUEST_MGMT_IP} 'mkdir -p ${PREVIEW_DIR}/bin ${PREVIEW_DIR}/logs'
+    sudo -n scp ${GUEST_SSH_OPTS} ${STAGE_DIR}/* ${GUEST_USER}@${GUEST_MGMT_IP}:${PREVIEW_DIR}/bin/ >/dev/null
 "
 
 # ---------------------------------------------------------------------------
@@ -414,8 +442,8 @@ EOF
 
 scp -o BatchMode=yes "${START_SCRIPT}" "${TARGET_HOST}:${STAGE_DIR}/start.sh" >/dev/null
 ssh -o BatchMode=yes "${TARGET_HOST}" "
-    sudo -n scp ${GUEST_SSH_OPTS} ${STAGE_DIR}/start.sh ${GUEST_USER}@${TAILNET_IP}:${PREVIEW_DIR}/start.sh >/dev/null
-    sudo -n ssh ${GUEST_SSH_OPTS} ${GUEST_USER}@${TAILNET_IP} 'chmod +x ${PREVIEW_DIR}/start.sh && ${PREVIEW_DIR}/start.sh'
+    sudo -n scp ${GUEST_SSH_OPTS} ${STAGE_DIR}/start.sh ${GUEST_USER}@${GUEST_MGMT_IP}:${PREVIEW_DIR}/start.sh >/dev/null
+    sudo -n ssh ${GUEST_SSH_OPTS} ${GUEST_USER}@${GUEST_MGMT_IP} 'chmod +x ${PREVIEW_DIR}/start.sh && ${PREVIEW_DIR}/start.sh'
 "
 rm -f "${START_SCRIPT}"
 
@@ -425,7 +453,7 @@ rm -f "${START_SCRIPT}"
 log "Running health checks..."
 GUI_OK=0
 for i in $(seq 1 30); do
-    CODE="$(ssh -o BatchMode=yes "${TARGET_HOST}" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://${TAILNET_IP}:${GUEST_PORT}/api/v1/health 2>/dev/null || true" | tr -d '\r')"
+    CODE="$(ssh -o BatchMode=yes "${TARGET_HOST}" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://${GUEST_MGMT_IP}:${GUEST_PORT}/api/v1/health 2>/dev/null || true" | tr -d '\r')"
     if [[ "${CODE}" == "200" ]]; then
         GUI_OK=1
         break
@@ -433,7 +461,7 @@ for i in $(seq 1 30); do
     sleep 2
 done
 if [[ "${GUI_OK}" -ne 1 ]]; then
-    warn "GUI health check did not return 200 in time; inspect logs: ssh compute-lab \"sudo -n ssh -i ${GUEST_SSH_KEY} ${GUEST_USER}@${TAILNET_IP} 'tail -n 40 ${PREVIEW_DIR}/logs/gui.log'\""
+    warn "GUI health check did not return 200 in time; inspect logs: ssh compute-lab \"sudo -n ssh -i ${GUEST_SSH_KEY} ${GUEST_USER}@${GUEST_MGMT_IP} 'tail -n 40 ${PREVIEW_DIR}/logs/gui.log'\""
 else
     success "GUI front door healthy on port ${GUEST_PORT}."
 fi
@@ -441,7 +469,7 @@ fi
 if [[ "${NEED_DAEMON}" -eq 1 ]]; then
     DAEMON_OK=0
     for i in $(seq 1 30); do
-        CODE="$(ssh -o BatchMode=yes "${TARGET_HOST}" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://${TAILNET_IP}:18080/api/v1/health 2>/dev/null || true" | tr -d '\r')"
+        CODE="$(ssh -o BatchMode=yes "${TARGET_HOST}" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://${GUEST_MGMT_IP}:18080/api/v1/health 2>/dev/null || true" | tr -d '\r')"
         if [[ "${CODE}" == "200" ]]; then
             DAEMON_OK=1
             break
@@ -449,7 +477,7 @@ if [[ "${NEED_DAEMON}" -eq 1 ]]; then
         sleep 2
     done
     if [[ "${DAEMON_OK}" -ne 1 ]]; then
-        warn "Guest-local daemon health check did not return 200 in time; inspect logs: ssh compute-lab \"sudo -n ssh -i ${GUEST_SSH_KEY} ${GUEST_USER}@${TAILNET_IP} 'sudo tail -n 40 /var/log/compute/computed.log'\""
+        warn "Guest-local daemon health check did not return 200 in time; inspect logs: ssh compute-lab \"sudo -n ssh -i ${GUEST_SSH_KEY} ${GUEST_USER}@${GUEST_MGMT_IP} 'sudo tail -n 40 /var/log/compute/computed.log'\""
     else
         success "Guest-local daemon healthy on port 18080."
     fi
@@ -469,7 +497,11 @@ echo "Services (REUSED): ${SERVICES_REUSED:-none}"
 if [[ -n "${TAILNET_DNS}" && "${TAILNET_DNS}" != "—" ]]; then
     echo "Tailscale DNS URL: http://${TAILNET_DNS}:${GUEST_PORT}"
 fi
-echo "Tailscale IP URL:  http://${TAILNET_IP}:${GUEST_PORT}"
+if [[ -n "${TAILNET_IP}" ]]; then
+    echo "Tailscale IP URL:  http://${TAILNET_IP}:${GUEST_PORT}"
+else
+    echo "Tailscale IP URL:  (pending) — run 'ssh ${TARGET_HOST} ${CLI_BIN} sandbox info ${SANDBOX_NAME}' in ~1 min"
+fi
 if [[ -n "${HOST_IP}" ]]; then
     echo "Ingress Proxy URL: http://${HOST_IP}:18080/preview/${SANDBOX_NAME}/${GUEST_PORT}/"
 fi
