@@ -1,4 +1,4 @@
-.PHONY: all build build-ui dev-ui dev run test test-coverage test-features bench bench-unit clean setup-host install systemd build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab
+.PHONY: all build build-ui dev-ui dev run test test-coverage test-features bench bench-unit clean setup-host install systemd build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab preview-deploy temp-deploy
 
 all: build
 
@@ -87,6 +87,11 @@ remote-status-lab:
 
 remote-logs:
 	ssh $(LAB_HOST) "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"
+
+preview-deploy:
+	./scripts/temp-deploy-sandbox.sh $(PR)
+
+temp-deploy: preview-deploy
 
 clean:
 	rm -rf bin/ coverage.out benchmark-results.json

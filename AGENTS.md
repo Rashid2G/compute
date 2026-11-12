@@ -64,6 +64,19 @@ The alias must be configured in `~/.ssh/config` and a non-interactive SSH key mu
 
 Deployment restarts live services and affects shared infrastructure. Deploy only when the user explicitly requests deployment or the active task/operating instructions require it. Confirm the correct target from current repository guidance; after deployment verify service health and report any failure. Never infer that a local test VM is safe to modify if it contains user workloads.
 
+For pull requests and feature verification, do NOT redeploy or restart the main host deployment; instead, spin up a temporary preview sandbox in the background (`make preview-deploy PR=<PR_NUMBER>` or `./scripts/temp-deploy-sandbox.sh <PR_NUMBER>`) which serves an isolated microVM on the tailnet directly on the main deployment. The preview deploys ONLY the services changed by the PR into the sandbox and reuses the compute-lab running services for the rest (e.g. a UI-only PR runs the new UI in the sandbox against the shared compute-lab daemon API; if both UI and daemon changed, both run in the sandbox).
+
+## Standard agent execution workflow
+
+All coding agents modifying code, tests, or configurations in this repository must strictly adhere to the following 6-step flow:
+
+1. **Plan the changes**: Inspect relevant packages, tests, configuration, and architecture. Check `git status --short` to preserve unrelated user work. Formulate a minimal, focused plan before editing.
+2. **Implement**: Carry out implementation in a dedicated git worktree branched from `dev`. Follow Go, React/TypeScript, and configuration standards without introducing unnecessary dependencies.
+3. **Write tests and run them**: Add or update focused tests covering new behavior. Execute tests (`make test`, focused `go test ./...`, or `npm run typecheck && npm run build` for web) and ensure all pass.
+4. **Provide evidence of the end change**: If the change is visible or verifiable (such as a web UI update, CLI command output, or status display), provide concrete evidence (e.g. screenshots of the rendered UI or verified command output). Keep screenshots out of commits unless explicitly requested.
+5. **Run the updated version on a separate temp deployment (in the background)**: Each preview deployment **must contain the PR number** in its sandbox name (e.g. `pr-<PR_NUMBER>`) and **must run on the main deployment that is deployed from the `dev` branch at the VM `compute-lab`** (self-serving the microVM via the main daemon). Run `./scripts/temp-deploy-sandbox.sh <PR_NUMBER> [port]` or `make preview-deploy PR=<PR_NUMBER>` in the background (non-blocking) and link the Tailscale URL (`http://compute-pr-<PR_NUMBER>.<tailnet>.ts.net:<port>` or `http://<tailnet-ip>:<port>`) so the user can inspect changes live on the tailnet without blocking PR creation. Each sandbox enrolls in the tailnet individually (ephemeral, tagged, per-sandbox auth key) and gets its **own unique Tailscale URL** — link the URL of the sandbox serving this PR, never another sandbox's. The script deploys **only the services changed by the PR** into the sandbox (diff vs `origin/dev`) and reuses the compute-lab services for the rest, so a UI-only PR runs the new UI against the shared lab API, while a daemon change runs the new daemon (plus its matching GUI) in the guest.
+6. **Create the PR**: Push the branch to `origin` and open a PR targeting `dev` (`gh pr create --base dev`). Include the linked Tailscale sandbox URL in the PR description / comment, and reference any relevant GitHub issues (`Closes #n` or `Refs #n`).
+
 ## Branch, worktree, and release workflow
 
 - Agents must interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
@@ -88,7 +101,7 @@ Deployment restarts live services and affects shared infrastructure. Deploy only
 
 ## Change completion and Git
 
-Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, deployment status, and known gaps. End the work with concrete evidence for the result: summarize the checks or observations that support the completion claim, and include screenshots when they are useful or needed to demonstrate visual behavior. Capture screenshots only when relevant, and keep them out of commits unless requested. Do not commit or push unless requested. Use descriptive, scoped commits when authorized; do not amend or force-push without explicit direction.
+Before finishing, inspect `git diff --check`, review the final diff, and report files changed, checks run, evidence of visual/functional behavior, background temp deployment status with Tailscale URL, and known gaps. End the work with concrete evidence for the result. Do not commit or push unless requested or following the authorized PR flow. Use descriptive, scoped commits (`feat: ...`, `fix: ...`, `docs: ...`); do not amend or force-push without explicit direction.
 
 ## Agent delegation and issues
 
