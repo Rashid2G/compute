@@ -116,12 +116,15 @@ type NetworkAllocation struct {
 
 // SSHKey represents a stored user public SSH key
 type SSHKey struct {
-	ID          string    `json:"id"`
-	OwnerID     string    `json:"owner_id"`
-	Name        string    `json:"name"`
-	PublicKey   string    `json:"public_key"`
-	Fingerprint string    `json:"fingerprint"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	OwnerID     string `json:"owner_id"`
+	Name        string `json:"name"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
+	// AllSandboxes marks the key as account-wide: it is embedded into every
+	// sandbox owned by the key's owner, including existing and future ones.
+	AllSandboxes bool      `json:"all_sandboxes"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // WorkerPool groups remote workers with shared placement policy.

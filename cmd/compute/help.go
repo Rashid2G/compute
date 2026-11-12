@@ -23,7 +23,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key, --ssh-password, --protected).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --protected).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -197,6 +197,35 @@ Options:
   -p, --password <password>   SSH password
   -t                          Force pseudo-terminal allocation
   -T                          Disable pseudo-terminal allocation`,
+
+	"keys": `Manage saved SSH public keys for your account.
+
+Usage:
+  compute keys list
+  compute keys add --name <name> --key-file <path> [--all]
+  compute keys update <name|id> [--name <name>] [--key-file <path>] [--all|--no-all]
+  compute keys apply <name|id>
+  compute keys show <name|id>
+  compute keys delete <name|id>...
+
+Commands:
+  list, ls                 List saved public keys and their scope.
+  add, create              Save a public key (--key-file, or pass the key directly).
+  update, set              Rename, replace, or change the scope of a saved key.
+  apply                    Mark a key account-wide and push it to every sandbox.
+  show, info               Display a saved key's details.
+  delete, rm               Delete one or more saved keys.
+
+Flags:
+  --name <name>            Descriptive key name.
+  --key-file <path>        Public key file, or '-' to read from stdin.
+  --all                    Apply to all current and future sandboxes.
+  --no-all                 Stop applying the key to every sandbox.
+
+Account-wide keys (--all) are embedded into every sandbox you create and are
+pushed to existing running sandboxes over SSH and to stopped sandboxes offline.
+Without --all, a key is only embedded when you select it at creation time with
+'compute sandbox create --ssh-key <name|path>'.`,
 }
 
 func init() {
@@ -209,6 +238,8 @@ func init() {
 	commandHelp["autocomplete"] = commandHelp["completion"]
 	commandHelp["ui"] = commandHelp["gui"]
 	commandHelp["web"] = commandHelp["gui"]
+	commandHelp["key"] = commandHelp["keys"]
+	commandHelp["ssh-keys"] = commandHelp["keys"]
 }
 
 func printCommandError(reason string, usage string, group string) {

@@ -286,6 +286,7 @@ export interface SSHKey {
   name: string;
   public_key: string;
   fingerprint: string;
+  all_sandboxes: boolean;
   created_at: string;
 }
 

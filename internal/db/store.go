@@ -268,6 +268,7 @@ func (s *Store) initSchema() error {
 		name TEXT NOT NULL,
 		public_key TEXT NOT NULL,
 		fingerprint TEXT NOT NULL,
+		all_sandboxes INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMP NOT NULL
 	);
 	CREATE TABLE IF NOT EXISTS worker_pools(id TEXT PRIMARY KEY,name TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',policy_json TEXT NOT NULL DEFAULT '{}',created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
@@ -402,6 +403,7 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN desired_running INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN disk_mb INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN all_sandboxes INTEGER NOT NULL DEFAULT 0")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, and protected columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
@@ -1137,15 +1139,16 @@ func (s *Store) SaveSSHKey(ctx context.Context, key *SSHKey) error {
 	}
 
 	query := `
-	INSERT INTO ssh_keys (id, owner_id, name, public_key, fingerprint, created_at)
-	VALUES (?, ?, ?, ?, ?, ?)
+	INSERT INTO ssh_keys (id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		public_key = excluded.public_key,
-		fingerprint = excluded.fingerprint;
+		fingerprint = excluded.fingerprint,
+		all_sandboxes = excluded.all_sandboxes;
 	`
 	_, err := s.db.ExecContext(ctx, query,
-		key.ID, key.OwnerID, key.Name, key.PublicKey, key.Fingerprint, key.CreatedAt,
+		key.ID, key.OwnerID, key.Name, key.PublicKey, key.Fingerprint, boolInt(key.AllSandboxes), key.CreatedAt,
 	)
 	return err
 }
@@ -1156,7 +1159,7 @@ func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, err
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, owner_id, name, public_key, fingerprint, created_at
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at
 	FROM ssh_keys
 	WHERE (? = "" OR owner_id = ?)
 	ORDER BY created_at DESC;
@@ -1170,9 +1173,11 @@ func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, err
 	var keys []*SSHKey
 	for rows.Next() {
 		k := &SSHKey{}
-		if err := rows.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt); err != nil {
+		var allSandboxes int
+		if err := rows.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &k.CreatedAt); err != nil {
 			return nil, err
 		}
+		k.AllSandboxes = allSandboxes != 0
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
@@ -1184,7 +1189,7 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, owner_id, name, public_key, fingerprint, created_at
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at
 	FROM ssh_keys
 	WHERE id = ? OR name = ?
 	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END
@@ -1192,13 +1197,15 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 	`
 	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName)
 	k := &SSHKey{}
-	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt)
+	var allSandboxes int
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &k.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	k.AllSandboxes = allSandboxes != 0
 	return k, nil
 }
 
@@ -1210,7 +1217,7 @@ func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) 
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, owner_id, name, public_key, fingerprint, created_at
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at
 	FROM ssh_keys
 	WHERE (id = ? OR name = ?) AND (? = '' OR owner_id = ?)
 	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END, created_at DESC
@@ -1218,13 +1225,15 @@ func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) 
 	`
 	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, ownerID, ownerID, idOrName)
 	k := &SSHKey{}
-	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &k.CreatedAt)
+	var allSandboxes int
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &k.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	k.AllSandboxes = allSandboxes != 0
 	return k, nil
 }
 

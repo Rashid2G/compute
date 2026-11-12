@@ -429,8 +429,21 @@ func (c *DaemonClient) LaunchTemplate(ctx context.Context, idOrName string, req 
 }
 
 type CreateKeyRequest struct {
-	Name      string `json:"name"`
-	PublicKey string `json:"public_key"`
+	Name         string `json:"name"`
+	PublicKey    string `json:"public_key"`
+	AllSandboxes bool   `json:"all_sandboxes,omitempty"`
+}
+
+type UpdateKeyRequest struct {
+	Name         *string `json:"name,omitempty"`
+	PublicKey    *string `json:"public_key,omitempty"`
+	AllSandboxes *bool   `json:"all_sandboxes,omitempty"`
+}
+
+// KeyApplyResult reports an account-wide key reconciliation pass.
+type KeyApplyResult struct {
+	Key  *db.SSHKey           `json:"key"`
+	Sync *vm.SSHKeySyncResult `json:"sync,omitempty"`
 }
 
 type KeysResponse struct {
@@ -457,13 +470,29 @@ func (c *DaemonClient) ListKeys(ctx context.Context) ([]*db.SSHKey, error) {
 	return resp.Keys, nil
 }
 
-func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string) (*db.SSHKey, error) {
-	req := CreateKeyRequest{Name: name, PublicKey: pubKey}
+func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string, allSandboxes bool) (*db.SSHKey, error) {
+	req := CreateKeyRequest{Name: name, PublicKey: pubKey, AllSandboxes: allSandboxes}
 	var key db.SSHKey
 	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys", req, &key); err != nil {
 		return nil, err
 	}
 	return &key, nil
+}
+
+func (c *DaemonClient) UpdateKey(ctx context.Context, idOrName string, req UpdateKeyRequest) (*db.SSHKey, error) {
+	var key db.SSHKey
+	if err := c.doRequest(ctx, http.MethodPatch, "/api/v1/keys/"+url.PathEscape(idOrName), req, &key); err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
+func (c *DaemonClient) ApplyKey(ctx context.Context, idOrName string) (*KeyApplyResult, error) {
+	var res KeyApplyResult
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys/"+url.PathEscape(idOrName)+"/apply", nil, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 func (c *DaemonClient) GetKey(ctx context.Context, idOrName string) (*db.SSHKey, error) {

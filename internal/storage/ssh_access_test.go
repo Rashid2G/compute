@@ -160,6 +160,55 @@ func TestConfigureSSHAccessDebugfs(t *testing.T) {
 	}
 }
 
+func TestConfigureAuthorizedKeysPreservesPasswordPolicy(t *testing.T) {
+	for _, tool := range []string{"truncate", "mkfs.ext4", "debugfs"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available: %v", tool, err)
+		}
+	}
+
+	dir := t.TempDir()
+	disk := filepath.Join(dir, "rootfs.ext4")
+	if out, err := exec.Command("truncate", "-s", "32M", disk).CombinedOutput(); err != nil {
+		t.Fatalf("truncate: %v: %s", err, out)
+	}
+	if out, err := exec.Command("mkfs.ext4", "-F", "-q", disk).CombinedOutput(); err != nil {
+		t.Fatalf("mkfs.ext4: %v: %s", err, out)
+	}
+
+	writeGuestFile(t, disk, "/etc/shadow", "root:$2a$10$existing:19000:0:99999:7:::\ncompute:$2a$10$existing:19000:0:99999:7:::\n")
+	writeGuestFile(t, disk, "/etc/ssh/sshd_config", "PasswordAuthentication yes\n")
+	writeGuestFile(t, disk, "/root/.ssh/authorized_keys", "ssh-ed25519 OLDKEY old@example\n")
+
+	m, err := NewManager(Config{BaseImagesDir: dir, VMsDir: filepath.Join(dir, "vms"), TemplatesDir: filepath.Join(dir, "templates"), SSHKeyPath: filepath.Join(dir, "missing-key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := m.AuthorizedKeys("ssh-ed25519 NEWKEY1 one@example", "ssh-ed25519 NEWKEY2 two@example", "ssh-ed25519 NEWKEY1 one@example")
+	if strings.Count(content, "NEWKEY1") != 1 || !strings.Contains(content, "NEWKEY2") {
+		t.Fatalf("AuthorizedKeys did not dedupe keys:\n%s", content)
+	}
+
+	if err := m.ConfigureAuthorizedKeys(disk, "ssh-ed25519 NEWKEY1 one@example", "ssh-ed25519 NEWKEY2 two@example"); err != nil {
+		t.Fatalf("ConfigureAuthorizedKeys: %v", err)
+	}
+	for _, path := range []string{"/root/.ssh/authorized_keys", "/home/compute/.ssh/authorized_keys"} {
+		keys := readGuestFile(t, disk, path)
+		if !strings.Contains(keys, "NEWKEY1") || !strings.Contains(keys, "NEWKEY2") || strings.Contains(keys, "OLDKEY") {
+			t.Fatalf("%s was not replaced:\n%s", path, keys)
+		}
+	}
+	shadow := readGuestFile(t, disk, "/etc/shadow")
+	if !strings.Contains(shadow, "root:$2a$10$existing") || !strings.Contains(shadow, "compute:$2a$10$existing") {
+		t.Fatalf("password policy changed while updating keys:\n%s", shadow)
+	}
+	sshd := readGuestFile(t, disk, "/etc/ssh/sshd_config")
+	if !strings.Contains(sshd, "PasswordAuthentication yes") {
+		t.Fatalf("sshd policy changed while updating keys:\n%s", sshd)
+	}
+}
+
 func writeGuestFile(t *testing.T, disk, path, content string) {
 	t.Helper()
 	tmp := filepath.Join(t.TempDir(), "content")

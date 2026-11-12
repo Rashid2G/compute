@@ -6,6 +6,7 @@ import type {
   CreateVMRequest,
   CustomImage,
   DaemonConfig,
+  SSHKey,
   StatsResult,
   Template,
 } from '@/lib/types';
@@ -56,6 +57,7 @@ export function CreateVMDialog({
   const [count, setCount] = useState<number>(1);
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
+  const [sshKeyId, setSshKeyId] = useState('');
   const [sshPassword, setSshPassword] = useState('');
   const [setupScript, setSetupScript] = useState('');
   const [protectedVM, setProtectedVM] = useState(false);
@@ -64,6 +66,7 @@ export function CreateVMDialog({
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [images, setImages] = useState<CustomImage[]>([]);
+  const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
   const [stats, setStats] = useState<StatsResult | null>(null);
 
   useEffect(() => {
@@ -76,6 +79,10 @@ export function CreateVMDialog({
       .listImages()
       .then((res) => setImages(res || []))
       .catch(() => setImages([]));
+    void api
+      .listKeys()
+      .then((res) => setSshKeys(res || []))
+      .catch(() => setSshKeys([]));
     void api
       .stats()
       .then((res) => setStats(res))
@@ -106,7 +113,10 @@ export function CreateVMDialog({
 
   // Never keep a typed password in memory after the dialog closes.
   useEffect(() => {
-    if (!open) setSshPassword('');
+    if (!open) {
+      setSshPassword('');
+      setSshKeyId('');
+    }
   }, [open]);
 
   if (!open) return null;
@@ -136,6 +146,7 @@ export function CreateVMDialog({
           public_ip_enabled: true,
           protected: protectedVM,
           tailscale: tailscaleVM,
+          ssh_key_id: sshKeyId || undefined,
           ssh_password: sshPassword || undefined,
         };
 
@@ -370,6 +381,33 @@ export function CreateVMDialog({
               </select>
               <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              SSH public key (optional)
+            </label>
+            <div className="relative">
+              <select
+                aria-label="SSH public key"
+                value={sshKeyId}
+                onChange={(e) => setSshKeyId(e.target.value)}
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+              >
+                <option value="">Account-wide keys only</option>
+                {sshKeys.map((key) => (
+                  <option key={key.id} value={key.id}>
+                    {key.name}
+                    {key.all_sandboxes ? ' (all sandboxes)' : ''}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            </div>
+            <p className="text-[10.5px] text-muted-foreground">
+              Keys marked "all sandboxes" are always embedded. Select another key
+              here to add it to this sandbox only.
+            </p>
           </div>
 
           <div className="space-y-1.5">
