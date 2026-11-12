@@ -138,6 +138,7 @@ class Sandbox:
         api_key: Optional[str] = None,
         host: Optional[str] = None,
         timeout: Optional[int] = None,
+        ssh_password: Optional[str] = None,
     ) -> "Sandbox":
         """Provision and launch a new isolated compute sandbox in milliseconds."""
         resolved_host = host or os.getenv("COMPUTE_HOST") or os.getenv("COMPUTE_DAEMON") or "http://127.0.0.1:18080"
@@ -159,6 +160,8 @@ class Sandbox:
             payload["disk_mb"] = disk_mb
         if name:
             payload["name"] = name
+        if ssh_password:
+            payload["ssh_password"] = ssh_password
 
         headers = {"Content-Type": "application/json"}
         if resolved_key:

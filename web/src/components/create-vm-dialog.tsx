@@ -56,6 +56,7 @@ export function CreateVMDialog({
   const [count, setCount] = useState<number>(1);
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
+  const [sshPassword, setSshPassword] = useState('');
   const [setupScript, setSetupScript] = useState('');
   const [protectedVM, setProtectedVM] = useState(false);
   const [tailscaleVM, setTailscaleVM] = useState(false);
@@ -103,6 +104,11 @@ export function CreateVMDialog({
     setMemoryMb((current) => Math.min(current, maxUsableMb));
   }, [open, maxUsableMb]);
 
+  // Never keep a typed password in memory after the dialog closes.
+  useEffect(() => {
+    if (!open) setSshPassword('');
+  }, [open]);
+
   if (!open) return null;
 
   const availableImages = config?.images?.available ?? [];
@@ -130,6 +136,7 @@ export function CreateVMDialog({
           public_ip_enabled: true,
           protected: protectedVM,
           tailscale: tailscaleVM,
+          ssh_password: sshPassword || undefined,
         };
 
         if (fromSource.startsWith('tpl:')) {
@@ -149,6 +156,7 @@ export function CreateVMDialog({
 
       onOpenChange(false);
       setSandboxName('');
+      setSshPassword('');
       setSetupScript('');
       setProtectedVM(false);
       setCount(1);
@@ -362,6 +370,25 @@ export function CreateVMDialog({
               </select>
               <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              SSH password (optional)
+            </label>
+            <input
+              type="password"
+              aria-label="SSH password"
+              autoComplete="new-password"
+              value={sshPassword}
+              onChange={(e) => setSshPassword(e.target.value)}
+              placeholder="Leave blank for public-key-only access"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            />
+            <p className="text-[10.5px] text-muted-foreground">
+              Minimum 8 characters. Applied to the compute and root accounts. If
+              left blank, password login is disabled.
+            </p>
           </div>
 
           <div className="space-y-1.5">

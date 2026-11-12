@@ -150,3 +150,22 @@ names/usernames keep working through sanitization.
 SSH auth is handled by the sandbox's own sshd exactly as before: the user's
 SSH keys are embedded into the guest at creation (`/api/v1/keys`), the default
 SSH user is `compute`, and root login is available in the base image.
+
+Password authentication is opt-in per sandbox. Pass `ssh_password` in the sandbox
+create request (or `--ssh-password` on `compute sandbox create`) to enable it:
+
+- The password is installed for the `compute` and `root` accounts, and sshd is
+  configured with `PasswordAuthentication yes`. The embedded public key remains
+  valid, so either method works.
+- If no password is supplied, sshd is configured with
+  `PasswordAuthentication no`, and both accounts are locked. Only the embedded
+  public key (including the daemon's internal automation key) can log in.
+- The password is hashed into the guest's `/etc/shadow`; the daemon never stores
+  the plaintext or the hash. Sandbox responses only expose the boolean
+  `ssh_password_enabled`.
+- `compute sandbox ssh --password <password> user@sandbox` uses the same password
+  when connecting through the daemon's SSH proxy.
+
+The password is applied when the disk is created, including when cloning a
+sandbox or launching a snapshot template. A sandbox created without a password
+from a source that had one will have its managed accounts locked again.
