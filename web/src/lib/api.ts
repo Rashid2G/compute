@@ -319,10 +319,28 @@ export const api = {
     return (res as { keys: SSHKey[] }).keys || [];
   },
 
-  createKey(payload: { name: string; public_key: string }): Promise<SSHKey> {
+  createKey(payload: { name: string; public_key: string; all_sandboxes?: boolean }): Promise<SSHKey> {
     return request<SSHKey>('/keys', {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  },
+
+  updateKey(
+    id: string,
+    payload: { name?: string; public_key?: string; all_sandboxes?: boolean },
+  ): Promise<SSHKey> {
+    return request<SSHKey>(`/keys/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  applyKey(
+    id: string,
+  ): Promise<{ key: SSHKey; sync?: { applied: string[]; failed: { vm_id: string; name?: string; error: string }[] } }> {
+    return request(`/keys/${encodeURIComponent(id)}/apply`, {
+      method: 'POST',
     });
   },
 

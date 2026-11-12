@@ -203,6 +203,17 @@ compute sandbox info dev-box        # shows tailnet_ip + tailnet_dns
 ssh compute@100.101.102.103
 ```
 
+Authentication over the tailnet still goes to the guest's sshd, so the same
+keys and optional password apply. To authorize your key on every tailnet
+sandbox without selecting it each time:
+
+```bash
+compute keys add --name laptop --key-file ~/.ssh/id_ed25519.pub --all
+```
+
+See `docs/dns-ssh.md` for per-sandbox keys, password authentication, and how
+account-wide keys are propagated to running and stopped sandboxes.
+
 ### ACL recommendations
 
 Run `compute tailscale policy` to print the recommended, fully-scoped snippet

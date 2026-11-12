@@ -30,6 +30,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
 	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
@@ -1188,6 +1189,9 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	var embeddedKeyName string
 	if req.SSHPublicKey != "" {
 		embeddedPubKey = strings.TrimSpace(req.SSHPublicKey)
+		if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(embeddedPubKey)); err != nil {
+			return nil, fmt.Errorf("invalid ssh_public_key: %w", err)
+		}
 		embeddedKeyName = "custom"
 	} else if req.SSHKeyID != "" {
 		key, err := m.lookupSSHKeyForRequest(ctx, &req, req.SSHKeyID, ownerID)
@@ -1208,9 +1212,15 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 
 	if diskPath != "" {
+		accountKeys, keyErr := m.GlobalSSHKeys(ctx, ownerID)
+		if keyErr != nil {
+			m.storMgr.CleanupVM(internalID)
+			return nil, fmt.Errorf("failed to resolve account-wide ssh keys: %w", keyErr)
+		}
 		err := m.storMgr.ConfigureSSHAccess(diskPath, storage.SSHAccess{
-			PublicKey: embeddedPubKey,
-			Password:  req.SSHPassword,
+			PublicKey:  embeddedPubKey,
+			PublicKeys: accountKeys,
+			Password:   req.SSHPassword,
 		})
 		if err != nil {
 			if req.SSHPassword != "" {
@@ -1417,7 +1427,11 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 	if vm.PID > 0 {
 		go m.watchProcessExit(vm.ID, vm.PID, nil)
 	}
-	return m.saveVMRecord(ctx, vm)
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		return err
+	}
+	m.maybeSyncSSHKeys(vm)
+	return nil
 }
 
 // startVMProcess executes the Firecracker binary, attaches TAP, and boots the microVM
@@ -2254,7 +2268,11 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	vm.DesiredRunning = true
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
 	go m.watchProcessExit(vm.ID, vm.PID, cmd)
-	return m.saveVMRecord(ctx, vm)
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		return err
+	}
+	m.maybeSyncSSHKeys(vm)
+	return nil
 }
 
 // StopVM gracefully shuts down a running VM, flushing caches, and cleaning runtime resources

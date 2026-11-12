@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Copy, Key, Loader2, Plus, Trash2 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -27,8 +28,10 @@ export function SSHKeysDialog({
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [publicKey, setPublicKey] = useState('');
+  const [allSandboxes, setAllSandboxes] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -61,9 +64,11 @@ export function SSHKeysDialog({
       const created = await api.createKey({
         name: name.trim(),
         public_key: publicKey.trim(),
+        all_sandboxes: allSandboxes,
       });
       setName('');
       setPublicKey('');
+      setAllSandboxes(false);
       setKeys((prev) => [created, ...prev]);
       if (onKeyAdded) {
         onKeyAdded(created);
@@ -88,6 +93,22 @@ export function SSHKeysDialog({
     }
   }
 
+  async function handleToggleAll(key: SSHKey) {
+    if (togglingId) return;
+    setTogglingId(key.id);
+    setError(null);
+    try {
+      const updated = await api.updateKey(key.id, {
+        all_sandboxes: !key.all_sandboxes,
+      });
+      setKeys((prev) => prev.map((k) => (k.id === key.id ? updated : k)));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setTogglingId(null);
+    }
+  }
+
   function copyKey(key: SSHKey) {
     navigator.clipboard.writeText(key.public_key);
     setCopiedId(key.id);
@@ -105,7 +126,8 @@ export function SSHKeysDialog({
             <div>
               <DialogTitle>Account SSH Keys</DialogTitle>
               <DialogDescription className="mt-0.5 text-xs">
-                Manage public keys that can be embedded into newly created microVMs.
+                Manage public keys for your sandboxes. Keys marked "all sandboxes"
+                are added to every current and future sandbox.
               </DialogDescription>
             </div>
           </div>
@@ -149,6 +171,17 @@ export function SSHKeysDialog({
                 className="w-full resize-none rounded-md border bg-background px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="key-all-sandboxes"
+                checked={allSandboxes}
+                onCheckedChange={(checked) => setAllSandboxes(checked === true)}
+                disabled={adding}
+              />
+              <Label htmlFor="key-all-sandboxes" className="text-xs font-normal">
+                Apply to all current and future sandboxes
+              </Label>
+            </div>
             <div className="flex justify-end pt-1">
               <Button type="submit" size="sm" disabled={!name.trim() || !publicKey.trim() || adding}>
                 {adding ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Plus className="mr-1.5 h-3.5 w-3.5" />}
@@ -178,12 +211,36 @@ export function SSHKeysDialog({
                         <span className="rounded bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
                           {k.id}
                         </span>
+                        {k.all_sandboxes && (
+                          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                            all sandboxes
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
                         {k.fingerprint || k.public_key.slice(0, 32) + '...'}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Checkbox
+                          id={`key-all-${k.id}`}
+                          checked={k.all_sandboxes}
+                          onCheckedChange={() => handleToggleAll(k)}
+                          disabled={togglingId === k.id}
+                          aria-label={`Apply ${k.name} to all sandboxes`}
+                        />
+                        <Label
+                          htmlFor={`key-all-${k.id}`}
+                          className="text-[10.5px] font-normal text-muted-foreground"
+                        >
+                          {togglingId === k.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            'all'
+                          )}
+                        </Label>
+                      </div>
                       <Button
                         type="button"
                         variant="ghost"

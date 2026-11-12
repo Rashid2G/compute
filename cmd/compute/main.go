@@ -75,6 +75,10 @@ func main() {
 		handleAuthCommand(ctx, client, os.Args[2:])
 		return
 
+	case "keys", "key", "ssh-keys":
+		handleKeysCommand(ctx, client, os.Args[2:])
+		return
+
 	case "sandbox", "vm":
 		handleSandboxCommand(ctx, client, os.Args[2:])
 		return
@@ -184,6 +188,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  pool, pools        Manage worker pools (list, create, delete)")
 	fmt.Fprintln(w, "  image, images      Manage base and custom rootfs images (list, build, inspect, delete)")
 	fmt.Fprintln(w, "  template, templates Manage VM disk templates (list, create, launch, inspect, delete)")
+	fmt.Fprintln(w, "  keys               Manage saved SSH public keys (list, add, update, apply, delete)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Tools & Utilities:")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
@@ -253,18 +258,40 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			}
 			password = strings.TrimRight(string(data), "\r\n")
 		}
+		// --ssh-key accepts a saved key name/ID, a literal public key, or a path
+		// to a public key file. Files and literals are sent inline; names are
+		// resolved by the daemon against the caller's account keys.
+		sshKeyID := ""
+		sshPublicKey := ""
+		if strings.TrimSpace(*sshKey) != "" {
+			candidate := strings.TrimSpace(*sshKey)
+			if looksLikePublicKey(candidate) {
+				sshPublicKey = candidate
+			} else if data, err := os.ReadFile(expandHome(candidate)); err == nil && len(data) > 0 {
+				sshPublicKey = strings.TrimSpace(string(data))
+			} else {
+				sshKeyID = candidate
+			}
+			if sshPublicKey != "" {
+				if err := validatePublicKey(sshPublicKey); err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading SSH key %s: %v\n", candidate, err)
+					os.Exit(1)
+				}
+			}
+		}
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:        *name,
-			Tier:        *tier,
-			VCPUs:       *vcpus,
-			MemoryMB:    *mem,
-			DiskMB:      *disk,
-			Image:       *image,
-			Template:    *template,
-			SSHKeyID:    *sshKey,
-			SSHPassword: password,
-			Protected:   protected,
-			Tailscale:   tsEnabled,
+			Name:         *name,
+			Tier:         *tier,
+			VCPUs:        *vcpus,
+			MemoryMB:     *mem,
+			DiskMB:       *disk,
+			Image:        *image,
+			Template:     *template,
+			SSHKeyID:     sshKeyID,
+			SSHPublicKey: sshPublicKey,
+			SSHPassword:  password,
+			Protected:    protected,
+			Tailscale:    tsEnabled,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
