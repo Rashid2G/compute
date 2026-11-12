@@ -11,6 +11,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/db"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 )
 
 func readDiskPrefix(path string, n int) string {
@@ -162,6 +163,85 @@ func TestDeleteVMCleansStorageAndDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(stor.GetVMDir(vm.ID)); !os.IsNotExist(err) {
 		t.Fatalf("expected vm dir to be removed, err = %v", err)
+	}
+}
+
+type mockTailscaleProvisioner struct {
+	deletedDevices []struct {
+		DeviceID  string
+		VMID      string
+		TailnetIP string
+	}
+}
+
+func (m *mockTailscaleProvisioner) Provision(ctx context.Context, vmID, vmIP, sshKeyPath string) (*tailscale.ProvisionResult, error) {
+	return nil, nil
+}
+
+func (m *mockTailscaleProvisioner) Teardown(ctx context.Context, vmIP, sshKeyPath string) {}
+
+func (m *mockTailscaleProvisioner) DeleteDevice(ctx context.Context, deviceID, vmID, tailnetIP string) error {
+	m.deletedDevices = append(m.deletedDevices, struct {
+		DeviceID  string
+		VMID      string
+		TailnetIP string
+	}{DeviceID: deviceID, VMID: vmID, TailnetIP: tailnetIP})
+	return nil
+}
+
+func (m *mockTailscaleProvisioner) PublishService(ctx context.Context, vmID, vmIP, sshKeyPath string, guestPort int) (*tailscale.ServiceResult, error) {
+	return nil, nil
+}
+
+func (m *mockTailscaleProvisioner) UnpublishService(ctx context.Context, vmID, vmIP, sshKeyPath string, guestPort int) error {
+	return nil
+}
+
+func TestDeleteVMCleansTailscaleDevice(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+
+	mockProv := &mockTailscaleProvisioner{}
+	m.SetTailscaleProvisioner(mockProv)
+
+	// Create a VM with Tailscale enabled and device details populated
+	vm, err := m.CreateVM(ctx, CreateRequest{Name: "ts-vm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vm.TailscaleEnabled = true
+	vm.TailscaleDeviceID = "dev-ts-12345"
+	vm.TailnetIP = "100.64.0.42"
+	vm.TailnetDNS = "compute-ts-vm.tailnet.ts.net"
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete VM
+	if err := m.DeleteVM(ctx, vm.ID); err != nil {
+		t.Fatalf("DeleteVM error = %v", err)
+	}
+
+	// Verify that DeleteDevice was called on the provisioner
+	if len(mockProv.deletedDevices) != 1 {
+		t.Fatalf("expected 1 DeleteDevice call, got %d", len(mockProv.deletedDevices))
+	}
+	called := mockProv.deletedDevices[0]
+	if called.DeviceID != "dev-ts-12345" {
+		t.Errorf("expected DeviceID %q, got %q", "dev-ts-12345", called.DeviceID)
+	}
+	if called.VMID != vm.ID {
+		t.Errorf("expected VMID %q, got %q", vm.ID, called.VMID)
+	}
+	if called.TailnetIP != "100.64.0.42" {
+		t.Errorf("expected TailnetIP %q, got %q", "100.64.0.42", called.TailnetIP)
+	}
+
+	// Ensure the VM is removed from store
+	deleted, err := store.GetVM(ctx, vm.ID)
+	if err != nil || deleted != nil {
+		t.Fatalf("VM should be removed from store, got %+v", deleted)
 	}
 }
 
