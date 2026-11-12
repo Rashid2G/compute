@@ -29,6 +29,7 @@ export function SSHKeysDialog({
   const [adding, setAdding] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [togglingDefaultId, setTogglingDefaultId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [publicKey, setPublicKey] = useState('');
   const [allSandboxes, setAllSandboxes] = useState(false);
@@ -109,6 +110,22 @@ export function SSHKeysDialog({
     }
   }
 
+  // Toggling the default reassigns the account's single default key, so the
+  // whole list is reloaded to reflect which key carries the flag.
+  async function handleToggleDefault(key: SSHKey) {
+    if (togglingDefaultId) return;
+    setTogglingDefaultId(key.id);
+    setError(null);
+    try {
+      await api.updateKey(key.id, { is_default: !key.is_default });
+      await loadKeys();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setTogglingDefaultId(null);
+    }
+  }
+
   function copyKey(key: SSHKey) {
     navigator.clipboard.writeText(key.public_key);
     setCopiedId(key.id);
@@ -126,7 +143,8 @@ export function SSHKeysDialog({
             <div>
               <DialogTitle>Account SSH Keys</DialogTitle>
               <DialogDescription className="mt-0.5 text-xs">
-                Manage public keys for your sandboxes. Keys marked "all sandboxes"
+                Manage public keys for your sandboxes. The "default" key is added
+                to every new sandbox automatically; keys marked "all sandboxes"
                 are added to every current and future sandbox.
               </DialogDescription>
             </div>
@@ -216,12 +234,36 @@ export function SSHKeysDialog({
                             all sandboxes
                           </span>
                         )}
+                        {k.is_default && (
+                          <span className="rounded bg-[#263fa9]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#263fa9] dark:text-[#8ea4ff]">
+                            default
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
                         {k.fingerprint || k.public_key.slice(0, 32) + '...'}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Checkbox
+                          id={`key-default-${k.id}`}
+                          checked={k.is_default === true}
+                          onCheckedChange={() => handleToggleDefault(k)}
+                          disabled={togglingDefaultId === k.id}
+                          aria-label={`Use ${k.name} as the default key for new sandboxes`}
+                        />
+                        <Label
+                          htmlFor={`key-default-${k.id}`}
+                          className="text-[10.5px] font-normal text-muted-foreground"
+                        >
+                          {togglingDefaultId === k.id ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            'default'
+                          )}
+                        </Label>
+                      </div>
                       <div className="flex items-center gap-1.5">
                         <Checkbox
                           id={`key-all-${k.id}`}

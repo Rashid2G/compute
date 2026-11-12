@@ -428,7 +428,7 @@ func TestDaemonClient_Keys(t *testing.T) {
 	}
 
 	// 2. Create
-	created, err := client.CreateKey(ctx, "laptop", mockKey.PublicKey, false)
+	created, err := client.CreateKey(ctx, "laptop", mockKey.PublicKey, false, false)
 	if err != nil || created.Name != "laptop" {
 		t.Fatalf("CreateKey failed: %v", err)
 	}

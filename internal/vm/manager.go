@@ -491,6 +491,11 @@ type CreateRequest struct {
 	Tailscale    *bool  `json:"tailscale,omitempty"`
 	SSHKeyID     string `json:"ssh_key_id,omitempty"`
 	SSHPublicKey string `json:"ssh_public_key,omitempty"`
+	// SSHNoDefaultKey opts out of the caller's default account key. When a
+	// creation request names no key explicitly and this flag is false, the
+	// control plane injects the owner's default key automatically. Clients
+	// set it when the user explicitly chose "no account key" for the sandbox.
+	SSHNoDefaultKey bool `json:"ssh_no_default_key,omitempty"`
 	// SSHPassword is an optional password for the guest's managed SSH accounts
 	// (compute and root). It is applied to the disk image at creation time and
 	// never persisted. When empty, password authentication is disabled and the

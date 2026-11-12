@@ -432,12 +432,14 @@ type CreateKeyRequest struct {
 	Name         string `json:"name"`
 	PublicKey    string `json:"public_key"`
 	AllSandboxes bool   `json:"all_sandboxes,omitempty"`
+	IsDefault    bool   `json:"is_default,omitempty"`
 }
 
 type UpdateKeyRequest struct {
 	Name         *string `json:"name,omitempty"`
 	PublicKey    *string `json:"public_key,omitempty"`
 	AllSandboxes *bool   `json:"all_sandboxes,omitempty"`
+	IsDefault    *bool   `json:"is_default,omitempty"`
 }
 
 // KeyApplyResult reports an account-wide key reconciliation pass.
@@ -470,8 +472,8 @@ func (c *DaemonClient) ListKeys(ctx context.Context) ([]*db.SSHKey, error) {
 	return resp.Keys, nil
 }
 
-func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string, allSandboxes bool) (*db.SSHKey, error) {
-	req := CreateKeyRequest{Name: name, PublicKey: pubKey, AllSandboxes: allSandboxes}
+func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string, allSandboxes, isDefault bool) (*db.SSHKey, error) {
+	req := CreateKeyRequest{Name: name, PublicKey: pubKey, AllSandboxes: allSandboxes, IsDefault: isDefault}
 	var key db.SSHKey
 	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys", req, &key); err != nil {
 		return nil, err

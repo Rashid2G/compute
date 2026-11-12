@@ -269,6 +269,7 @@ func (s *Store) initSchema() error {
 		public_key TEXT NOT NULL,
 		fingerprint TEXT NOT NULL,
 		all_sandboxes INTEGER NOT NULL DEFAULT 0,
+		is_default INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMP NOT NULL
 	);
 	CREATE TABLE IF NOT EXISTS worker_pools(id TEXT PRIMARY KEY,name TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',policy_json TEXT NOT NULL DEFAULT '{}',created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
@@ -404,6 +405,7 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN disk_mb INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN all_sandboxes INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, and protected columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
@@ -1139,16 +1141,17 @@ func (s *Store) SaveSSHKey(ctx context.Context, key *SSHKey) error {
 	}
 
 	query := `
-	INSERT INTO ssh_keys (id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO ssh_keys (id, owner_id, name, public_key, fingerprint, all_sandboxes, is_default, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		public_key = excluded.public_key,
 		fingerprint = excluded.fingerprint,
-		all_sandboxes = excluded.all_sandboxes;
+		all_sandboxes = excluded.all_sandboxes,
+		is_default = excluded.is_default;
 	`
 	_, err := s.db.ExecContext(ctx, query,
-		key.ID, key.OwnerID, key.Name, key.PublicKey, key.Fingerprint, boolInt(key.AllSandboxes), key.CreatedAt,
+		key.ID, key.OwnerID, key.Name, key.PublicKey, key.Fingerprint, boolInt(key.AllSandboxes), boolInt(key.IsDefault), key.CreatedAt,
 	)
 	return err
 }
@@ -1159,7 +1162,7 @@ func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, err
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, is_default, created_at
 	FROM ssh_keys
 	WHERE (? = "" OR owner_id = ?)
 	ORDER BY created_at DESC;
@@ -1173,11 +1176,12 @@ func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, err
 	var keys []*SSHKey
 	for rows.Next() {
 		k := &SSHKey{}
-		var allSandboxes int
-		if err := rows.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &k.CreatedAt); err != nil {
+		var allSandboxes, isDefault int
+		if err := rows.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt); err != nil {
 			return nil, err
 		}
 		k.AllSandboxes = allSandboxes != 0
+		k.IsDefault = isDefault != 0
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
@@ -1189,7 +1193,7 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, is_default, created_at
 	FROM ssh_keys
 	WHERE id = ? OR name = ?
 	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END
@@ -1197,8 +1201,8 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 	`
 	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName)
 	k := &SSHKey{}
-	var allSandboxes int
-	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &k.CreatedAt)
+	var allSandboxes, isDefault int
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1206,6 +1210,7 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 		return nil, err
 	}
 	k.AllSandboxes = allSandboxes != 0
+	k.IsDefault = isDefault != 0
 	return k, nil
 }
 
@@ -1217,7 +1222,7 @@ func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) 
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, created_at
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, is_default, created_at
 	FROM ssh_keys
 	WHERE (id = ? OR name = ?) AND (? = '' OR owner_id = ?)
 	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END, created_at DESC
@@ -1225,8 +1230,8 @@ func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) 
 	`
 	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, ownerID, ownerID, idOrName)
 	k := &SSHKey{}
-	var allSandboxes int
-	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &k.CreatedAt)
+	var allSandboxes, isDefault int
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1234,7 +1239,72 @@ func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) 
 		return nil, err
 	}
 	k.AllSandboxes = allSandboxes != 0
+	k.IsDefault = isDefault != 0
 	return k, nil
+}
+
+// GetDefaultSSHKey returns the key flagged as ownerID's default, or nil when
+// the owner has not chosen one. The default key is embedded into every new
+// sandbox the owner creates unless the request picks another key explicitly.
+func (s *Store) GetDefaultSSHKey(ctx context.Context, ownerID string) (*SSHKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+	SELECT id, owner_id, name, public_key, fingerprint, all_sandboxes, is_default, created_at
+	FROM ssh_keys
+	WHERE owner_id = ? AND is_default = 1
+	ORDER BY created_at DESC
+	LIMIT 1;
+	`
+	row := s.db.QueryRowContext(ctx, query, ownerID)
+	k := &SSHKey{}
+	var allSandboxes, isDefault int
+	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	k.AllSandboxes = allSandboxes != 0
+	k.IsDefault = isDefault != 0
+	return k, nil
+}
+
+// SetDefaultSSHKey flags keyID as ownerID's single default key, clearing the
+// flag from every other key the owner holds. The key must belong to ownerID.
+func (s *Store) SetDefaultSSHKey(ctx context.Context, ownerID, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, "UPDATE ssh_keys SET is_default = 0 WHERE owner_id = ?", ownerID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, "UPDATE ssh_keys SET is_default = 1 WHERE id = ? AND owner_id = ?", keyID, ownerID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("ssh key %s not found for owner %s", keyID, ownerID)
+	}
+	return tx.Commit()
+}
+
+// ClearDefaultSSHKey removes the default flag from keyID when it is ownerID's
+// default key. Other keys are left untouched.
+func (s *Store) ClearDefaultSSHKey(ctx context.Context, ownerID, keyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, "UPDATE ssh_keys SET is_default = 0 WHERE id = ? AND owner_id = ?", keyID, ownerID)
+	return err
 }
 
 // DeleteSSHKey removes an SSH key by ID or Name
