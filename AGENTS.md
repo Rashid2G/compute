@@ -8,9 +8,8 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
 
 1. Read this file and the relevant package documentation/tests.
 2. Check `git status --short` and preserve unrelated user changes.
-3. If changes include code or any non-simple tasks (features, bug fixes, refactoring, multi-file changes), agents **must work in a git worktree** checked out from `origin/dev` (see "Branch, worktree, and release workflow" below). Do not make code or non-simple edits directly in the primary workspace checkout.
-4. Trace a feature across its layers: CLI/client, API types and handlers, persistence/migrations, runtime/worker, and UI/SDK as applicable.
-5. For deployment or host changes, inspect the relevant scripts and config before acting. Never print secrets, private keys, enrollment tokens, or environment values into logs.
+3. Trace a feature across its layers: CLI/client, API types and handlers, persistence/migrations, runtime/worker, and UI/SDK as applicable.
+4. For deployment or host changes, inspect the relevant scripts and config before acting. Never print secrets, private keys, enrollment tokens, or environment values into logs.
 
 ## Architecture map
 
@@ -80,7 +79,6 @@ All coding agents modifying code, tests, or configurations in this repository mu
 
 ## Branch, worktree, and release workflow
 
-- **Mandatory worktree rule**: Agents are supposed to and **must work in git worktrees** if the changes include code or any non-simple tasks (features, bug fixes, refactoring, multi-file edits, schema/dependency changes). Do not make code or non-simple edits directly in the primary checkout. Only simple read-only queries or trivial single-line non-code adjustments may be performed without a worktree.
 - Agents must interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
 - `main` is production and is maintained separately from agent work. Changes may reach it only through a maintainer-approved promotion from `dev`.
 - `dev` is the sole integration branch. All agent work targets `dev`.
@@ -107,7 +105,7 @@ Before finishing, inspect `git diff --check`, review the final diff, and report 
 
 ## Agent delegation and issues
 
-Work independently unless the user or repository task explicitly requests delegation. When delegation is requested, provide the child agent this file plus a bounded task, relevant paths, expected output, and explicit instructions to work in a dedicated git worktree if their task involves code or non-simple changes. Do not claim a separate issue/thread has been created unless the issue/thread tool confirms it. Record concrete failures with reproduction steps and affected behavior; fix them in the current task when authorized, otherwise return a concise issue-ready report.
+Work independently unless the user or repository task explicitly requests delegation. When delegation is requested, provide the child agent this file plus a bounded task, relevant paths, expected output, and shared-worktree coordination instructions. Do not claim a separate issue/thread has been created unless the issue/thread tool confirms it. Record concrete failures with reproduction steps and affected behavior; fix them in the current task when authorized, otherwise return a concise issue-ready report.
 
 ## Skills
 
