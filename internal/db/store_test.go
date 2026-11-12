@@ -294,11 +294,12 @@ func TestStore_SSHKeys(t *testing.T) {
 	ctx := context.Background()
 
 	key1 := &SSHKey{
-		ID:          "ssh-key-1",
-		OwnerID:     "default",
-		Name:        "laptop",
-		PublicKey:   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey1 test@laptop",
-		Fingerprint: "SHA256:testfingerprint1",
+		ID:           "ssh-key-1",
+		OwnerID:      "default",
+		Name:         "laptop",
+		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey1 test@laptop",
+		Fingerprint:  "SHA256:testfingerprint1",
+		AllSandboxes: true,
 	}
 
 	key2 := &SSHKey{
@@ -321,7 +322,7 @@ func TestStore_SSHKeys(t *testing.T) {
 	if err != nil || gotByID == nil {
 		t.Fatalf("failed to get key by ID: %v", err)
 	}
-	if gotByID.Name != "laptop" || gotByID.Fingerprint != "SHA256:testfingerprint1" {
+	if gotByID.Name != "laptop" || gotByID.Fingerprint != "SHA256:testfingerprint1" || !gotByID.AllSandboxes {
 		t.Fatalf("unexpected key by ID: %+v", gotByID)
 	}
 
