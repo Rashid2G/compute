@@ -115,9 +115,40 @@ func (s *Server) dnsSandboxIPs(ctx context.Context, sandbox, username string) ([
 		if sandboxLabelForVM(vm) != sandbox {
 			continue
 		}
-		return sandboxAddresses(vm), true
+		return s.sandboxAddresses(vm), true
 	}
 	return nil, false
+}
+
+// sandboxAddresses returns the addresses a sandbox name resolves to, with the
+// Service gateway VIP first when one is allocated. The VIP is reachable from
+// every tailnet device through the Service host; the guest IP requires routing
+// but works for on-net clients.
+func (s *Server) sandboxAddresses(v *db.VM) []net.IP {
+	var out []net.IP
+	seen := make(map[string]bool)
+	add := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		key := ip.String()
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, ip)
+		}
+	}
+
+	if s != nil && s.gateway != nil {
+		for _, vip := range s.gateway.VIPs(v.ID) {
+			if ip := net.ParseIP(vip); ip != nil && ip.To4() != nil {
+				add(ip)
+			}
+		}
+	}
+	for _, ip := range sandboxAddresses(v) {
+		add(ip)
+	}
+	return out
 }
 
 // sandboxLabelForVM returns the DNS label used for a VM inside its owner's
@@ -329,14 +360,37 @@ func (s *Server) vmHostname(v *db.VM) string {
 	return sandboxLabelForVM(v) + "." + label + "." + zone
 }
 
-// decorateVMHostnames fills the transient Hostname field on API responses.
+// decorateVMHostnames fills the transient Hostname field on API responses,
+// as well as TailnetIP and TailnetDNS when the Service gateway is active.
 func (s *Server) decorateVMHostnames(vms []*db.VM) {
-	zone := s.cfg.PrimaryDNSBaseDomain()
-	if zone == "" || !s.cfg.DNS.Enabled || len(vms) == 0 {
+	if len(vms) == 0 {
 		return
 	}
-	for _, v := range vms {
-		v.Hostname = s.vmHostname(v)
+	zone := s.cfg.PrimaryDNSBaseDomain()
+	if zone != "" && s.cfg.DNS.Enabled {
+		for _, v := range vms {
+			if v != nil {
+				v.Hostname = s.vmHostname(v)
+			}
+		}
+	}
+	if s != nil && s.gateway != nil {
+		ctx := context.Background()
+		for _, v := range vms {
+			if v == nil {
+				continue
+			}
+			if v.TailnetIP == "" {
+				if vips := s.gateway.VIPs(v.ID); len(vips) > 0 {
+					v.TailnetIP = vips[0]
+				}
+			}
+			if v.TailnetDNS == "" {
+				if dns := s.gatewayServiceDNS(ctx, v); dns != "" {
+					v.TailnetDNS = dns
+				}
+			}
+		}
 	}
 }
 

@@ -246,10 +246,27 @@ type TailscaleStatus struct {
 	Tailnet               string `json:"tailnet,omitempty"`
 	NodeTag               string `json:"node_tag,omitempty"`
 	SandboxTag            string `json:"sandbox_tag,omitempty"`
+	HostTag               string `json:"host_tag,omitempty"`
 	DefaultSandboxes      bool   `json:"default_sandboxes"`
 	WorkerControlPlaneURL string `json:"worker_control_plane_url,omitempty"`
 	RecommendedPolicy     string `json:"recommended_policy,omitempty"`
-	Host                  *struct {
+	ServiceGateway        *struct {
+		Enabled       bool   `json:"enabled"`
+		TargetAddress string `json:"target_address"`
+		LastSync      string `json:"last_sync,omitempty"`
+		LastError     string `json:"last_error,omitempty"`
+		Services      int    `json:"services"`
+	} `json:"service_gateway,omitempty"`
+	GatewayServices []struct {
+		VMID      string   `json:"vm_id"`
+		Sandbox   string   `json:"sandbox"`
+		Service   string   `json:"service"`
+		VIPs      []string `json:"vips,omitempty"`
+		Ports     []int    `json:"ports,omitempty"`
+		Status    string   `json:"status"`
+		LastError string   `json:"last_error,omitempty"`
+	} `json:"gateway_services,omitempty"`
+	Host *struct {
 		Installed bool     `json:"installed"`
 		Running   bool     `json:"running"`
 		Hostname  string   `json:"hostname"`
@@ -272,6 +289,18 @@ func (c *DaemonClient) GetTailscaleStatus(ctx context.Context) (*TailscaleStatus
 	var st TailscaleStatus
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/tailscale/status", nil, &st)
 	return &st, err
+}
+
+// EnrollTailscaleHost tags the daemon host as the Service host. Without
+// confirm it only previews the change.
+func (c *DaemonClient) EnrollTailscaleHost(ctx context.Context, confirm bool) (map[string]interface{}, error) {
+	var res map[string]interface{}
+	u := "/api/v1/tailscale/enroll"
+	if confirm {
+		u += "?confirm=true"
+	}
+	err := c.doRequest(ctx, http.MethodPost, u, nil, &res)
+	return res, err
 }
 
 func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {

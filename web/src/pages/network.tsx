@@ -645,6 +645,70 @@ export function NetworkPage({
                 </div>
               </div>
 
+              {tailnet.service_gateway && (
+                <div className="border border-border bg-background p-3.5 font-mono text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] uppercase text-muted-foreground font-semibold">
+                      Tailscale Service Gateway (Single-Host Mode)
+                    </div>
+                    <span className="text-[11px] text-success">Active</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11.5px]">
+                    <div>
+                      <span className="text-muted-foreground">Target address: </span>
+                      <span className="text-foreground">{tailnet.service_gateway.target_address || 'auto'}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Active services: </span>
+                      <span className="text-foreground">{tailnet.service_gateway.services}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Host tag: </span>
+                      <span className="text-foreground">{tailnet.host_tag || '-'}</span>
+                    </div>
+                  </div>
+                  {tailnet.service_gateway.last_error && (
+                    <div className="text-[11px] text-destructive">
+                      Error: {tailnet.service_gateway.last_error}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {tailnet.gateway_services && tailnet.gateway_services.length > 0 && (
+                <div className="border border-border bg-background overflow-x-auto">
+                  <div className="border-b border-border bg-muted/30 px-3 py-2 text-[11.5px] text-muted-foreground">
+                    Sandbox Services ({tailnet.gateway_services.length})
+                  </div>
+                  <table className="w-full border-collapse text-left text-[12px]">
+                    <thead>
+                      <tr className="border-b border-border text-[11.5px] text-muted-foreground">
+                        <th className="py-2.5 px-3 font-normal">Sandbox</th>
+                        <th className="py-2.5 px-3 font-normal">Service</th>
+                        <th className="py-2.5 px-3 font-normal">VIPs</th>
+                        <th className="py-2.5 px-3 font-normal">Exposed Ports</th>
+                        <th className="py-2.5 px-3 font-normal">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border font-mono text-[11.5px]">
+                      {tailnet.gateway_services.map((svc) => (
+                        <tr key={svc.service} className="hover:bg-muted/30">
+                          <td className="py-2.5 px-3 font-sans text-foreground">{svc.sandbox}</td>
+                          <td className="py-2.5 px-3 text-foreground">{svc.service}</td>
+                          <td className="py-2.5 px-3 text-foreground">{(svc.vips || []).join(', ') || '-'}</td>
+                          <td className="py-2.5 px-3 text-muted-foreground">{(svc.ports || []).join(', ') || '-'}</td>
+                          <td className="py-2.5 px-3 text-muted-foreground">
+                            <span className={cn(svc.status === 'active' ? 'text-success' : 'text-muted-foreground')}>
+                              {svc.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
               <div className="border border-border bg-background overflow-x-auto">
                 <table className="w-full border-collapse text-left text-[12px]">
                   <thead>

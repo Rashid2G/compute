@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 )
@@ -275,6 +276,52 @@ func TestTailscaleConfigParsing(t *testing.T) {
 	legacyCfg := TailscaleConfig{SandboxTag: "tag:compute:custom"}
 	if legacyCfg.ResolvedSandboxTag() != "tag:compute-custom" {
 		t.Errorf("legacy sandbox tag = %q, want tag:compute-custom", legacyCfg.ResolvedSandboxTag())
+	}
+}
+
+func TestTailscaleServiceGatewayConfig(t *testing.T) {
+	yes := true
+	cfg := TailscaleConfig{
+		Enabled: true,
+		ServiceGateway: &ServiceGatewayConfig{
+			Enabled:             true,
+			HostTag:             "tag:custom-host",
+			ServiceTag:          "tag:custom-svc",
+			AutoApprove:         &yes,
+			ScanIntervalSeconds: 15,
+		},
+	}
+	if !cfg.ServiceGatewayEnabled() {
+		t.Fatal("expected gateway enabled")
+	}
+	if cfg.ResolvedHostTag() != "tag:custom-host" {
+		t.Fatalf("host tag = %q", cfg.ResolvedHostTag())
+	}
+	if cfg.ResolvedServiceTag() != "tag:custom-svc" {
+		t.Fatalf("service tag = %q", cfg.ResolvedServiceTag())
+	}
+	if !cfg.AutoApproveResolved() {
+		t.Fatal("expected auto approve")
+	}
+	if cfg.GatewayScanInterval() != 15*time.Second {
+		t.Fatalf("interval = %v", cfg.GatewayScanInterval())
+	}
+	if cfg.GatewayServicePrefix() != "compute" {
+		t.Fatalf("prefix = %q", cfg.GatewayServicePrefix())
+	}
+
+	def := TailscaleConfig{Enabled: true, NodeTag: "tag:compute-master"}
+	if def.ServiceGatewayEnabled() {
+		t.Fatal("gateway should be off without a section")
+	}
+	if !def.AutoApproveResolved() {
+		t.Fatal("auto approve should default to true")
+	}
+	if def.ResolvedServiceTag() != "tag:compute-sandbox" {
+		t.Fatalf("default service tag = %q", def.ResolvedServiceTag())
+	}
+	if def.GatewayScanInterval() != 30*time.Second {
+		t.Fatalf("default interval = %v", def.GatewayScanInterval())
 	}
 }
 

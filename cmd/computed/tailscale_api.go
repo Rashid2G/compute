@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	servicegateway "github.com/Rashid2G/on-demand-vms/internal/gateway"
 	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 )
 
@@ -20,17 +21,20 @@ func (s *Server) tailscaleAdminClient() *tailscale.Client {
 
 // tailscaleStatusResponse is the payload of GET /api/v1/tailscale/status.
 type tailscaleStatusResponse struct {
-	Enabled               bool                   `json:"enabled"`
-	APIKeyConfigured      bool                   `json:"api_key_configured"`
-	Tailnet               string                 `json:"tailnet,omitempty"`
-	NodeTag               string                 `json:"node_tag,omitempty"`
-	SandboxTag            string                 `json:"sandbox_tag,omitempty"`
-	DefaultSandboxes      bool                   `json:"default_sandboxes"`
-	Host                  *tailscale.LocalStatus `json:"host,omitempty"`
-	WorkerControlPlaneURL string                 `json:"worker_control_plane_url,omitempty"`
-	RecommendedPolicy     string                 `json:"recommended_policy,omitempty"`
-	Sandboxes             []tailscaleSandbox     `json:"sandboxes,omitempty"`
-	Services              []tailscale.Service    `json:"services,omitempty"`
+	Enabled               bool                         `json:"enabled"`
+	APIKeyConfigured      bool                         `json:"api_key_configured"`
+	Tailnet               string                       `json:"tailnet,omitempty"`
+	NodeTag               string                       `json:"node_tag,omitempty"`
+	SandboxTag            string                       `json:"sandbox_tag,omitempty"`
+	DefaultSandboxes      bool                         `json:"default_sandboxes"`
+	Host                  *tailscale.LocalStatus       `json:"host,omitempty"`
+	WorkerControlPlaneURL string                       `json:"worker_control_plane_url,omitempty"`
+	RecommendedPolicy     string                       `json:"recommended_policy,omitempty"`
+	Sandboxes             []tailscaleSandbox           `json:"sandboxes,omitempty"`
+	Services              []tailscale.Service          `json:"services,omitempty"`
+	HostTag               string                       `json:"host_tag,omitempty"`
+	ServiceGateway        *servicegateway.Status       `json:"service_gateway,omitempty"`
+	GatewayServices       []servicegateway.ServiceInfo `json:"gateway_services,omitempty"`
 }
 
 // tailscaleSandbox summarizes a sandbox's tailnet identity.
@@ -62,6 +66,12 @@ func (s *Server) handleTailscaleStatus(w http.ResponseWriter, r *http.Request) {
 		NodeTag:          cfg.ResolvedNodeTag(),
 		SandboxTag:       cfg.ResolvedSandboxTag(),
 		DefaultSandboxes: cfg.DefaultSandboxes,
+		HostTag:          cfg.ResolvedHostTag(),
+	}
+	if s.gateway != nil {
+		st := s.gateway.Status()
+		resp.ServiceGateway = &st
+		resp.GatewayServices = s.gateway.Snapshots()
 	}
 
 	// Local host detection never requires the admin API.
@@ -82,7 +92,7 @@ func (s *Server) handleTailscaleStatus(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			if svc, err := client.ListServices(ctx); err == nil {
-				resp.Services = svc
+				resp.Services = tailscale.FilterComputeServices(svc, cfg.ResolvedServiceTag(), cfg.GatewayServicePrefix()+"-")
 			}
 		}
 		resp.RecommendedPolicy = tailscale.RecommendedPolicy(cfg.ResolvedSandboxTag(), tailscale.TagNode, cfg.ResolvedNodeTag())
@@ -179,6 +189,105 @@ func (s *Server) handleTailscaleCleanup(w http.ResponseWriter, r *http.Request) 
 		"stale":   stale,
 		"deleted": deleted,
 	})
+}
+
+// handleTailscaleEnroll tags the daemon host as the Compute Service host.
+// Tailscale only accepts tagged devices as Service hosts. The operation is
+// explicit: without confirm=true it reports what would change and does nothing.
+func (s *Server) handleTailscaleEnroll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
+	client := s.tailscaleAdminClient()
+	if client == nil {
+		httpError(w, "tailscale integration is not configured (api key missing)", http.StatusBadRequest)
+		return
+	}
+
+	var body struct {
+		Confirm bool `json:"confirm"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body)
+	}
+	confirm := body.Confirm || r.URL.Query().Get("confirm") == "true"
+
+	runner := tailscale.NewServeRunner(s.cfg.Tailscale.GatewayTailscaleBinary(), s.cfg.Tailscale.GatewayTailscaleSocket())
+	host, err := runner.LocalStatus(r.Context())
+	if err != nil || host == nil {
+		httpError(w, "cannot read the host's tailscale status (install the tailscale CLI on the daemon host and mount its control socket): "+errString(err), http.StatusBadRequest)
+		return
+	}
+	if !host.Running {
+		httpError(w, "the host is not connected to a tailnet; run 'tailscale up' on the host first", http.StatusBadRequest)
+		return
+	}
+	if host.DeviceID == "" {
+		httpError(w, "cannot determine the host's tailnet device ID", http.StatusBadRequest)
+		return
+	}
+
+	want := s.cfg.Tailscale.ResolvedHostTag()
+	tags := mergeTags(host.Tags, want)
+	already := containsString(host.Tags, want)
+	resp := map[string]interface{}{
+		"dry_run":        true,
+		"device_id":      host.DeviceID,
+		"hostname":       host.Hostname,
+		"current_tags":   host.Tags,
+		"desired_tags":   tags,
+		"already_tagged": already,
+	}
+	if already {
+		resp["dry_run"] = false
+		resp["message"] = "host already carries " + want
+	} else if confirm {
+		if err := client.SetDeviceTags(r.Context(), host.DeviceID, tags); err != nil {
+			httpError(w, "tailscale api: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp["dry_run"] = false
+		resp["message"] = "tagged host as " + want
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func mergeTags(current []string, extra string) []string {
+	seen := make(map[string]bool, len(current)+1)
+	out := make([]string, 0, len(current)+1)
+	for _, t := range current {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	if extra != "" && !seen[extra] {
+		out = append(out, extra)
+	}
+	return out
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+func errString(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	return err.Error()
 }
 
 // portFromAddr extracts the numeric port from a listen address.

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
@@ -215,8 +216,55 @@ type TailscaleConfig struct {
 	// lack it (via the SSH control channel). Default true.
 	AutoInstallGuest *bool `json:"auto_install_guest,omitempty"`
 	// DefaultSandboxes gives every new sandbox tailnet addressing unless the
-	// request explicitly opts out.
+	// request explicitly opts out. Deprecated: superseded by ServiceGateway.
 	DefaultSandboxes bool `json:"default_sandboxes,omitempty"`
+	// ServiceGateway turns the API host into the single tailnet Service host.
+	// Sandboxes stay on the local bridge; the daemon creates one Tailscale
+	// Service (VIP + MagicDNS name) per sandbox and proxies its ports.
+	ServiceGateway *ServiceGatewayConfig `json:"service_gateway,omitempty"`
+	// LegacyPerSandboxDevices keeps the old behaviour of joining each sandbox
+	// to the tailnet as its own ephemeral device. Off by default; the
+	// ServiceGateway replaces it.
+	LegacyPerSandboxDevices bool `json:"legacy_per_sandbox_devices,omitempty"`
+}
+
+// ServiceGatewayConfig controls the "single tailnet Service host" model: only
+// the machine running the daemon joins the tailnet, sandboxes stay on the
+// local bridge, and the daemon creates/deletes a Tailscale Service per
+// sandbox for stable VIP addresses and MagicDNS names.
+type ServiceGatewayConfig struct {
+	// Enabled turns the gateway on. Requires tailscale.enabled and an API key.
+	Enabled bool `json:"enabled,omitempty"`
+	// HostTag is the tag the API host must carry to act as a Service host.
+	// Default tag:compute-master.
+	HostTag string `json:"host_tag,omitempty"`
+	// ServiceTag is applied to every created Service. Default tag:compute-sandbox.
+	ServiceTag string `json:"service_tag,omitempty"`
+	// AutoApprove approves this daemon's Service host advertisements through
+	// the admin API so no manual console click is needed. Default true.
+	AutoApprove *bool `json:"auto_approve,omitempty"`
+	// ScanIntervalSeconds controls how often guest listening ports are
+	// re-scanned and Services reconciled. Default 60.
+	ScanIntervalSeconds int `json:"scan_interval_seconds,omitempty"`
+	// ExposeLoopback also exposes listeners bound to 127.0.0.1/::1. Off by
+	// default because those are usually meant to stay inside the sandbox.
+	ExposeLoopback bool `json:"expose_loopback,omitempty"`
+	// ExcludePorts are never exposed (for example 25 to avoid mail abuse).
+	ExcludePorts []int `json:"exclude_ports,omitempty"`
+	// TargetAddress is the address tailscaled (running on the host) should dial
+	// to reach the daemon's local gateway listeners. Empty auto-detects a
+	// non-loopback IPv4 address of this process (the container IP in the
+	// compose deployment).
+	TargetAddress string `json:"target_address,omitempty"`
+	// TailscaleBinary is the CLI used for `tailscale serve`. Default "tailscale".
+	TailscaleBinary string `json:"tailscale_binary,omitempty"`
+	// TailscaleSocket is the tailscaled control socket. Default
+	// /var/run/tailscale/tailscaled.sock.
+	TailscaleSocket string `json:"tailscale_socket,omitempty"`
+	// SSHUser is the guest account used to scan listening ports. Default "compute".
+	SSHUser string `json:"ssh_user,omitempty"`
+	// ServicePrefix prefixes generated Service names. Default "compute".
+	ServicePrefix string `json:"service_prefix,omitempty"`
 }
 
 // ResolvedSandboxTag returns the sandbox tag with the Compute default applied.
@@ -241,6 +289,97 @@ func (c TailscaleConfig) AutoInstallResolved() bool {
 		return *c.AutoInstallGuest
 	}
 	return true
+}
+
+// ServiceGatewayEnabled reports whether the single-host Service gateway is on.
+func (c TailscaleConfig) ServiceGatewayEnabled() bool {
+	return c.Enabled && c.ServiceGateway != nil && c.ServiceGateway.Enabled
+}
+
+// ResolvedHostTag returns the Service-host tag with the Compute default applied.
+func (c TailscaleConfig) ResolvedHostTag() string {
+	if c.ServiceGateway != nil && c.ServiceGateway.HostTag != "" {
+		return tailscale.NormalizeTag(c.ServiceGateway.HostTag)
+	}
+	return c.ResolvedNodeTag()
+}
+
+// ResolvedServiceTag returns the tag applied to created Services.
+func (c TailscaleConfig) ResolvedServiceTag() string {
+	if c.ServiceGateway != nil && c.ServiceGateway.ServiceTag != "" {
+		return tailscale.NormalizeTag(c.ServiceGateway.ServiceTag)
+	}
+	return c.ResolvedSandboxTag()
+}
+
+// AutoApproveResolved defaults to true when unset.
+func (c TailscaleConfig) AutoApproveResolved() bool {
+	if c.ServiceGateway != nil && c.ServiceGateway.AutoApprove != nil {
+		return *c.ServiceGateway.AutoApprove
+	}
+	return true
+}
+
+// GatewayScanInterval returns the reconcile interval (default 30s).
+func (c TailscaleConfig) GatewayScanInterval() time.Duration {
+	if c.ServiceGateway != nil && c.ServiceGateway.ScanIntervalSeconds > 0 {
+		return time.Duration(c.ServiceGateway.ScanIntervalSeconds) * time.Second
+	}
+	return 30 * time.Second
+}
+
+// GatewayExcludePorts returns the configured exclusion set.
+func (c TailscaleConfig) GatewayExcludePorts() map[int]bool {
+	out := make(map[int]bool)
+	if c.ServiceGateway == nil {
+		return out
+	}
+	for _, p := range c.ServiceGateway.ExcludePorts {
+		if p > 0 && p <= 65535 {
+			out[p] = true
+		}
+	}
+	return out
+}
+
+// GatewayServicePrefix returns the Service name prefix.
+func (c TailscaleConfig) GatewayServicePrefix() string {
+	if c.ServiceGateway != nil && strings.TrimSpace(c.ServiceGateway.ServicePrefix) != "" {
+		return strings.TrimSpace(c.ServiceGateway.ServicePrefix)
+	}
+	return "compute"
+}
+
+// GatewayTailscaleBinary returns the tailscale CLI path.
+func (c TailscaleConfig) GatewayTailscaleBinary() string {
+	if c.ServiceGateway != nil && strings.TrimSpace(c.ServiceGateway.TailscaleBinary) != "" {
+		return strings.TrimSpace(c.ServiceGateway.TailscaleBinary)
+	}
+	return "tailscale"
+}
+
+// GatewayTailscaleSocket returns the tailscaled control socket path.
+func (c TailscaleConfig) GatewayTailscaleSocket() string {
+	if c.ServiceGateway != nil && strings.TrimSpace(c.ServiceGateway.TailscaleSocket) != "" {
+		return strings.TrimSpace(c.ServiceGateway.TailscaleSocket)
+	}
+	return "/var/run/tailscale/tailscaled.sock"
+}
+
+// GatewaySSHUser returns the guest account used for port scans.
+func (c TailscaleConfig) GatewaySSHUser() string {
+	if c.ServiceGateway != nil && strings.TrimSpace(c.ServiceGateway.SSHUser) != "" {
+		return strings.TrimSpace(c.ServiceGateway.SSHUser)
+	}
+	return "compute"
+}
+
+// GatewayTargetAddress returns the explicit target address, or "" for auto.
+func (c TailscaleConfig) GatewayTargetAddress() string {
+	if c.ServiceGateway != nil {
+		return strings.TrimSpace(c.ServiceGateway.TargetAddress)
+	}
+	return ""
 }
 
 // JobsConfig controls local job execution on the control-plane host.

@@ -19,6 +19,12 @@ ssh compute@myvm.alice.compute-lab.tailb1be99.ts.net
 > and `docs/tailscale.md`. A custom domain is required for the per-user
 > subdomain scheme.
 
+When the Tailscale Service gateway is enabled
+(`docs/tailscale-service-gateway.md`), each sandbox name is answered with the
+sandbox Service's VIP first and the guest IP second. Tailnet clients reach the
+VIP through the Service host without any subnet route; LAN clients fall back
+to the guest IP.
+
 The base domain is **generic** — it works for any zone you can delegate (a
 custom/private zone via Tailscale split DNS, a domain at any DNS provider, or
 a LAN zone). It is not tied to Tailscale.
