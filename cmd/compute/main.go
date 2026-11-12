@@ -1691,7 +1691,21 @@ func handleTailscaleCommand(ctx context.Context, client *DaemonClient, args []st
 		if st.SandboxTag != "" {
 			fmt.Printf("Sandbox tag:      %s\n", st.SandboxTag)
 		}
+		if st.HostTag != "" {
+			fmt.Printf("Service host tag: %s\n", st.HostTag)
+		}
 		fmt.Printf("Sandboxes auto:   %t\n", st.DefaultSandboxes)
+		if st.ServiceGateway != nil {
+			fmt.Printf("\nService gateway:\n")
+			fmt.Printf("  target:        %s\n", st.ServiceGateway.TargetAddress)
+			fmt.Printf("  services:      %d\n", st.ServiceGateway.Services)
+			if st.ServiceGateway.LastSync != "" {
+				fmt.Printf("  last sync:     %s\n", st.ServiceGateway.LastSync)
+			}
+			if st.ServiceGateway.LastError != "" {
+				fmt.Printf("  last error:    %s\n", st.ServiceGateway.LastError)
+			}
+		}
 		if st.Host != nil {
 			fmt.Printf("\nHost device:\n")
 			if !st.Host.Installed {
@@ -1710,6 +1724,16 @@ func handleTailscaleCommand(ctx context.Context, client *DaemonClient, args []st
 					fmt.Printf("  tags:           %s\n", strings.Join(st.Host.Tags, ", "))
 				}
 			}
+		}
+		if len(st.GatewayServices) > 0 {
+			fmt.Printf("\nSandbox Services (%d):\n", len(st.GatewayServices))
+			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(w, "  SANDBOX\tSERVICE\tVIPS\tPORTS\tSTATUS")
+			for _, svc := range st.GatewayServices {
+				fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n",
+					svc.Sandbox, svc.Service, strings.Join(svc.VIPs, ","), intsCSV(svc.Ports), svc.Status)
+			}
+			_ = w.Flush()
 		}
 		if st.WorkerControlPlaneURL != "" {
 			fmt.Printf("\nWorkers connect with:\n  --control-plane %s\n", st.WorkerControlPlaneURL)
@@ -1737,6 +1761,31 @@ func handleTailscaleCommand(ctx context.Context, client *DaemonClient, args []st
 		fmt.Println(st.RecommendedPolicy)
 		fmt.Println("Review the snippet above, then apply it in the tailnet policy file:")
 		fmt.Println("https://console.tailscale.com/admin/acls — Compute never edits it for you.")
+
+	case "enroll":
+		fs := flag.NewFlagSet("tailscale enroll", flag.ExitOnError)
+		confirm := fs.Bool("confirm", false, "Actually tag the host (default is a preview)")
+		fs.Parse(args[1:])
+		res, err := client.EnrollTailscaleHost(ctx, *confirm)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error enrolling host: %v\n", err)
+			os.Exit(1)
+		}
+		if msg, _ := res["message"].(string); msg != "" {
+			fmt.Println(msg)
+		}
+		if host, _ := res["hostname"].(string); host != "" {
+			fmt.Printf("Host: %s\n", host)
+		}
+		if tags, ok := res["current_tags"].([]interface{}); ok {
+			fmt.Printf("Current tags: %s\n", joinStringValues(tags))
+		}
+		if tags, ok := res["desired_tags"].([]interface{}); ok {
+			fmt.Printf("Desired tags: %s\n", joinStringValues(tags))
+		}
+		if dry, _ := res["dry_run"].(bool); dry {
+			fmt.Println("Dry run. Re-run with --confirm to apply the tag.")
+		}
 
 	case "cleanup":
 		confirm := false
@@ -1778,9 +1827,33 @@ func handleTailscaleCommand(ctx context.Context, client *DaemonClient, args []st
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown tailscale command %q.\n\n", args[0])
-		fmt.Fprintln(os.Stderr, "Usage: compute tailscale status|policy|cleanup [--confirm]")
+		fmt.Fprintln(os.Stderr, "Usage: compute tailscale status|policy|enroll [--confirm]|cleanup [--confirm]")
 		os.Exit(1)
 	}
+}
+
+func intsCSV(values []int) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		parts = append(parts, strconv.Itoa(v))
+	}
+	return strings.Join(parts, ",")
+}
+
+func joinStringValues(values []interface{}) string {
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		if s, ok := v.(string); ok && s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func handleVersionCommand(ctx context.Context, client *DaemonClient, args []string) {

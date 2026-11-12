@@ -24,6 +24,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	servicegateway "github.com/Rashid2G/on-demand-vms/internal/gateway"
 	"github.com/Rashid2G/on-demand-vms/internal/jobs"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
@@ -52,6 +53,8 @@ type Server struct {
 	fcVersion    string
 	ingressProxy *network.IngressProxy
 	dns          *dnsRuntime
+	gateway      *servicegateway.Manager
+	gatewayKick  chan struct{}
 
 	// DNS/ingress caches (daemon-owned, response only).
 	userIndexMu     sync.RWMutex
@@ -62,6 +65,10 @@ type Server struct {
 	dnsHostMu       sync.RWMutex
 	dnsHostIPs      []net.IP
 	dnsHostExpiry   time.Time
+
+	tailnetDomainMu     sync.RWMutex
+	tailnetDomain       string
+	tailnetDomainExpiry time.Time
 
 	eventMu       sync.RWMutex
 	eventSubs     map[chan *db.AuditEvent]struct{}
@@ -257,6 +264,7 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		fcVersion:   fcVersion,
 		eventSubs:   make(map[chan *db.AuditEvent]struct{}),
 		vmListCache: make(map[string]vmListEntry),
+		gatewayKick: make(chan struct{}, 1),
 	}
 
 	var domains []string
@@ -607,6 +615,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/tailscale/status", s.wrapAuth(s.handleTailscaleStatus))
 	s.mux.HandleFunc("/api/v1/tailscale/policy", s.wrapAuth(s.handleTailscalePolicy))
 	s.mux.HandleFunc("/api/v1/tailscale/cleanup", s.wrapAuth(s.handleTailscaleCleanup))
+	s.mux.HandleFunc("/api/v1/tailscale/enroll", s.wrapAuth(s.handleTailscaleEnroll))
 	s.mux.HandleFunc("/api/v1/network", s.wrapAuth(s.handleNetworkInfo))
 	s.mux.HandleFunc("/api/v1/network/allocations", s.wrapAuth(s.handleNetworkAllocations))
 	s.mux.HandleFunc("/api/v1/network/inspect/", s.wrapAuth(s.handleNetworkInspect))
@@ -1073,7 +1082,8 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			"vcpus":     created.VCPUs,
 			"memory_mb": created.MemoryMB,
 		})
-		json.NewEncoder(w).Encode(created)
+		s.kickTailscaleGateway()
+		s.encodeVM(w, created)
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1119,6 +1129,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.removePortForwardsForVM(ctx, v, true)
+			s.kickTailscaleGateway()
 			var delErr error
 			if _, isAdmin := s.currentOwnerID(r); isAdmin {
 				delErr = s.vmMgr.DeleteVM(ctx, vmID)
@@ -1226,6 +1237,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyEnvironment(ctx, v)
 			s.applyPortForwardsForVM(ctx, v)
 		}
+		s.kickTailscaleGateway()
 		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
 		s.encodeVM(w, v)
 
@@ -1254,6 +1266,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyEnvironment(ctx, v)
 			s.applyPortForwardsForVM(ctx, v)
 		}
+		s.kickTailscaleGateway()
 		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
 		s.encodeVM(w, v)
 
@@ -1271,6 +1284,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if v != nil {
 			s.removePortForwardsForVM(ctx, v, false)
 		}
+		s.kickTailscaleGateway()
 		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
 		s.encodeVM(w, v)
 

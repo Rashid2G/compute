@@ -22,6 +22,7 @@ type LocalStatus struct {
 	TailnetName string   `json:"tailnet_name"`
 	Tags        []string `json:"tags"`
 	Version     string   `json:"version"`
+	DeviceID    string   `json:"device_id,omitempty"` // tailnet device ID (n123...)
 }
 
 // TailnetDomain returns the MagicDNS domain of the local device.
@@ -35,6 +36,7 @@ func (s *LocalStatus) TailnetDomain() string {
 
 // selfStatus mirrors the "Self" object of `tailscale status --json`.
 type selfStatus struct {
+	ID           string   `json:"ID"`
 	HostName     string   `json:"HostName"`
 	DNSName      string   `json:"DNSName"`
 	TailscaleIPs []string `json:"TailscaleIPs"`
@@ -91,6 +93,7 @@ func DetectLocalWith(ctx context.Context, binary string, timeout time.Duration) 
 	st.DNSName = strings.TrimSuffix(parsed.Self.DNSName, ".")
 	st.TailnetName = parsed.CurrentTailnet.Name
 	st.Tags = parsed.Self.Tags
+	st.DeviceID = parsed.Self.ID
 	for _, ip := range parsed.Self.TailscaleIPs {
 		if strings.HasPrefix(ip, "100.") {
 			st.TailnetIP = ip

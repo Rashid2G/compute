@@ -151,7 +151,7 @@ func TestSandboxServiceNameAndHostname(t *testing.T) {
 
 func TestRecommendedPolicy(t *testing.T) {
 	policy := RecommendedPolicy(TagSandbox, TagNode, TagMaster)
-	for _, want := range []string{"autoApprovers", `"tag:compute-sandbox": ["tag:compute-sandbox"]`, `"tag:compute-master"`, `"autogroup:member"`} {
+	for _, want := range []string{"autoApprovers", `"tag:compute-sandbox": ["tag:compute-master", "tag:compute-sandbox"]`, `"tag:compute-master"`, `"autogroup:member"`} {
 		if !strings.Contains(policy, want) {
 			t.Errorf("policy missing %q:\n%s", want, policy)
 		}
@@ -430,6 +430,105 @@ func TestProvisionerDeleteDevice_CleansServices(t *testing.T) {
 	}
 	if !found8080 || !found3000 {
 		t.Errorf("expected both ports 8080 and 3000 services deleted, got %v", deletedServices)
+	}
+}
+
+func TestListAndGetServiceVIPs(t *testing.T) {
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/api/v2/tailnet/-/services") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"vipServices": []Service{
+					{Name: "svc:compute-a", Addrs: []string{"100.64.1.1", "fd7a::1"}, Ports: []string{"tcp:22"}},
+					{Name: "svc:compute-b", Addrs: []string{"100.64.1.2"}, Ports: []string{"tcp:80"}},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/api/v2/tailnet/-/services/svc:compute-a") && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(Service{Name: "svc:compute-a", Addrs: []string{"100.64.1.1"}, Ports: []string{"tcp:22"}})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+
+	services, err := c.ListServices(context.Background())
+	if err != nil {
+		t.Fatalf("ListServices: %v", err)
+	}
+	if len(services) != 2 || services[0].VIP4() != "100.64.1.1" {
+		t.Fatalf("services = %+v", services)
+	}
+	svc, err := c.GetService(context.Background(), "svc:compute-a")
+	if err != nil {
+		t.Fatalf("GetService: %v", err)
+	}
+	if svc.VIP4() != "100.64.1.1" {
+		t.Fatalf("VIP = %q", svc.VIP4())
+	}
+}
+
+func TestSetServiceHostApproval(t *testing.T) {
+	var got map[string]bool
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s", r.Method)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/api/v2/tailnet/-/services/svc:compute-a/device/n123/approved") {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	if err := c.SetServiceHostApproval(context.Background(), "svc:compute-a", "n123", true); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if !got["approved"] {
+		t.Fatalf("body = %v", got)
+	}
+}
+
+func TestEnsureServiceNormalizesName(t *testing.T) {
+	var putPath, approvalPath string
+	var putBody ServiceDefinition
+	c, _ := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut:
+			putPath = r.URL.Path
+			_ = json.NewDecoder(r.Body).Decode(&putBody)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost:
+			approvalPath = r.URL.Path
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	if err := c.EnsureService(context.Background(), "compute-dev-abc", []string{"tcp:22"}, []string{TagSandbox}); err != nil {
+		t.Fatalf("EnsureService: %v", err)
+	}
+	if !strings.Contains(putPath, "/services/svc:compute-dev-abc") {
+		t.Errorf("bare name not normalised in path: %q", putPath)
+	}
+	if putBody.Name != "svc:compute-dev-abc" {
+		t.Errorf("body name = %q", putBody.Name)
+	}
+	if err := c.SetServiceHostApproval(context.Background(), "compute-dev-abc", "n123", true); err != nil {
+		t.Fatalf("SetServiceHostApproval: %v", err)
+	}
+	if !strings.Contains(approvalPath, "/services/svc:compute-dev-abc/device/n123/approved") {
+		t.Errorf("approval path = %q", approvalPath)
+	}
+}
+
+func TestFilterComputeServices(t *testing.T) {
+	in := []Service{
+		{Name: "svc:compute-dev-box-abc", Tags: []string{TagSandbox}},
+		{Name: "svc:cockpit", Tags: []string{"tag:server"}},
+		{Name: "svc:custom", Tags: []string{TagSandbox}},
+	}
+	got := FilterComputeServices(in, TagSandbox, "compute-")
+	if len(got) != 2 || got[0].Name != "svc:compute-dev-box-abc" || got[1].Name != "svc:custom" {
+		t.Fatalf("filtered = %+v", got)
 	}
 }
 

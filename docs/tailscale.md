@@ -11,6 +11,13 @@ LAN, VPN) and that sandbox IPs are routable on the host network. Neither holds w
 daemon runs on a cloud VM **without a public IP**, or when worker nodes are spread across
 networks the operator does not control (home lab + cloud + office).
 
+> **Default model (Service gateway).** The current default is a single-host
+> model: only the daemon host joins the tailnet, sandboxes stay on the local
+> bridge, and the daemon creates one Tailscale Service per sandbox. See
+> [`docs/tailscale-service-gateway.md`](tailscale-service-gateway.md). The
+> per-sandbox ephemeral device model described below is the legacy/optional
+> path (`legacy_per_sandbox_devices: true`).
+
 A Tailscale tailnet solves both problems:
 
 1. **Control plane reachability** — every machine the operator owns joins the tailnet and
@@ -46,16 +53,19 @@ A Tailscale tailnet solves both problems:
 |-----------------|----------------------|---------------------------|---------------------|
 | Master daemon   | `tag:compute-master` | `compute-master[-<id>]`   | persistent (host)   |
 | Worker node     | `tag:compute-node`   | `compute-node-<name>`     | persistent (host)   |
-| Sandbox         | `tag:compute-sandbox`| `compute-<vmid8>`         | ephemeral (per VM)  |
+| Sandbox (legacy) | `tag:compute-sandbox`| `compute-<vmid8>`         | ephemeral (per VM)  |
 
 ## Component overview
 
 ```
 tailnet (user-owned)
  ├── compute-master  (tag:compute-master)   ← daemon + GUI + ingress proxy
- ├── compute-node-X  (tag:compute-node)    ← workers; report tailnet IP as underlay
- └── compute-a1b2c3d4 (tag:compute-sandbox) ← ephemeral per-sandbox node (100.x IP)
+ │     └── svc:compute-<sandbox>-<id>      ← one Tailscale Service per sandbox (default)
+ └── compute-node-X  (tag:compute-node)    ← workers; report tailnet IP as underlay
 ```
+
+In the legacy model each sandbox also appears as its own ephemeral
+`compute-<vmid8>` (`tag:compute-sandbox`) device with a `100.x` address.
 
 ### 1. Control plane (`computed`)
 
@@ -71,10 +81,21 @@ Configuration (daemon JSON → `tailscale` section, or env):
     "sandbox_tag": "tag:compute-sandbox",
     "hostname_prefix": "compute",
     "key_expiry_seconds": 7776000,       // 90 days for the reusable sandbox key
-    "auto_install_guest": true           // install the tailscale binary in guests on first use
+    "auto_install_guest": true,          // install the tailscale binary in guests on first use
+    "default_sandboxes": false,          // Service gateway is the default; no per-VM device
+    "service_gateway": {
+      "enabled": true,                   // this host is the only tailnet Service host
+      "host_tag": "tag:compute-master",
+      "service_tag": "tag:compute-sandbox",
+      "auto_approve": true,
+      "scan_interval_seconds": 30
+    }
   }
 }
 ```
+
+See [`docs/tailscale-service-gateway.md`](tailscale-service-gateway.md) for the
+gateway fields, enrollment step, and the policy snippet.
 
 Environment overrides: `COMPUTE_TAILSCALE_ENABLED`, `COMPUTE_TAILSCALE_API_KEY`,
 `COMPUTE_TAILSCALE_TAILNET`.
@@ -100,11 +121,18 @@ Startup behavior:
 - Connectivity is pure configuration: run the worker with
   `--control-plane http://<master-magicdns>:18080` (or the master's `100.x` IP).
 
-### 3. Sandboxes (tailnet IP assignment)
+### 3. Sandboxes (address assignment)
 
-When a sandbox is created with `tailscale: true` (or the daemon is configured with
-`tailscale.default_sandboxes: true`), after boot the daemon provisions the guest over its
-existing SSH control channel:
+**Default (Service gateway):** a sandbox created with default settings stays on
+the local bridge and does **not** join the tailnet. The daemon creates one
+Tailscale Service for it on the API host and proxies its listening TCP ports;
+the Service VIP plus MagicDNS name is the sandbox's stable address. Nothing runs
+inside the guest. Details: [`docs/tailscale-service-gateway.md`](tailscale-service-gateway.md).
+
+**Legacy (per-sandbox device):** when the daemon sets
+`tailscale.legacy_per_sandbox_devices: true` (or a sandbox is created with
+`tailscale: true`), after boot the daemon provisions the guest over its existing
+SSH control channel:
 
 1. Mint an ephemeral, preauth, tagged auth key (`tag:compute-sandbox`) via the admin API.
 2. Ensure the `tailscale` binary exists in the guest; if `auto_install_guest` is enabled
