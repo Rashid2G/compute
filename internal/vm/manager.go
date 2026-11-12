@@ -57,6 +57,7 @@ type Config struct {
 type TailscaleProvisioner interface {
 	Provision(ctx context.Context, vmID, vmIP, sshKeyPath string) (*tailscale.ProvisionResult, error)
 	Teardown(ctx context.Context, vmIP, sshKeyPath string)
+	DeleteDevice(ctx context.Context, deviceID, vmID, tailnetIP string) error
 	PublishService(ctx context.Context, vmID, vmIP, sshKeyPath string, guestPort int) (*tailscale.ServiceResult, error)
 	UnpublishService(ctx context.Context, vmID, vmIP, sshKeyPath string, guestPort int) error
 }
@@ -2462,6 +2463,34 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 		if vm.InternalID != "" {
 			_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.InternalID)))
 		}
+	}
+
+	// Clean up Tailscale device if provisioned
+	m.mu.RLock()
+	prov := m.tsProvisioner
+	m.mu.RUnlock()
+	if prov != nil && (vm == nil || vm.TailscaleEnabled || vm.TailscaleDeviceID != "" || vm.TailnetIP != "") {
+		tsCtx, tsCancel := context.WithTimeout(ctx, 15*time.Second)
+		var devID, targetVMID, tailnetIP string
+		if vm != nil {
+			devID = vm.TailscaleDeviceID
+			targetVMID = vm.ID
+			if targetVMID == "" {
+				targetVMID = vm.InternalID
+			}
+			tailnetIP = vm.TailnetIP
+		} else {
+			targetVMID = vmID
+		}
+		if err := prov.DeleteDevice(tsCtx, devID, targetVMID, tailnetIP); err != nil {
+			log.Printf("[vm-manager] %s: tailscale device deletion failed: %v", targetVMID, err)
+		} else {
+			log.Printf("[vm-manager] %s: tailscale device removed from tailnet", targetVMID)
+		}
+		if vm != nil && vm.InternalID != "" && vm.InternalID != targetVMID && devID == "" {
+			_ = prov.DeleteDevice(tsCtx, "", vm.InternalID, tailnetIP)
+		}
+		tsCancel()
 	}
 
 	var deleteErr error

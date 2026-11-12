@@ -171,6 +171,19 @@ sudo rm -rf /tmp/tailscale_*`
 			}
 		}
 	}
+	if deviceID == "" && p.Client != nil {
+		if devices, err := p.Client.ListDevices(ctx); err == nil {
+			for _, d := range FilterComputeDevices(devices, sandboxTag) {
+				if d.Hostname == hostname || d.TailscaleIP() == ip {
+					deviceID = d.ID
+					if d.TailnetDomain() != "" {
+						dnsName = hostname + "." + d.TailnetDomain()
+					}
+					break
+				}
+			}
+		}
+	}
 
 	return &ProvisionResult{
 		TailnetIP: ip,
@@ -191,6 +204,79 @@ func (p *Provisioner) Teardown(ctx context.Context, vmIP, sshKeyPath string) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	_, _, _, _ = p.runner(sshKeyPath).Run(ctx, vmIP, "sudo tailscale logout >/dev/null 2>&1 || tailscale logout >/dev/null 2>&1 || true; sudo pkill tailscaled >/dev/null 2>&1 || true")
+}
+
+// DeleteDevice removes the sandbox's device and any exposed services from the
+// tailnet using the admin API. It first attempts to delete by deviceID if
+// provided. If deviceID is empty or deletion fails, it looks up the device by
+// sandbox hostname or tailnet IP among Compute-owned devices and deletes it.
+func (p *Provisioner) DeleteDevice(ctx context.Context, deviceID, vmID, tailnetIP string) error {
+	if p == nil || p.Client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var deleteErr error
+	deleted := false
+
+	// 1. Try deleting directly by deviceID if known.
+	if deviceID != "" {
+		err := p.Client.DeleteDevice(ctx, deviceID)
+		if err == nil || strings.Contains(err.Error(), "HTTP 404") {
+			deleted = true
+		} else {
+			deleteErr = err
+		}
+	}
+
+	// 2. If not yet deleted, fall back to searching Compute-owned devices.
+	if !deleted && (vmID != "" || tailnetIP != "") {
+		devices, err := p.Client.ListDevices(ctx)
+		if err == nil {
+			hostname := ""
+			if vmID != "" {
+				hostname = SandboxHostname(vmID)
+			}
+			for _, d := range FilterComputeDevices(devices, p.sandboxTag()) {
+				matched := false
+				if deviceID != "" && d.ID == deviceID {
+					matched = true
+				} else if hostname != "" && (d.Hostname == hostname || strings.HasPrefix(d.Name, hostname+".")) {
+					matched = true
+				} else if tailnetIP != "" && d.TailscaleIP() == tailnetIP {
+					matched = true
+				}
+				if matched {
+					if err := p.Client.DeleteDevice(ctx, d.ID); err == nil || strings.Contains(err.Error(), "HTTP 404") {
+						deleted = true
+						deleteErr = nil
+					} else {
+						deleteErr = err
+					}
+					break
+				}
+			}
+		} else if deleteErr == nil {
+			deleteErr = err
+		}
+	}
+
+	// 3. Clean up any published Tailscale Services defined for this sandbox.
+	if vmID != "" {
+		if services, err := p.Client.ListServices(ctx); err == nil {
+			prefix := SandboxHostname(vmID) + "-"
+			for _, s := range services {
+				cleanName := strings.TrimPrefix(s.Name, "svc:")
+				if strings.HasPrefix(cleanName, prefix) || cleanName == SandboxHostname(vmID) {
+					_ = p.Client.DeleteService(ctx, s.Name)
+					_ = p.Client.DeleteService(ctx, "svc:"+cleanName)
+				}
+			}
+		}
+	}
+
+	return deleteErr
 }
 
 // PublishService defines a Compute-owned Tailscale Service and advertises the
