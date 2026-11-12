@@ -14,7 +14,7 @@ description: >
 - Deployed checkout: /home/rashid/on-demand-vms
 
 ## Commands
-- **Temporary PR preview sandbox (non-blocking)**: `make preview-deploy` (or `./scripts/temp-deploy-sandbox.sh [name] [port]`)
+- **Temporary PR preview sandbox (non-blocking)**: `make preview-deploy PR=<number>` (or `./scripts/temp-deploy-sandbox.sh <pr-number> [port]`)
 - Go/config/scripts changes to main deployment: `make deploy` (or `make deploy-lab`)
 - Web UI changes to main deployment: `make deploy-ui` (or `make deploy-lab-ui`)
 - Restart only: `make deploy-restart`
@@ -25,14 +25,15 @@ description: >
 For testing changes and pull request verification, do NOT restart the main host deployment. Instead, deploy to an ephemeral microVM sandbox served directly by the project on `compute-lab`:
 ```bash
 # Provision temp sandbox in background and get its Tailscale URL:
-./scripts/temp-deploy-sandbox.sh [name] [port] &
+./scripts/temp-deploy-sandbox.sh <pr-number> [port] &
 # Or make target:
-make preview-deploy
+make preview-deploy PR=<pr-number>
 ```
-- **Self-serving**: The main deployment on `compute-lab` creates an isolated Firecracker microVM for the preview.
-- **Tailscale addressing**: Sandboxes join the tailnet with an ephemeral address (`http://compute-<sandbox>.<tailnet>.ts.net:<port>` or `http://100.x.y.z:<port>`).
+- **PR Number Required**: Each preview deployment **must contain the PR number** and is named `pr-<pr-number>`.
+- **Runs on Main Dev Deployment**: Each preview deployment **must run on the main deployment deployed from the `dev` branch on the VM `compute-lab`** (`/home/rashid/on-demand-vms`).
+- **Tailscale addressing**: Sandboxes join the tailnet with an ephemeral address (`http://compute-pr-<pr-number>.<tailnet>.ts.net:<port>` or `http://100.x.y.z:<port>`).
 - **Non-blocking**: Designed to be launched in the background without holding up PR creation.
-- **Teardown**: `ssh compute-lab "~/on-demand-vms/bin/compute sandbox stop <name> && ~/on-demand-vms/bin/compute sandbox delete <name>"`
+- **Teardown**: `ssh compute-lab "~/on-demand-vms/bin/compute sandbox stop pr-<pr-number> && ~/on-demand-vms/bin/compute sandbox delete pr-<pr-number>"`
 
 ## SSH
 `ssh compute-lab` (BatchMode, non-interactive key). Never print secrets/keys/tokens.

@@ -7,11 +7,11 @@ All agent tasks modifying code or configuration must follow this 6-step flow:
 2. **Implement**: Carry out work in a git worktree based on `dev`.
 3. **Write tests and run them**: Verify changes with `make test` (or web typecheck/build).
 4. **Provide evidence of the end change**: Include visual proof (screenshots) or command output.
-5. **Run on a separate temp deployment (in the background)**: Launch an isolated microVM sandbox on `compute-lab` via `make preview-deploy` (or `./scripts/temp-deploy-sandbox.sh`) and link its Tailscale URL (`http://<tailnet-dns>:<port>`). Run in the background without blocking PR creation.
+5. **Run on a separate temp deployment (in the background)**: Launch an isolated microVM sandbox named with the PR number (`pr-<PR_NUMBER>`) running on the main deployment deployed from `dev` on `compute-lab` via `make preview-deploy PR=<PR_NUMBER>` (or `./scripts/temp-deploy-sandbox.sh <PR_NUMBER>`) and link its Tailscale URL (`http://compute-pr-<PR_NUMBER>.<tailnet>.ts.net:<port>`). Run in the background without blocking PR creation.
 6. **Create the PR**: Open a pull request targeting `dev` (`gh pr create --base dev`) with the Tailscale URL.
 
 ## Deployment Commands
-- `make preview-deploy`: Spin up an isolated temp preview sandbox on `compute-lab` in the background and output its Tailscale URL (non-blocking for PRs)
+- `make preview-deploy PR=<n>`: Spin up an isolated temp preview sandbox named `pr-<n>` running on the main `dev` deployment on `compute-lab` in the background and output its Tailscale URL (non-blocking for PRs)
 - `make deploy`: Deploy code/config/scripts to the main shared deployment on `ssh compute-lab` (restarts services)
 - `make deploy-ui`: Build web UI and deploy to main shared deployment
 - `make remote-status`: Check health of main deployment services
