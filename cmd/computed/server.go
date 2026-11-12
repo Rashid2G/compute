@@ -498,6 +498,7 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 		}
 		if deleteRecords {
+			s.vmMgr.UnpublishTailscaleService(ctx, pf.VMID, pf.GuestPort)
 			_ = st.DeletePortForward(ctx, pf.ID)
 			continue
 		}
