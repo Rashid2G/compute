@@ -127,6 +127,7 @@ export class Sandbox {
         memory_mb: options.memoryMb,
         disk_mb: options.diskMb,
         name: options.name,
+        ssh_password: options.sshPassword,
       }),
     });
 

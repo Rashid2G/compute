@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
@@ -488,6 +489,11 @@ type CreateRequest struct {
 	Tailscale    *bool  `json:"tailscale,omitempty"`
 	SSHKeyID     string `json:"ssh_key_id,omitempty"`
 	SSHPublicKey string `json:"ssh_public_key,omitempty"`
+	// SSHPassword is an optional password for the guest's managed SSH accounts
+	// (compute and root). It is applied to the disk image at creation time and
+	// never persisted. When empty, password authentication is disabled and the
+	// accounts stay locked, leaving the embedded public key as the only way in.
+	SSHPassword string `json:"ssh_password,omitempty"`
 
 	Protected *bool `json:"protected,omitempty"`
 
@@ -877,6 +883,42 @@ func (m *Manager) generateNickname(ctx context.Context, ownerID string) string {
 	return fmt.Sprintf("%s-%s", RandomNickname(), uid[:4])
 }
 
+// hasExtFilesystem reports whether path contains an ext2/3/4 superblock magic.
+// It is used to decide whether a failure to apply the SSH access policy must
+// abort sandbox creation: placeholder disks in tests and non-ext images cannot
+// be configured, while a real guest disk must never be left with its old policy.
+func hasExtFilesystem(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [2]byte
+	if _, err := f.ReadAt(magic[:], 1080); err != nil {
+		return false
+	}
+	// ext superblock magic 0xEF53, stored little-endian at superblock offset 0x38.
+	return magic[0] == 0x53 && magic[1] == 0xEF
+}
+
+func validateSSHPassword(password string) error {
+	if password == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(password) < 8 {
+		return fmt.Errorf("invalid ssh password: must be at least 8 characters")
+	}
+	// bcrypt only considers the first 72 bytes, so reject longer inputs rather
+	// than silently truncating them.
+	if len(password) > 72 {
+		return fmt.Errorf("invalid ssh password: must be at most 72 bytes")
+	}
+	if strings.ContainsAny(password, "\x00\r\n") {
+		return fmt.Errorf("invalid ssh password: must not contain NUL or newline characters")
+	}
+	return nil
+}
+
 // CreateVM reserves networking, validates disk space and images, and registers a created VM
 func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, error) {
 	uid := uuid.New().String()
@@ -886,6 +928,9 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	ownerID := req.OwnerID
 	if ownerID == "" {
 		ownerID = "default"
+	}
+	if err := validateSSHPassword(req.SSHPassword); err != nil {
+		return nil, err
 	}
 	// Internal job service processes may consume images/templates that the
 	// control plane already authorized for a tenant.
@@ -1162,7 +1207,27 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 
 	if diskPath != "" {
-		_ = m.storMgr.EmbedSSHKey(diskPath, embeddedPubKey)
+		err := m.storMgr.ConfigureSSHAccess(diskPath, storage.SSHAccess{
+			PublicKey: embeddedPubKey,
+			Password:  req.SSHPassword,
+		})
+		if err != nil {
+			if req.SSHPassword != "" {
+				m.storMgr.CleanupVM(internalID)
+				return nil, fmt.Errorf("failed to configure ssh password: %w", err)
+			}
+			// A real guest disk must never keep its previous password policy
+			// when the sandbox was created without a password. Placeholder or
+			// non-ext images used by tests and some custom images are the only
+			// case where the policy cannot be applied.
+			if hasExtFilesystem(diskPath) {
+				m.storMgr.CleanupVM(internalID)
+				return nil, fmt.Errorf("failed to enforce public-key-only SSH access: %w", err)
+			}
+			log.Printf("[vm-manager] %s: failed to apply SSH access configuration (non-ext disk): %v", externalID, err)
+		}
+	} else if req.SSHPassword != "" {
+		return nil, fmt.Errorf("invalid ssh password: sandbox disk is not available")
 	}
 
 	// 2. Fetch current IP allocations
@@ -1259,29 +1324,30 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 
 	vm := &db.VM{
-		ID:               externalID,
-		InternalID:       internalID,
-		OwnerID:          ownerID,
-		Name:             name,
-		Status:           db.StatusCreated,
-		Protected:        protected,
-		VCPUs:            vcpus,
-		MemoryMB:         memoryMB,
-		DiskMB:           diskMB,
-		IPAddress:        ip,
-		PublicIP:         publicIP,
-		PublicIPEnabled:  publicIPEnabled,
-		MACAddress:       mac,
-		TAPDevice:        tapDev,
-		TailscaleEnabled: tailscaleEnabled,
-		RootfsPath:       rootfsPath,
-		KernelPath:       kernelPath,
-		DiskPath:         diskPath,
-		SSHKeyPath:       sshKeyPath,
-		SSHKeyName:       embeddedKeyName,
-		SSHPublicKey:     embeddedPubKey,
-		CreatedAt:        time.Now().UTC(),
-		UpdatedAt:        time.Now().UTC(),
+		ID:                 externalID,
+		InternalID:         internalID,
+		OwnerID:            ownerID,
+		Name:               name,
+		Status:             db.StatusCreated,
+		Protected:          protected,
+		VCPUs:              vcpus,
+		MemoryMB:           memoryMB,
+		DiskMB:             diskMB,
+		IPAddress:          ip,
+		PublicIP:           publicIP,
+		PublicIPEnabled:    publicIPEnabled,
+		MACAddress:         mac,
+		TAPDevice:          tapDev,
+		TailscaleEnabled:   tailscaleEnabled,
+		RootfsPath:         rootfsPath,
+		KernelPath:         kernelPath,
+		DiskPath:           diskPath,
+		SSHKeyPath:         sshKeyPath,
+		SSHKeyName:         embeddedKeyName,
+		SSHPublicKey:       embeddedPubKey,
+		SSHPasswordEnabled: req.SSHPassword != "",
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
 	}
 
 	if err := m.saveVMRecord(ctx, vm); err != nil {

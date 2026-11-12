@@ -141,6 +141,7 @@ export function InspectVMDialog({
                 <Fact label="MAC" value={vm.mac_address} />
                 <Fact label="TAP" value={vm.tap_device} />
                 <Fact label="SSH Key" value={vm.ssh_key_name || (vm.ssh_public_key ? 'Custom Key' : 'Default Key')} mono={false} />
+                <Fact label="SSH auth" value={vm.ssh_password_enabled ? 'Password + key' : 'Public key only'} mono={false} />
                 <Fact label="Created" value={formatDateTime(vm.created_at)} mono={false} />
                 <Fact label="Updated" value={formatDateTime(vm.updated_at)} mono={false} />
                 <Fact label="Snapshot" value={vm.snapshot_path ? 'Available' : 'None'} mono={false} />
