@@ -62,7 +62,7 @@ export function SSHTerminal({
     const isDark = theme === 'dark';
     const term = new Terminal({
       cursorBlink: true,
-      cursorStyle: 'bar',
+      cursorStyle: 'block',
       fontSize: 13,
       fontFamily: 'JetBrains Mono, Geist Mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
       lineHeight: 1.25,
