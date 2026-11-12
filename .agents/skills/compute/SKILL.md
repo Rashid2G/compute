@@ -276,7 +276,6 @@ Every pull request or branch can be given an isolated, addressable live deployme
 
 ### Step-by-Step PR Preview Lifecycle Workflow
 
-```
 [PR Opened / Updated]
         |
         v
@@ -284,13 +283,16 @@ Every pull request or branch can be given an isolated, addressable live deployme
 2. Boot Sandbox:      `compute sandbox start pr-<n>-<slug>`
 3. Deploy Code:       `compute sandbox exec ... -- <build & start server>`
 4. Mark Port Public:  `POST /api/v1/network/port-forwards` (`public: true`)
-5. Post URL to PR:    `http://<daemon-host>:18080/preview/pr-<n>-<slug>/<port>/`
+5. Tailscale URL:     `http://<tailnet-dns>:<guest-port>` or `http://<tailnet-ip>:<guest-port>`
+6. Post URL to PR:    Include Tailscale URL & Ingress URL in PR body / comments
         |
    [PR Closed]
         v
-6. Teardown:          `compute sandbox stop ... && compute sandbox delete ...`
-7. Prune Network:     `compute network prune`
+7. Teardown:          `compute sandbox stop ... && compute sandbox delete ...`
+8. Prune Network:     `compute network prune`
 ```
+
+> **Fast automated temp preview (non-blocking)**: For on-demand-vms itself, each preview deployment **must contain the PR number** (named `pr-<pr-number>`) and **must run on the main deployment deployed from the `dev` branch on the VM `compute-lab`**. Run `./scripts/temp-deploy-sandbox.sh <pr-number> [port] &` (or `make preview-deploy PR=<pr-number>`) to spin up an ephemeral sandbox on `compute-lab` in the background and output the Tailscale URL without blocking PR creation. The script diffs the branch against `origin/dev`, builds and installs **only the changed services** into the guest (GUI front door always; `computed` only when daemon-side code changed; `compute-worker` when worker code changed), and reuses the compute-lab services for everything else. Each sandbox enrolls in the tailnet individually — the daemon mints a scoped, ephemeral, preauthorized auth key per sandbox and joins the guest as its own ephemeral, tagged device (`tag:compute-sandbox`, userspace networking) — so every preview sandbox gets its own unique Tailscale DNS/IP URL (`compute-<sandbox-name>.<tailnet>.ts.net` / its own `100.x.y.z`), and teardown logs the node out so it expires automatically.
 
 #### Step 1: Provision & Boot
 ```bash
