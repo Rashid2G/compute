@@ -169,3 +169,41 @@ create request (or `--ssh-password` on `compute sandbox create`) to enable it:
 The password is applied when the disk is created, including when cloning a
 sandbox or launching a snapshot template. A sandbox created without a password
 from a source that had one will have its managed accounts locked again.
+
+### Managing public keys
+
+Saved public keys live under `/api/v1/keys` and can be managed from the CLI:
+
+```bash
+# Save a key for the account
+compute keys add --name laptop --key-file ~/.ssh/id_ed25519.pub
+
+# Mark it account-wide: embedded into every current and future sandbox
+compute keys add --name laptop --key-file ~/.ssh/id_ed25519.pub --all
+
+# Promote or demote an existing key
+compute keys apply laptop
+compute keys update laptop --no-all
+
+# Inspect and remove
+compute keys list
+compute keys show laptop
+compute keys delete laptop
+```
+
+The GUI exposes the same controls in the **Account SSH Keys** dialog: each key
+has an *all sandboxes* toggle, and the sandbox create dialog lets you pick a
+specific saved key in addition to the account-wide set.
+
+Account-wide keys are resolved at creation time and reconciled afterwards:
+
+- New sandboxes embed the owner's account-wide keys automatically.
+- Running sandboxes are updated over SSH, and stopped/paused sandboxes have
+  their `authorized_keys` edited offline on the disk.
+- Removing the account-wide flag or deleting the key reconciles the remaining
+  sandboxes so the key is no longer authorized.
+- A per-sandbox key selected with `--ssh-key <name|path>` stays scoped to that
+  sandbox. `--ssh-key` also accepts a literal key or a path to a `.pub` file.
+
+The daemon's internal automation key is always authorized so the control plane
+can continue to reach the sandbox. Managed accounts are `compute` and `root`.

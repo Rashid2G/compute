@@ -26,8 +26,12 @@ const sshAccessDropInPath = "/etc/ssh/sshd_config.d/00-compute-access.conf"
 // password authentication is disabled and the managed accounts are locked.
 type SSHAccess struct {
 	PublicKey string
-	Password  string
-	Users     []string
+	// PublicKeys may carry additional keys (for example account-wide keys) that
+	// are authorized alongside PublicKey. The daemon's internal automation key
+	// is always added.
+	PublicKeys []string
+	Password   string
+	Users      []string
 }
 
 // imageFS abstracts the small set of file operations needed to configure SSH
@@ -57,7 +61,7 @@ func (m *Manager) ConfigureSSHAccess(diskPath string, access SSHAccess) error {
 	if len(users) == 0 {
 		users = defaultSSHUsers
 	}
-	keysContent := m.sshAuthorizedKeys(access.PublicKey)
+	keysContent := m.sshAuthorizedKeys(append([]string{access.PublicKey}, access.PublicKeys...)...)
 
 	var attempts []func() error
 	if os.Geteuid() == 0 {
@@ -86,19 +90,8 @@ func (m *Manager) ConfigureSSHAccess(diskPath string, access SSHAccess) error {
 }
 
 func applySSHAccess(fs imageFS, access SSHAccess, users []string, keysContent string) error {
-	// Replace authorized_keys for the managed accounts so a sandbox created from
-	// a template or clone never inherits keys that no longer belong to it.
-	for _, user := range users {
-		dir, uid, gid, ok := sshHomeDir(user)
-		if !ok {
-			continue
-		}
-		if err := fs.MkdirAll(dir, 0700, uid, gid); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
-		}
-		if err := fs.WriteFile(filepath.Join(dir, "authorized_keys"), []byte(keysContent), 0600, uid, gid); err != nil {
-			return fmt.Errorf("write authorized_keys for %s: %w", user, err)
-		}
+	if err := applyAuthorizedKeys(fs, users, keysContent); err != nil {
+		return err
 	}
 
 	shadow, err := fs.ReadFile("/etc/shadow")
@@ -137,6 +130,71 @@ func applySSHAccess(fs imageFS, access SSHAccess, users []string, keysContent st
 	}
 	if err := fs.WriteFile(sshAccessDropInPath, []byte(dropInSSHDConfig(passwordEnabled)), 0644, 0, 0); err != nil {
 		return fmt.Errorf("write sshd drop-in: %w", err)
+	}
+	return nil
+}
+
+// ConfigureAuthorizedKeys replaces authorized_keys for the managed SSH users
+// without touching password state or sshd policy. It is used to propagate
+// account-wide keys to existing sandboxes, including stopped ones whose disks
+// can be edited offline.
+func (m *Manager) ConfigureAuthorizedKeys(diskPath string, pubKeys ...string) error {
+	if strings.TrimSpace(diskPath) == "" {
+		return errors.New("disk path is empty")
+	}
+	if _, err := os.Stat(diskPath); err != nil {
+		return fmt.Errorf("stat disk image: %w", err)
+	}
+
+	keysContent := m.sshAuthorizedKeys(pubKeys...)
+
+	var attempts []func() error
+	if os.Geteuid() == 0 {
+		attempts = append(attempts, func() error {
+			fs, err := newMountImageFS(diskPath)
+			if err != nil {
+				return err
+			}
+			defer fs.Close()
+			return applyAuthorizedKeys(fs, defaultSSHUsers, keysContent)
+		})
+	}
+	attempts = append(attempts, func() error {
+		return applyAuthorizedKeys(newDebugfsImageFS(diskPath), defaultSSHUsers, keysContent)
+	})
+
+	var failures []string
+	for _, attempt := range attempts {
+		if err := attempt(); err == nil {
+			return nil
+		} else {
+			failures = append(failures, err.Error())
+		}
+	}
+	return fmt.Errorf("configure authorized_keys on %s: %s", diskPath, strings.Join(failures, "; "))
+}
+
+// AuthorizedKeys renders the managed authorized_keys content for the given
+// public keys. The daemon's internal automation key is always included so the
+// control plane can keep reaching the sandbox.
+func (m *Manager) AuthorizedKeys(pubKeys ...string) string {
+	return m.sshAuthorizedKeys(pubKeys...)
+}
+
+func applyAuthorizedKeys(fs imageFS, users []string, keysContent string) error {
+	// Replace authorized_keys for the managed accounts so a sandbox created from
+	// a template or clone never inherits keys that no longer belong to it.
+	for _, user := range users {
+		dir, uid, gid, ok := sshHomeDir(user)
+		if !ok {
+			continue
+		}
+		if err := fs.MkdirAll(dir, 0700, uid, gid); err != nil {
+			return fmt.Errorf("create %s: %w", dir, err)
+		}
+		if err := fs.WriteFile(filepath.Join(dir, "authorized_keys"), []byte(keysContent), 0600, uid, gid); err != nil {
+			return fmt.Errorf("write authorized_keys for %s: %w", user, err)
+		}
 	}
 	return nil
 }
@@ -286,9 +344,7 @@ func dropInSSHDConfig(passwordEnabled bool) string {
 	}, "\n")
 }
 
-func (m *Manager) sshAuthorizedKeys(pubKey string) string {
-	pubKey = strings.TrimSpace(pubKey)
-
+func (m *Manager) sshAuthorizedKeys(pubKeys ...string) string {
 	var internalPubKey string
 	candidates := []string{}
 	if privKey := m.GetSSHKeyPath(); privKey != "" {
@@ -311,12 +367,21 @@ func (m *Manager) sshAuthorizedKeys(pubKey string) string {
 
 	var keys []string
 	seen := make(map[string]bool)
-	if internalPubKey != "" {
-		keys = append(keys, internalPubKey)
-		seen[internalPubKey] = true
+	add := func(raw string) {
+		for _, line := range strings.Split(raw, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || seen[line] {
+				continue
+			}
+			seen[line] = true
+			keys = append(keys, line)
+		}
 	}
-	if pubKey != "" && !seen[pubKey] {
-		keys = append(keys, pubKey)
+	if internalPubKey != "" {
+		add(internalPubKey)
+	}
+	for _, key := range pubKeys {
+		add(key)
 	}
 	if len(keys) == 0 {
 		return ""

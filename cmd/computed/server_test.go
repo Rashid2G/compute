@@ -796,7 +796,62 @@ func TestSSHKeyEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK for lookup by name, got %d", respGetName.StatusCode)
 	}
 
-	// 5. Create VM with embedded SSH key
+	// 4b. Toggle account-wide scope and apply it
+	patchBody, _ := json.Marshal(map[string]interface{}{"all_sandboxes": true})
+	patchReq, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/keys/"+createdKey.ID, bytes.NewReader(patchBody))
+	respPatch, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respPatch.Body.Close()
+	if respPatch.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for patch, got %d", respPatch.StatusCode)
+	}
+	var patched db.SSHKey
+	_ = json.NewDecoder(respPatch.Body).Decode(&patched)
+	if !patched.AllSandboxes {
+		t.Fatalf("expected all_sandboxes=true after patch, got %+v", patched)
+	}
+
+	respApply, err := http.Post(server.URL+"/api/v1/keys/"+createdKey.ID+"/apply", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respApply.Body.Close()
+	if respApply.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for apply, got %d", respApply.StatusCode)
+	}
+	var applyResp struct {
+		Key  db.SSHKey `json:"key"`
+		Sync *struct {
+			Applied []string `json:"applied"`
+			Failed  []struct {
+				VMID string `json:"vm_id"`
+			} `json:"failed"`
+		} `json:"sync"`
+	}
+	_ = json.NewDecoder(respApply.Body).Decode(&applyResp)
+	if !applyResp.Key.AllSandboxes {
+		t.Fatalf("expected applied key to be account-wide, got %+v", applyResp.Key)
+	}
+
+	// 5. Reject a private key supplied inline as ssh_public_key
+	badVMReq, _ := json.Marshal(vm.CreateRequest{
+		Name:         "bad-key-vm",
+		VCPUs:        1,
+		MemoryMB:     512,
+		SSHPublicKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+	})
+	respBadVM, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(badVMReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respBadVM.Body.Close()
+	if respBadVM.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for private key as ssh_public_key, got %d", respBadVM.StatusCode)
+	}
+
+	// 5b. Create VM with embedded SSH key
 	vmReq, _ := json.Marshal(vm.CreateRequest{
 		Name:     "key-vm",
 		VCPUs:    1,

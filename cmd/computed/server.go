@@ -1958,8 +1958,33 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateKeyRequest struct {
-	Name      string `json:"name"`
-	PublicKey string `json:"public_key"`
+	Name         string `json:"name"`
+	PublicKey    string `json:"public_key"`
+	AllSandboxes bool   `json:"all_sandboxes"`
+}
+
+type UpdateKeyRequest struct {
+	Name         *string `json:"name"`
+	PublicKey    *string `json:"public_key"`
+	AllSandboxes *bool   `json:"all_sandboxes"`
+}
+
+// syncAccountSSHKeys reconciles account-wide keys for a key's owner. It never
+// fails the key operation: per-sandbox failures are reported in the response
+// payload and logged.
+func (s *Server) syncAccountSSHKeys(ctx context.Context, key *db.SSHKey) *vm.SSHKeySyncResult {
+	if key == nil || s.vmMgr == nil {
+		return nil
+	}
+	result, err := s.vmMgr.SyncSSHKeysForOwner(ctx, key.OwnerID)
+	if err != nil {
+		log.Printf("[ssh-keys] reconcile owner %s: %v", key.OwnerID, err)
+		return &vm.SSHKeySyncResult{Failed: []vm.SSHKeySyncFailure{{Error: err.Error()}}}
+	}
+	if len(result.Failed) > 0 {
+		log.Printf("[ssh-keys] reconcile owner %s: %d applied, %d failed", key.OwnerID, len(result.Applied), len(result.Failed))
+	}
+	return result
 }
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
@@ -2025,12 +2050,13 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 		keyID := fmt.Sprintf("ssh_%s", hex.EncodeToString(b))
 
 		key := &db.SSHKey{
-			ID:          keyID,
-			OwnerID:     ownerID,
-			Name:        req.Name,
-			PublicKey:   req.PublicKey,
-			Fingerprint: fingerprint,
-			CreatedAt:   time.Now().UTC(),
+			ID:           keyID,
+			OwnerID:      ownerID,
+			Name:         req.Name,
+			PublicKey:    req.PublicKey,
+			Fingerprint:  fingerprint,
+			AllSandboxes: req.AllSandboxes,
+			CreatedAt:    time.Now().UTC(),
 		}
 
 		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
@@ -2038,7 +2064,14 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.recordEvent("ssh_key.created", getActor(r), key.Name, "delivered", 15, map[string]string{"name": key.Name, "fingerprint": key.Fingerprint})
+		if key.AllSandboxes {
+			s.syncAccountSSHKeys(r.Context(), key)
+		}
+		s.recordEvent("ssh_key.created", getActor(r), key.Name, "delivered", 15, map[string]interface{}{
+			"name":          key.Name,
+			"fingerprint":   key.Fingerprint,
+			"all_sandboxes": key.AllSandboxes,
+		})
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(key)
 
@@ -2048,8 +2081,16 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
-	idOrName := strings.TrimPrefix(r.URL.Path, "/api/v1/keys/")
-	idOrName = strings.TrimSpace(idOrName)
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/keys/"), "/")
+	parts := strings.Split(rest, "/")
+	idOrName := ""
+	if len(parts) > 0 {
+		idOrName = strings.TrimSpace(parts[0])
+	}
+	action := ""
+	if len(parts) > 1 {
+		action = strings.ToLower(strings.TrimSpace(parts[1]))
+	}
 	if idOrName == "" {
 		http.Error(w, `{"error":"key id or name required"}`, http.StatusBadRequest)
 		return
@@ -2065,8 +2106,92 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if action != "" {
+		if action != "apply" {
+			http.Error(w, `{"error":"unknown key action"}`, http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		key.AllSandboxes = true
+		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		sync := s.syncAccountSSHKeys(r.Context(), key)
+		s.recordEvent("ssh_key.applied", getActor(r), key.Name, "delivered", 25, map[string]interface{}{
+			"id": key.ID, "name": key.Name, "all_sandboxes": true,
+		})
+		json.NewEncoder(w).Encode(map[string]interface{}{"key": key, "sync": sync})
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
+		json.NewEncoder(w).Encode(key)
+
+	case http.MethodPatch, http.MethodPut:
+		var req UpdateKeyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request payload"}`, http.StatusBadRequest)
+			return
+		}
+		oldKey := key.PublicKey
+		if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" {
+				http.Error(w, `{"error":"name cannot be empty"}`, http.StatusBadRequest)
+				return
+			}
+			key.Name = name
+		}
+		keyChanged := false
+		if req.PublicKey != nil {
+			pub := strings.TrimSpace(*req.PublicKey)
+			if pub == "" {
+				http.Error(w, `{"error":"public_key cannot be empty"}`, http.StatusBadRequest)
+				return
+			}
+			parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pub))
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"invalid public key format: %v"}`, err), http.StatusBadRequest)
+				return
+			}
+			if pub != key.PublicKey {
+				keyChanged = true
+			}
+			key.PublicKey = pub
+			key.Fingerprint = ssh.FingerprintSHA256(parsed)
+		}
+		if req.AllSandboxes != nil {
+			key.AllSandboxes = *req.AllSandboxes
+		}
+		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+
+		// Keep existing sandboxes in sync: update per-sandbox references when the
+		// key material changed, then reconcile the owner's managed key set.
+		if keyChanged && !key.AllSandboxes {
+			if affected, err := s.vmMgr.ReplaceSandboxSSHKey(r.Context(), key.OwnerID, oldKey, key.PublicKey); err != nil {
+				log.Printf("[ssh-keys] update sandbox references for %s: %v", key.ID, err)
+			} else {
+				for _, vmID := range affected {
+					if err := s.vmMgr.SyncSSHKeysForVM(r.Context(), vmID); err != nil {
+						log.Printf("[ssh-keys] sync %s after key update: %v", vmID, err)
+					}
+				}
+			}
+		}
+		if keyChanged || (req.AllSandboxes != nil) {
+			s.syncAccountSSHKeys(r.Context(), key)
+		}
+		s.recordEvent("ssh_key.updated", getActor(r), key.Name, "delivered", 15, map[string]interface{}{
+			"id": key.ID, "name": key.Name, "all_sandboxes": key.AllSandboxes,
+		})
 		json.NewEncoder(w).Encode(key)
 
 	case http.MethodDelete:
@@ -2074,7 +2199,11 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to delete key: %v"}`, err), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("ssh_key.deleted", getActor(r), key.Name, "delivered", 15, map[string]string{"id": key.ID, "name": key.Name})
+		// Removing an account-wide key also removes it from existing sandboxes.
+		if key.AllSandboxes {
+			s.syncAccountSSHKeys(r.Context(), key)
+		}
+		s.recordEvent("ssh_key.deleted", getActor(r), key.Name, "delivered", 15, map[string]interface{}{"id": key.ID, "name": key.Name})
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": key.ID})
 
