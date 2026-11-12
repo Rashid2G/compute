@@ -1,15 +1,15 @@
 ---
 name: compute
 description: >
-  Manage isolated Firecracker microVM sandboxes, distributed compute jobs, and ephemeral per-pull-request preview
-  deployments across any repository using the compute platform. Grounded in the native compute CLI and REST APIs.
+  Manage isolated Firecracker microVM sandboxes, distributed compute jobs, and live web service
+  ingress routing across any repository using the compute platform. Grounded in the native compute CLI and REST APIs.
   Triggers when the user mentions "compute", "sandbox", "microVM", "Firecracker", "isolated build", "distributed job",
-  "preview deployment", "ephemeral environment", "per-PR preview", "dogfood compute", or needs isolated, safe code execution.
+  "ephemeral environment", "dogfood compute", or needs isolated, safe code execution.
 ---
 
 # Compute Platform Skill
 
-A unified, project-agnostic operational skill for utilizing the `compute` platform (`on-demand-vms`). It empowers AI agents to provision lightweight, isolated Firecracker microVM sandboxes on demand, run ephemeral distributed build/test jobs with file synchronization, host live per-pull-request preview deployments with automatic ingress routing, and recursively dogfood/develop `compute` itself without host collisions.
+A unified, project-agnostic operational skill for utilizing the `compute` platform (`on-demand-vms`). It empowers AI agents to provision lightweight, isolated Firecracker microVM sandboxes on demand, run ephemeral distributed build/test jobs with file synchronization, host live web services with automatic ingress routing, and recursively dogfood/develop `compute` itself without host collisions.
 
 ---
 
@@ -21,7 +21,7 @@ A unified, project-agnostic operational skill for utilizing the `compute` platfo
 | :--- | :--- | :--- | :--- |
 | **Ephemeral Build / Test / Lint** | **Job (`compute job`)** | `compute job run --files ... -- <cmd>` | CI/CD steps, compiling binaries, unit tests, linters, static analysis, artifact packaging. No persistent VM lifecycle needed. |
 | **Interactive / Long-Running / Multi-Step** | **Sandbox (`compute sandbox`)** | `compute sandbox create` & `exec` | Multi-step debugging, iterative compilation, background processes, SSH sessions, state checkpoints (`save-state`/`resume`). |
-| **Live Web App / PR Preview** | **Sandbox + Ingress** | `compute sandbox create` + Ingress Proxy | Per-branch/PR live previews, public demos, webhook testing, full-stack dev environments with HTTP/WebSocket/SSE routing. |
+| **Live Web App / Service** | **Sandbox + Ingress** | `compute sandbox create` + Ingress Proxy | Web apps, public demos, webhook testing, full-stack dev environments with HTTP/WebSocket/SSE routing. |
 | **Dogfooding / Recursion** | **Isolated Sandbox** | `compute sandbox create` (nested KVM/daemon) | Developing `computed`, testing CLI features, running feature test suites inside a guest microVM without host conflicts. |
 
 ```
@@ -32,20 +32,20 @@ A unified, project-agnostic operational skill for utilizing the `compute` platfo
                 +------------------------+------------------------+
                 |                                                 |
                 v                                                 v
-   [Ephemeral One-Off Task?]                           [Stateful / Service / Preview?]
+   [Ephemeral One-Off Task?]                           [Stateful / Service / Ingress?]
                 |                                                 |
                 v                                                 v
        +-----------------+                              +-------------------+
        |   compute job   |                              |  compute sandbox  |
        |  (tar.gz sync,  |                              | (dedicated disk,  |
        |  run, stream,   |                              |  exec, live HTTP/ |
-       |  auto-teardown) |                              |  WS preview, IP)  |
+       |  auto-teardown) |                              |  WS ingress, IP)  |
        +-----------------+                              +---------+---------+
                                                                   |
                                               +-------------------+-------------------+
                                               |                                       |
                                               v                                       v
-                                    [Interactive / Debug]                   [PR Preview Deployment]
+                                    [Interactive / Debug]                   [Live Web Service]
                                     `compute sandbox exec`                 Ingress Reverse Proxy:
                                     `compute sandbox ssh`                  - Subdomain: `<port>-<vm>.<domain>`
                                     `save-state` / `resume`                - Path: `/preview/<vm>/<port>/`
@@ -233,9 +233,9 @@ curl -s -X POST "http://${COMPUTE_DAEMON:-127.0.0.1:18080}/api/v1/sandboxes/<san
 
 ---
 
-## 3. Per-Pull-Request Ephemeral Deployments
+## 3. Web Service Ingress & Reverse Proxy Routing
 
-Every pull request or branch can be given an isolated, addressable live deployment with bidirectional HTTP/WebSocket reverse proxy routing.
+Every sandbox running a web service or API can be given an isolated, addressable endpoint with bidirectional HTTP/WebSocket reverse proxy routing.
 
 ### Ingress & Routing Mechanism
 `computed` contains a built-in reverse proxy (`IngressProxy`) supporting HTTP/1.1, HTTP/2, WebSockets, and SSE. It resolves incoming requests to target guest IPs and ports using two schemes:
@@ -245,7 +245,7 @@ Every pull request or branch can be given an isolated, addressable live deployme
    http://<daemon-host>:<port>/preview/<sandbox-name-or-id>/<guest-port>/
    http://<daemon-host>:<port>/api/v1/sandboxes/<sandbox-name-or-id>/preview/<guest-port>/
    ```
-   *Example:* `http://127.0.0.1:18080/preview/pr-42-web/3000/`
+   *Example:* `http://127.0.0.1:18080/preview/my-web-app/3000/`
 
 2. **Subdomain-Based Routing (When wildcard DNS or `/etc/hosts` points to ingress):**
    ```
@@ -253,18 +253,18 @@ Every pull request or branch can be given an isolated, addressable live deployme
    http://<sandbox-name-or-id>-<guest-port>.<base-domain>:<port>/
    ```
    *Supported default base domains:* `preview.localhost`, `compute.internal`, `compute.dev`, `localhost`.
-   *Example:* `http://3000-pr-42-web.preview.localhost:18080/`
+   *Example:* `http://3000-my-web-app.preview.localhost:18080/`
 
-### Public vs. Private Previews
-- **Private Preview (Default):** The ingress proxy requires an `Authorization: Bearer <token>` or session cookie matching the VM owner. Unauthenticated external requests receive `401 Unauthorized`.
-- **Public Preview:** Expose the guest port publicly so external reviewers, clients, or automated test runners can access it without credentials:
+### Public vs. Private Ingress
+- **Private Ingress (Default):** The ingress proxy requires an `Authorization: Bearer <token>` or session cookie matching the VM owner. Unauthenticated external requests receive `401 Unauthorized`.
+- **Public Ingress:** Expose the guest port publicly so external reviewers, clients, or automated test runners can access it without credentials:
   ```bash
   # Register public port forward rule via control-plane API
   curl -s -X POST "http://${COMPUTE_DAEMON:-127.0.0.1:18080}/api/v1/network/port-forwards" \
     -H "Authorization: Bearer ${COMPUTE_API_KEY}" \
     -H "Content-Type: application/json" \
     -d '{
-      "vm_id": "pr-42-web",
+      "vm_id": "my-web-app",
       "guest_port": 3000,
       "host_port": 33000,
       "protocol": "tcp",
@@ -274,48 +274,23 @@ Every pull request or branch can be given an isolated, addressable live deployme
 
 ---
 
-### Step-by-Step PR Preview Lifecycle Workflow
+### Step-by-Step Web Service Deployment Example
 
-[PR Opened / Updated]
-        |
-        v
-1. Provision Sandbox: `compute sandbox create --name pr-<n>-<slug>`
-2. Boot Sandbox:      `compute sandbox start pr-<n>-<slug>`
-3. Deploy Code:       `compute sandbox exec ... -- <build & start server>`
-4. Mark Port Public:  `POST /api/v1/network/port-forwards` (`public: true`)
-5. Tailscale URL:     `http://<tailnet-dns>:<guest-port>` or `http://<tailnet-ip>:<guest-port>`
-6. Post URL to PR:    Include Tailscale URL & Ingress URL in PR body / comments
-        |
-   [PR Closed]
-        v
-7. Teardown:          `compute sandbox stop ... && compute sandbox delete ...`
-8. Prune Network:     `compute network prune`
 ```
-
-> **Fast automated temp preview (non-blocking)**: For on-demand-vms itself, each preview deployment **must contain the PR number** (named `pr-<pr-number>`) and **must run on the main deployment deployed from the `dev` branch on the VM `compute-lab`**. Run `./scripts/temp-deploy-sandbox.sh <pr-number> [port] &` (or `make preview-deploy PR=<pr-number>`) to spin up an ephemeral sandbox on `compute-lab` in the background and output the Tailscale URL without blocking PR creation. The script diffs the branch against `origin/dev`, builds and installs **only the changed services** into the guest (GUI front door always; `computed` only when daemon-side code changed; `compute-worker` when worker code changed), and reuses the compute-lab services for everything else. Each sandbox enrolls in the tailnet individually — the daemon mints a scoped, ephemeral, preauthorized auth key per sandbox and joins the guest as its own ephemeral, tagged device (`tag:compute-sandbox`, userspace networking) — so every preview sandbox gets its own unique Tailscale DNS/IP URL (`compute-<sandbox-name>.<tailnet>.ts.net` / its own `100.x.y.z`), and teardown logs the node out so it expires automatically.
+[Provision Sandbox] -> [Deploy Code & Run Service] -> [Expose Port / Forward] -> [Access Ingress]
+```
 
 #### Step 1: Provision & Boot
 ```bash
-PR_NUM=42
-REPO_SLUG="web-client"
-BOX_NAME="pr-${PR_NUM}-${REPO_SLUG}"
+BOX_NAME="my-web-app"
 
 # Create sandbox with 2 vCPUs and 2GB RAM
 compute sandbox create --name "${BOX_NAME}" --vcpus 2 --memory 2048
 compute sandbox start "${BOX_NAME}"
 ```
 
-#### Step 2: Deploy Project Code
-Sync files and run the build inside the sandbox:
+#### Step 2: Deploy and Start Service
 ```bash
-# Clone the PR branch inside the guest microVM
-compute sandbox exec "${BOX_NAME}" -- bash -c "
-  git clone --depth 1 -b my-feature-branch https://github.com/my-org/my-repo.git /app && \
-  cd /app && \
-  npm install && \
-  npm run build
-"
-
 # Start application server in the background (e.g. listening on port 3000)
 compute sandbox exec "${BOX_NAME}" -- bash -c "
   cd /app && nohup npm start > /var/log/app.log 2>&1 &
@@ -336,38 +311,19 @@ compute sandbox exec "${BOX_NAME}" -- bash -c "
 "
 ```
 
-#### Step 4: Expose & Publish Preview URL
-Make the preview publicly accessible:
+#### Step 4: Expose & Resolve Ingress URL
 ```bash
 curl -s -X POST "http://${COMPUTE_DAEMON:-127.0.0.1:18080}/api/v1/network/port-forwards" \
   -H "Authorization: Bearer ${COMPUTE_API_KEY}" \
   -H "Content-Type: application/json" \
   -d "{\"vm_id\": \"${BOX_NAME}\", \"guest_port\": 3000, \"public\": true}"
 
-# Resolve the addressable preview URL
+# Resolve the addressable ingress URL
 DAEMON_HOST="${COMPUTE_DAEMON:-127.0.0.1:18080}"
-PREVIEW_URL="http://${DAEMON_HOST}/preview/${BOX_NAME}/3000/"
-
-echo "Preview Deployment ready at: ${PREVIEW_URL}"
-# Post comment to GitHub PR:
-# gh pr comment "${PR_NUM}" --body "Deployed preview: ${PREVIEW_URL}"
+echo "Service endpoint: http://${DAEMON_HOST}/preview/${BOX_NAME}/3000/"
 ```
 
-#### Step 5: Update Deployment on Subsequent Commits
-When new commits arrive on the PR branch, update in place without re-provisioning:
-```bash
-compute sandbox exec "${BOX_NAME}" -- bash -c "
-  cd /app && \
-  git fetch origin && \
-  git checkout FETCH_HEAD && \
-  npm run build && \
-  pkill -f 'npm start' || true && \
-  nohup npm start > /var/log/app.log 2>&1 &
-"
-```
-
-#### Step 6: Teardown on PR Merge / Close
-When the pull request is closed or merged, reclaim host resources:
+#### Step 5: Teardown
 ```bash
 compute sandbox stop "${BOX_NAME}"
 compute sandbox delete "${BOX_NAME}"
@@ -406,8 +362,8 @@ compute network prune
 ### Batch Operations with Shell-Style Pattern Matching
 Clean up groups of ephemeral sandboxes safely by quoting wildcards:
 ```bash
-# Stop all PR preview environments
-compute sandbox stop 'pr-*'
+# Stop all temporary sandboxes
+compute sandbox stop 'temp-*'
 
 # Delete all completed feature test sandboxes
 compute sandbox delete 'feat-test-*'
@@ -508,4 +464,3 @@ compute sandbox delete compute-dogfood
 Detailed references are available in the `references/` directory:
 - [CLI Reference](./references/cli-reference.md): Full flag specifications and command semantics.
 - [API Reference](./references/api-reference.md): REST endpoints, WebSocket contracts, and JSON payload definitions.
-- [Preview Recipes](./references/preview-recipes.md): End-to-end setup recipes for Node.js, Go, Python, and static site PR previews.

@@ -12,7 +12,7 @@ description: >
 - Repository skills live in `.agents/skills/<name>/SKILL.md` (some have `references/`).
 - Load a skill with the `skill` tool when its `description` matches the task. Load before acting on anything the skill covers.
 - Available skills (current):
-  - `compute` — isolated microVM sandboxes, distributed build jobs, per-PR preview deployments, and recursive dogfooding.
+  - `compute` — isolated microVM sandboxes, distributed build jobs, and recursive dogfooding.
   - `dev-workflow` — worktrees, `dev` branch, PR-to-`dev`, approval-gated `main`.
   - `github-issues` — filing, linking, triage, resuming issues.
   - `deployment` — deploy to `compute-lab`, health checks, remote logs.
@@ -55,7 +55,6 @@ Every PR that references an issue must resolve it explicitly.
 - [ ] Requirements planned and implemented in a git worktree based on `dev`.
 - [ ] Tests written and passing locally (`make test`).
 - [ ] Concrete evidence of the end change provided (screenshots for UI, verified command outputs for CLI).
-- [ ] Temporary deployment preview sandbox named with the PR number (`pr-<PR_NUMBER>`) launched in the background on the main `dev` deployment on `compute-lab` (`make preview-deploy PR=<PR_NUMBER>`), with only the PR's changed services deployed into the sandbox (unchanged services reused from compute-lab), and its Tailscale URL linked.
 - [ ] PR targets `dev` per `dev-workflow`.
 - [ ] `Closes #n` if fully resolved, else `Refs #n`.
 - [ ] Partial work has a progress comment on each referenced issue.

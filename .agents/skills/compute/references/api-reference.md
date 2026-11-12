@@ -40,7 +40,7 @@ Create a new microVM sandbox.
 - **Request Body:**
 ```json
 {
-  "name": "preview-pr-42",
+  "name": "web-service-1",
   "tier": "2vcpu",
   "vcpus": 2,
   "memory_mb": 2048,
@@ -184,15 +184,15 @@ The unified Ingress Reverse Proxy exposes running sandbox guest ports to host or
    - Pattern: `/preview/:sandbox_id_or_name/:port/*`
    - Rewrite: Strips prefix and passes subpath to guest `http://<guest_ip>:<port>/*`.
 2. **Subdomain-Based Route:**
-   - Pattern: `<port>-<sandbox_id_or_name>.<base_domain>` (e.g. `3000-pr-42.preview.localhost:18080`)
-   - Pattern: `<sandbox_id_or_name>-<port>.<base_domain>` (e.g. `pr-42-3000.preview.localhost:18080`)
+   - Pattern: `<port>-<sandbox_id_or_name>.<base_domain>` (e.g. `3000-my-web-app.preview.localhost:18080`)
+   - Pattern: `<sandbox_id_or_name>-<port>.<base_domain>` (e.g. `my-web-app-3000.preview.localhost:18080`)
 
 ### Public Port Exposure API: `POST /api/v1/network/port-forwards`
-Registers a port forwarding rule and configures authorization bypass for public previews:
+Registers a port forwarding rule and configures authorization bypass for public ingress:
 - **Request Body:**
 ```json
 {
-  "vm_id": "pr-42-web",
+  "vm_id": "my-web-app",
   "guest_port": 3000,
   "host_port": 34000,
   "protocol": "tcp",
@@ -203,7 +203,7 @@ Registers a port forwarding rule and configures authorization bypass for public 
 ```json
 {
   "id": "pf_a1b2c3d4",
-  "vm_id": "pr-42-web",
+  "vm_id": "my-web-app",
   "guest_port": 3000,
   "host_port": 34000,
   "public": true,
