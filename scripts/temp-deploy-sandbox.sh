@@ -280,47 +280,38 @@ ssh -o BatchMode=yes "${TARGET_HOST}" "
     ${CLI_BIN} sandbox start '${SANDBOX_NAME}'
 "
 
-# 4. Wait for guest addresses. The bridge IP (lab-host-local) is available
-# immediately and is used for all provisioning; the Tailnet IP is only needed
-# for the reportable preview URL, so missing it is a warning, not an error.
-log "Waiting for guest addresses (bridge IP first, then Tailscale)..."
-GUEST_MGMT_IP=""
+# 4. Wait for guest addresses. On the docker-compose deployment, guest bridge
+# IPs are not reachable from the lab host (guest taps live in the container's
+# network namespace), so provisioning goes over the guest TAILNET IP. The
+# bridge IP is kept only as a fallback for host-native deployments.
+log "Waiting for guest Tailscale provisioning (this can take 1-3 minutes)..."
 TAILNET_IP=""
 TAILNET_DNS=""
-for i in $(seq 1 75); do
+BRIDGE_IP=""
+for i in $(seq 1 90); do
     INFO_OUT="$(ssh -o BatchMode=yes "${TARGET_HOST}" "${CLI_BIN} sandbox info '${SANDBOX_NAME}'" 2>/dev/null || true)"
-    if [[ -z "${GUEST_MGMT_IP}" ]]; then
-        GUEST_MGMT_IP="$(echo "${INFO_OUT}" | awk '/IP Address:/ {print $3}' | tr -d '\r')"
-        if [[ "${GUEST_MGMT_IP}" == "—" || "${GUEST_MGMT_IP}" == "172.16."*"/"* ]]; then
-            GUEST_MGMT_IP=""
-        fi
-    fi
     if [[ -z "${TAILNET_IP}" ]]; then
         TAILNET_IP="$(echo "${INFO_OUT}" | awk '/Tailnet IP:/ {print $3}' | tr -d '\r')"
         [[ "${TAILNET_IP}" == "—" ]] && TAILNET_IP=""
         TAILNET_DNS="$(echo "${INFO_OUT}" | awk '/Tailnet DNS:/ {print $3}' | tr -d '\r')"
         [[ "${TAILNET_DNS}" == "—" ]] && TAILNET_DNS=""
     fi
-    if [[ -n "${GUEST_MGMT_IP}" && -n "${TAILNET_IP}" ]]; then
-        break
+    if [[ -z "${BRIDGE_IP}" ]]; then
+        BRIDGE_IP="$(echo "${INFO_OUT}" | awk '/IP Address:/ {print $3}' | tr -d '\r')"
+        [[ "${BRIDGE_IP}" == "—" ]] && BRIDGE_IP=""
     fi
-    # Bridge IP alone is enough to start provisioning; keep polling Tailscale
-    # in the background of the loop but never block the install on it.
-    if [[ -n "${GUEST_MGMT_IP}" && "${i}" -ge 5 ]]; then
-        break
-    fi
+    [[ -n "${TAILNET_IP}" ]] && break
     sleep 2
 done
 
-if [[ -z "${GUEST_MGMT_IP}" && -n "${TAILNET_IP}" ]]; then
+if [[ -n "${TAILNET_IP}" ]]; then
     GUEST_MGMT_IP="${TAILNET_IP}"
-fi
-if [[ -z "${GUEST_MGMT_IP}" ]]; then
+elif [[ -n "${BRIDGE_IP}" ]]; then
+    warn "Tailnet IP not assigned; falling back to bridge IP ${BRIDGE_IP} (only reachable on host-native deployments)."
+    GUEST_MGMT_IP="${BRIDGE_IP}"
+else
     echo "Error: sandbox '${SANDBOX_NAME}' has no reachable IP (bridge or tailnet); cannot install services." >&2
     exit 1
-fi
-if [[ -z "${TAILNET_IP}" ]]; then
-    warn "Tailnet IP not assigned yet; provisioning via bridge IP ${GUEST_MGMT_IP}. The Tailscale URL may need a minute before it works."
 fi
 log "Guest management IP: ${GUEST_MGMT_IP}"
 
