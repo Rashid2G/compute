@@ -235,24 +235,52 @@ func (c *Client) SetDeviceTags(ctx context.Context, deviceID string, tags []stri
 		bytes.NewReader(body), nil)
 }
 
-// Service is a Tailscale Service published on the tailnet.
+// Service is a Tailscale Service published on the tailnet. The admin API
+// returns names with the "svc:" prefix (for example "svc:compute-dev-abc").
 type Service struct {
-	Name        string   `json:"name"` // without the "svc:" prefix
+	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	Ports       []string `json:"ports,omitempty"`
+	Addrs       []string `json:"addrs,omitempty"` // VIPs assigned to the Service
+}
+
+// VIP4 returns the first IPv4 virtual address assigned to the Service, or "".
+func (s *Service) VIP4() string {
+	for _, a := range s.Addrs {
+		if strings.HasPrefix(a, "100.") {
+			return a
+		}
+	}
+	return ""
 }
 
 // ListServices returns the Tailscale Services defined for the tailnet.
 func (c *Client) ListServices(ctx context.Context) ([]Service, error) {
 	var out struct {
-		Services []Service `json:"services"`
+		Services    []Service `json:"services"`
+		VIPServices []Service `json:"vipServices"`
 	}
 	if err := c.do(ctx, http.MethodGet,
 		fmt.Sprintf("/api/v2/tailnet/%s/services", url.PathEscape(c.Tailnet)),
 		nil, &out); err != nil {
 		return nil, err
 	}
+	if len(out.VIPServices) > 0 {
+		return out.VIPServices, nil
+	}
 	return out.Services, nil
+}
+
+// GetService returns one Service definition, including its assigned VIPs.
+func (c *Client) GetService(ctx context.Context, name string) (*Service, error) {
+	var svc Service
+	if err := c.do(ctx, http.MethodGet,
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(serviceName(name))),
+		nil, &svc); err != nil {
+		return nil, err
+	}
+	return &svc, nil
 }
 
 // ServiceDefinition is the payload used to define or update a Tailscale
@@ -270,6 +298,7 @@ func (c *Client) EnsureService(ctx context.Context, name string, ports, tags []s
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("tailscale: service name is required")
 	}
+	name = serviceName(name)
 	body, err := json.Marshal(ServiceDefinition{Name: name, Ports: ports, Tags: tags})
 	if err != nil {
 		return err
@@ -283,8 +312,37 @@ func (c *Client) EnsureService(ctx context.Context, name string, ports, tags []s
 // Compute-owned service names (compute-*).
 func (c *Client) DeleteService(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodDelete,
-		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(name)),
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s", url.PathEscape(c.Tailnet), url.PathEscape(serviceName(name))),
 		nil, nil)
+}
+
+// SetServiceHostApproval approves or denies a device as a host for a Service.
+// It lets the daemon approve its own advertisements without an admin console
+// click; the call is scoped to one Compute-owned service and one device.
+func (c *Client) SetServiceHostApproval(ctx context.Context, name, deviceID string, approved bool) error {
+	if strings.TrimSpace(name) == "" || strings.TrimSpace(deviceID) == "" {
+		return fmt.Errorf("tailscale: service name and device id are required")
+	}
+	body, err := json.Marshal(struct {
+		Approved bool `json:"approved"`
+	}{Approved: approved})
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPost,
+		fmt.Sprintf("/api/v2/tailnet/%s/services/%s/device/%s/approved",
+			url.PathEscape(c.Tailnet), url.PathEscape(serviceName(name)), url.PathEscape(deviceID)),
+		bytes.NewReader(body), nil)
+}
+
+// serviceName normalises a Service name to the "svc:" form the admin API uses
+// in paths and request bodies. Callers may pass either form.
+func serviceName(name string) string {
+	name = strings.TrimSpace(name)
+	if strings.HasPrefix(name, "svc:") {
+		return name
+	}
+	return "svc:" + name
 }
 
 // do performs an authenticated API request and decodes the JSON response.
@@ -341,7 +399,31 @@ func FilterComputeDevices(devices []Device, tags ...string) []Device {
 	return out
 }
 
-// SandboxDeviceID returns a deterministic MagicDNS-safe service name for a
+// FilterComputeServices returns Services owned by Compute: either named with
+// the compute prefix or carrying one of the given tags.
+func FilterComputeServices(services []Service, tag, prefix string) []Service {
+	if prefix == "" {
+		prefix = HostnamePrefix + "-"
+	}
+	prefix = "svc:" + strings.TrimPrefix(prefix, "svc:")
+	var out []Service
+	for _, s := range services {
+		name := strings.TrimPrefix(s.Name, "svc:")
+		if strings.HasPrefix("svc:"+name, prefix) {
+			out = append(out, s)
+			continue
+		}
+		for _, t := range s.Tags {
+			if t == tag {
+				out = append(out, s)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// SandboxServiceName returns a deterministic MagicDNS-safe service name for a
 // sandbox port exposure, e.g. "compute-vm-a1b2c3d4-8080".
 func SandboxServiceName(vmID string, port int) string {
 	return fmt.Sprintf("%s-%d", SandboxHostname(vmID), port)
