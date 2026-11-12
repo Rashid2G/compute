@@ -128,7 +128,7 @@ type SSHKey struct {
 	// sandbox when its creation request does not choose a key. The creator
 	// can override the choice per sandbox. At most one key per owner carries
 	// the flag.
-	IsDefault bool      `json:"is_default,omitempty"`
+	IsDefault bool      `json:"is_default"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
