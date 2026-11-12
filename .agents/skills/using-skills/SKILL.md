@@ -13,7 +13,7 @@ description: >
 - Load a skill with the `skill` tool when its `description` matches the task. Load before acting on anything the skill covers.
 - Available skills (current):
   - `compute` — isolated microVM sandboxes, distributed build jobs, per-PR preview deployments, and recursive dogfooding.
-  - `dev-workflow` — mandatory worktrees for code and non-simple tasks, `dev` branch, PR-to-`dev`, approval-gated `main`.
+  - `dev-workflow` — worktrees, `dev` branch, PR-to-`dev`, approval-gated `main`.
   - `github-issues` — filing, linking, triage, resuming issues.
   - `deployment` — deploy to `compute-lab`, health checks, remote logs.
   - `leader-evaluator-refinement` — multi-agent adversarial implementation/review.

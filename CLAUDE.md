@@ -1,20 +1,10 @@
 # CLAUDE.md
 
-## Worktree & Branch Mandate (MANDATORY)
-
-- **Mandatory worktrees**: If changes include code or any non-simple task (features, bug fixes, refactoring, multi-file edits), agents **must work in a dedicated git worktree** checked out from `dev`:
-  ```bash
-  git fetch origin && git worktree add ../on-demand-vms-<topic> -b <type>/<topic> origin/dev
-  ```
-  Never make code or non-simple changes directly in the primary repository checkout.
-- **Target `dev` only**: Never checkout, push to, or target `main`. All agent work branches from and targets `dev`.
-- Clean up the worktree after PR merge: `git worktree remove ../on-demand-vms-<topic>`.
-
 ## Agent Workflow (MANDATORY)
 
 All agent tasks modifying code or configuration must follow this 6-step flow:
 1. **Plan the changes**: Review architecture, git status, and target packages.
-2. **Implement**: Carry out work in a dedicated git worktree based on `dev` if the task involves code or non-simple changes.
+2. **Implement**: Carry out work in a git worktree based on `dev`.
 3. **Write tests and run them**: Verify changes with `make test` (or web typecheck/build).
 4. **Provide evidence of the end change**: Include visual proof (screenshots) or command output.
 5. **Run on a separate temp deployment (in the background)**: Launch an isolated microVM sandbox named with the PR number (`pr-<PR_NUMBER>`) running on the main deployment deployed from `dev` on `compute-lab` via `make preview-deploy PR=<PR_NUMBER>` (or `./scripts/temp-deploy-sandbox.sh <PR_NUMBER>`) and link its Tailscale URL (`http://compute-pr-<PR_NUMBER>.<tailnet>.ts.net:<port>`); each sandbox enrolls in the tailnet individually (ephemeral, tagged, per-sandbox auth key) and gets its own unique Tailscale URL. Run in the background without blocking PR creation. The preview deploys only the services changed by the PR into the sandbox and reuses the compute-lab services for the rest (UI-only PR: new UI in sandbox + shared lab API; daemon change: new daemon + matching GUI in sandbox).
