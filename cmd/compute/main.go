@@ -238,6 +238,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		image := createCmd.String("image", "", "Base image name")
 		template := createCmd.String("template", "", "Template name or ID")
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
+		noSSHKey := createCmd.Bool("no-ssh-key", false, "Exclude the account's default SSH key from this sandbox")
 		sshPassword := createCmd.String("ssh-password", "", "Optional SSH password for compute/root (min 8 chars; use '-' to read from stdin)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
 		tailscale := createCmd.Bool("tailscale", false, "Join the operator's tailnet (ephemeral device with a 100.x IP and MagicDNS name)")
@@ -280,18 +281,19 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			}
 		}
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:         *name,
-			Tier:         *tier,
-			VCPUs:        *vcpus,
-			MemoryMB:     *mem,
-			DiskMB:       *disk,
-			Image:        *image,
-			Template:     *template,
-			SSHKeyID:     sshKeyID,
-			SSHPublicKey: sshPublicKey,
-			SSHPassword:  password,
-			Protected:    protected,
-			Tailscale:    tsEnabled,
+			Name:            *name,
+			Tier:            *tier,
+			VCPUs:           *vcpus,
+			MemoryMB:        *mem,
+			DiskMB:          *disk,
+			Image:           *image,
+			Template:        *template,
+			SSHKeyID:        sshKeyID,
+			SSHPublicKey:    sshPublicKey,
+			SSHNoDefaultKey: *noSSHKey,
+			SSHPassword:     password,
+			Protected:       protected,
+			Tailscale:       tsEnabled,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
