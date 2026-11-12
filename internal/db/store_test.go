@@ -26,20 +26,21 @@ func TestStore(t *testing.T) {
 	ctx := context.Background()
 
 	vm := &VM{
-		ID:             "vm-test-1",
-		Name:           "test-vm",
-		Status:         StatusCreated,
-		DesiredRunning: true,
-		VCPUs:          1,
-		MemoryMB:       512,
-		IPAddress:      "172.16.0.2",
-		MACAddress:     "06:00:ac:10:00:02",
-		TAPDevice:      "mftap-test-1",
-		RootfsPath:     "/tmp/rootfs.ext4",
-		KernelPath:     "/tmp/vmlinux",
-		DiskPath:       "/tmp/disk.ext4",
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
+		ID:                 "vm-test-1",
+		Name:               "test-vm",
+		Status:             StatusCreated,
+		DesiredRunning:     true,
+		VCPUs:              1,
+		MemoryMB:           512,
+		IPAddress:          "172.16.0.2",
+		MACAddress:         "06:00:ac:10:00:02",
+		TAPDevice:          "mftap-test-1",
+		RootfsPath:         "/tmp/rootfs.ext4",
+		KernelPath:         "/tmp/vmlinux",
+		DiskPath:           "/tmp/disk.ext4",
+		SSHPasswordEnabled: true,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
 	}
 
 	if err := store.SaveVM(ctx, vm); err != nil {
@@ -55,6 +56,9 @@ func TestStore(t *testing.T) {
 	}
 	if !got.DesiredRunning {
 		t.Fatalf("expected desired_running to persist as true: %+v", got)
+	}
+	if !got.SSHPasswordEnabled {
+		t.Fatalf("expected ssh_password_enabled to persist as true: %+v", got)
 	}
 
 	// Update status
@@ -804,5 +808,52 @@ func TestStore_VMTailnetFields(t *testing.T) {
 	}
 	if all[0].TailnetIP != "100.64.7.8" {
 		t.Fatalf("tailnet_ip missing in list: %+v", all[0])
+	}
+}
+
+func TestStore_MigratesSSHPasswordEnabled(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	ctx := context.Background()
+
+	vm := &VM{ID: "legacy-vm", Name: "legacy-vm", OwnerID: "default", Status: StatusStopped}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		store.Close()
+		t.Fatalf("failed to save VM: %v", err)
+	}
+	// Simulate a database created before ssh_password_enabled existed.
+	if _, err := store.db.Exec("ALTER TABLE vms DROP COLUMN ssh_password_enabled"); err != nil {
+		store.Close()
+		t.Fatalf("failed to drop column: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("failed to close store: %v", err)
+	}
+
+	reopened, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen store: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.GetVM(ctx, "legacy-vm")
+	if err != nil {
+		t.Fatalf("GetVM after migration: %v", err)
+	}
+	if got == nil || got.SSHPasswordEnabled {
+		t.Fatalf("migrated VM = %+v, want ssh_password_enabled=false", got)
+	}
+
+	all, err := reopened.ListVMs(ctx)
+	if err != nil {
+		t.Fatalf("ListVMs after migration: %v", err)
+	}
+	if len(all) != 1 || all[0].SSHPasswordEnabled {
+		t.Fatalf("migrated list = %+v, want one VM with ssh_password_enabled=false", all)
 	}
 }

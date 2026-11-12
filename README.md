@@ -75,6 +75,9 @@ control-plane host (`jobs.local_execution` in the daemon config), so
 compute sandbox create --name dev-box --tier 2vcpu --image alpine
 compute sandbox start dev-box
 
+# Optional: allow SSH password login for compute/root (omit for public-key-only)
+compute sandbox create --name pw-box --ssh-password 'choose-a-strong-password'
+
 # Interactive terminal
 compute sandbox ssh dev-box
 
