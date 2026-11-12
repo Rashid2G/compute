@@ -89,7 +89,7 @@ remote-logs:
 	ssh $(LAB_HOST) "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"
 
 preview-deploy:
-	./scripts/temp-deploy-sandbox.sh
+	./scripts/temp-deploy-sandbox.sh $(PR)
 
 temp-deploy: preview-deploy
 

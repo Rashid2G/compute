@@ -11,14 +11,40 @@ TARGET_HOST="${COMPUTE_HOST:-compute-lab}"
 TARGET_DIR="${COMPUTE_DIR:-/home/rashid/on-demand-vms}"
 CLI_BIN="${TARGET_DIR}/bin/compute"
 
-# Determine default sandbox name from git branch or timestamp
-GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "preview")"
-CLEAN_BRANCH="$(echo "${GIT_BRANCH}" | tr '/' '-' | tr '_' '-' | tr -cd '[:alnum:]-' | tr '[:upper:]' '[:lower:]')"
-RAND_SUFFIX="$(head -c 3 /dev/urandom 2>/dev/null | xxd -p 2>/dev/null || echo "$$")"
-DEFAULT_NAME="prv-${CLEAN_BRANCH:0:15}-${RAND_SUFFIX:0:4}"
-
-SANDBOX_NAME="${1:-${DEFAULT_NAME}}"
+# Determine PR number (from argument, PR env, or gh pr view)
+PR_ARG="${1:-${PR:-}}"
 GUEST_PORT="${2:-8080}"
+
+if [[ -z "${PR_ARG}" ]]; then
+    # Attempt auto-detection from gh pr view
+    DETECTED_PR="$(gh pr view --json number -q .number 2>/dev/null || true)"
+    if [[ -n "${DETECTED_PR}" && "${DETECTED_PR}" =~ ^[0-9]+$ ]]; then
+        PR_ARG="${DETECTED_PR}"
+    fi
+fi
+
+if [[ -z "${PR_ARG}" ]]; then
+    # Attempt extraction from git branch name (e.g., fix/25-feature or pr-25)
+    BRANCH_NUM="$(git rev-parse --abbrev-ref HEAD 2>/dev/null | grep -oE '[0-9]+' | head -n1 || true)"
+    if [[ -n "${BRANCH_NUM}" ]]; then
+        PR_ARG="${BRANCH_NUM}"
+    fi
+fi
+
+if [[ -z "${PR_ARG}" ]]; then
+    echo "Error: Each preview deployment must contain the PR number." >&2
+    echo "Usage: $(basename "$0") <pr-number> [guest-port]" >&2
+    echo "Example: $(basename "$0") 25 8080" >&2
+    exit 1
+fi
+
+# Ensure sandbox name follows pr-<PR_NUMBER> naming
+if [[ "${PR_ARG}" =~ ^pr- ]]; then
+    SANDBOX_NAME="${PR_ARG}"
+else
+    SANDBOX_NAME="pr-${PR_ARG}"
+fi
+
 VCPUS="${COMPUTE_VCPUS:-1}"
 MEMORY_MB="${COMPUTE_MEMORY_MB:-512}"
 SSH_PASSWORD="${COMPUTE_SSH_PASSWORD:-compute1234}"
@@ -29,14 +55,14 @@ success() { printf '\033[1;32m[✓]\033[0m %s\n' "$*"; }
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [sandbox-name] [guest-port]
+Usage: $(basename "$0") <pr-number> [guest-port]
 
-Spin up an isolated Firecracker microVM sandbox on ${TARGET_HOST} running the updated
-code/version on a separate temporary deployment, and output its Tailscale URL.
+Spin up an isolated Firecracker microVM sandbox on ${TARGET_HOST} (running on the
+main deployment deployed from the dev branch) for the PR preview, and output its Tailscale URL.
 
 Arguments:
-  sandbox-name   Name for the preview sandbox (default: ${DEFAULT_NAME})
-  guest-port     Port exposed by the preview service (default: 8080)
+  <pr-number>    GitHub Pull Request number (sandbox will be named pr-<pr-number>)
+  [guest-port]   Port exposed by the preview service (default: 8080)
 
 Environment:
   COMPUTE_HOST          Target SSH host (default: compute-lab)
@@ -45,10 +71,9 @@ Environment:
   COMPUTE_SSH_PASSWORD  Guest SSH password for provisioning (default: compute1234)
 
 Examples:
-  ./scripts/temp-deploy-sandbox.sh
-  ./scripts/temp-deploy-sandbox.sh my-preview-box 8080
-  # Or run in background so it does not block:
-  ./scripts/temp-deploy-sandbox.sh my-preview-box 8080 &
+  ./scripts/temp-deploy-sandbox.sh 25 8080
+  # Or run in background so it does not block PR creation:
+  ./scripts/temp-deploy-sandbox.sh 25 8080 &
 EOF
     exit 0
 }

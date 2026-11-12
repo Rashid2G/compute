@@ -292,7 +292,7 @@ Every pull request or branch can be given an isolated, addressable live deployme
 8. Prune Network:     `compute network prune`
 ```
 
-> **Fast automated temp preview (non-blocking)**: For on-demand-vms itself, run `./scripts/temp-deploy-sandbox.sh <name> <port> &` (or `make preview-deploy`) to spin up an ephemeral sandbox on `compute-lab` in the background and output the Tailscale URL without blocking PR creation.
+> **Fast automated temp preview (non-blocking)**: For on-demand-vms itself, each preview deployment **must contain the PR number** (named `pr-<pr-number>`) and **must run on the main deployment deployed from the `dev` branch on the VM `compute-lab`**. Run `./scripts/temp-deploy-sandbox.sh <pr-number> [port] &` (or `make preview-deploy PR=<pr-number>`) to spin up an ephemeral sandbox on `compute-lab` in the background and output the Tailscale URL without blocking PR creation.
 
 #### Step 1: Provision & Boot
 ```bash

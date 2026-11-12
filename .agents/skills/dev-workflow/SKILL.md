@@ -22,7 +22,7 @@ All implementation tasks follow this structured flow:
 2. **Implement**: Work inside a dedicated git worktree from `dev`. Commit with scoped messages (`feat: ...`, `fix: ...`, `docs: ...`).
 3. **Write tests and run them**: Write focused tests and verify locally (`make test`, `npm run typecheck && npm run build` for web).
 4. **Provide evidence of the end change**: If the change is visible (UI/CLI/visual), provide concrete evidence (e.g. screenshots of UI changes, verified command outputs).
-5. **Run on a separate temp deployment (background sandbox)**: Run the changes on an isolated microVM sandbox on `compute-lab` via `./scripts/temp-deploy-sandbox.sh <name> <port>` or `make preview-deploy`. Obtain and link the Tailscale URL (`http://<tailnet-dns>:<port>` or `http://<tailnet-ip>:<port>`). Launch in the background without blocking PR creation.
+5. **Run on a separate temp deployment (background sandbox)**: Each preview deployment **must contain the PR number** in its sandbox name (e.g. `pr-<PR_NUMBER>`) and **must run on the main deployment that is deployed from the `dev` branch at the VM `compute-lab`** (self-served by the project daemon). Run `./scripts/temp-deploy-sandbox.sh <PR_NUMBER> <port>` or `make preview-deploy PR=<PR_NUMBER>`. Obtain and link the Tailscale URL (`http://<tailnet-dns>:<port>` or `http://<tailnet-ip>:<port>`). Launch in the background without blocking PR creation.
 6. **Create the PR**: Push branch (`git push -u origin <branch>`) and open PR targeting `dev` (`gh pr create --base dev`), linking issues and including the Tailscale sandbox URL.
 
 ## Worktree workflow
@@ -32,9 +32,9 @@ All implementation tasks follow this structured flow:
 3. Plan and implement inside the worktree.
 4. Write tests and run them locally: `make test`.
 5. Provide evidence of the change (screenshots for UI, command output for CLI).
-6. Spin up temp preview sandbox in background: `make preview-deploy` / `./scripts/temp-deploy-sandbox.sh`.
-7. Commit and push: `git push -u origin <branch>`.
-8. Open PR **targeting `dev`**: `gh pr create --base dev` with Tailscale preview URL and `Closes #n` / `Refs #n`.
+6. Open PR **targeting `dev`**: `gh pr create --base dev` with `Closes #n` / `Refs #n`.
+7. Spin up temp preview sandbox in background with PR number on `compute-lab`: `make preview-deploy PR=<number>` or `./scripts/temp-deploy-sandbox.sh <number> &`.
+8. Link the Tailscale URL (`http://compute-pr-<number>.<tailnet>.ts.net:<port>`) in the PR and comments.
 9. After review/approval, merge into `dev`.
 
 ## Issues
@@ -59,4 +59,4 @@ All implementation tasks follow this structured flow:
 - For web: `cd web && npm run typecheck && npm run build`
 - `git diff --check`
 - Evidence of end change provided (screenshots for UI, verified command outputs for CLI/backend).
-- Temporary deployment sandbox launched in the background on `ssh compute-lab` with Tailscale URL provided.
+- Temporary deployment sandbox named with the PR number (`pr-<PR_NUMBER>`) launched in the background on the main `dev` deployment on `ssh compute-lab`, with its Tailscale URL provided.
