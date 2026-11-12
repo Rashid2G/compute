@@ -23,7 +23,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key, --protected).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key, --ssh-password, --protected).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.

@@ -19,7 +19,10 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute
 # Final minimal runtime image with Firecracker & network tooling
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables openssh-client bash socat tar gzip
+# e2fsprogs-extra provides debugfs, and mount/losetup provide the loop mount
+# fallback; both are used to configure SSH keys, passwords, and sshd policy
+# inside guest disk images.
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables openssh-client bash socat tar gzip e2fsprogs-extra mount losetup
 
 # Install Firecracker & Jailer static binaries
 ARG FIRECRACKER_VERSION=v1.17.0

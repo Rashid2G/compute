@@ -233,6 +233,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		image := createCmd.String("image", "", "Base image name")
 		template := createCmd.String("template", "", "Template name or ID")
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
+		sshPassword := createCmd.String("ssh-password", "", "Optional SSH password for compute/root (min 8 chars; use '-' to read from stdin)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
 		tailscale := createCmd.Bool("tailscale", false, "Join the operator's tailnet (ephemeral device with a 100.x IP and MagicDNS name)")
 		createCmd.Parse(subArgs)
@@ -243,17 +244,27 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 				tsEnabled = tailscale
 			}
 		})
+		password := *sshPassword
+		if password == "-" {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading SSH password from stdin: %v\n", err)
+				os.Exit(1)
+			}
+			password = strings.TrimRight(string(data), "\r\n")
+		}
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:      *name,
-			Tier:      *tier,
-			VCPUs:     *vcpus,
-			MemoryMB:  *mem,
-			DiskMB:    *disk,
-			Image:     *image,
-			Template:  *template,
-			SSHKeyID:  *sshKey,
-			Protected: protected,
-			Tailscale: tsEnabled,
+			Name:        *name,
+			Tier:        *tier,
+			VCPUs:       *vcpus,
+			MemoryMB:    *mem,
+			DiskMB:      *disk,
+			Image:       *image,
+			Template:    *template,
+			SSHKeyID:    *sshKey,
+			SSHPassword: password,
+			Protected:   protected,
+			Tailscale:   tsEnabled,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
@@ -269,6 +280,11 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Printf("Tailnet:         IP=%s DNS=%s (reachable from any machine in your tailnet)\n", v.TailnetIP, v.TailnetDNS)
 		} else if v.TailscaleEnabled {
 			fmt.Println("Tailnet:         provisioning in progress; run 'compute sandbox info' shortly")
+		}
+		if v.SSHPasswordEnabled {
+			fmt.Println("SSH auth:        password enabled for compute and root (embedded public keys also accepted)")
+		} else {
+			fmt.Println("SSH auth:        public key only (no SSH password configured)")
 		}
 
 	case "start", "run":
@@ -452,6 +468,11 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		}
 		for _, line := range sandboxAccessLines(sandboxAccessForVM(v, "compute", 0)) {
 			fmt.Println(line)
+		}
+		if v.SSHPasswordEnabled {
+			fmt.Printf("  SSH auth:      password enabled for compute and root\n")
+		} else {
+			fmt.Printf("  SSH auth:      public key only\n")
 		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))

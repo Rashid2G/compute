@@ -8,6 +8,7 @@ export interface SandboxCreateOptions {
   apiKey?: string;
   host?: string;
   timeout?: number;
+  sshPassword?: string;
 }
 
 export interface ExecutionResult {

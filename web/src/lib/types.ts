@@ -37,6 +37,7 @@ export interface VM {
   ssh_key_path?: string;
   ssh_key_name?: string;
   ssh_public_key?: string;
+  ssh_password_enabled?: boolean;
   hostname?: string;
   pid?: number;
   socket_path?: string;
@@ -97,6 +98,7 @@ export interface CreateVMRequest {
   tailscale?: boolean;
   ssh_key_id?: string;
   ssh_public_key?: string;
+  ssh_password?: string;
 }
 
 export interface ExecRequest {

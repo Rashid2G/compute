@@ -217,14 +217,15 @@ RUN (userdel -r ubuntu 2>/dev/null || true) && \
     mkdir -p /etc/sudoers.d && \
     echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute && \
     chmod 0440 /etc/sudoers.d/compute && \
-    echo "root:root" | chpasswd && \
-    echo "compute:compute" | chpasswd
+    usermod -p '!' root && \
+    usermod -p '!' compute
 
 RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true && \
     sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "UsePAM no" >> /etc/ssh/sshd_config && \
     echo "StrictModes no" >> /etc/ssh/sshd_config
