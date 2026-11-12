@@ -1,7 +1,7 @@
 ---
 name: dev-workflow
 description: >
-  Development workflow for on-demand-vms: agents work in git worktrees, push to dev branch,
+  Development workflow for on-demand-vms: agents work in git worktrees if changes include code or non-simple things, push to dev branch,
   main only receives changes via approved pull requests. Use when starting any implementation,
   creating branches, committing, pushing, or opening PRs.
 ---
@@ -12,7 +12,11 @@ description: >
 - Agents interact with `dev` only: base all worktrees and pull requests on `dev`, and never checkout, push, merge into, or open a pull request targeting `main`.
 - `main` — production branch maintained separately from agent work. It changes only through a maintainer-approved promotion from `dev`.
 - `dev` — the sole integration branch. All agent work merges here first.
-- Feature work happens in **git worktrees** checked out from `dev`.
+
+## Mandatory worktree requirement
+- **Agents must work in git worktrees** whenever changes include code or any non-simple task (features, bug fixes, refactoring, multi-file edits, schema/dependency changes).
+- Never edit code or carry out non-simple changes directly in the primary workspace checkout.
+- Only simple read-only queries or trivial single-line documentation tweaks are permitted without a worktree.
 
 ## The 6-step agent workflow
 
@@ -29,13 +33,14 @@ All implementation tasks follow this structured flow:
 1. `git fetch origin`
 2. `git worktree add ../on-demand-vms-<topic> -b <type>/<topic> origin/dev`
    - branch prefixes: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`
-3. Plan and implement inside the worktree.
-4. Write tests and run them locally: `make test`.
+3. Plan and implement inside the worktree (`cd ../on-demand-vms-<topic>`).
+4. Write tests and run them locally: `make test` (or web build/check).
 5. Provide evidence of the change (screenshots for UI, command output for CLI).
-6. Open PR **targeting `dev`**: `gh pr create --base dev` with `Closes #n` / `Refs #n`.
-7. Spin up temp preview sandbox in background with PR number on `compute-lab`: `make preview-deploy PR=<number>` or `./scripts/temp-deploy-sandbox.sh <number> &`.
-8. Link the Tailscale URL (`http://compute-pr-<number>.<tailnet>.ts.net:<port>`) in the PR and comments.
-9. After review/approval, merge into `dev`.
+6. Commit with scoped messages (`feat: ...`, `fix: ...`, `docs: ...`) and push branch: `git push -u origin <branch>`.
+7. Open PR **targeting `dev`**: `gh pr create --base dev` with `Closes #n` / `Refs #n`.
+8. Spin up temp preview sandbox in background with PR number on `compute-lab`: `make preview-deploy PR=<number>` or `./scripts/temp-deploy-sandbox.sh <number> &`.
+9. Link the Tailscale URL (`http://compute-pr-<number>.<tailnet>.ts.net:<port>`) in the PR and comments.
+10. After review/approval and merge into `dev`, clean up with `git worktree remove ../on-demand-vms-<topic>`.
 
 ## Issues
 - Track bugs, deferred work, and follow-ups as GitHub issues (see skill `github-issues`).
