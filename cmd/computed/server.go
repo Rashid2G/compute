@@ -1093,6 +1093,10 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusNotFound)
 				return
 			}
+			if strings.Contains(err.Error(), "base rootfs image not found") || strings.Contains(err.Error(), "image not found") || strings.Contains(err.Error(), "custom image rootfs not found") || (strings.Contains(err.Error(), "template '") && strings.Contains(err.Error(), "' not found")) {
+				httpError(w, err.Error(), http.StatusNotFound)
+				return
+			}
 			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
@@ -1142,6 +1146,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	// lookup would otherwise resolve to another tenant's VM.
 	requestedID := vmID
 	vmID = vmIdentifier(v)
+	displayName := v.Name
+	if displayName == "" {
+		displayName = requestedID
+	}
 
 	if len(parts) == 1 {
 		switch r.Method {
@@ -1149,7 +1157,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.encodeVM(w, v)
 		case http.MethodDelete:
 			if v.Protected {
-				httpError(w, fmt.Sprintf("item %s is protected against deletion", vmID), http.StatusBadRequest)
+				httpError(w, fmt.Sprintf("item %s is protected against deletion", displayName), http.StatusBadRequest)
 				return
 			}
 			s.removePortForwardsForVM(ctx, v, true)
@@ -1162,7 +1170,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			if delErr != nil {
 				if strings.Contains(delErr.Error(), "protected against deletion") {
-					httpError(w, delErr.Error(), http.StatusBadRequest)
+					httpError(w, fmt.Sprintf("item %s is protected against deletion", displayName), http.StatusBadRequest)
 					return
 				}
 				httpError(w, delErr.Error(), http.StatusInternalServerError)
@@ -1420,6 +1428,17 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		s.recordEvent("sandbox.unprotected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": false})
 		json.NewEncoder(w).Encode(updated)
+
+	case "reconcile-ssh", "reconcile":
+		if err := s.vmMgr.SyncSSHKeysForVM(ctx, v.ID); err != nil {
+			httpError(w, "failed to reconcile SSH access: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "reconciled",
+			"sandbox": v.Name,
+			"id":      v.ID,
+		})
 
 	default:
 		httpError(w, "unknown action: "+action, http.StatusBadRequest)
@@ -2165,6 +2184,21 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 	}
 	if idOrName == "" {
 		http.Error(w, `{"error":"key id or name required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if idOrName == "reconcile" {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		ownerID, _, _ := s.callerIdentity(r)
+		res, err := s.vmMgr.SyncSSHKeysForOwner(r.Context(), ownerID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"reconciliation failed: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "reconciled", "sync": res})
 		return
 	}
 

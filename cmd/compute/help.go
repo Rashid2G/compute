@@ -18,12 +18,15 @@ Usage:
   compute sandbox protect|unprotect <name|id>
   compute sandbox info <name|id|hostname>
   compute sandbox url [flags] <name|id|hostname>
+  compute sandbox file <read|write|list|mkdir|remove> <sandbox> [args...]
+  compute sandbox cp <src> <dst>
+  compute sandbox process <list|start|kill> <sandbox> [args...]
   compute sandbox exec [flags] [user@]<name|id> -- <command...>
   compute sandbox ssh [user@]<name|id|hostname> [<command...>]
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --protected).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -31,6 +34,11 @@ Commands:
   delete, rm               Delete one or more sandboxes.
   protect                  Enable deletion protection on a sandbox.
   unprotect                Disable deletion protection on a sandbox.
+  images                   Discover available base and custom rootfs images.
+  templates                Discover available reusable sandbox templates.
+  file                     Interact with sandbox filesystem (read, write, list, mkdir, remove).
+  cp                       Copy files between local host and sandbox.
+  process, ps              Inspect and manage background processes (list, start, kill).
   info, inspect, show      Display sandbox details, hostname, SSH command and URLs.
   url                      Print the best HTTP URL, or the SSH name when no URL resolves.
   exec                     Execute a command inside a sandbox, streaming output live.
@@ -51,6 +59,45 @@ URL flags:
 Target patterns support shell-style matching. Quote '*' or other patterns:
   compute sandbox delete '*'
   compute sandbox stop 'dev-*'`,
+
+	"file": `Manage files and directories inside running sandboxes.
+
+Usage:
+  compute sandbox file read <sandbox> <path> [--format text|base64]
+  compute sandbox file write <sandbox> <path> [--content <data> | --file <path> | -]
+  compute sandbox file list <sandbox> [path]
+  compute sandbox file mkdir <sandbox> <path>
+  compute sandbox file remove <sandbox> <path>
+
+Actions:
+  read                     Read and output file contents from the sandbox.
+  write                    Write data from flag, file, or stdin to a remote file.
+  list, ls                 List directory contents inside the sandbox (default: /workspace).
+  mkdir                    Create a directory tree inside the sandbox.
+  remove, rm               Delete a file or directory tree inside the sandbox.`,
+
+	"cp": `Copy files between local filesystem and sandboxes.
+
+Usage:
+  compute sandbox cp <src> <dst>
+  compute cp <src> <dst>
+
+Examples:
+  compute sandbox cp ./app.py my-box:/workspace/app.py
+  compute sandbox cp my-box:/workspace/results.json ./results.json
+  compute sandbox cp box-1:/workspace/data.bin box-2:/workspace/data.bin`,
+
+	"process": `Inspect and manage processes inside running sandboxes.
+
+Usage:
+  compute sandbox process list <sandbox>
+  compute sandbox process start <sandbox> [--cwd <path>] [--env KEY=VAL] [--] <command...>
+  compute sandbox process kill <sandbox> <pid> [--signal SIGTERM|SIGKILL]
+
+Actions:
+  list, ls, ps             List running processes with PID, PPID, %CPU, %MEM, and command line.
+  start, run               Launch a detached background process inside the sandbox.
+  kill, signal             Send a termination signal (default SIGTERM) to a process.`,
 
 	"url": `Print the best HTTP URL or SSH target for a sandbox.
 

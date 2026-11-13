@@ -255,11 +255,25 @@ Every sandbox running a web service or API can be given an isolated, addressable
    *Supported default base domains:* `preview.localhost`, `compute.internal`, `compute.dev`, `localhost`.
    *Example:* `http://3000-my-web-app.preview.localhost:18080/`
 
+### Ingress Architecture: Path-Based Ingress vs. Host Port-Forwarding
+
+- **Path-Based Ingress (`/preview/<sandbox>/<guest-port>/`) — Highly Recommended:**
+  Routes HTTP and WebSocket traffic through the compute daemon's unified reverse proxy (port 18080).
+  * **Zero Network Friction:** Works out-of-the-box across all environments, including containerized deployments (Docker/Podman) and lab virtual machines where only daemon port 18080 is exposed.
+  * **No Port Conflicts:** Eliminates host port allocation conflicts between parallel sandboxes.
+  * **Unified Security:** Supports session auth, bearer token auth, and public mode.
+
+- **Host Port Forwarding (`POST /api/v1/network/port-forwards`):**
+  Installs host DNAT rules mapping a designated host TCP port (`host_port`) directly to `<sandbox_ip>:<guest_port>`.
+  * **Requirement:** `host_port` and `guest_port` (1–65535) are strictly required. Privileged ports (<1024) require administrator privileges.
+  * > [!IMPORTANT]
+    > **Containerized / Docker Setups:** Host port forwarding binds the port inside the container's network namespace. Unless that specific host port was pre-published during container startup (`-p 33000:33000`), external clients cannot connect to it. **Always use Path-Based Ingress (`/preview/<sandbox>/<guest-port>/`) for seamless external access.**
+
 ### Public vs. Private Ingress
 - **Private Ingress (Default):** The ingress proxy requires an `Authorization: Bearer <token>` or session cookie matching the VM owner. Unauthenticated external requests receive `401 Unauthorized`.
 - **Public Ingress:** Expose the guest port publicly so external reviewers, clients, or automated test runners can access it without credentials:
   ```bash
-  # Register public port forward rule via control-plane API
+  # Register public port forward rule via control-plane API (both guest_port AND host_port required)
   curl -s -X POST "http://${COMPUTE_DAEMON:-127.0.0.1:18080}/api/v1/network/port-forwards" \
     -H "Authorization: Bearer ${COMPUTE_API_KEY}" \
     -H "Content-Type: application/json" \
@@ -284,17 +298,17 @@ Every sandbox running a web service or API can be given an isolated, addressable
 ```bash
 BOX_NAME="my-web-app"
 
-# Create sandbox with 2 vCPUs and 2GB RAM
-compute sandbox create --name "${BOX_NAME}" --vcpus 2 --memory 2048
-compute sandbox start "${BOX_NAME}"
+# Create sandbox with 2 vCPUs, 2GB RAM, and immediately boot
+compute sandbox create --name "${BOX_NAME}" --vcpus 2 --memory 2048 --start
 ```
 
 #### Step 2: Deploy and Start Service
 ```bash
-# Start application server in the background (e.g. listening on port 3000)
-compute sandbox exec "${BOX_NAME}" -- bash -c "
-  cd /app && nohup npm start > /var/log/app.log 2>&1 &
-"
+# Start application server in the background using native CLI process management
+compute sandbox process start "${BOX_NAME}" --cwd /app -- npm start
+
+# Or compound execution via exec:
+# compute sandbox exec "${BOX_NAME}" -- bash -c "cd /app && nohup npm start > /var/log/app.log 2>&1 &"
 ```
 
 #### Step 3: Verify Application Health
@@ -313,14 +327,15 @@ compute sandbox exec "${BOX_NAME}" -- bash -c "
 
 #### Step 4: Expose & Resolve Ingress URL
 ```bash
+# Register port forward with required host_port (e.g. 33000)
 curl -s -X POST "http://${COMPUTE_DAEMON:-127.0.0.1:18080}/api/v1/network/port-forwards" \
   -H "Authorization: Bearer ${COMPUTE_API_KEY}" \
   -H "Content-Type: application/json" \
-  -d "{\"vm_id\": \"${BOX_NAME}\", \"guest_port\": 3000, \"public\": true}"
+  -d "{\"vm_id\": \"${BOX_NAME}\", \"guest_port\": 3000, \"host_port\": 33000, \"public\": true}"
 
-# Resolve the addressable ingress URL
+# Addressable path-based ingress endpoint (works universally in local and containerized setups)
 DAEMON_HOST="${COMPUTE_DAEMON:-127.0.0.1:18080}"
-echo "Service endpoint: http://${DAEMON_HOST}/preview/${BOX_NAME}/3000/"
+echo "Universal Ingress endpoint: http://${DAEMON_HOST}/preview/${BOX_NAME}/3000/"
 ```
 
 #### Step 5: Teardown

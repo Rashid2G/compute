@@ -89,6 +89,29 @@ func handleKeysCommand(ctx context.Context, client *DaemonClient, args []string)
 		}
 		printKeySyncResult(res)
 
+	case "reconcile", "unlock", "repair":
+		reconcileCmd := flag.NewFlagSet("keys reconcile", flag.ExitOnError)
+		allFlag := reconcileCmd.Bool("all", false, "Reconcile SSH access and unlock accounts across all sandboxes")
+		reconcileCmd.Parse(args[1:])
+		target := ""
+		if reconcileCmd.NArg() > 0 {
+			target = reconcileCmd.Arg(0)
+		}
+		if target != "" && !*allFlag {
+			if err := client.ReconcileSandboxSSH(ctx, target); err != nil {
+				fmt.Fprintf(os.Stderr, "Error reconciling SSH access for %s: %v\n", target, err)
+				os.Exit(1)
+			}
+			fmt.Printf("Sandbox %s: SSH access and accounts reconciled successfully\n", target)
+			return
+		}
+		res, err := client.ReconcileKeys(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reconciling SSH keys and accounts: %v\n", err)
+			os.Exit(1)
+		}
+		printKeySyncResult(res)
+
 	case "update", "set", "edit":
 		updateCmd := flag.NewFlagSet("keys update", flag.ExitOnError)
 		name := updateCmd.String("name", "", "New key name")

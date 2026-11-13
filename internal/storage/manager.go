@@ -153,8 +153,7 @@ func (m *Manager) ResolveImage(imageName string) (kernelPath, rootfsPath string,
 		}
 	}
 
-	// Prefix with "disk space issue:" so API handlers and existing tests correctly map to Bad Request
-	return "", "", fmt.Errorf("disk space issue: unsupported image '%s': only 'ubuntu-24' (Ubuntu 24.04 LTS), custom images, or saved templates are supported", imageName)
+	return "", "", fmt.Errorf("unsupported image '%s': only 'ubuntu-24' (Ubuntu 24.04 LTS), custom images, or saved templates are supported", imageName)
 }
 
 // InitVMDisk creates the VM directory and creates a persistent copy-on-write / sparse disk for the VM using default rootfs

@@ -790,10 +790,15 @@ func (s *Store) DeleteVMByOwner(ctx context.Context, ownerID, idOrName string) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var name string
 	var protected int
-	checkQuery := `SELECT protected FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?) LIMIT 1;`
-	if err := s.db.QueryRowContext(ctx, checkQuery, idOrName, idOrName, idOrName, ownerID, ownerID).Scan(&protected); err == nil && protected != 0 {
-		return fmt.Errorf("item %s is protected against deletion", idOrName)
+	checkQuery := `SELECT name, protected FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?) LIMIT 1;`
+	if err := s.db.QueryRowContext(ctx, checkQuery, idOrName, idOrName, idOrName, ownerID, ownerID).Scan(&name, &protected); err == nil && protected != 0 {
+		displayName := name
+		if displayName == "" {
+			displayName = idOrName
+		}
+		return fmt.Errorf("item %s is protected against deletion", displayName)
 	}
 
 	query := `DELETE FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?);`
@@ -810,10 +815,15 @@ func (s *Store) DeleteVMByInternalID(ctx context.Context, internalID string) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	var name string
 	var protected int
-	checkQuery := `SELECT protected FROM vms WHERE internal_id = ? LIMIT 1;`
-	if err := s.db.QueryRowContext(ctx, checkQuery, internalID).Scan(&protected); err == nil && protected != 0 {
-		return fmt.Errorf("item %s is protected against deletion", internalID)
+	checkQuery := `SELECT name, protected FROM vms WHERE internal_id = ? LIMIT 1;`
+	if err := s.db.QueryRowContext(ctx, checkQuery, internalID).Scan(&name, &protected); err == nil && protected != 0 {
+		displayName := name
+		if displayName == "" {
+			displayName = internalID
+		}
+		return fmt.Errorf("item %s is protected against deletion", displayName)
 	}
 
 	_, err := s.db.ExecContext(ctx, `DELETE FROM vms WHERE internal_id = ?;`, internalID)
