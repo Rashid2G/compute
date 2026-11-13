@@ -249,9 +249,9 @@ if [ "${DEPLOY_MODE}" = "docker" ]; then
             cp .env.example .env && chmod 600 .env
         fi
         if docker compose version >/dev/null 2>&1; then
-            sudo docker compose up -d --build
+            sudo docker compose --profile gui up -d --build
         else
-            sudo docker-compose up -d --build
+            sudo docker-compose --profile gui up -d --build
         fi
     '"
     printf "${GREEN}✓${NC} Docker Compose deployment launched.\n"
@@ -281,7 +281,7 @@ for i in $(seq 1 20); do
         echo \"daemon:\$DAEMON_OK gui:\$GUI_OK\"
     '" 2>/dev/null || echo "daemon:false gui:false")
 
-    if [[ "$STATUS_OUT" =~ "daemon:true gui:true" ]] || [[ "$STATUS_OUT" =~ "daemon:true" ]]; then
+    if [[ "$STATUS_OUT" =~ "daemon:true gui:true" ]]; then
         HEALTHY=true
         break
     fi

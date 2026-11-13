@@ -69,7 +69,7 @@ services:
       - .env
     environment:
       COMPUTE_DATA_DIR: /var/lib/compute
-      COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-127.0.0.1}
+      COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-0.0.0.0}
       COMPUTE_API_PORT: ${COMPUTE_API_PORT:-18080}
       COMPUTE_AUTH_ENABLED: ${COMPUTE_AUTH_ENABLED:-true}
       COMPUTE_ADMIN_PASSWORD: ${COMPUTE_ADMIN_PASSWORD:-}
@@ -117,7 +117,7 @@ services:
       - /usr/local/bin/compute
       - gui
       - --addr
-      - ${COMPUTE_GUI_BIND_ADDRESS:-127.0.0.1}
+      - ${COMPUTE_GUI_BIND_ADDRESS:-0.0.0.0}
       - --port
       - ${COMPUTE_GUI_PORT:-8080}
       - --daemon
