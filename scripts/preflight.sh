@@ -139,6 +139,13 @@ if command -v sysctl >/dev/null 2>&1; then
 fi
 
 section "Network ports"
+say_info "API would bind ${BIND_ADDRESS}:${API_PORT}"
+case "${BIND_ADDRESS}" in
+    127.0.0.1 | localhost | ::1 | "[::1]") ;;
+    *)
+        say_warn "API binds a non-loopback address (${BIND_ADDRESS}): keep COMPUTE_AUTH_ENABLED=true and restrict access with a firewall"
+        ;;
+esac
 if port_in_use "${API_PORT}" tcp; then
     say_warn "TCP ${API_PORT} is already in use (an existing daemon or another service)"
 else
@@ -163,6 +170,11 @@ if [ "${DNS_ENABLED}" = "true" ]; then
     else
         say_ok "DNS port 53 is free (UDP and TCP)"
     fi
+fi
+if port_in_use "${GUI_PORT}" tcp; then
+    say_info "TCP ${GUI_PORT} is already in use (only needed by the optional gui profile; the daemon serves its own UI on ${API_PORT})"
+else
+    say_info "TCP ${GUI_PORT} is free for the optional gui profile"
 fi
 
 section "Data directory and disk space"
