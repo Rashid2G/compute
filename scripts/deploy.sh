@@ -229,6 +229,9 @@ if [ "${DEPLOY_MODE}" = "docker" ]; then
         # Stop conflicting systemd services if running
         sudo systemctl stop computed.service compute-gui.service 2>/dev/null || true
         sudo systemctl disable computed.service compute-gui.service 2>/dev/null || true
+        # Stop and remove legacy non-compose containers if running
+        sudo docker stop computed compute-gui compute-worker 2>/dev/null || true
+        sudo docker rm computed compute-gui compute-worker 2>/dev/null || true
     '"
 
     printf "${BLUE}==>${NC} ${BOLD}Starting containers with Docker Compose...${NC}\n"
