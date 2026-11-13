@@ -107,6 +107,10 @@ func main() {
 		handleImageCommand(ctx, client, os.Args[2:])
 		return
 
+	case "doctor", "check":
+		handleDoctorCommand(ctx, client, os.Args[2:])
+		return
+
 	case "template", "templates":
 		handleTemplateCommand(ctx, client, os.Args[2:])
 		return
@@ -1295,6 +1299,32 @@ func handlePoolCommand(ctx context.Context, client *DaemonClient, args []string)
 	default:
 		printCommandError(fmt.Sprintf("unknown pool command '%s'.", sub), "", "pool")
 	}
+}
+
+// handleDoctorCommand renders the daemon readiness report with remediation.
+func handleDoctorCommand(ctx context.Context, client *DaemonClient, args []string) {
+	_ = args
+	report, err := client.GetReadiness(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot reach the Compute daemon: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Check that the daemon is running and COMPUTE_DAEMON points at it (default 127.0.0.1:18080).")
+		os.Exit(1)
+	}
+	for _, check := range report.Checks {
+		status := "OK"
+		if !check.OK {
+			status = strings.ToUpper(string(check.Severity))
+		}
+		fmt.Printf("[%-8s] %-14s %s\n", status, check.Name, check.Detail)
+		if !check.OK && check.Remediation != "" {
+			fmt.Printf("           fix: %s\n", check.Remediation)
+		}
+	}
+	if !report.OK {
+		fmt.Println("\nReadiness failed. Fix the critical items above.")
+		os.Exit(1)
+	}
+	fmt.Println("\nReadiness: all critical checks passed.")
 }
 
 // Image Command Implementation

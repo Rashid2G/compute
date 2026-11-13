@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -36,6 +37,35 @@ func (c *Client) send(ctx context.Context, v interface{}) error {
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
 func (c *Client) Run(ctx context.Context) error {
+	backoff := time.Second
+	for {
+		err := c.runOnce(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			log.Printf("[worker] connection lost: %v (reconnecting in %s)", err, backoff)
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+		if backoff > 30*time.Second {
+			backoff = 30 * time.Second
+		}
+	}
+}
+
+// runOnce establishes one control-plane session. The enrollment token is
+// single-use, but the daemon accepts the same worker name reconnecting with
+// it, so a restarted worker re-enrolls instead of failing permanently.
+func (c *Client) runOnce(ctx context.Context) error {
 	u, e := url.Parse(c.Config.ControlPlaneURL)
 	if e != nil {
 		return e
@@ -48,17 +78,21 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	var dialOpts *websocket.DialOptions
 	if c.Config.Token != "" {
-		dialOpts = &websocket.DialOptions{
-			HTTPHeader: http.Header{
-				"X-Worker-Token": []string{c.Config.Token},
-			},
+		headers := http.Header{
+			"X-Worker-Token": []string{c.Config.Token},
 		}
+		if c.Config.Name != "" {
+			headers.Set("X-Worker-Name", c.Config.Name)
+		}
+		dialOpts = &websocket.DialOptions{HTTPHeader: headers}
 	}
 	conn, _, e := websocket.Dial(ctx, u.String(), dialOpts)
 	if e != nil {
 		return e
 	}
+	c.mu.Lock()
 	c.conn = conn
+	c.mu.Unlock()
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	workerMsgID := c.Config.Name
 	if workerMsgID == "" {
@@ -80,7 +114,16 @@ func (c *Client) Run(ctx context.Context) error {
 		return fmt.Errorf("worker handshake rejected")
 	}
 	c.workerID = ack.WorkerID
-	go c.heartbeat(ctx)
+
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		c.heartbeat(connCtx)
+	}()
+	defer func() { cancelConn(); <-heartbeatDone }()
+
 	for {
 		_, b, e = conn.Read(ctx)
 		if e != nil {
