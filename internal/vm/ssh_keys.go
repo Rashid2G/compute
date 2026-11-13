@@ -2,13 +2,16 @@ package vm
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // SSHKeySyncFailure describes one sandbox that could not be updated.
@@ -170,6 +173,14 @@ func (m *Manager) maybeSyncSSHKeys(vm *db.VM) {
 // comments and options cannot break the shell command.
 func (m *Manager) writeAuthorizedKeysRunning(ctx context.Context, vm *db.VM, content string) error {
 	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+
+	// Generate an unguessable bcrypt placeholder hash in Go to unlock legacy
+	// accounts ('!' or '*') so OpenSSH 9.6 with UsePAM=no allows public-key login.
+	placeholderBuf := make([]byte, 32)
+	_, _ = rand.Read(placeholderBuf)
+	bcryptHashBytes, _ := bcrypt.GenerateFromPassword([]byte(hex.EncodeToString(placeholderBuf)), bcrypt.DefaultCost)
+	bcryptHash := string(bcryptHashBytes)
+
 	script := fmt.Sprintf(`set -e
 for u in root compute; do
   home="$(getent passwd "$u" | cut -d: -f6)"
@@ -180,8 +191,17 @@ for u in root compute; do
   chmod 700 "$d"
   chmod 600 "$d/authorized_keys"
   chown "$u:$u" "$d" "$d/authorized_keys" 2>/dev/null || chown "$u" "$d" "$d/authorized_keys" || true
+  shadow_entry="$(getent shadow "$u" 2>/dev/null || true)"
+  if [ -n "$shadow_entry" ]; then
+    pw_field="$(printf '%%s' "$shadow_entry" | cut -d: -f2)"
+    case "$pw_field" in
+      '!'*|'*'*|'')
+        sed -i "s|^${u}:[^:]*:|${u}:%s:|" /etc/shadow 2>/dev/null || true
+        ;;
+    esac
+  fi
 done
-`, encoded)
+`, encoded, bcryptHash)
 
 	target := vm.InternalID
 	if target == "" {

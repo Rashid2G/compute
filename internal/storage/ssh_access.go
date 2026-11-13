@@ -186,11 +186,18 @@ func (m *Manager) ConfigureAuthorizedKeys(diskPath string, pubKeys ...string) er
 				return err
 			}
 			defer fs.Close()
-			return applyAuthorizedKeys(fs, defaultSSHUsers, keysContent)
+			if err := applyAuthorizedKeys(fs, defaultSSHUsers, keysContent); err != nil {
+				return err
+			}
+			return reconcileShadowAccounts(fs, defaultSSHUsers)
 		})
 	}
 	attempts = append(attempts, func() error {
-		return applyAuthorizedKeys(newDebugfsImageFS(diskPath), defaultSSHUsers, keysContent)
+		fs := newDebugfsImageFS(diskPath)
+		if err := applyAuthorizedKeys(fs, defaultSSHUsers, keysContent); err != nil {
+			return err
+		}
+		return reconcileShadowAccounts(fs, defaultSSHUsers)
 	})
 
 	var failures []string
@@ -202,6 +209,13 @@ func (m *Manager) ConfigureAuthorizedKeys(diskPath string, pubKeys ...string) er
 		}
 	}
 	return fmt.Errorf("configure authorized_keys on %s: %s", diskPath, strings.Join(failures, "; "))
+}
+
+// ReconcileSSHAccess unlocks any locked accounts ('!' or '*') in /etc/shadow
+// without requiring recreation of the sandbox, ensuring OpenSSH 9.6 with
+// UsePAM=no permits public-key authentication.
+func (m *Manager) ReconcileSSHAccess(diskPath string) error {
+	return m.ConfigureAuthorizedKeys(diskPath)
 }
 
 // AuthorizedKeys renders the managed authorized_keys content for the given
@@ -271,6 +285,70 @@ func updateShadowUsers(shadow []byte, users []string, passwordHash string) ([]by
 		matched++
 	}
 	return []byte(strings.Join(lines, "\n")), matched
+}
+
+// unlockLockedShadowUsers scans the shadow file for the specified users and
+// replaces any locked password field (starts with '!' or '*' or is empty) with
+// an unguessable placeholder bcrypt hash. Existing valid passwords are preserved.
+func unlockLockedShadowUsers(shadow []byte, users []string) ([]byte, int, error) {
+	selected := make(map[string]struct{}, len(users))
+	for _, user := range users {
+		selected[user] = struct{}{}
+	}
+
+	lines := strings.Split(string(shadow), "\n")
+	unlockedCount := 0
+	var placeholderHash string
+
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 2 {
+			continue
+		}
+		if _, ok := selected[fields[0]]; !ok {
+			continue
+		}
+		pw := fields[1]
+		if pw == "" || strings.HasPrefix(pw, "!") || strings.HasPrefix(pw, "*") {
+			if placeholderHash == "" {
+				secret, err := randomShadowSecret()
+				if err != nil {
+					return nil, 0, fmt.Errorf("generate placeholder SSH password: %w", err)
+				}
+				hashed, err := bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)
+				if err != nil {
+					return nil, 0, fmt.Errorf("hash placeholder SSH password: %w", err)
+				}
+				placeholderHash = string(hashed)
+			}
+			fields[1] = placeholderHash
+			lines[i] = strings.Join(fields, ":")
+			unlockedCount++
+		}
+	}
+	return []byte(strings.Join(lines, "\n")), unlockedCount, nil
+}
+
+// reconcileShadowAccounts checks /etc/shadow on the guest filesystem and unlocks
+// any locked accounts among users so OpenSSH allows public-key login.
+func reconcileShadowAccounts(fs imageFS, users []string) error {
+	shadow, err := fs.ReadFile("/etc/shadow")
+	if err != nil {
+		return nil // Non-fatal if /etc/shadow does not exist
+	}
+	updated, count, err := unlockLockedShadowUsers(shadow, users)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		if err := fs.WriteFile("/etc/shadow", updated, 0600, 0, 0); err != nil {
+			return fmt.Errorf("write /etc/shadow: %w", err)
+		}
+	}
+	return nil
 }
 
 type sshdDirective struct {
