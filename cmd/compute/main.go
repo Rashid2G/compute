@@ -247,6 +247,8 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		sshPassword := createCmd.String("ssh-password", "", "Optional SSH password for compute/root (min 8 chars; use '-' to read from stdin)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
 		tailscale := createCmd.Bool("tailscale", false, "Join the operator's tailnet (ephemeral device with a 100.x IP and MagicDNS name)")
+		startNow := createCmd.Bool("start", false, "Immediately boot/start the sandbox after creation")
+		bootNow := createCmd.Bool("boot", false, "Alias for --start")
 		createCmd.Parse(subArgs)
 
 		var tsEnabled *bool
@@ -319,6 +321,18 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Println("SSH auth:        password enabled for compute and root (embedded public keys also accepted)")
 		} else {
 			fmt.Println("SSH auth:        public key only (no SSH password configured)")
+		}
+
+		if *startNow || *bootNow {
+			fmt.Printf("Booting sandbox %s...\n", v.Name)
+			runningVM, err := client.RunVM(ctx, v.ID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error booting sandbox %s: %v\n", v.Name, err)
+				os.Exit(1)
+			}
+			v = runningVM
+			fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s\n",
+				v.ID, v.Name, v.IPAddress, v.Status)
 		}
 
 	case "start", "run":
@@ -537,6 +551,12 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			os.Exit(1)
 		}
 		fmt.Printf("Sandbox %s: deletion protection disabled\n", v.Name)
+
+	case "images", "image":
+		handleImageCommand(ctx, client, append([]string{"list"}, subArgs...))
+
+	case "templates", "template":
+		handleTemplateCommand(ctx, client, append([]string{"list"}, subArgs...))
 
 	default:
 		printCommandError(fmt.Sprintf("unknown sandbox command '%s'.", sub), "", "sandbox")
@@ -888,7 +908,7 @@ func handleExecCommand(ctx context.Context, client *DaemonClient, args []string)
 	}
 
 	req := vm.ExecRequest{
-		Command: strings.Join(cmdArgs, " "),
+		Command: buildExecCommand(cmdArgs),
 		User:    user,
 		Timeout: *timeout,
 	}
@@ -946,6 +966,47 @@ func handleExecCommand(ctx context.Context, client *DaemonClient, args []string)
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
+}
+
+// quoteForRemoteShell wraps an argument in single quotes if it contains spaces
+// or shell metacharacters, escaping any inner single quotes, so that compound
+// arguments (e.g. bash -c "mkdir -p /path && cmd") survive remote SSH shell execution.
+func quoteForRemoteShell(arg string) string {
+	if len(arg) == 0 {
+		return "''"
+	}
+	safe := true
+	for i := 0; i < len(arg); i++ {
+		c := arg[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '-' || c == '.' || c == '/' || c == ':' || c == '=' || c == '@' {
+			continue
+		}
+		safe = false
+		break
+	}
+	if safe {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
+// buildExecCommand combines command arguments into a remote shell string.
+// If a single argument is supplied, it is treated as a raw shell command string.
+// If multiple arguments are supplied, each argument is safely shell-quoted so
+// subcommands, flags, and compound commands preserve their boundaries over SSH.
+func buildExecCommand(cmdArgs []string) string {
+	if len(cmdArgs) == 0 {
+		return ""
+	}
+	if len(cmdArgs) == 1 {
+		return cmdArgs[0]
+	}
+	quoted := make([]string, len(cmdArgs))
+	for i, a := range cmdArgs {
+		quoted[i] = quoteForRemoteShell(a)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // Job Command Implementation
