@@ -11,8 +11,8 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Server.ListenAddr != "0.0.0.0:18080" {
-		t.Fatalf("expected 0.0.0.0:18080, got %s", cfg.Server.ListenAddr)
+	if cfg.Server.ListenAddr != "127.0.0.1:18080" {
+		t.Fatalf("expected 127.0.0.1:18080, got %s", cfg.Server.ListenAddr)
 	}
 	if cfg.Network.Mode != network.ModeNAT {
 		t.Fatalf("expected mode nat, got %s", cfg.Network.Mode)
