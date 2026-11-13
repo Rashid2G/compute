@@ -82,6 +82,27 @@ compute sandbox <subcommand> [flags]
   - `--template <id|name>`: Launch from a disk template.
   - `--ssh-key <id|name|path>`: Pre-authorize SSH public key.
   - `--protected`: Enable deletion protection.
+  - `--start`, `--boot`: Immediately boot and start the sandbox after creation.
+- `images` (alias: `image`)
+  List and discover available base rootfs images and custom images.
+- `templates` (alias: `template`)
+  List and discover available reusable VM disk templates.
+- `file <read|write|list|mkdir|remove> <sandbox> [args...]`
+  Manage files inside running sandboxes via high-speed daemon REST endpoints:
+  - `file read <sandbox> <path> [--format text|base64]`
+  - `file write <sandbox> <path> [--content <data> | --file <path> | -]`
+  - `file list <sandbox> [path]` (default: `/workspace`)
+  - `file mkdir <sandbox> <path>`
+  - `file remove <sandbox> <path>`
+- `cp <src> <dst>`
+  Copy files between local filesystem and sandboxes:
+  - `compute sandbox cp ./app.py my-box:/workspace/app.py`
+  - `compute sandbox cp my-box:/workspace/results.json ./results.json`
+- `process <list|start|kill> <sandbox> [args...]`
+  Inspect and manage background processes in running sandboxes:
+  - `process list <sandbox>`: Display process table with PID, PPID, %CPU, %MEM, STATUS, COMMAND.
+  - `process start <sandbox> [--cwd <path>] [--env KEY=VAL] [--] <command...>`: Detach background process.
+  - `process kill <sandbox> <pid> [--signal SIGTERM|SIGKILL]`: Send termination signal.
 - `start <name|id|pattern>...` (alias: `run`)
   Launch one or more microVMs. Spawns Firecracker, attaches TAP device, binds veth, and boots Linux guest. Supports shell wildcards (e.g. `'pr-*'`).
 - `stop <name|id|pattern>...`
