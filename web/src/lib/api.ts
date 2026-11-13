@@ -34,9 +34,14 @@ import type {
   WorkerNodeRecord,
   WorkerPoolRecord,
   WorkerTokenRecord,
+  AuthMeResponse,
+  AuthUser,
+  LoginResponse,
 } from './types';
 
 const BASE_PATH = '/api/v1';
+const AUTH_TOKEN_KEY = 'compute_auth_token';
+const AUTH_USER_KEY = 'compute_auth_user';
 
 export class ApiError extends Error {
   status: number;
@@ -48,11 +53,85 @@ export class ApiError extends Error {
   }
 }
 
+type UnauthorizedListener = () => void;
+const unauthorizedListeners: Set<UnauthorizedListener> = new Set();
+
+export function onUnauthorized(fn: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(fn);
+  return () => {
+    unauthorizedListeners.delete(fn);
+  };
+}
+
+function notifyUnauthorized() {
+  for (const listener of unauthorizedListeners) {
+    try {
+      listener();
+    } catch {
+      // Ignore listener errors
+    }
+  }
+}
+
+export function getStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token: string | null) {
+  try {
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function getStoredUser(): AuthUser | null {
+  try {
+    const raw = window.localStorage.getItem(AUTH_USER_KEY);
+    return raw ? (JSON.parse(raw) as AuthUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredUser(user: AuthUser | null) {
+  try {
+    if (user) {
+      window.localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+    } else {
+      window.localStorage.removeItem(AUTH_USER_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function clearAuth() {
+  setStoredToken(null);
+  setStoredUser(null);
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getStoredToken();
+  const authHeaders: Record<string, string> = {};
+  if (token) {
+    authHeaders['Authorization'] = `Bearer ${token}`;
+  }
+
   const response = await fetch(`${BASE_PATH}${path}`, {
+    credentials: 'include',
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders,
       ...options.headers,
     },
   });
@@ -60,11 +139,18 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
-      const body = (await response.json()) as { error?: string };
-      if (body.error) message = body.error;
+      const body = (await response.json()) as { error?: string; message?: string };
+      if (body.error) {
+        message = body.message ? `${body.error}: ${body.message}` : body.error;
+      }
     } catch {
       // Keep the status-based message when the body is not JSON.
     }
+
+    if (response.status === 401 && !path.startsWith('/auth/login')) {
+      notifyUnauthorized();
+    }
+
     throw new ApiError(message, response.status);
   }
 
@@ -74,6 +160,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   return (await response.json()) as T;
 }
+
 
 export const api = {
   async health(): Promise<HealthResult> {
@@ -632,7 +719,69 @@ export const api = {
       method: 'DELETE',
     });
   },
+
+  // Authentication & Identity
+  async login(username: string, password: string): Promise<LoginResponse> {
+    const res = await request<LoginResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    if (res.token) {
+      setStoredToken(res.token);
+    }
+    if (res.user) {
+      setStoredUser(res.user);
+    }
+    return res;
+  },
+
+  async logout(): Promise<void> {
+    try {
+      await request<{ status: string }>('/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      clearAuth();
+    }
+  },
+
+  async me(): Promise<AuthMeResponse> {
+    const res = await request<AuthMeResponse>('/auth/me');
+    if (res.user) {
+      setStoredUser(res.user);
+    }
+    return res;
+  },
+
+  getAuthToken(): string | null {
+    return getStoredToken();
+  },
+
+  getAuthUser(): AuthUser | null {
+    return getStoredUser();
+  },
+
+  setAuthToken(token: string | null): void {
+    setStoredToken(token);
+  },
+
+  clearAuth(): void {
+    clearAuth();
+  },
+
+  async ensureAuth(): Promise<boolean> {
+    const current = getStoredToken();
+    if (current) return true;
+    try {
+      // Graceful auto-login with default admin credentials
+      const res = await this.login('admin', 'admin');
+      return !!res.token;
+    } catch {
+      return false;
+    }
+  },
 };
+
 
 export function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;

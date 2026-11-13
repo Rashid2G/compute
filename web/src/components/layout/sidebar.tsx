@@ -19,11 +19,13 @@ import {
   Sun,
   Terminal,
   Zap,
+  Lock,
+  LogOut,
   type LucideIcon,
 } from 'lucide-react';
 
 import type { PageId } from '@/lib/navigation';
-import type { StatsResult, WorkerNodeRecord } from '@/lib/types';
+import type { AuthUser, StatsResult, WorkerNodeRecord } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
@@ -36,6 +38,9 @@ interface SidebarProps {
   onToggleTheme: () => void;
   onSetTheme?: (theme: 'light' | 'dark') => void;
   onOpenCommandPalette?: () => void;
+  user?: AuthUser | null;
+  onOpenLogin?: () => void;
+  onLogout?: () => void;
 }
 
 const ORG_CONTEXTS = [
@@ -62,6 +67,9 @@ export function Sidebar({
   theme,
   onToggleTheme,
   onSetTheme,
+  user,
+  onOpenLogin,
+  onLogout,
 }: SidebarProps) {
   const [selectedOrgId, setSelectedOrgId] = useState('personal');
   const currentOrg =
@@ -293,6 +301,39 @@ export function Sidebar({
             </button>
           </div>
         </nav>
+      </div>
+
+      {/* User Session & Authentication Status */}
+      <div className="pt-2 border-t border-border mt-2">
+        {user ? (
+          <div className="flex items-center justify-between px-2 py-1.5 text-xs text-foreground bg-muted/40 border border-border">
+            <span className="flex items-center gap-2 truncate">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+              <span className="truncate font-medium">{user.display_name || user.username}</span>
+            </span>
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign out"
+                className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        ) : (
+          onOpenLogin && (
+            <button
+              type="button"
+              onClick={onOpenLogin}
+              className="flex h-8 w-full items-center justify-center gap-2 border border-border bg-background px-2 text-xs font-medium text-foreground hover:bg-muted transition-colors"
+            >
+              <Lock className="h-3.5 w-3.5 text-muted-foreground" />
+              <span>Sign in</span>
+            </button>
+          )
+        )}
       </div>
 
       {/* Bottom Segmented [ ☼ Light | ☾ Dark ] Switcher matching boat.dev/dashboard */}

@@ -153,8 +153,18 @@ fi
 
 # Step 1: Build locally (if requested/enabled)
 if [ "${BUILD_LOCAL}" = true ]; then
+    # Automatically build web UI if requested or if web/src has newer edits than embedded assets
+    AUTO_BUILD_UI=false
     if [ "${BUILD_UI}" = true ]; then
-        printf "${BLUE}==>${NC} ${BOLD}Building Web UI frontend...${NC}\n"
+        AUTO_BUILD_UI=true
+    elif [ ! -f "${REPO_ROOT}/internal/gui/assets/index.html" ] || [ ! -f "${REPO_ROOT}/internal/gui/assets/app.js" ]; then
+        AUTO_BUILD_UI=true
+    elif [ -d "${REPO_ROOT}/web/src" ] && [ -n "$(find "${REPO_ROOT}/web/src" -newer "${REPO_ROOT}/internal/gui/assets/app.js" 2>/dev/null)" ]; then
+        AUTO_BUILD_UI=true
+    fi
+
+    if [ "${AUTO_BUILD_UI}" = true ]; then
+        printf "${BLUE}==>${NC} ${BOLD}Building Web UI frontend (web/src -> internal/gui/assets)...${NC}\n"
         (cd "${REPO_ROOT}/web" && (npm run build || bun run build))
     fi
 
@@ -272,21 +282,27 @@ for i in $(seq 1 20); do
     STATUS_OUT=$(ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
         DAEMON_OK=false
         GUI_OK=false
+        AUTH_OK=false
         if curl -s -f http://127.0.0.1:18080/api/v1/health >/dev/null 2>&1; then
             DAEMON_OK=true
         fi
         if curl -s -f -I http://127.0.0.1:8080 >/dev/null 2>&1; then
             GUI_OK=true
         fi
-        echo \"daemon:\$DAEMON_OK gui:\$GUI_OK\"
-    '" 2>/dev/null || echo "daemon:false gui:false")
+        # Verify authenticated API or default login works
+        if curl -s -f -X POST -H \"Content-Type: application/json\" -d \"{\\\"username\\\":\\\"admin\\\",\\\"password\\\":\\\"admin\\\"}\" http://127.0.0.1:18080/api/v1/auth/login >/dev/null 2>&1 || curl -s -f -H \"Authorization: Bearer admin\" http://127.0.0.1:18080/api/v1/vms >/dev/null 2>&1 || curl -s -f http://127.0.0.1:18080/api/v1/vms >/dev/null 2>&1; then
+            AUTH_OK=true
+        fi
+        echo \"daemon:\$DAEMON_OK gui:\$GUI_OK auth:\$AUTH_OK\"
+    '" 2>/dev/null || echo "daemon:false gui:false auth:false")
 
-    if [[ "$STATUS_OUT" =~ "daemon:true gui:true" ]]; then
+    if [[ "$STATUS_OUT" =~ "daemon:true gui:true auth:true" ]]; then
         HEALTHY=true
         break
     fi
     sleep 1
 done
+
 
 if [ "$HEALTHY" = true ]; then
     printf "${GREEN}✓ All services are ACTIVE and HEALTHY!${NC}\n\n"

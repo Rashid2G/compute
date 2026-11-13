@@ -533,3 +533,27 @@ export interface TailscaleStatus {
   sandboxes?: TailscaleSandboxRecord[];
   services?: TailscaleServiceRecord[];
 }
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  username: string;
+  display_name: string;
+  role: string;
+  status: string;
+}
+
+export interface LoginResponse {
+  status: string;
+  token: string;
+  csrf?: string;
+  user: AuthUser;
+}
+
+export interface AuthMeResponse {
+  user: AuthUser;
+  org_id?: string;
+  role?: string;
+  auth_type?: string;
+  scopes?: string[];
+}
