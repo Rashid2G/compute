@@ -53,7 +53,9 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Set at least the admin credential:
+The template defaults admin credentials to `"admin"` so the system runs
+immediately upon copying. For production deployments, override with a strong
+password:
 
 ```dotenv
 COMPUTE_ADMIN_PASSWORD=replace-with-a-long-random-password
@@ -61,8 +63,8 @@ COMPUTE_ADMIN_PASSWORD=replace-with-a-long-random-password
 # COMPUTE_ADMIN_SECRET=...
 ```
 
-Generate a password with `openssl rand -base64 32`. `.env` is git-ignored;
-never commit it.
+Generate a production password with `openssl rand -base64 32`. `.env` is
+git-ignored; never commit it.
 
 The API binds `127.0.0.1:18080` by default. Set
 `COMPUTE_BIND_ADDRESS=0.0.0.0` (or a specific host address) to expose it, and
