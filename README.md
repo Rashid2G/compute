@@ -29,26 +29,48 @@ Compute is a distributed compute platform for orchestrating lightning-fast Firec
 
 ## Quickstart
 
-### 1. Launch Central Daemon & Worker via Docker Compose
+### 1. Install on a fresh host with Docker Compose
+
+Requirements: Linux with Docker Engine 24+ (rootful), Compose v2.20+, and
+`/dev/kvm`. See [docs/install.md](docs/install.md) for the full guide.
 
 ```bash
-# Start both computed and compute-worker
+cp .env.example .env
+chmod 600 .env
+# set COMPUTE_ADMIN_PASSWORD (and COMPUTE_DOMAIN if you want DNS names)
+./scripts/preflight.sh
+sudo ./scripts/host-prepare.sh
 docker compose up -d
 
-# Check cluster health
-curl -f http://localhost:18080/api/v1/health
+# Liveness and readiness (readiness returns 503 with remediation when unready)
+curl -fsS http://127.0.0.1:18080/api/v1/health
+curl -fsS http://127.0.0.1:18080/api/v1/ready | python3 -m json.tool
+./bin/compute doctor
 ```
 
-### 2. Enroll a Remote Worker Node
+The default install starts only the daemon (API plus embedded GUI on
+`:18080`). Base images, the internal SSH key, DNS, a separate GUI container,
+Tailscale, and multi-host workers are configured through `.env` and optional
+profiles. Every variable is documented in
+[docs/configuration.md](docs/configuration.md).
+
+### 2. Enroll a Remote Worker Node (experimental, optional)
+
+The single-host install runs sandboxes on the control plane and does not need a
+worker. To add one:
 
 ```bash
-# 1. On your machine with compute CLI:
-compute worker token create --pool default
+# 1. On your machine with the compute CLI:
+compute worker token create --name node-1
 
-# Output will provide the one-time enrollment token and run command:
-# Run on the worker node:
-compute-worker run --control-plane http://<daemon-ip>:18080 --token <token> --name node-1
+# 2. Put the printed token in .env as COMPUTE_WORKER_TOKEN, then:
+docker compose --profile worker up -d
 ```
+
+A worker with the same `COMPUTE_WORKER_NAME` and token reconnects safely after
+a restart, including after the token expires; `--name` pins the token to one
+worker, while an unnamed token binds to the first worker that enrolls. Workers
+require their own `/dev/kvm`, host networking, and cgroups.
 
 ### 3. Run Compute Tasks (Agent Workflow)
 
@@ -112,7 +134,10 @@ See [AGENTS.md](file:///home/rashid/Projects/Repos/on-demand-vms/AGENTS.md) for 
 
 A dedicated VM (`compute-lab`) serves the full stack on the LAN:
 
-- Web GUI: http://192.168.1.70:8080
-- Daemon API: http://192.168.1.70:18080/api/v1/health
-- Remote CLI: `COMPUTE_DAEMON=192.168.1.70:18080 ./bin/compute sandbox list`
+- Web GUI: `http://compute-lab:8080`
+- Daemon API: `http://compute-lab:18080/api/v1/health`
+- Remote CLI: `COMPUTE_DAEMON=compute-lab:18080 ./bin/compute sandbox list`
 - SSH Access: `ssh compute-lab`
+
+The `compute-lab` host alias and its address are configured in `~/.ssh/config`;
+see [AGENTS.md](AGENTS.md) for deployment guidance.

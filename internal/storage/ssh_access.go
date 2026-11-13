@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -47,8 +49,9 @@ type imageFS interface {
 // sshd password policy to a guest disk image.
 //
 // If SSHAccess.Password is empty, password authentication is turned off and the
-// managed accounts are locked. Otherwise the password is hashed and installed
-// for every managed account, and password authentication is enabled.
+// managed accounts receive an unguessable random password. The accounts are
+// deliberately not locked: OpenSSH 9.6 with UsePAM no rejects locked accounts
+// even when the client authenticates with a public key.
 func (m *Manager) ConfigureSSHAccess(diskPath string, access SSHAccess) error {
 	if strings.TrimSpace(diskPath) == "" {
 		return errors.New("disk path is empty")
@@ -89,6 +92,17 @@ func (m *Manager) ConfigureSSHAccess(diskPath string, access SSHAccess) error {
 	return fmt.Errorf("configure SSH access on %s: %s", diskPath, strings.Join(failures, "; "))
 }
 
+// randomShadowSecret returns an unguessable password used only to keep the
+// managed guest accounts out of the "locked" state. Password authentication is
+// still disabled by sshd_config, so this value is never usable to log in.
+func randomShadowSecret() ([]byte, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	return []byte(hex.EncodeToString(buf)), nil
+}
+
 func applySSHAccess(fs imageFS, access SSHAccess, users []string, keysContent string) error {
 	if err := applyAuthorizedKeys(fs, users, keysContent); err != nil {
 		return err
@@ -104,6 +118,22 @@ func applySSHAccess(fs imageFS, access SSHAccess, users []string, keysContent st
 		hashed, err := bcrypt.GenerateFromPassword([]byte(access.Password), bcrypt.DefaultCost)
 		if err != nil {
 			return fmt.Errorf("hash SSH password: %w", err)
+		}
+		passwordHash = string(hashed)
+	} else {
+		// Do not lock the accounts with "!" here. OpenSSH 9.6 with
+		// UsePAM no refuses every authentication method, public keys
+		// included, when the shadow password starts with "!" or "*"
+		// ("User ... not allowed because account is locked"). Install an
+		// unguessable random password instead and keep password
+		// authentication disabled in sshd_config.
+		secret, err := randomShadowSecret()
+		if err != nil {
+			return fmt.Errorf("generate placeholder SSH password: %w", err)
+		}
+		hashed, err := bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)
+		if err != nil {
+			return fmt.Errorf("hash placeholder SSH password: %w", err)
 		}
 		passwordHash = string(hashed)
 	}

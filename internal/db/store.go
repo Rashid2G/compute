@@ -136,6 +136,77 @@ func (s *Store) ConsumeWorkerTokenAtomic(ctx context.Context, token string) erro
 	return nil
 }
 
+// legacyUnboundTokenName is the placeholder name written by older token
+// creation paths when the caller did not choose a name. It is treated as
+// unbound so those tokens can still bind to their first worker.
+const legacyUnboundTokenName = "worker-token"
+
+// AuthorizeWorkerToken validates a worker enrollment token and allows a
+// worker with the same name to reconnect with it. The first connection marks
+// the token as used and binds it to the connecting worker name; subsequent
+// connections are accepted only when the X-Worker-Name header matches that
+// bound name. This keeps single-use enrollment while making worker restarts
+// reconnect-safe, including after the enrollment token's expiry (expiry gates
+// enrollment, not an already enrolled worker's identity).
+func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	t := new(WorkerToken)
+	err = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).
+		Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("invalid worker token")
+	}
+	boundName := strings.TrimSpace(t.Name)
+	if boundName == legacyUnboundTokenName {
+		boundName = ""
+	}
+	workerName = strings.TrimSpace(workerName)
+
+	if t.UsedAt != nil {
+		// Reconnect: allow only the worker this token was bound to. An
+		// unbound token (created without --name, or by an older release)
+		// binds to the first worker that reconnects so restarts keep
+		// working without inventing a new identity.
+		if boundName == "" {
+			if workerName == "" {
+				return fmt.Errorf("worker token already consumed; worker name required to reconnect")
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET name=? WHERE token=?`, workerName, token); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		if workerName == "" || !strings.EqualFold(boundName, workerName) {
+			return fmt.Errorf("worker token already consumed by another worker")
+		}
+		return nil
+	}
+	if time.Now().After(t.ExpiresAt) {
+		return fmt.Errorf("worker token expired")
+	}
+	bindName := boundName
+	if bindName == "" {
+		bindName = workerName
+	}
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=?, name=? WHERE token=? AND used_at IS NULL`, now, bindName, token)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("worker token already consumed by another worker")
+	}
+	return tx.Commit()
+}
+
+// ListWorkerTokens returns all enrollment tokens.
 func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

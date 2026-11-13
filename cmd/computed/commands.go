@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/dns"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
+	"github.com/Rashid2G/on-demand-vms/internal/image"
 	"github.com/Rashid2G/on-demand-vms/internal/master/audit"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
@@ -29,6 +35,9 @@ func handleSubcommands() bool {
 	case "init":
 		runInit(os.Args[2:])
 		return true
+	case "check":
+		runCheck(os.Args[2:])
+		return true
 	case "admin":
 		runAdmin(os.Args[2:])
 		return true
@@ -40,7 +49,17 @@ func handleSubcommands() bool {
 func runInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "/var/lib/compute/master", "Directory for master data, keys, and SQLite state")
+	images := fs.Bool("images", false, "Bootstrap base images and the internal SSH key, then exit")
+	mode := fs.String("images-mode", "", "Image mode: download, prebuilt, build, or none (default COMPUTE_IMAGES_MODE)")
+	manifestURL := fs.String("image-manifest-url", "", "Image manifest URL (default COMPUTE_IMAGE_MANIFEST_URL)")
+	imagesDir := fs.String("images-dir", "", "Base images directory (default COMPUTE_IMAGES_DIR)")
+	sshKeyPath := fs.String("ssh-key-path", "", "Internal SSH private key path (default COMPUTE_SSH_KEY_PATH)")
 	_ = fs.Parse(args)
+
+	if *images {
+		runInitImages(*mode, *manifestURL, *imagesDir, *sshKeyPath)
+		return
+	}
 
 	fmt.Printf("Initializing Compute master in %s...\n", *dataDir)
 	if err := os.MkdirAll(*dataDir, 0700); err != nil {
@@ -88,6 +107,111 @@ func runInit(args []string) {
 	fmt.Println("\nCompute initialization complete!")
 	fmt.Println("Create the initial administrator account with:")
 	fmt.Printf("  computed admin user create --username admin --email admin@example.com --password <secret> --data-dir %s\n", *dataDir)
+}
+
+// runInitImages performs the first-run image/SSH-key bootstrap. It is used by
+// the compute-init compose service and is safe to run on every start.
+func runInitImages(mode, manifestURL, imagesDir, sshKeyPath string) {
+	cfg, _, err := config.ResolveConfig("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+	resolvedImagesDir := firstNonEmpty(imagesDir, cfg.Images.ImagesDir)
+	resolvedKeyPath := firstNonEmpty(sshKeyPath, os.Getenv("COMPUTE_SSH_KEY_PATH"))
+	if resolvedKeyPath == "" {
+		resolvedKeyPath = cfg.Images.SSHKeyPath
+		// Keep the key inside the selected images directory unless the operator
+		// pinned an explicit path; --images-dir is often a scratch/bootstrap dir.
+		if imagesDir != "" && imagesDir != cfg.Images.ImagesDir {
+			resolvedKeyPath = filepath.Join(resolvedImagesDir, "ssh", "id_ed25519")
+		}
+	}
+	opts := image.BootstrapOptions{
+		Mode:           firstNonEmpty(mode, os.Getenv("COMPUTE_IMAGES_MODE")),
+		ManifestURL:    firstNonEmpty(manifestURL, os.Getenv("COMPUTE_IMAGE_MANIFEST_URL")),
+		ImagesDir:      resolvedImagesDir,
+		KernelName:     cfg.Images.DefaultKernel,
+		RootfsName:     cfg.Images.DefaultRootfs,
+		SSHKeyPath:     resolvedKeyPath,
+		Logf:           log.Printf,
+		AllowPlainHTTP: envTruthy("COMPUTE_IMAGE_ALLOW_HTTP"),
+	}
+	res, err := image.Bootstrap(context.Background(), opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Image bootstrap failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Image bootstrap complete (mode=%s)\n", res.State.Mode)
+	if res.State.Version != "" {
+		fmt.Printf("  manifest version: %s\n", res.State.Version)
+	}
+	if opts.Mode != image.ModeNone {
+		fmt.Printf("  kernel: %s\n", filepath.Join(opts.ImagesDir, cfg.Images.DefaultKernel))
+		fmt.Printf("  rootfs: %s\n", filepath.Join(opts.ImagesDir, cfg.Images.DefaultRootfs))
+	}
+	fmt.Printf("  ssh key: %s%s\n", res.KeyPath, map[bool]string{true: " (generated)", false: ""}[res.GeneratedKey])
+	for _, path := range res.Downloaded {
+		fmt.Printf("  downloaded: %s\n", path)
+	}
+}
+
+// runCheck prints the same diagnostics as the readiness endpoint without
+// requiring a running daemon. `compute doctor` renders the endpoint version.
+func runCheck(args []string) {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	jsonOut := fs.Bool("json", false, "Print the report as JSON")
+	_ = fs.Parse(args)
+
+	cfg, _, err := config.ResolveConfig("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+	report := doctor.Run(cfg)
+	if *jsonOut {
+		_ = json.NewEncoder(os.Stdout).Encode(report)
+	} else {
+		printDoctorReport(report)
+	}
+	if !report.OK {
+		os.Exit(1)
+	}
+}
+
+func printDoctorReport(report doctor.Report) {
+	for _, check := range report.Checks {
+		status := "OK"
+		if !check.OK {
+			status = strings.ToUpper(string(check.Severity))
+		}
+		fmt.Printf("[%-8s] %-14s %s\n", status, check.Name, check.Detail)
+		if !check.OK && check.Remediation != "" {
+			fmt.Printf("           fix: %s\n", check.Remediation)
+		}
+	}
+	if report.OK {
+		fmt.Println("\nAll critical checks passed.")
+	} else {
+		fmt.Println("\nCritical checks failed; fix the items above before creating sandboxes.")
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func runAdmin(args []string) {

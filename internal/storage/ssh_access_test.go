@@ -142,17 +142,24 @@ func TestConfigureSSHAccessDebugfs(t *testing.T) {
 		t.Fatalf("drop-in does not enable password auth:\n%s", dropIn)
 	}
 
-	// Re-applying without a password must lock both accounts and remove the
-	// password policy.
+	// Re-applying without a password must disable password auth and install an
+	// unguessable placeholder password. The accounts must NOT be locked: OpenSSH
+	// 9.6 with UsePAM=no rejects locked accounts even for public-key auth.
 	if err := m.ConfigureSSHAccess(disk, SSHAccess{PublicKey: "ssh-ed25519 NEWKEY new@example"}); err != nil {
-		t.Fatalf("ConfigureSSHAccess (lock): %v", err)
+		t.Fatalf("ConfigureSSHAccess (passwordless): %v", err)
 	}
 	shadow = readGuestFile(t, disk, "/etc/shadow")
-	if got := shadowField(t, shadow, "compute", 1); got != "!" {
-		t.Fatalf("compute not locked: %q", got)
-	}
-	if got := shadowField(t, shadow, "root", 1); got != "!" {
-		t.Fatalf("root not locked: %q", got)
+	for _, user := range []string{"compute", "root"} {
+		got := shadowField(t, shadow, user, 1)
+		if got == "!" || got == "" || got == "oldroot" || got == "oldcompute" {
+			t.Fatalf("%s account is locked or empty: %q", user, got)
+		}
+		if !strings.HasPrefix(got, "$2") {
+			t.Fatalf("%s shadow entry is not a bcrypt hash: %q", user, got)
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(got), []byte("")); err == nil {
+			t.Fatalf("%s accepts an empty password", user)
+		}
 	}
 	sshd = readGuestFile(t, disk, "/etc/ssh/sshd_config")
 	if !strings.Contains(sshd, "PasswordAuthentication no") {

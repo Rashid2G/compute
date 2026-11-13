@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,13 +26,24 @@ func readDiskPrefix(path string, n int) string {
 	return string(buf[:nRead])
 }
 
-type testRunner struct{ calls [][]string }
+type testRunner struct {
+	calls [][]string
+	taps  []string
+}
 
 func (r *testRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, append([]string{name}, args...))
 	cmdStr := strings.Join(append([]string{name}, args...), " ")
 	if strings.Contains(cmdStr, "ip -o link show") {
-		return []byte("1: lo: <LOOPBACK>\n10: mftap-dead: <BROADCAST>\n"), nil
+		taps := r.taps
+		if len(taps) == 0 {
+			taps = []string{"mftap-dead"}
+		}
+		var out strings.Builder
+		for i, tap := range taps {
+			fmt.Fprintf(&out, "%d: %s: <BROADCAST>\n", i+10, tap)
+		}
+		return []byte(out.String()), nil
 	}
 	return []byte("ok"), nil
 }
@@ -245,6 +257,41 @@ func TestDeleteVMCleansTailscaleDevice(t *testing.T) {
 	}
 }
 
+func TestFlushGuestFilesystemsSyncsRunningVMs(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+
+	running := &db.VM{ID: "vm-flush", Name: "flush", Status: db.StatusRunning, IPAddress: "10.20.0.10", SSHKeyPath: "/tmp/key"}
+	noIP := &db.VM{ID: "vm-noip", Name: "noip", Status: db.StatusRunning, SSHKeyPath: "/tmp/key"}
+	stopped := &db.VM{ID: "vm-stopped-flush", Name: "stopped", Status: db.StatusStopped, IPAddress: "10.20.0.11", SSHKeyPath: "/tmp/key"}
+	for _, vm := range []*db.VM{running, noIP, stopped} {
+		if err := store.SaveVM(ctx, vm); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var synced []string
+	m.guestSyncer = func(_ context.Context, vm *db.VM) error {
+		synced = append(synced, vm.ID)
+		return nil
+	}
+
+	if got := m.FlushGuestFilesystems(ctx); got != 1 {
+		t.Fatalf("expected 1 flushed guest, got %d (synced=%v)", got, synced)
+	}
+	if len(synced) != 1 || synced[0] != running.ID {
+		t.Fatalf("expected only the running VM with an IP to be flushed, got %v", synced)
+	}
+
+	// A failing guest is logged but does not block the others.
+	m.guestSyncer = func(_ context.Context, vm *db.VM) error {
+		return fmt.Errorf("guest unreachable")
+	}
+	if got := m.FlushGuestFilesystems(ctx); got != 0 {
+		t.Fatalf("expected 0 flushed guests when sync fails, got %d", got)
+	}
+}
+
 func TestStopVMStoppedAndMissingProcess(t *testing.T) {
 	ctx := context.Background()
 	m, store, _, _ := testManager(t)
@@ -300,7 +347,6 @@ func TestSaveStateAndResumeValidateState(t *testing.T) {
 func TestReconcileAndPrune(t *testing.T) {
 	ctx := context.Background()
 	m, store, _, _ := testManager(t)
-
 	// Dead running VM
 	vmDead := &db.VM{ID: "vm-dead", Name: "dead", Status: db.StatusRunning, PID: 9999998, TAPDevice: "mftap-dead", IPAddress: "10.20.0.99"}
 	if err := store.SaveVM(ctx, vmDead); err != nil {
@@ -321,6 +367,55 @@ func TestReconcileAndPrune(t *testing.T) {
 	}
 	if loaded.Status != db.StatusStopped || loaded.PID != 0 {
 		t.Fatalf("expected dead VM to be marked stopped, got: %+v", loaded)
+	}
+}
+
+// A sandbox that is still booting keeps status "created" in the database while
+// RunVM has already created its TAP. ReconcileAndPrune runs every few seconds,
+// so it must not delete that TAP: doing so made Firecracker fail with
+// "Setting tap interface offload flags failed: File descriptor in bad state".
+func TestReconcileAndPruneKeepsTAPForBootingVM(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, runner := testManager(t)
+	runner.taps = []string{"mftap-booting", "mftap-stale", "mftap-foreign"}
+
+	booting := &db.VM{ID: "vm-booting", Name: "booting", Status: db.StatusCreated, TAPDevice: "mftap-booting"}
+	if err := store.SaveVM(ctx, booting); err != nil {
+		t.Fatal(err)
+	}
+	stale := &db.VM{ID: "vm-stale", Name: "stale", Status: db.StatusStopped, TAPDevice: "mftap-stale"}
+	if err := store.SaveVM(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := m.ReconcileAndPrune(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileAndPrune error = %v", err)
+	}
+	for _, tap := range pruned {
+		if tap == "mftap-booting" {
+			t.Fatalf("reconciler pruned the TAP of a booting VM: %v", pruned)
+		}
+		if tap == "mftap-foreign" {
+			t.Fatalf("reconciler pruned a TAP it does not own (another deployment): %v", pruned)
+		}
+	}
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "del") && strings.Contains(joined, "mftap-booting") {
+			t.Fatalf("reconciler removed the booting VM TAP: %s", joined)
+		}
+		if strings.Contains(joined, "del") && strings.Contains(joined, "mftap-foreign") {
+			t.Fatalf("reconciler removed a foreign TAP: %s", joined)
+		}
+	}
+
+	loaded, err := store.GetVM(ctx, booting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != db.StatusCreated {
+		t.Fatalf("booting VM status changed to %q", loaded.Status)
 	}
 }
 

@@ -55,6 +55,13 @@ type Config struct {
 	GatewayIP     string   `json:"gateway_ip,omitempty"`     // e.g. "192.168.1.1" (main router)
 	LinkedBridges []string `json:"linked_bridges,omitempty"` // Explicit list of bridges to link
 	BaseDomain    string   `json:"base_domain,omitempty"`    // e.g. "preview.localhost", "compute.internal"
+
+	// LinkAllBridges links every bridge found on the host to this manager's
+	// primary bridge. It is opt-in (COMPUTE_LINK_OTHER_BRIDGES=1) because a
+	// shared host can already run other bridges (Docker, another Compute
+	// daemon/worker, libvirt). Auto-linking those creates L2 loops and MAC
+	// flaps that make unrelated sandboxes unreachable.
+	LinkAllBridges bool `json:"link_all_bridges,omitempty"`
 }
 
 // DefaultNATConfig returns standard NAT network configuration
@@ -250,8 +257,8 @@ func (m *Manager) EnsureNetwork(ctx context.Context) error {
 		_, _ = m.runner.Run(ctx, "ip", "link", "set", "dev", nic, "up")
 	}
 
-	// 5. Link all other bridges on the host VM to this main bridge via veth pairs
-	// so the host, VMs, and other bridged networks can use the NIC to access main DHCP
+	// 5. Link explicitly configured bridges to this main bridge. Automatic
+	// linking of every host bridge is opt-in only; see linkOtherBridgesLocked.
 	_, _ = m.linkOtherBridgesLocked(ctx)
 
 	// 6. Enable IPv4 forwarding and bridge netfilter settings
@@ -306,12 +313,16 @@ func (m *Manager) ListOtherBridges(ctx context.Context) ([]string, error) {
 	return bridges, nil
 }
 
-// linkOtherBridgesLocked links any other bridges on the host system to the primary bridge
-// via veth pairs so all bridges share L2 access to the host NIC and main router DHCP.
+// linkOtherBridgesLocked links explicitly configured bridges to the primary
+// bridge via veth pairs so they share L2 access to the host NIC and the main
+// router's DHCP. It deliberately does not sweep every bridge on the host: a
+// shared host may run Docker bridges, other Compute daemons/workers, or
+// libvirt bridges, and linking those creates loops and MAC flaps. Set
+// LinkAllBridges (COMPUTE_LINK_OTHER_BRIDGES=1) to opt into the old behavior.
 func (m *Manager) linkOtherBridgesLocked(ctx context.Context) ([]string, error) {
-	otherBridges, err := m.ListOtherBridges(ctx)
-	if err != nil {
-		otherBridges = nil
+	var otherBridges []string
+	if m.cfg.LinkAllBridges {
+		otherBridges, _ = m.ListOtherBridges(ctx)
 	}
 
 	// Also include any explicitly configured linked bridges
@@ -1081,19 +1092,25 @@ func (m *Manager) ListHostTAPs(ctx context.Context) ([]string, error) {
 	return taps, nil
 }
 
-// PruneOrphanTAPs deletes any TAP devices matching "mftap-" that are not in the activeTAPs map
-func (m *Manager) PruneOrphanTAPs(ctx context.Context, activeTAPs map[string]bool) ([]string, error) {
+// PruneOrphanTAPs deletes host TAP devices that are known to this manager but
+// are no longer active. knownTAPs is the set of TAP names recorded on this
+// store's VM records. Hosts may run more than one Compute deployment (a control
+// plane plus a worker, or several installations), and each one creates
+// "mftap-*" devices; blindly deleting every "mftap-*" device that is not in
+// this manager's active set tears down another deployment's running sandboxes.
+func (m *Manager) PruneOrphanTAPs(ctx context.Context, activeTAPs, knownTAPs map[string]bool) ([]string, error) {
 	hostTAPs, err := m.ListHostTAPs(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var pruned []string
 	for _, tap := range hostTAPs {
-		if !activeTAPs[tap] {
-			m.RemoveAntiSpoofAndIsolation(ctx, IsolationConfig{TAPDevice: tap})
-			if _, err := m.runner.Run(ctx, "ip", "link", "del", "dev", tap); err == nil {
-				pruned = append(pruned, tap)
-			}
+		if activeTAPs[tap] || !knownTAPs[tap] {
+			continue
+		}
+		m.RemoveAntiSpoofAndIsolation(ctx, IsolationConfig{TAPDevice: tap})
+		if _, err := m.runner.Run(ctx, "ip", "link", "del", "dev", tap); err == nil {
+			pruned = append(pruned, tap)
 		}
 	}
 	return pruned, nil
