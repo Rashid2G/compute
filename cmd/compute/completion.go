@@ -20,7 +20,7 @@ _compute_completion() {
     fi
     local completion_command="${words[0]}"
 
-    local commands="sandbox vm ssh job jobs worker workers pool pools image images template templates url gui completion help"
+    local commands="sandbox vm ssh job jobs worker workers pool pools image images template templates url gui completion help scp"
     local sandbox_subcommands="list create start stop delete exec ssh info url"
     local job_subcommands="run list info logs cancel"
     local worker_subcommands="token list info cordon drain delete"
@@ -137,6 +137,7 @@ _compute() {
         'image:Manage base and custom rootfs images'
         'template:Manage VM disk templates'
         'url:Print a sandbox URL or SSH target'
+        'scp:Copy files between local host and sandboxes'
         'gui:Launch Web UI dashboard'
         'completion:Generate shell autocompletion script'
         'help:Show help documentation'
@@ -166,7 +167,7 @@ _compute "$@"
 `
 
 const fishCompletionScript = `# fish completion for compute
-set -l commands sandbox vm job jobs worker workers pool pools image images template templates url gui completion help
+set -l commands sandbox vm job jobs worker workers pool pools image images template templates url gui completion help scp
 
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a sandbox -d "Manage isolated compute sandboxes"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a vm -d "Manage isolated compute sandboxes (alias)"
@@ -176,6 +177,7 @@ complete -c compute -n "not __fish_seen_subcommand_from $commands" -a pool -d "M
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a image -d "Manage base and custom rootfs images"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a template -d "Manage VM disk templates"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a url -d "Print a sandbox URL or SSH target"
+complete -c compute -n "not __fish_seen_subcommand_from $commands" -a scp -d "Copy files between local host and sandboxes"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a gui -d "Launch Web UI dashboard"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a completion -d "Generate completion script"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a help -d "Show help documentation"

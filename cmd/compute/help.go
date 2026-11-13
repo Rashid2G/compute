@@ -87,6 +87,28 @@ Examples:
   compute sandbox cp my-box:/workspace/results.json ./results.json
   compute sandbox cp box-1:/workspace/data.bin box-2:/workspace/data.bin`,
 
+	"scp": `Copy files and directories between the local host and sandboxes (scp-style).
+
+Usage:
+  compute scp [-r] <src> [<src>...] <dst>
+
+Remote paths are written as <sandbox>:<path>; local paths as plain paths.
+Directory sources require -r. A trailing slash on a remote directory source
+(e.g. trigger:/home/) copies the directory's contents.
+
+Flags:
+  -r, --recursive     Recursively copy directories (required for directory sources).
+
+Examples:
+  compute scp ./file trigger:/home/        push a file into a sandbox
+  compute scp trigger:/home/file ./        pull a file from a sandbox
+  compute scp -r ./mydir trigger:/home/    push a directory tree
+  compute scp -r trigger:/home/logs ./     pull a directory tree
+  compute scp a.txt b.txt trigger:/tmp/    push multiple files
+
+Transfers run as the sandbox's default user ('compute'); a user@ prefix on
+the sandbox name is accepted and ignored.`,
+
 	"process": `Inspect and manage processes inside running sandboxes.
 
 Usage:
