@@ -113,6 +113,11 @@ services:
     depends_on:
       computed:
         condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
+      COMPUTE_API_KEY: ${COMPUTE_API_KEY:-}
     entrypoint:
       - /usr/local/bin/compute
       - gui

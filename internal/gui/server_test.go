@@ -150,3 +150,47 @@ func TestCheckDaemonReachable(t *testing.T) {
 		t.Fatalf("expected test server %s to be reachable", ts.URL)
 	}
 }
+
+func TestGUIHandlerProxyFallbackAuth(t *testing.T) {
+	var capturedAuth string
+	mockDaemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer mockDaemon.Close()
+
+	t.Setenv("COMPUTE_ADMIN_SECRET", "test-secret-123")
+
+	handler, err := NewHandler(mockDaemon.URL)
+	if err != nil {
+		t.Fatalf("NewHandler error = %v", err)
+	}
+
+	guiServer := httptest.NewServer(handler)
+	defer guiServer.Close()
+
+	// 1. Unauthenticated request receives fallback secret
+	capturedAuth = ""
+	resp1, err := http.Get(guiServer.URL + "/api/v1/vms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp1.Body.Close()
+	if capturedAuth != "Bearer test-secret-123" {
+		t.Errorf("expected fallback auth header 'Bearer test-secret-123', got %q", capturedAuth)
+	}
+
+	// 2. Request with explicit Authorization header preserves caller's header
+	capturedAuth = ""
+	req, _ := http.NewRequest("GET", guiServer.URL+"/api/v1/vms", nil)
+	req.Header.Set("Authorization", "Bearer user-token-456")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if capturedAuth != "Bearer user-token-456" {
+		t.Errorf("expected caller auth header 'Bearer user-token-456', got %q", capturedAuth)
+	}
+}
