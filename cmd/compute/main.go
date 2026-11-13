@@ -91,6 +91,10 @@ func main() {
 		handleSandboxCpCommand(ctx, client, os.Args[2:])
 		return
 
+	case "scp":
+		handleSandboxScpCommand(ctx, client, os.Args[2:])
+		return
+
 	case "process", "processes", "ps":
 		handleSandboxProcessCommand(ctx, client, os.Args[2:])
 		return
@@ -209,6 +213,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "Tools & Utilities:")
 	fmt.Fprintln(w, "  file               Read, write, list, mkdir, and remove files in sandboxes")
 	fmt.Fprintln(w, "  cp                 Copy files between local host and sandboxes")
+	fmt.Fprintln(w, "  scp                Copy files/directories to and from sandboxes (scp-style, -r for directories)")
 	fmt.Fprintln(w, "  process, ps        List, start, and kill processes inside sandboxes")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
