@@ -174,11 +174,21 @@ after a restart.
 docker compose --profile worker up -d
 ```
 
+`--name` pins the token to that worker name. Without it, the token binds to the
+first worker that enrolls. Either way the worker may reconnect with the same
+name and token after a restart, including after the 30-minute enrollment
+expiry; a different name is rejected. Set `COMPUTE_WORKER_NAME` to the same
+value on the worker so the identity stays stable.
+
 The worker must share the base images (`COMPUTE_HOST_DATA_DIR/images`) and have
 its own `/dev/kvm`, `cgroup: host`, and privileged access. It refuses to start
 without a token. `COMPUTE_WORKER_ALLOW_LOCAL_EXEC=true` is a development-only
 escape hatch that runs commands on the host shell; never enable it in
 production.
+
+The `worker` profile is intended for a separate host. Running it on the same
+host as `computed` makes both deployments share `/dev/kvm`, the host sandbox
+bridge/subnet, and capacity; use that only for smoke tests.
 
 ### DNS and HTTP edge
 
@@ -203,8 +213,14 @@ docker compose up -d
 ```
 
 The data volume (`COMPUTE_HOST_DATA_DIR`, default `./data`) and database are
-preserved. Running microVMs are re-adopted when the daemon restarts because the
-daemon process is replaced without killing Firecracker and reconciles by PID.
+preserved. A Docker restart replaces the container's PID namespace, so the
+Firecracker processes die with the daemon: on startup the control plane marks
+those sandboxes `stopped` and restarts the ones with `desired_running=true`.
+Before exiting, the daemon asks running guests to `sync` their disks so writes
+are not lost and the filesystems stay consistent. Expect running sandboxes to
+reboot once; their disks and data survive. (The legacy systemd install keeps the
+daemon process separate from Firecracker, so there it re-adopts running VMs by
+PID instead.)
 
 If you run the legacy systemd units instead of Compose, add
 `COMPUTE_ADMIN_PASSWORD` (or `COMPUTE_ADMIN_SECRET`) to the daemon's
@@ -213,16 +229,26 @@ and `computed` refuses to start without a credential.
 
 ## Backup
 
-Back up the data directory while the daemon is stopped or quiesced:
+Stop the daemon and sandboxes first so the SQLite database and VM disks are
+consistent, then archive the data directory. The daemon writes as root inside
+the container (database, `images/ssh` private key, VM disks), so the archive
+command needs `sudo`. VM disks are sparse 50 GB files: `--sparse` keeps the
+archive small instead of copying tens of gigabytes of holes.
 
 ```bash
+./bin/compute sandbox stop '*' || true   # quoted: the CLI expands the glob
 docker compose stop computed
-tar -C ./data -czf compute-backup-$(date +%F).tar.gz .
+sudo tar --sparse -C ./data -czf compute-backup-$(date +%F).tar.gz .
 docker compose start computed
 ```
 
 The archive contains the SQLite database, base images, VM disks, and the
 internal SSH key. Store it encrypted; the SSH key grants access to sandboxes.
+On the lab host a full archive of a small install is roughly 500 MB and takes
+several minutes, mostly gzip on the multi-gigabyte images.
+
+If you only need the control-plane state (no VM disks), back up
+`data/data/compute.db` and `data/images/ssh/` instead.
 
 ## Uninstall
 
@@ -244,7 +270,7 @@ The host prep changes (`sysctl net.ipv4.ip_forward=1`, loaded modules, the
 | `compute-init` fails with `COMPUTE_IMAGE_MANIFEST_URL is not set` | No release manifest is published yet. Build images with `scripts/build-rootfs.sh` and keep `COMPUTE_IMAGES_MODE=build`, or set a manifest URL. |
 | Readiness fails with `kernel`/`rootfs` | Check `COMPUTE_HOST_DATA_DIR/images`, re-run `docker compose up compute-init`, and confirm the image files are valid ELF/ext4. |
 | Readiness fails with `kvm` | Enable virtualization/nested KVM on the host and ensure `/dev/kvm` is passed through (`chmod 666 /dev/kvm` on the host if needed). |
-| `host_network` readiness failure | `computed` must keep `network_mode: host`; bridge-mode networking hides the bridge/TAPs from the host. |
+| `host_network` readiness failure | `computed` must keep `network_mode: host` and set `COMPUTE_HOST_NETWORK=1`; bridge-mode networking hides the bridge/TAPs from the host. `docker run` users need the same flag. |
 | `bridge` readiness failure | The daemon creates `mft3br0`; check `docker compose logs computed` for NET_ADMIN or permission errors, and run `scripts/host-prepare.sh`. |
 | Port 18080/80/53 already in use | Change `COMPUTE_API_PORT`, or stop the conflicting service (systemd-resolved for 53). |
 | `docker compose` complains about `COMPUTE_VERSION` | Set `COMPUTE_VERSION` in `.env`; it is intentionally required to pin upgrades. |

@@ -68,7 +68,9 @@ docker compose --profile worker up -d
 ```
 
 A worker with the same `COMPUTE_WORKER_NAME` and token reconnects safely after
-a restart. Workers require their own `/dev/kvm`, host networking, and cgroups.
+a restart, including after the token expires; `--name` pins the token to one
+worker, while an unnamed token binds to the first worker that enrolls. Workers
+require their own `/dev/kvm`, host networking, and cgroups.
 
 ### 3. Run Compute Tasks (Agent Workflow)
 
