@@ -83,6 +83,18 @@ func main() {
 		handleSandboxCommand(ctx, client, os.Args[2:])
 		return
 
+	case "file", "files":
+		handleSandboxFileCommand(ctx, client, os.Args[2:])
+		return
+
+	case "cp":
+		handleSandboxCpCommand(ctx, client, os.Args[2:])
+		return
+
+	case "process", "processes", "ps":
+		handleSandboxProcessCommand(ctx, client, os.Args[2:])
+		return
+
 	case "job", "jobs":
 		handleJobCommand(ctx, client, os.Args[2:])
 		return
@@ -195,6 +207,9 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  keys               Manage saved SSH public keys (list, add, update, apply, delete)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Tools & Utilities:")
+	fmt.Fprintln(w, "  file               Read, write, list, mkdir, and remove files in sandboxes")
+	fmt.Fprintln(w, "  cp                 Copy files between local host and sandboxes")
+	fmt.Fprintln(w, "  process, ps        List, start, and kill processes inside sandboxes")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
 	fmt.Fprintln(w, "  doctor, check      Print daemon readiness checks with remediation for failures")
@@ -557,6 +572,15 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 
 	case "templates", "template":
 		handleTemplateCommand(ctx, client, append([]string{"list"}, subArgs...))
+
+	case "file", "files":
+		handleSandboxFileCommand(ctx, client, subArgs)
+
+	case "cp":
+		handleSandboxCpCommand(ctx, client, subArgs)
+
+	case "process", "processes", "ps":
+		handleSandboxProcessCommand(ctx, client, subArgs)
 
 	default:
 		printCommandError(fmt.Sprintf("unknown sandbox command '%s'.", sub), "", "sandbox")
