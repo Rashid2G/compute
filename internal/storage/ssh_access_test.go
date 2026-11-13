@@ -216,6 +216,56 @@ func TestConfigureAuthorizedKeysPreservesPasswordPolicy(t *testing.T) {
 	}
 }
 
+func TestConfigureAuthorizedKeysUnlocksLockedAccounts(t *testing.T) {
+	for _, tool := range []string{"truncate", "mkfs.ext4", "debugfs"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available: %v", tool, err)
+		}
+	}
+
+	dir := t.TempDir()
+	disk := filepath.Join(dir, "rootfs.ext4")
+	if out, err := exec.Command("truncate", "-s", "32M", disk).CombinedOutput(); err != nil {
+		t.Fatalf("truncate: %v: %s", err, out)
+	}
+	if out, err := exec.Command("mkfs.ext4", "-F", "-q", disk).CombinedOutput(); err != nil {
+		t.Fatalf("mkfs.ext4: %v: %s", err, out)
+	}
+
+	// Legacy state created prior to c065c73 has accounts locked with '!'
+	writeGuestFile(t, disk, "/etc/shadow", "root:!:19000:0:99999:7:::\ncompute:!:19000:0:99999:7:::\n")
+	writeGuestFile(t, disk, "/etc/ssh/sshd_config", "PasswordAuthentication no\n")
+
+	m, err := NewManager(Config{BaseImagesDir: dir, VMsDir: filepath.Join(dir, "vms"), TemplatesDir: filepath.Join(dir, "templates"), SSHKeyPath: filepath.Join(dir, "missing-key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.ConfigureAuthorizedKeys(disk, "ssh-ed25519 RECONCILEKEY user@example"); err != nil {
+		t.Fatalf("ConfigureAuthorizedKeys: %v", err)
+	}
+
+	// Verify keys were written
+	for _, path := range []string{"/root/.ssh/authorized_keys", "/home/compute/.ssh/authorized_keys"} {
+		keys := readGuestFile(t, disk, path)
+		if !strings.Contains(keys, "RECONCILEKEY") {
+			t.Fatalf("%s does not contain RECONCILEKEY:\n%s", path, keys)
+		}
+	}
+
+	// Verify shadow accounts are unlocked (no longer '!') and have valid bcrypt hashes
+	shadow := readGuestFile(t, disk, "/etc/shadow")
+	for _, user := range []string{"compute", "root"} {
+		got := shadowField(t, shadow, user, 1)
+		if got == "!" || got == "" || strings.HasPrefix(got, "!") || strings.HasPrefix(got, "*") {
+			t.Fatalf("%s account is still locked: %q", user, got)
+		}
+		if !strings.HasPrefix(got, "$2") {
+			t.Fatalf("%s shadow entry is not a bcrypt hash: %q", user, got)
+		}
+	}
+}
+
 func writeGuestFile(t *testing.T, disk, path, content string) {
 	t.Helper()
 	tmp := filepath.Join(t.TempDir(), "content")

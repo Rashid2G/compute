@@ -527,6 +527,21 @@ func (c *DaemonClient) ApplyKey(ctx context.Context, idOrName string) (*KeyApply
 	return &res, nil
 }
 
+func (c *DaemonClient) ReconcileKeys(ctx context.Context) (*KeyApplyResult, error) {
+	var res struct {
+		Status string            `json:"status"`
+		Sync   *vm.SSHKeySyncResult `json:"sync"`
+	}
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys/reconcile", nil, &res); err != nil {
+		return nil, err
+	}
+	return &KeyApplyResult{Sync: res.Sync}, nil
+}
+
+func (c *DaemonClient) ReconcileSandboxSSH(ctx context.Context, idOrName string) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(idOrName)+"/reconcile-ssh", nil, nil)
+}
+
 func (c *DaemonClient) GetKey(ctx context.Context, idOrName string) (*db.SSHKey, error) {
 	var key db.SSHKey
 	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/keys/"+idOrName, nil, &key); err != nil {

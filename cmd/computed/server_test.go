@@ -136,11 +136,11 @@ func TestQueueEndpoint(t *testing.T) {
 	}
 }
 
-func TestDiskSpaceIssueOnCreate(t *testing.T) {
+func TestUnsupportedImageOnCreate(t *testing.T) {
 	server := newTestServer(t)
 	client := server.Client()
 
-	// Try creating with a nonexistent image
+	// Try creating with a nonexistent/unsupported image
 	createReq := vm.CreateRequest{Name: "bad-img-vm", Image: "nonexistent-distro"}
 	data, _ := json.Marshal(createReq)
 	resp, err := client.Post(server.URL+"/api/v1/vms", "application/json", strings.NewReader(string(data)))
@@ -150,13 +150,59 @@ func TestDiskSpaceIssueOnCreate(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 Bad Request for disk space issue, got %d", resp.StatusCode)
+		t.Fatalf("expected 400 Bad Request for unsupported image, got %d", resp.StatusCode)
 	}
 
 	var errResp map[string]string
 	_ = json.NewDecoder(resp.Body).Decode(&errResp)
-	if !strings.Contains(errResp["error"], "disk space issue") {
-		t.Fatalf("expected error mentioning 'disk space issue', got: %v", errResp)
+	if !strings.Contains(errResp["error"], "unsupported image") {
+		t.Fatalf("expected error mentioning 'unsupported image', got: %v", errResp)
+	}
+	// Verify it does NOT misclassify as disk space issue
+	if strings.Contains(errResp["error"], "disk space issue") {
+		t.Fatalf("unexpected 'disk space issue' in image error: %v", errResp)
+	}
+}
+
+func TestProtectedVMDeleteReportsHumanReadableName(t *testing.T) {
+	server := newTestServer(t)
+	client := server.Client()
+
+	// Create a protected sandbox named user-flow-box
+	prot := true
+	createReq := vm.CreateRequest{Name: "user-flow-box", Protected: &prot}
+	data, _ := json.Marshal(createReq)
+	resp, err := client.Post(server.URL+"/api/v1/vms", "application/json", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", resp.StatusCode)
+	}
+
+	// Attempt to delete it
+	delReq, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/vms/user-flow-box", nil)
+	delResp, err := client.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delResp.Body.Close()
+
+	if delResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d", delResp.StatusCode)
+	}
+	var errResp map[string]string
+	_ = json.NewDecoder(delResp.Body).Decode(&errResp)
+
+	errMsg := errResp["error"]
+	expectedMsg := "item user-flow-box is protected against deletion"
+	if errMsg != expectedMsg {
+		t.Fatalf("expected exact error %q, got %q", expectedMsg, errMsg)
+	}
+	// Verify no internal identifier ins_ was leaked
+	if strings.Contains(errMsg, "ins_") {
+		t.Fatalf("internal database identifier leaked in error: %q", errMsg)
 	}
 }
 
