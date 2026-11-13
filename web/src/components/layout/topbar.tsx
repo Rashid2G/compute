@@ -8,9 +8,13 @@ import {
   Search,
   Terminal,
   Zap,
+  User,
+  LogOut,
+  Lock,
 } from 'lucide-react';
 
 import type { PageId, PageMeta } from '@/lib/navigation';
+import type { AuthUser } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface TopbarProps {
@@ -23,6 +27,9 @@ interface TopbarProps {
   daemonOnline: boolean;
   latency: number | null;
   wsConnected: boolean;
+  user?: AuthUser | null;
+  onOpenLogin?: () => void;
+  onLogout?: () => void;
 }
 
 export function Topbar({
@@ -35,6 +42,9 @@ export function Topbar({
   daemonOnline,
   latency,
   wsConnected,
+  user,
+  onOpenLogin,
+  onLogout,
 }: TopbarProps) {
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur-none">
@@ -96,6 +106,37 @@ export function Topbar({
             <KeyRound className="h-3.5 w-3.5 text-muted-foreground" />
             <span>SSH Keys</span>
           </button>
+
+          {/* User Account / Auth Status */}
+          {user ? (
+            <div className="flex items-center gap-1 border border-border bg-background px-2 h-8 text-xs text-foreground">
+              <span className="flex items-center gap-1.5 font-medium truncate max-w-[120px]">
+                <User className="h-3.5 w-3.5 text-emerald-500" />
+                <span>{user.username}</span>
+              </span>
+              {onLogout && (
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  title="Sign out"
+                  className="ml-1 p-1 text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  <LogOut className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          ) : (
+            onOpenLogin && (
+              <button
+                type="button"
+                onClick={onOpenLogin}
+                className="flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-xs text-foreground hover:bg-muted transition-colors"
+              >
+                <Lock className="h-3.5 w-3.5 text-muted-foreground" />
+                <span>Sign in</span>
+              </button>
+            )
+          )}
 
           {/* Signature boat.dev/dashboard Split Action Button [ ▷ New | ⌄ ] */}
           <div className="inline-flex items-center">

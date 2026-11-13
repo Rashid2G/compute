@@ -190,7 +190,8 @@ export function useCluster(): ClusterSnapshot {
       if (unmounted) return;
 
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/ws`;
+      const token = api.getAuthToken();
+      const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 
       try {
         const ws = new WebSocket(wsUrl);
@@ -241,8 +242,13 @@ export function useCluster(): ClusterSnapshot {
       }
     }
 
-    void refresh(true);
-    connect();
+    void (async () => {
+      await api.ensureAuth();
+      if (!unmounted) {
+        void refresh(true);
+        connect();
+      }
+    })();
 
     return () => {
       unmounted = true;

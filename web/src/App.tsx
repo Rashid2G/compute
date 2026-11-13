@@ -5,15 +5,16 @@ import { CommandPalette } from '@/components/command-palette';
 import { CreateVMDialog } from '@/components/create-vm-dialog';
 import { DeleteVMDialog } from '@/components/delete-vm-dialog';
 import { InspectVMDialog } from '@/components/inspect-vm-dialog';
+import { LoginDialog } from '@/components/login-dialog';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Topbar } from '@/components/layout/topbar';
 import { SSHKeysDialog } from '@/components/ssh-keys-dialog';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useCluster } from '@/hooks/use-cluster';
-import { api, errorMessage } from '@/lib/api';
+import { api, errorMessage, onUnauthorized } from '@/lib/api';
 import { PAGES, resolvePageId, type PageId } from '@/lib/navigation';
-import type { CreateVMRequest, VM } from '@/lib/types';
+import type { AuthUser, CreateVMRequest, VM } from '@/lib/types';
 import { AccessPage } from '@/pages/access';
 import { ApiPage } from '@/pages/api';
 import { ConsolePage } from '@/pages/console';
@@ -65,9 +66,39 @@ export default function App() {
   const [inspectTarget, setInspectTarget] = useState<VM | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VM | null>(null);
   const [consoleVMID, setConsoleVMID] = useState<string | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => api.getAuthUser());
 
   const cluster = useCluster();
   const currentPage = PAGES.find((item) => item.id === page) ?? PAGES[0];
+
+  useEffect(() => {
+    return onUnauthorized(() => {
+      setLoginOpen(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const me = await api.me();
+        setAuthUser(me.user);
+      } catch {
+        const ok = await api.ensureAuth();
+        if (ok) {
+          setAuthUser(api.getAuthUser());
+        }
+      }
+    })();
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await api.logout();
+    setAuthUser(null);
+    setLoginOpen(true);
+    toast.info('Signed out');
+    await cluster.refresh(true);
+  }, [cluster]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -133,13 +164,14 @@ export default function App() {
   );
 
   async function startVM(vm: VM) {
-    const toastID = toast.loading(`Starting ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Starting ${vmName}…`);
     try {
       await api.runVM(vm.id);
-      toast.success(`${vm.name} started`, { id: toastID });
+      toast.success(`${vmName} started`, { id: toastID });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not start ${vm.name}`, {
+      toast.error(`Could not start ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -147,13 +179,14 @@ export default function App() {
   }
 
   async function stopVM(vm: VM) {
-    const toastID = toast.loading(`Stopping ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Stopping ${vmName}…`);
     try {
       await api.stopVM(vm.id);
-      toast.success(`${vm.name} stopped`, { id: toastID });
+      toast.success(`${vmName} stopped`, { id: toastID });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not stop ${vm.name}`, {
+      toast.error(`Could not stop ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -161,16 +194,17 @@ export default function App() {
   }
 
   async function snapshotVM(vm: VM) {
-    const toastID = toast.loading(`Snapshotting ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Snapshotting ${vmName}…`);
     try {
       await api.snapshotVM(vm.id);
-      toast.success(`${vm.name} snapshotted`, {
+      toast.success(`${vmName} snapshotted`, {
         id: toastID,
         description: 'Guest memory state was saved to disk.',
       });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not snapshot ${vm.name}`, {
+      toast.error(`Could not snapshot ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -178,13 +212,14 @@ export default function App() {
   }
 
   async function resumeVM(vm: VM) {
-    const toastID = toast.loading(`Resuming ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Resuming ${vmName}…`);
     try {
       await api.resumeVM(vm.id);
-      toast.success(`${vm.name} resumed`, { id: toastID });
+      toast.success(`${vmName} resumed`, { id: toastID });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not resume ${vm.name}`, {
+      toast.error(`Could not resume ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -196,10 +231,12 @@ export default function App() {
     autoStart: boolean,
     options?: { setupScript?: string },
   ) {
-    const toastID = toast.loading(`Provisioning ${payload.name}…`);
+    const targetName = payload.name?.trim() || 'sandbox';
+    const toastID = toast.loading(`Provisioning ${targetName}…`);
     try {
       const created = await api.createVM(payload);
-      toast.success(`${created.name} provisioned`, {
+      const createdName = created?.name || targetName;
+      toast.success(`${createdName} provisioned`, {
         id: toastID,
         description: created.ip_address
           ? `Address ${created.ip_address}`
@@ -207,13 +244,13 @@ export default function App() {
       });
 
       if (autoStart) {
-        const bootID = toast.loading(`Booting ${created.name}…`);
+        const bootID = toast.loading(`Booting ${createdName}…`);
         try {
           await api.runVM(created.id);
-          toast.success(`${created.name} is running`, { id: bootID });
+          toast.success(`${createdName} is running`, { id: bootID });
           setConsoleVMID(created.id);
         } catch (error) {
-          toast.error(`Could not boot ${created.name}`, {
+          toast.error(`Could not boot ${createdName}`, {
             id: bootID,
             description: errorMessage(error),
           });
@@ -222,7 +259,7 @@ export default function App() {
 
       const script = options?.setupScript?.trim();
       if (script && autoStart) {
-        const scriptID = toast.loading(`Running setup script in ${created.name}…`);
+        const scriptID = toast.loading(`Running setup script in ${createdName}…`);
         try {
           const res = await api.execVM(created.id, {
             command: script,
@@ -246,13 +283,14 @@ export default function App() {
 
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not provision ${payload.name}`, {
+      toast.error(`Could not provision ${targetName}`, {
         id: toastID,
         description: errorMessage(error),
       });
       throw error;
     }
   }
+
 
   async function deleteVM(id: string) {
     const toastID = toast.loading(`Deleting ${id}…`);
@@ -472,6 +510,9 @@ export default function App() {
             onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
             onSetTheme={setTheme}
             onOpenCommandPalette={() => setCommandOpen(true)}
+            user={authUser}
+            onOpenLogin={() => setLoginOpen(true)}
+            onLogout={handleLogout}
           />
         </aside>
 
@@ -487,6 +528,9 @@ export default function App() {
               onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
               onSetTheme={setTheme}
               onOpenCommandPalette={() => setCommandOpen(true)}
+              user={authUser}
+              onOpenLogin={() => setLoginOpen(true)}
+              onLogout={handleLogout}
             />
           </SheetContent>
         </Sheet>
@@ -503,6 +547,9 @@ export default function App() {
               daemonOnline={cluster.daemonOnline}
               latency={cluster.latency}
               wsConnected={cluster.wsConnected}
+              user={authUser}
+              onOpenLogin={() => setLoginOpen(true)}
+              onLogout={handleLogout}
             />
           </div>
 
@@ -546,6 +593,15 @@ export default function App() {
           open={deleteTarget !== null}
           onOpenChange={(open) => !open && setDeleteTarget(null)}
           onConfirm={(id) => deleteVM(id)}
+        />
+
+        <LoginDialog
+          open={loginOpen}
+          onOpenChange={setLoginOpen}
+          onSuccess={() => {
+            setAuthUser(api.getAuthUser());
+            void cluster.refresh(true);
+          }}
         />
 
         <Toaster position="bottom-right" richColors />
