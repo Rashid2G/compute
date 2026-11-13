@@ -136,6 +136,50 @@ func (s *Store) ConsumeWorkerTokenAtomic(ctx context.Context, token string) erro
 	return nil
 }
 
+// AuthorizeWorkerToken validates a worker enrollment token and allows a
+// worker with the same name to reconnect with it. The first connection marks
+// the token as used; subsequent connections are accepted only when the
+// X-Worker-Name header matches the name the token was bound to. This keeps
+// single-use enrollment while making worker restarts reconnect-safe.
+func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	t := new(WorkerToken)
+	err = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).
+		Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("invalid worker token")
+	}
+	if time.Now().After(t.ExpiresAt) {
+		return fmt.Errorf("worker token expired")
+	}
+	if t.UsedAt != nil {
+		// Reconnect: allow the same enrolled worker. Tokens bound to a name
+		// require the client to present that name; named tokens are never
+		// reusable by a different worker.
+		if t.Name == "" || workerName == "" || !strings.EqualFold(t.Name, workerName) {
+			return fmt.Errorf("worker token already consumed by another worker")
+		}
+		return nil
+	}
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=? WHERE token=? AND used_at IS NULL`, now, token)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("worker token already consumed by another worker")
+	}
+	return tx.Commit()
+}
+
+// ListWorkerTokens returns all enrollment tokens.
 func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

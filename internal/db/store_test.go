@@ -460,6 +460,60 @@ func TestStore_FailStaleJobs(t *testing.T) {
 	}
 }
 
+func TestStore_AuthorizeWorkerTokenReconnect(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	tok := &WorkerToken{
+		Token:     "tok-reconnect",
+		Name:      "worker-a",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, tok); err != nil {
+		t.Fatalf("SaveWorkerToken: %v", err)
+	}
+
+	// First enrollment succeeds and consumes the token.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", "worker-a"); err != nil {
+		t.Fatalf("first authorize: %v", err)
+	}
+	// The same named worker may reconnect after a restart.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", "worker-a"); err != nil {
+		t.Fatalf("reconnect with same name: %v", err)
+	}
+	// A different worker name is rejected.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", "intruder"); err == nil {
+		t.Fatal("expected different worker name to be rejected")
+	}
+	// Missing name is rejected once the token has been consumed.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", ""); err == nil {
+		t.Fatal("expected empty worker name to be rejected after consumption")
+	}
+	// Unknown token is rejected.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-missing", "worker-a"); err == nil {
+		t.Fatal("expected unknown token to be rejected")
+	}
+	// Expired token is rejected.
+	expired := &WorkerToken{
+		Token:     "tok-expired",
+		Name:      "worker-b",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(-time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, expired); err != nil {
+		t.Fatalf("SaveWorkerToken expired: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-expired", "worker-b"); err == nil {
+		t.Fatal("expected expired token to be rejected")
+	}
+}
+
 func TestStore_NewEntities(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(filepath.Join(tmpDir, "test.db"))

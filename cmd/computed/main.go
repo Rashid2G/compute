@@ -15,6 +15,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
 	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
@@ -78,6 +79,9 @@ func main() {
 	if err != nil && *configFile != "" {
 		log.Fatalf("Failed to load specified configuration from %s: %v", *configFile, err)
 	}
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
 	globalCfg.ConfigPath = loadedPath
 
 	// Legacy network config flag override
@@ -138,6 +142,30 @@ func main() {
 			globalCfg.Server.CgroupEnforce = *cgroupEnforceFlag
 		}
 	})
+
+	// Authentication is on by default. Refuse to start without a credential
+	// instead of falling back to a generated password that nobody can read.
+	if globalCfg.Server.AuthEnabled && globalCfg.Server.AdminPassword == "" && globalCfg.Server.AdminSecret == "" {
+		log.Fatalf("Authentication is enabled but no admin credential is configured. Set COMPUTE_ADMIN_PASSWORD (recommended) or COMPUTE_ADMIN_SECRET in .env, or set COMPUTE_AUTH_ENABLED=false for a loopback-only development host.")
+	}
+	if (globalCfg.Server.TLSCertFile == "") != (globalCfg.Server.TLSKeyFile == "") {
+		log.Fatalf("COMPUTE_TLS_CERT_FILE and COMPUTE_TLS_KEY_FILE must both be set (or both be empty).")
+	}
+
+	// Fail before creating any host state if KVM, firecracker, images or the
+	// internal SSH key are missing. The readiness endpoint repeats these checks
+	// with remediation after startup.
+	if report := doctor.Preflight(globalCfg); !report.OK && !envTruthy("COMPUTE_ALLOW_UNREADY_STARTUP") {
+		for _, c := range report.Failures() {
+			if c.Severity == doctor.Critical {
+				log.Printf("[computed] preflight failed: %s: %s", c.Name, c.Detail)
+				if c.Remediation != "" {
+					log.Printf("[computed]   fix: %s", c.Remediation)
+				}
+			}
+		}
+		log.Fatalf("Startup preflight failed. Fix the critical checks above or set COMPUTE_ALLOW_UNREADY_STARTUP=true to start in a degraded state.")
+	}
 
 	isWired := globalCfg.Network.Mode == network.ModeNIC || globalCfg.Network.Mode == network.ModeWired
 
@@ -315,8 +343,14 @@ func main() {
 	}
 
 	go func() {
-		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+		var serveErr error
+		if globalCfg.Server.TLSCertFile != "" {
+			serveErr = httpServer.ServeTLS(listener, globalCfg.Server.TLSCertFile, globalCfg.Server.TLSKeyFile)
+		} else {
+			serveErr = httpServer.Serve(listener)
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", serveErr)
 		}
 	}()
 
