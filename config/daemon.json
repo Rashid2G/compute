@@ -1,8 +1,9 @@
 {
   "server": {
-    "listen": "0.0.0.0:18080",
+    "listen": "127.0.0.1:18080",
     "db_path": "/var/lib/compute/data/compute.db",
-    "firecracker_bin": "/usr/local/bin/firecracker"
+    "firecracker_bin": "/usr/local/bin/firecracker",
+    "auth_enabled": true
   },
   "network": {
     "mode": "nat",
@@ -29,12 +30,6 @@
         "kernel": "vmlinux",
         "rootfs": "ubuntu-24.04.ext4",
         "description": "Ubuntu 24.04 LTS (Noble Numbat) with Node.js 20, Python 3, git, jq, SSH, and sudo"
-      },
-      {
-        "name": "app-server",
-        "kernel": "vmlinux",
-        "rootfs": "app-server.ext4",
-        "description": "Compute application microVM (daemon :18080, Web GUI :8080, CLI, SSH)"
       }
     ]
   },
@@ -51,14 +46,14 @@
     "boot_timeout_seconds": 90
   },
   "dns": {
-    "enabled": true,
+    "enabled": false,
     "listen": ":53",
-    "base_domain": "compute-lab.tailb1be99.ts.net",
+    "base_domain": "",
     "extra_base_domains": [],
-    "host_addresses": ["100.78.129.96", "192.168.1.70"]
+    "host_addresses": []
   },
   "tailscale": {
-    "enabled": true,
+    "enabled": false,
     "api_key": "",
     "tailnet": "-",
     "node_tag": "tag:compute-master",
@@ -67,7 +62,7 @@
     "auto_install_guest": true,
     "default_sandboxes": false,
     "service_gateway": {
-      "enabled": true,
+      "enabled": false,
       "host_tag": "tag:compute-master",
       "service_tag": "tag:compute-sandbox",
       "auto_approve": true,
