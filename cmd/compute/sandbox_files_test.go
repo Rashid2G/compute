@@ -18,6 +18,8 @@ func TestSplitRemoteRef(t *testing.T) {
 		{"mybox:/workspace/app.py", "mybox", "/workspace/app.py", true},
 		{"ins_12345:/etc/hosts", "ins_12345", "/etc/hosts", true},
 		{"./local/path.txt", "", "./local/path.txt", false},
+		{"./logs/2026-11-13:00.log", "", "./logs/2026-11-13:00.log", false},
+		{"/var/log:1/syslog", "", "/var/log:1/syslog", false},
 		{"relative/file.go", "", "relative/file.go", false},
 		{"/var/log/syslog", "", "/var/log/syslog", false},
 		{"C:\\Windows\\System32", "", "C:\\Windows\\System32", false},
@@ -35,6 +37,44 @@ func TestSplitRemoteRef(t *testing.T) {
 		if p != tc.wantPath {
 			t.Errorf("splitRemoteRef(%q) path = %q, want %q", tc.input, p, tc.wantPath)
 		}
+	}
+}
+
+func TestSplitFlagAndPositionalArgs(t *testing.T) {
+	valueFlags := map[string]bool{
+		"format":  true,
+		"content": true,
+		"file":    true,
+	}
+
+	// Case 1: space-separated flags after positional
+	args1 := []string{"mybox", "/workspace/app.py", "--format", "base64"}
+	flags1, pos1 := splitFlagAndPositionalArgs(args1, valueFlags)
+	if len(flags1) != 2 || flags1[0] != "--format" || flags1[1] != "base64" {
+		t.Errorf("unexpected flags1: %v", flags1)
+	}
+	if len(pos1) != 2 || pos1[0] != "mybox" || pos1[1] != "/workspace/app.py" {
+		t.Errorf("unexpected pos1: %v", pos1)
+	}
+
+	// Case 2: flags before positional with =
+	args2 := []string{"--format=text", "--content=hello", "mybox", "/path.txt"}
+	flags2, pos2 := splitFlagAndPositionalArgs(args2, valueFlags)
+	if len(flags2) != 2 || flags2[0] != "--format=text" || flags2[1] != "--content=hello" {
+		t.Errorf("unexpected flags2: %v", flags2)
+	}
+	if len(pos2) != 2 || pos2[0] != "mybox" || pos2[1] != "/path.txt" {
+		t.Errorf("unexpected pos2: %v", pos2)
+	}
+
+	// Case 3: space-separated content with empty string and dash
+	args3 := []string{"mybox", "/path.txt", "--content", ""}
+	flags3, pos3 := splitFlagAndPositionalArgs(args3, valueFlags)
+	if len(flags3) != 2 || flags3[0] != "--content" || flags3[1] != "" {
+		t.Errorf("unexpected flags3: %v", flags3)
+	}
+	if len(pos3) != 2 || pos3[0] != "mybox" || pos3[1] != "/path.txt" {
+		t.Errorf("unexpected pos3: %v", pos3)
 	}
 }
 

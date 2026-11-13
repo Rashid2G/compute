@@ -60,8 +60,8 @@ func printFileUsage() {
 func handleFileRead(ctx context.Context, client *DaemonClient, args []string) {
 	fs := flag.NewFlagSet("file read", flag.ExitOnError)
 	format := fs.String("format", "", "Output format: 'text' or 'base64'")
-	_ = fs.Parse(filterFlags(args))
-	pos := filterPositional(args)
+	flags, pos := splitFlagAndPositionalArgs(args, map[string]bool{"format": true})
+	_ = fs.Parse(flags)
 
 	if len(pos) < 2 {
 		printCommandError("missing required arguments for 'file read'.", "Usage: compute sandbox file read <sandbox> <remote-path> [--format text|base64]", "file")
@@ -94,7 +94,7 @@ func handleFileRead(ctx context.Context, client *DaemonClient, args []string) {
 	if res.Format == "base64" {
 		decoded, err := base64.StdEncoding.DecodeString(res.Content)
 		if err != nil {
-			fmt.Println(res.Content)
+			fmt.Print(res.Content)
 			return
 		}
 		os.Stdout.Write(decoded)
@@ -102,9 +102,6 @@ func handleFileRead(ctx context.Context, client *DaemonClient, args []string) {
 	}
 
 	fmt.Print(res.Content)
-	if !strings.HasSuffix(res.Content, "\n") {
-		fmt.Println()
-	}
 }
 
 func handleFileWrite(ctx context.Context, client *DaemonClient, args []string) {
@@ -112,8 +109,19 @@ func handleFileWrite(ctx context.Context, client *DaemonClient, args []string) {
 	content := fs.String("content", "", "Inline string content to write (use '-' to read from stdin)")
 	filePath := fs.String("file", "", "Local file path to read content from")
 	format := fs.String("format", "", "Data format: 'text' or 'base64'")
-	_ = fs.Parse(filterFlags(args))
-	pos := filterPositional(args)
+	flags, pos := splitFlagAndPositionalArgs(args, map[string]bool{"content": true, "file": true, "format": true})
+	_ = fs.Parse(flags)
+
+	contentSet := false
+	fileSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "content" {
+			contentSet = true
+		}
+		if f.Name == "file" {
+			fileSet = true
+		}
+	})
 
 	if len(pos) < 2 {
 		printCommandError("missing required arguments for 'file write'.", "Usage: compute sandbox file write <sandbox> <remote-path> [--content <data> | --file <path> | -]", "file")
@@ -133,17 +141,26 @@ func handleFileWrite(ctx context.Context, client *DaemonClient, args []string) {
 	}
 
 	var data []byte
-	if *filePath != "" {
+	if fileSet && *filePath != "" {
 		d, err := os.ReadFile(*filePath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading local file %q: %v\n", *filePath, err)
 			os.Exit(1)
 		}
 		data = d
-	} else if *content != "" && *content != "-" {
-		data = []byte(*content)
+	} else if contentSet {
+		if *content == "-" {
+			d, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
+				os.Exit(1)
+			}
+			data = d
+		} else {
+			data = []byte(*content)
+		}
 	} else {
-		// Read from stdin
+		// Read from stdin by default
 		d, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error reading from stdin: %v\n", err)
@@ -170,7 +187,7 @@ func handleFileWrite(ctx context.Context, client *DaemonClient, args []string) {
 }
 
 func handleFileList(ctx context.Context, client *DaemonClient, args []string) {
-	pos := filterPositional(args)
+	_, pos := splitFlagAndPositionalArgs(args, nil)
 	if len(pos) < 1 {
 		printCommandError("missing required sandbox argument for 'file list'.", "Usage: compute sandbox file list <sandbox> [remote-path]", "file")
 	}
@@ -215,7 +232,7 @@ func handleFileList(ctx context.Context, client *DaemonClient, args []string) {
 }
 
 func handleFileMkdir(ctx context.Context, client *DaemonClient, args []string) {
-	pos := filterPositional(args)
+	_, pos := splitFlagAndPositionalArgs(args, nil)
 	if len(pos) < 2 {
 		printCommandError("missing required arguments for 'file mkdir'.", "Usage: compute sandbox file mkdir <sandbox> <remote-path>", "file")
 	}
@@ -242,7 +259,7 @@ func handleFileMkdir(ctx context.Context, client *DaemonClient, args []string) {
 }
 
 func handleFileRemove(ctx context.Context, client *DaemonClient, args []string) {
-	pos := filterPositional(args)
+	_, pos := splitFlagAndPositionalArgs(args, nil)
 	if len(pos) < 2 {
 		printCommandError("missing required arguments for 'file remove'.", "Usage: compute sandbox file remove <sandbox> <remote-path>", "file")
 	}
@@ -274,6 +291,10 @@ func splitRemoteRef(target string) (sandbox string, remotePath string, isRemote 
 		parts := strings.SplitN(target, ":", 2)
 		// Avoid interpreting Windows drive letters (e.g. C:\path) as remote
 		if len(parts[0]) == 1 && ((parts[0][0] >= 'a' && parts[0][0] <= 'z') || (parts[0][0] >= 'A' && parts[0][0] <= 'Z')) {
+			return "", target, false
+		}
+		// Avoid interpreting local paths with path separators in prefix (e.g. ./logs/2026-11-13:00.log) as remote
+		if strings.ContainsAny(parts[0], "/\\") {
 			return "", target, false
 		}
 		return parts[0], parts[1], true
@@ -450,7 +471,7 @@ func printProcessUsage() {
 }
 
 func handleProcessList(ctx context.Context, client *DaemonClient, args []string) {
-	pos := filterPositional(args)
+	_, pos := splitFlagAndPositionalArgs(args, nil)
 	if len(pos) < 1 {
 		printCommandError("missing required sandbox argument for 'process list'.", "Usage: compute sandbox process list <sandbox>", "process")
 	}
@@ -539,7 +560,7 @@ func handleProcessStart(ctx context.Context, client *DaemonClient, args []string
 		printCommandError("no command specified to run in process start.", "Usage: compute sandbox process start <sandbox> [--cwd <path>] [--] <command...>", "process")
 	}
 
-	fullCommand := strings.Join(cmdTokens, " ")
+	fullCommand := buildExecCommand(cmdTokens)
 
 	v, err := resolveSandboxReference(ctx, client, sandboxRef)
 	if err != nil {
@@ -615,32 +636,28 @@ func handleProcessKill(ctx context.Context, client *DaemonClient, args []string)
 	fmt.Printf("Signal %s sent to process PID %d in sandbox %s\n", signal, pid, v.Name)
 }
 
-func filterFlags(args []string) []string {
-	var flags []string
-	for _, arg := range args {
+func splitFlagAndPositionalArgs(args []string, valueFlags map[string]bool) (flags, positional []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
 		if strings.HasPrefix(arg, "-") && arg != "-" {
 			flags = append(flags, arg)
+			if strings.Contains(arg, "=") {
+				continue
+			}
+			flagName := strings.TrimLeft(arg, "-")
+			if valueFlags != nil && (valueFlags[flagName] || valueFlags[arg]) {
+				if i+1 < len(args) && (!strings.HasPrefix(args[i+1], "-") || args[i+1] == "-") {
+					flags = append(flags, args[i+1])
+					i++
+				}
+			}
+		} else {
+			positional = append(positional, arg)
 		}
 	}
-	return flags
-}
-
-func filterPositional(args []string) []string {
-	var pos []string
-	skipNext := false
-	for _, arg := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if arg == "--format" || arg == "--content" || arg == "--file" || arg == "--signal" || arg == "-s" || arg == "--cwd" || arg == "--env" || arg == "-e" {
-			skipNext = true
-			continue
-		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			continue
-		}
-		pos = append(pos, arg)
-	}
-	return pos
+	return flags, positional
 }
