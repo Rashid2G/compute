@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -79,6 +80,7 @@ type Manager struct {
 	queueMu               sync.Mutex
 	processChecker        func(pid int) bool
 	launcher              func(ctx context.Context, vm *db.VM) error
+	guestSyncer           func(ctx context.Context, vm *db.VM) error
 	tsProvisioner         TailscaleProvisioner
 	mu                    sync.RWMutex
 	vms                   map[string]*db.VM
@@ -2552,8 +2554,13 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	}
 
 	activeTAPs := make(map[string]bool)
+	knownTAPs := make(map[string]bool)
 	for _, v := range vms {
-		if v.Status == db.StatusRunning {
+		if v.TAPDevice != "" {
+			knownTAPs[v.TAPDevice] = true
+		}
+		switch v.Status {
+		case db.StatusRunning:
 			if !m.isAlive(v.PID) {
 				log.Printf("[vm] reconcile marking %s stopped: pid=%d not alive", v.ID, v.PID)
 				v.Status = db.StatusStopped
@@ -2573,16 +2580,79 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 			} else {
 				activeTAPs[v.TAPDevice] = true
 			}
-		} else {
+		case db.StatusCreated, db.StatusQueued:
+			// A sandbox moves from "created" to "running" only after Firecracker
+			// has booted. RunVM creates the TAP before that transition, so
+			// pruning it here would delete the device out from under a booting
+			// VM ("Setting tap interface offload flags failed: File descriptor
+			// in bad state"). Keep its TAP until the VM starts or is removed.
+			if v.TAPDevice != "" {
+				activeTAPs[v.TAPDevice] = true
+			}
+		default:
 			_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
 		}
 	}
 
-	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs)
+	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs, knownTAPs)
 	m.mu.Unlock()
 
 	m.processQueue(ctx)
 	return pruned, err
+}
+
+// FlushGuestFilesystems asks every running sandbox to flush its dirty page
+// cache to its disk. A container or PID-namespace restart kills Firecracker
+// without giving the guest a chance to power off, so writes made since the
+// guest's last writeback would be lost and the filesystem would be left
+// unclean. Best-effort, time-bounded by ctx, and never stops the sandbox; it
+// returns the number of guests that acknowledged the flush.
+func (m *Manager) FlushGuestFilesystems(ctx context.Context) int {
+	if m.store == nil {
+		return 0
+	}
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		log.Printf("[vm] guest flush skipped: %v", err)
+		return 0
+	}
+	var wg sync.WaitGroup
+	var flushed int32
+	for _, vm := range vms {
+		if vm == nil || vm.Status != db.StatusRunning || vm.IPAddress == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(vm *db.VM) {
+			defer wg.Done()
+			if err := m.flushGuest(ctx, vm); err != nil {
+				log.Printf("[vm] guest flush failed for %s: %v", vm.Name, err)
+				return
+			}
+			atomic.AddInt32(&flushed, 1)
+		}(vm)
+	}
+	wg.Wait()
+	return int(atomic.LoadInt32(&flushed))
+}
+
+func (m *Manager) flushGuest(ctx context.Context, vm *db.VM) error {
+	if m.guestSyncer != nil {
+		return m.guestSyncer(ctx, vm)
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	args := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=2",
+	}
+	if vm.SSHKeyPath != "" {
+		args = append(args, "-i", vm.SSHKeyPath)
+	}
+	args = append(args, fmt.Sprintf("compute@%s", vm.IPAddress), "sync")
+	return exec.CommandContext(flushCtx, "ssh", args...).Run()
 }
 
 // StartDesiredVMs restarts sandboxes that were running before the daemon (or

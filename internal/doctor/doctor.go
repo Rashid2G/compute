@@ -122,8 +122,8 @@ func checkHostNetwork() Check {
 	// The daemon must own the host network namespace so the sandbox bridge,
 	// TAPs, NAT rules and DNS answers are visible to host clients.
 	if _, err := os.Stat("/.dockerenv"); err == nil && os.Getenv("COMPUTE_HOST_NETWORK") != "1" {
-		return fail("host_network", Critical, "private container network namespace detected",
-			"Set network_mode: host for the computed service; bridge-mode containers cannot expose sandbox networking to the host.")
+		return fail("host_network", Critical, "container is not marked as host-networked",
+			"Run the daemon with network_mode: host and set COMPUTE_HOST_NETWORK=1; bridge-mode containers keep the sandbox bridge, TAPs, NAT rules and DNS answers inside the container.")
 	}
 	return ok("host_network", Critical, "host network namespace")
 }

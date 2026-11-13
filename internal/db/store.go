@@ -136,11 +136,18 @@ func (s *Store) ConsumeWorkerTokenAtomic(ctx context.Context, token string) erro
 	return nil
 }
 
+// legacyUnboundTokenName is the placeholder name written by older token
+// creation paths when the caller did not choose a name. It is treated as
+// unbound so those tokens can still bind to their first worker.
+const legacyUnboundTokenName = "worker-token"
+
 // AuthorizeWorkerToken validates a worker enrollment token and allows a
 // worker with the same name to reconnect with it. The first connection marks
-// the token as used; subsequent connections are accepted only when the
-// X-Worker-Name header matches the name the token was bound to. This keeps
-// single-use enrollment while making worker restarts reconnect-safe.
+// the token as used and binds it to the connecting worker name; subsequent
+// connections are accepted only when the X-Worker-Name header matches that
+// bound name. This keeps single-use enrollment while making worker restarts
+// reconnect-safe, including after the enrollment token's expiry (expiry gates
+// enrollment, not an already enrolled worker's identity).
 func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -156,20 +163,40 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 	if err != nil {
 		return fmt.Errorf("invalid worker token")
 	}
-	if time.Now().After(t.ExpiresAt) {
-		return fmt.Errorf("worker token expired")
+	boundName := strings.TrimSpace(t.Name)
+	if boundName == legacyUnboundTokenName {
+		boundName = ""
 	}
+	workerName = strings.TrimSpace(workerName)
+
 	if t.UsedAt != nil {
-		// Reconnect: allow the same enrolled worker. Tokens bound to a name
-		// require the client to present that name; named tokens are never
-		// reusable by a different worker.
-		if t.Name == "" || workerName == "" || !strings.EqualFold(t.Name, workerName) {
+		// Reconnect: allow only the worker this token was bound to. An
+		// unbound token (created without --name, or by an older release)
+		// binds to the first worker that reconnects so restarts keep
+		// working without inventing a new identity.
+		if boundName == "" {
+			if workerName == "" {
+				return fmt.Errorf("worker token already consumed; worker name required to reconnect")
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET name=? WHERE token=?`, workerName, token); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}
+		if workerName == "" || !strings.EqualFold(boundName, workerName) {
 			return fmt.Errorf("worker token already consumed by another worker")
 		}
 		return nil
 	}
+	if time.Now().After(t.ExpiresAt) {
+		return fmt.Errorf("worker token expired")
+	}
+	bindName := boundName
+	if bindName == "" {
+		bindName = workerName
+	}
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=? WHERE token=? AND used_at IS NULL`, now, token)
+	res, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=?, name=? WHERE token=? AND used_at IS NULL`, now, bindName, token)
 	if err != nil {
 		return err
 	}

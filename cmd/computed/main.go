@@ -362,6 +362,14 @@ func main() {
 	<-sigChan
 
 	log.Printf("[computed] Shutting down...")
+	// Firecracker children die with this container's PID namespace. Give
+	// running guests a moment to flush dirty pages so sandbox disks stay
+	// consistent and recent writes are not lost on restart.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if flushed := vmMgr.FlushGuestFilesystems(flushCtx); flushed > 0 {
+		log.Printf("[computed] flushed %d running sandbox filesystem(s)", flushed)
+	}
+	flushCancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
