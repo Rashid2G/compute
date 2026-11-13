@@ -23,7 +23,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --protected).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -31,6 +31,8 @@ Commands:
   delete, rm               Delete one or more sandboxes.
   protect                  Enable deletion protection on a sandbox.
   unprotect                Disable deletion protection on a sandbox.
+  images                   Discover available base and custom rootfs images.
+  templates                Discover available reusable sandbox templates.
   info, inspect, show      Display sandbox details, hostname, SSH command and URLs.
   url                      Print the best HTTP URL, or the SSH name when no URL resolves.
   exec                     Execute a command inside a sandbox, streaming output live.

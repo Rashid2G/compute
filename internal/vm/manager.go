@@ -2931,10 +2931,7 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	if vm.SSHKeyPath != "" {
 		sshArgs = append(sshArgs, "-i", vm.SSHKeyPath)
 	}
-	command := req.Command
-	if user != "root" {
-		command = `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; fi; ` + command
-	}
+	command := `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; elif [ -f "/home/compute/.compute-env" ]; then set -a; . "/home/compute/.compute-env"; set +a; fi; ` + req.Command
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), command)
 
 	return exec.CommandContext(execCtx, "ssh", sshArgs...), execCtx, cancel, nil
