@@ -107,6 +107,10 @@ func main() {
 		handleImageCommand(ctx, client, os.Args[2:])
 		return
 
+	case "doctor", "check":
+		handleDoctorCommand(ctx, client, os.Args[2:])
+		return
+
 	case "template", "templates":
 		handleTemplateCommand(ctx, client, os.Args[2:])
 		return
@@ -193,6 +197,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "Tools & Utilities:")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
+	fmt.Fprintln(w, "  doctor, check      Print daemon readiness checks with remediation for failures")
 	fmt.Fprintln(w, "  version, -v        Display version, build, and release information (--client, --short, --json)")
 	fmt.Fprintln(w, "  gui, web, ui       Launch the Web UI dashboard (--port, --addr, --daemon)")
 	fmt.Fprintln(w, "  completion         Generate shell autocompletion script (bash, zsh, fish)")
@@ -1174,9 +1179,11 @@ func handleWorkerCommand(ctx context.Context, client *DaemonClient, args []strin
 		}
 		tokenCmd := flag.NewFlagSet("worker token create", flag.ExitOnError)
 		pool := tokenCmd.String("pool", "default", "Worker pool ID")
+		name := tokenCmd.String("name", "", "Worker name to bind the token to (default: bind to the first worker that enrolls)")
 		tokenCmd.Parse(args[2:])
 
 		resp, err := client.CreateWorkerToken(ctx, api.WorkerTokenCreateRequest{
+			Name:   *name,
 			PoolID: *pool,
 		})
 		if err != nil {
@@ -1295,6 +1302,32 @@ func handlePoolCommand(ctx context.Context, client *DaemonClient, args []string)
 	default:
 		printCommandError(fmt.Sprintf("unknown pool command '%s'.", sub), "", "pool")
 	}
+}
+
+// handleDoctorCommand renders the daemon readiness report with remediation.
+func handleDoctorCommand(ctx context.Context, client *DaemonClient, args []string) {
+	_ = args
+	report, err := client.GetReadiness(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot reach the Compute daemon: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Check that the daemon is running and COMPUTE_DAEMON points at it (default 127.0.0.1:18080).")
+		os.Exit(1)
+	}
+	for _, check := range report.Checks {
+		status := "OK"
+		if !check.OK {
+			status = strings.ToUpper(string(check.Severity))
+		}
+		fmt.Printf("[%-8s] %-14s %s\n", status, check.Name, check.Detail)
+		if !check.OK && check.Remediation != "" {
+			fmt.Printf("           fix: %s\n", check.Remediation)
+		}
+	}
+	if !report.OK {
+		fmt.Println("\nReadiness failed. Fix the critical items above.")
+		os.Exit(1)
+	}
+	fmt.Println("\nReadiness: all critical checks passed.")
 }
 
 // Image Command Implementation

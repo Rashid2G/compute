@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,6 +161,10 @@ type ServerConfig struct {
 	// itself, every other subdomain goes to the sandbox ingress wildcard.
 	// Set to "" (or "-") to disable.
 	EdgeListen string `json:"edge_listen,omitempty"`
+	// TLSCertFile and TLSKeyFile optionally enable native HTTPS on the API
+	// listener. Leave empty to terminate TLS in a reverse proxy or Tailscale.
+	TLSCertFile string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `json:"tls_key_file,omitempty"`
 }
 
 // DefaultsConfig holds default microVM specifications
@@ -468,7 +471,9 @@ func (c GlobalConfig) EdgeListenResolved() string {
 func DefaultConfig() GlobalConfig {
 	return GlobalConfig{
 		Server: ServerConfig{
-			ListenAddr:     "0.0.0.0:18080",
+			// Bind loopback by default: a fresh install must not expose the
+			// API/GUI to the network until the operator sets COMPUTE_BIND_ADDRESS.
+			ListenAddr:     "127.0.0.1:18080",
 			DBPath:         "/var/lib/compute/data/compute.db",
 			FirecrackerBin: "/usr/local/bin/firecracker",
 			JailerEnabled:  false,
@@ -542,6 +547,9 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		}
 		cfg.Network = netCfg
 		cfg.ConfigPath = path
+		if err := ApplyEnvOverrides(&cfg); err != nil {
+			return cfg, err
+		}
 		return cfg, nil
 	}
 
@@ -554,7 +562,7 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 
 	// Normalize defaults if omitted in custom config
 	if cfg.Server.ListenAddr == "" {
-		cfg.Server.ListenAddr = "0.0.0.0:18080"
+		cfg.Server.ListenAddr = DefaultConfig().Server.ListenAddr
 	}
 	if cfg.Server.DBPath == "" {
 		cfg.Server.DBPath = "/var/lib/compute/data/compute.db"
@@ -587,35 +595,11 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		cfg.Images.DefaultRootfs = DefaultRootfsName
 	}
 
-	// Apply COMPUTE_DATA_DIR environment variable if specified
-	if dataDir := os.Getenv("COMPUTE_DATA_DIR"); dataDir != "" {
-		if cfg.Server.DBPath == "/var/lib/compute/data/compute.db" || strings.HasPrefix(cfg.Server.DBPath, "/home/") {
-			cfg.Server.DBPath = filepath.Join(dataDir, "data", "compute.db")
-		}
-		if cfg.Images.ImagesDir == "/var/lib/compute/images" || strings.HasPrefix(cfg.Images.ImagesDir, "/home/") {
-			cfg.Images.ImagesDir = filepath.Join(dataDir, "images")
-		}
-		if cfg.Images.VMsDir == "/var/lib/compute/vms" || strings.HasPrefix(cfg.Images.VMsDir, "/home/") {
-			cfg.Images.VMsDir = filepath.Join(dataDir, "vms")
-		}
-		if cfg.Images.SSHKeyPath == "/var/lib/compute/images/ssh/id_ed25519" || strings.HasPrefix(cfg.Images.SSHKeyPath, "/home/") {
-			cfg.Images.SSHKeyPath = filepath.Join(dataDir, "images", "ssh", "id_ed25519")
-		}
-	}
-
-	// Apply Tailscale environment overrides
-	if v := os.Getenv("COMPUTE_TAILSCALE_ENABLED"); v != "" {
-		cfg.Tailscale.Enabled = v == "true" || v == "1" || v == "on" || v == "yes"
-	}
-	if v := os.Getenv("COMPUTE_TAILSCALE_API_KEY"); v != "" {
-		cfg.Tailscale.APIKey = v
-	}
-	if v := os.Getenv("COMPUTE_TAILSCALE_TAILNET"); v != "" {
-		cfg.Tailscale.Tailnet = v
-	}
-	if cfg.Tailscale.Enabled && cfg.Tailscale.APIKey == "" && os.Getenv("COMPUTE_TAILSCALE_API_KEY") == "" {
-		// Enabling the integration without credentials still works for local
-		// status reporting; sandbox provisioning reports the missing key.
+	// Environment overrides are applied for every resolve path, including the
+	// no-config-file fallback, so `docker compose` can configure the daemon
+	// entirely from .env variables.
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		return cfg, err
 	}
 
 	// Auto-locate Firecracker and Jailer if configured path doesn't exist
@@ -662,12 +646,17 @@ func ResolveConfig(explicitPath string) (GlobalConfig, string, error) {
 	for _, p := range candidatePaths {
 		if _, err := os.Stat(p); err == nil {
 			cfg, err := LoadConfigFile(p)
-			if err == nil {
-				cfg.ConfigPath = p
-				return cfg, p, nil
+			if err != nil {
+				return cfg, p, err
 			}
+			cfg.ConfigPath = p
+			return cfg, p, nil
 		}
 	}
 
-	return DefaultConfig(), "", nil
+	cfg := DefaultConfig()
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		return cfg, "", err
+	}
+	return cfg, "", nil
 }

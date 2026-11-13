@@ -24,6 +24,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
 	servicegateway "github.com/Rashid2G/on-demand-vms/internal/gateway"
 	"github.com/Rashid2G/on-demand-vms/internal/jobs"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
@@ -240,7 +241,12 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 							panic("failed to generate secure random admin password: " + err.Error())
 						}
 						adminPW = hex.EncodeToString(pwBytes)
-						log.Printf("[computed] SECURITY NOTICE: No admin password configured. Generated secure random admin password: %s", adminPW)
+						credPath := filepath.Join(masterDir, "admin-password")
+						if err := os.WriteFile(credPath, []byte(adminPW+"\n"), 0600); err != nil {
+							log.Printf("[computed] Warning: no admin password configured and the one-time credential file could not be written: %v", err)
+						} else {
+							log.Printf("[computed] SECURITY NOTICE: no admin password configured; a one-time credential was written to %s (mode 0600). Set COMPUTE_ADMIN_PASSWORD to manage it explicitly.", credPath)
+						}
 					}
 					_, _ = authMgr.Signup(ctx, "admin@compute.local", "admin", "Administrator", adminPW, "admin")
 				}
@@ -589,6 +595,7 @@ func (s *Server) wrapAuth(handler http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("/api/v1/ready", s.handleReady)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
@@ -772,6 +779,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version": version.Version,
 		"name":    "Compute Daemon",
 	})
+}
+
+// handleReady is the readiness probe: it verifies that the host can actually
+// run sandboxes (KVM, firecracker, images, SSH key, database, cgroups, bridge)
+// and returns 503 with remediation when a critical component is missing.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	report := doctor.Run(s.cfg)
+	w.Header().Set("Content-Type", "application/json")
+	if !report.OK {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(report)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -3031,8 +3055,8 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.vmMgr.GetStore().ConsumeWorkerTokenAtomic(r.Context(), workerToken); err != nil {
-			http.Error(w, "unauthorized: invalid or already consumed worker token", http.StatusUnauthorized)
+		if err := s.vmMgr.GetStore().AuthorizeWorkerToken(r.Context(), workerToken, r.Header.Get("X-Worker-Name")); err != nil {
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 	}
@@ -3185,9 +3209,9 @@ func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
 			poolID = "default"
 		}
 		name := req.Name
-		if name == "" {
-			name = "worker-token"
-		}
+		// An empty name means "unbound": the daemon binds the token to the
+		// first worker that enrolls with it, and that worker may reconnect
+		// later. A caller-supplied name pins enrollment to a worker name.
 		tokenStr := fmt.Sprintf("mft_%s", uuid.NewString()[:16])
 		expiresAt := time.Now().UTC().Add(30 * time.Minute)
 		now := time.Now().UTC()

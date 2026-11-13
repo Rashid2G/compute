@@ -241,7 +241,8 @@ func TestCleanTeardownOnRemoveTAPAndPrune(t *testing.T) {
 	// PruneOrphanTAPs should clean up rules for orphan TAPs
 	runner.commands = nil
 	activeTAPs := map[string]bool{}
-	pruned, err := mgr.PruneOrphanTAPs(ctx, activeTAPs)
+	knownTAPs := map[string]bool{"mftap-orphan1": true}
+	pruned, err := mgr.PruneOrphanTAPs(ctx, activeTAPs, knownTAPs)
 	if err != nil {
 		t.Fatalf("PruneOrphanTAPs failed: %v", err)
 	}

@@ -100,7 +100,7 @@ when no worker is connected (config: jobs.local_execution).`,
 
 Usage:
   compute worker list
-  compute worker token create [--pool <pool>]
+  compute worker token create [--pool <pool>] [--name <worker-name>]
   compute worker info <id>
   compute worker cordon <id>
   compute worker drain <id>
@@ -109,6 +109,9 @@ Usage:
 Commands:
   list, ls                 List enrolled worker nodes and statuses.
   token create             Generate an enrollment token for a new worker node.
+                           Unnamed tokens bind to the first worker that enrolls
+                           and are accepted again when that same worker restarts;
+                           --name pins the token to one worker name.
   info                     Display detailed worker specifications and capabilities.
   cordon                   Mark a worker as unschedulable.
   drain                    Evict running jobs and cordon worker.

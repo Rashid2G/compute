@@ -19,6 +19,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/api"
@@ -644,6 +645,36 @@ func (c *DaemonClient) GetJobLogs(ctx context.Context, id string) ([]*db.JobLog,
 		return nil, err
 	}
 	return logs, nil
+}
+
+// GetReadiness fetches the daemon readiness report. A 503 response is a valid
+// report, not a transport error, so `compute doctor` can print remediation.
+func (c *DaemonClient) GetReadiness(ctx context.Context) (*doctor.Report, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/ready", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("connection to daemon failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return nil, fmt.Errorf("daemon error (status %d): %s", resp.StatusCode, string(body))
+	}
+	var report doctor.Report
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("invalid readiness response: %w", err)
+	}
+	return &report, nil
 }
 
 func (c *DaemonClient) GetVersion(ctx context.Context) (*version.Info, error) {
