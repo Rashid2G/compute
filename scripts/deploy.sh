@@ -183,7 +183,6 @@ if [ "${RESTART_ONLY}" = false ]; then
             --exclude='.env.*' \
             --exclude='node_modules' \
             --exclude='.cache' \
-            --exclude='.env' \
             --exclude='data/' \
             --exclude='coverage.out' \
             --exclude='benchmark-results.json' \
@@ -192,6 +191,21 @@ if [ "${RESTART_ONLY}" = false ]; then
     else
         printf "${YELLOW}rsync not found locally, falling back to scp...${NC}\n"
         scp -r "${REPO_ROOT}/bin" "${REPO_ROOT}/config" "${REPO_ROOT}/scripts" "${REPO_ROOT}/docker-compose.yml" "${REPO_ROOT}/Dockerfile.daemon" "${REPO_ROOT}/Dockerfile.worker" "${TARGET_HOST}:${TARGET_DIR}/"
+    fi
+
+    # Pass .env configuration to the target host
+    if [ -f "${REPO_ROOT}/.env" ]; then
+        printf "${BLUE}==>${NC} ${BOLD}Transferring .env configuration to %s...${NC}\n" "${TARGET_HOST}"
+        scp -p "${REPO_ROOT}/.env" "${TARGET_HOST}:${TARGET_DIR}/.env"
+        ssh -o BatchMode=yes "${TARGET_HOST}" "chmod 600 '${TARGET_DIR}/.env'"
+        printf "${GREEN}✓${NC} .env synchronized successfully.\n"
+    else
+        ssh -o BatchMode=yes "${TARGET_HOST}" "
+            if [ ! -f '${TARGET_DIR}/.env' ] && [ -f '${TARGET_DIR}/.env.example' ]; then
+                cp '${TARGET_DIR}/.env.example' '${TARGET_DIR}/.env'
+                chmod 600 '${TARGET_DIR}/.env'
+            fi
+        "
     fi
 
     # Ensure executable permissions on remote binaries and scripts
@@ -221,6 +235,9 @@ if [ "${DEPLOY_MODE}" = "docker" ]; then
     ssh -o BatchMode=yes "${TARGET_HOST}" bash -c "'
         cd \"${TARGET_DIR}\"
         mkdir -p data
+        if [ ! -f .env ] && [ -f .env.example ]; then
+            cp .env.example .env && chmod 600 .env
+        fi
         if docker compose version >/dev/null 2>&1; then
             sudo docker compose up -d --build
         else
