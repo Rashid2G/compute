@@ -130,12 +130,19 @@ if [ "${CHECK_STATUS_ONLY}" = true ]; then
         curl -s http://127.0.0.1:18080/api/v1/health || echo \"API Unreachable on :18080\"
         echo \"\"
         echo \"=== Web GUI Check ===\"
-        curl -s -I http://127.0.0.1:8080 2>/dev/null | head -n 1 || echo \"GUI Unreachable on :8080\"
+        if curl -s -I http://127.0.0.1:8080 2>/dev/null | head -n 1 | grep -q \"200\|301\|302\"; then
+            curl -s -I http://127.0.0.1:8080 2>/dev/null | head -n 1
+        elif curl -s -I http://127.0.0.1:18080/ 2>/dev/null | head -n 1 | grep -q \"200\|301\|302\"; then
+            echo \"HTTP/1.1 200 OK [Embedded GUI on :18080]\"
+        else
+            echo \"GUI Unreachable on :8080 and :18080\"
+        fi
         echo \"\"
         echo \"=== Recent Container / Service Logs ===\"
-        if sudo docker ps -q --filter \"name=computed\" | grep -q .; then
+        CID=\$(sudo docker ps -q --filter \"name=computed\" | head -n 1)
+        if [ -n \"\${CID}\" ]; then
             echo \"--- Docker Logs: computed ---\"
-            sudo docker logs --tail 15 computed || true
+            sudo docker logs --tail 15 \"\${CID}\" || true
         else
             echo \"--- Systemd Journal: computed ---\"
             sudo journalctl -u computed.service -n 15 --no-pager 2>/dev/null || true
