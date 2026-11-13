@@ -747,3 +747,73 @@ func TestCLIErrorExplanationAndAvailableCommands(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildExecCommandQuoting(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected string
+	}{
+		{
+			name:     "empty",
+			input:    []string{},
+			expected: "",
+		},
+		{
+			name:     "single string preserved as raw command",
+			input:    []string{"mkdir -p /foo/bar && echo done"},
+			expected: "mkdir -p /foo/bar && echo done",
+		},
+		{
+			name:     "compound bash -c preserves payload intact",
+			input:    []string{"bash", "-c", "mkdir -p /path && cmd"},
+			expected: "bash -c 'mkdir -p /path && cmd'",
+		},
+		{
+			name:     "python -c with single quotes",
+			input:    []string{"python3", "-c", "print('hello world')"},
+			expected: "python3 -c 'print('\\''hello world'\\'')'",
+		},
+		{
+			name:     "simple command and safe flags",
+			input:    []string{"ls", "-la", "/var/log"},
+			expected: "ls -la /var/log",
+		},
+		{
+			name:     "argument with spaces",
+			input:    []string{"touch", "file with spaces.txt"},
+			expected: "touch 'file with spaces.txt'",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildExecCommand(tc.input)
+			if got != tc.expected {
+				t.Fatalf("expected %q, got %q", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestSandboxHelpListsDiscoveryAndStartFlags(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "sandbox")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON=127.0.0.1:1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox help failed: %v: %s", err, out)
+	}
+	outStr := string(out)
+	for _, expected := range []string{
+		"images",
+		"templates",
+		"--start/--boot",
+	} {
+		if !strings.Contains(outStr, expected) {
+			t.Errorf("sandbox help missing expected term %q:\n%s", expected, outStr)
+		}
+	}
+}
+
+
+

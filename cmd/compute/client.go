@@ -527,6 +527,21 @@ func (c *DaemonClient) ApplyKey(ctx context.Context, idOrName string) (*KeyApply
 	return &res, nil
 }
 
+func (c *DaemonClient) ReconcileKeys(ctx context.Context) (*KeyApplyResult, error) {
+	var res struct {
+		Status string            `json:"status"`
+		Sync   *vm.SSHKeySyncResult `json:"sync"`
+	}
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys/reconcile", nil, &res); err != nil {
+		return nil, err
+	}
+	return &KeyApplyResult{Sync: res.Sync}, nil
+}
+
+func (c *DaemonClient) ReconcileSandboxSSH(ctx context.Context, idOrName string) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(idOrName)+"/reconcile-ssh", nil, nil)
+}
+
 func (c *DaemonClient) GetKey(ctx context.Context, idOrName string) (*db.SSHKey, error) {
 	var key db.SSHKey
 	if err := c.doRequest(ctx, http.MethodGet, "/api/v1/keys/"+idOrName, nil, &key); err != nil {
@@ -823,7 +838,32 @@ func (c *DaemonClient) CreateOrg(ctx context.Context, name, slug string) (map[st
 	return res, err
 }
 
-// Filesystem API methods
+// Filesystem API types & methods
+
+type SandboxFileEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"is_dir"`
+	Size  int64  `json:"size"`
+}
+
+type SandboxFileReadResult struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Format  string `json:"format"`
+	Size    int    `json:"size"`
+}
+
+type SandboxProcessInfo struct {
+	PID     int     `json:"pid"`
+	PPID    int     `json:"ppid"`
+	User    string  `json:"user"`
+	CPU     float64 `json:"cpu"`
+	Memory  float64 `json:"memory"`
+	Status  string  `json:"status"`
+	Command string  `json:"command"`
+	Args    string  `json:"args"`
+}
 
 func (c *DaemonClient) WriteFile(ctx context.Context, sandboxID, path, content, format string) error {
 	req := map[string]string{
@@ -834,20 +874,33 @@ func (c *DaemonClient) WriteFile(ctx context.Context, sandboxID, path, content, 
 	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/files/write", req, nil)
 }
 
+func (c *DaemonClient) MkdirFile(ctx context.Context, sandboxID, path string) error {
+	req := map[string]string{
+		"path": path,
+	}
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/files/mkdir", req, nil)
+}
+
 func (c *DaemonClient) ReadFile(ctx context.Context, sandboxID, path, format string) (string, error) {
+	res, err := c.ReadFileDetails(ctx, sandboxID, path, format)
+	if err != nil {
+		return "", err
+	}
+	return res.Content, nil
+}
+
+func (c *DaemonClient) ReadFileDetails(ctx context.Context, sandboxID, path, format string) (*SandboxFileReadResult, error) {
 	q := url.Values{}
 	q.Set("path", path)
 	if format != "" {
 		q.Set("format", format)
 	}
-	var res struct {
-		Content string `json:"content"`
-	}
+	var res SandboxFileReadResult
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/read?"+q.Encode(), nil, &res)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return res.Content, nil
+	return &res, nil
 }
 
 func (c *DaemonClient) ListFiles(ctx context.Context, sandboxID, path string) ([]map[string]interface{}, error) {
@@ -857,6 +910,21 @@ func (c *DaemonClient) ListFiles(ctx context.Context, sandboxID, path string) ([
 	}
 	var res struct {
 		Entries []map[string]interface{} `json:"entries"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/list?"+q.Encode(), nil, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Entries, nil
+}
+
+func (c *DaemonClient) ListFilesDetails(ctx context.Context, sandboxID, path string) ([]SandboxFileEntry, error) {
+	q := url.Values{}
+	if path != "" {
+		q.Set("path", path)
+	}
+	var res struct {
+		Entries []SandboxFileEntry `json:"entries"`
 	}
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/list?"+q.Encode(), nil, &res)
 	if err != nil {
@@ -876,6 +944,17 @@ func (c *DaemonClient) RemoveFile(ctx context.Context, sandboxID, path string) e
 func (c *DaemonClient) ListProcesses(ctx context.Context, sandboxID string) ([]map[string]interface{}, error) {
 	var res struct {
 		Processes []map[string]interface{} `json:"processes"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/processes", nil, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Processes, nil
+}
+
+func (c *DaemonClient) ListProcessesDetails(ctx context.Context, sandboxID string) ([]SandboxProcessInfo, error) {
+	var res struct {
+		Processes []SandboxProcessInfo `json:"processes"`
 	}
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/processes", nil, &res)
 	if err != nil {

@@ -1069,7 +1069,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	if req.Template != "" && tpl != nil {
 		// Launch from template disk
 		if _, err := os.Stat(tpl.DiskPath); err != nil {
-			return nil, fmt.Errorf("disk space issue: template disk not found at %s: %w", tpl.DiskPath, err)
+			return nil, fmt.Errorf("template disk not found at %s: %w", tpl.DiskPath, err)
 		}
 		var err error
 		diskPath, err = m.storMgr.InitVMDiskFromImageWithResize(internalID, tpl.DiskPath, diskMB)
@@ -1124,7 +1124,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				return nil, fmt.Errorf("disk space issue: custom image '%s' is not ready (status: %s)", imageName, customImg.Status)
 			}
 			if _, err := os.Stat(customImg.RootfsPath); err != nil {
-				return nil, fmt.Errorf("disk space issue: custom image rootfs not found at %s: %w", customImg.RootfsPath, err)
+				return nil, fmt.Errorf("custom image rootfs not found at %s: %w", customImg.RootfsPath, err)
 			}
 			var err error
 			diskPath, err = m.storMgr.InitVMDiskFromImageWithResize(internalID, customImg.RootfsPath, diskMB)
@@ -1143,11 +1143,11 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				return nil, fmt.Errorf("disk space issue: failed to resolve template '%s': %w", imageName, tplErr)
 			}
 			if namedTpl != nil && !resourceOwnerAllowed(&req, imageLookupOwner, namedTpl.OwnerID) {
-				return nil, fmt.Errorf("disk space issue: template '%s' not found", imageName)
+				return nil, fmt.Errorf("template '%s' not found", imageName)
 			}
 			if namedTpl != nil {
 				if _, err := os.Stat(namedTpl.DiskPath); err != nil {
-					return nil, fmt.Errorf("disk space issue: template disk not found at %s: %w", namedTpl.DiskPath, err)
+					return nil, fmt.Errorf("template disk not found at %s: %w", namedTpl.DiskPath, err)
 				}
 				var err error
 				diskPath, err = m.storMgr.InitVMDiskFromImageWithResize(internalID, namedTpl.DiskPath, diskMB)
@@ -1166,20 +1166,20 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				// a foreign custom image must never shadow them.
 				if req.Image != "" && !m.isPlatformBaseImage(imageName) {
 					if foreignImg, _ := m.store.GetImage(ctx, imageName); foreignImg != nil {
-						return nil, fmt.Errorf("disk space issue: custom image '%s' not found or not accessible", imageName)
+						return nil, fmt.Errorf("custom image '%s' not found or not accessible", imageName)
 					}
 					if foreignTpl, _ := m.store.GetTemplate(ctx, imageName); foreignTpl != nil {
-						return nil, fmt.Errorf("disk space issue: template '%s' not found", imageName)
+						return nil, fmt.Errorf("template '%s' not found", imageName)
 					}
 				}
 				// Resolve base image (compute supports Ubuntu 24 base image)
 				var err error
 				kernelPath, rootfsPath, err = m.storMgr.ResolveImage(imageName)
 				if err != nil {
-					return nil, fmt.Errorf("disk space issue: %w", err)
+					return nil, err
 				}
 				if _, err := os.Stat(rootfsPath); err != nil {
-					return nil, fmt.Errorf("disk space issue: base rootfs image not found at %s: %w", rootfsPath, err)
+					return nil, fmt.Errorf("base rootfs image not found at %s: %w", rootfsPath, err)
 				}
 
 				// Initialize persistent disk from base image with sparse resize to 50GB / 100GB
@@ -2425,7 +2425,11 @@ func (m *Manager) DeleteVMForOwner(ctx context.Context, ownerID, vmID string) er
 		return fmt.Errorf("vm %s not found", vmID)
 	}
 	if vm.Protected {
-		return fmt.Errorf("item %s is protected against deletion", vmID)
+		displayName := vm.Name
+		if displayName == "" {
+			displayName = vmID
+		}
+		return fmt.Errorf("item %s is protected against deletion", displayName)
 	}
 	key := vm.InternalID
 	if key == "" {
@@ -2441,8 +2445,12 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 
 	vm, _ := m.getVMUnsafe(ctx, vmID)
 	if vm != nil && vm.Protected {
+		displayName := vm.Name
+		if displayName == "" {
+			displayName = vmID
+		}
 		vmLock.Unlock()
-		return fmt.Errorf("item %s is protected against deletion", vmID)
+		return fmt.Errorf("item %s is protected against deletion", displayName)
 	}
 	if vm != nil {
 		_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
@@ -2923,10 +2931,7 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	if vm.SSHKeyPath != "" {
 		sshArgs = append(sshArgs, "-i", vm.SSHKeyPath)
 	}
-	command := req.Command
-	if user != "root" {
-		command = `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; fi; ` + command
-	}
+	command := `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; elif [ -f "/home/compute/.compute-env" ]; then set -a; . "/home/compute/.compute-env"; set +a; fi; ` + req.Command
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), command)
 
 	return exec.CommandContext(execCtx, "ssh", sshArgs...), execCtx, cancel, nil
