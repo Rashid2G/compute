@@ -58,9 +58,11 @@ case "$(uname -m)" in
 esac
 
 section "Docker and Compose"
+DOCKER_OK=0
 if command -v docker >/dev/null 2>&1; then
     DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
     if [ -n "${DOCKER_VERSION}" ]; then
+        DOCKER_OK=1
         if version_ge "${DOCKER_VERSION}" "24.0.0"; then
             say_ok "Docker Engine ${DOCKER_VERSION}"
         else
@@ -93,8 +95,13 @@ section "Virtualization (KVM)"
 if [ -c /dev/kvm ]; then
     if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
         say_ok "/dev/kvm is a character device and is read/write"
+    elif [ "${DOCKER_OK}" = "1" ]; then
+        # The supported install runs computed in a privileged container that
+        # receives /dev/kvm directly, so host-user group membership is not
+        # needed. Keep the hint for people who also run computed natively.
+        say_warn "/dev/kvm is not read/write for this user; the privileged computed container receives /dev/kvm itself (add your user to the kvm group for a native/systemd install)"
     else
-        say_fail "/dev/kvm is not read/write for this user: chmod 666 /dev/kvm or run the container with the kvm group"
+        say_fail "/dev/kvm is not read/write for this user: chmod 666 /dev/kvm or add your user to the kvm group"
     fi
 else
     say_fail "/dev/kvm missing: enable VT-x/AMD-V (and nested virtualization on a VM host)"
@@ -120,11 +127,23 @@ else
 fi
 
 section "Kernel modules and sysctls"
+module_available() {
+    # modprobe -n needs module dependency lookups; modinfo works as a
+    # non-root fallback when the module exists but is not loaded yet.
+    if command -v modprobe >/dev/null 2>&1 && modprobe -n "$1" >/dev/null 2>&1; then
+        return 0
+    fi
+    command -v modinfo >/dev/null 2>&1 && modinfo "$1" >/dev/null 2>&1
+}
 for module in tun bridge br_netfilter vhost_net; do
     if [ -d "/sys/module/${module}" ]; then
         say_ok "module ${module} loaded"
-    elif command -v modprobe >/dev/null 2>&1 && modprobe -n "${module}" >/dev/null 2>&1; then
+    elif module_available "${module}"; then
         say_warn "module ${module} available but not loaded: sudo modprobe ${module} (or run scripts/host-prepare.sh)"
+    elif [ "${module}" = "vhost_net" ]; then
+        # Firecracker uses userspace virtio-net when vhost_net is absent;
+        # vhost_net only improves throughput on some hosts.
+        say_warn "module ${module} is unavailable; Firecracker will use userspace virtio-net (optional performance hint)"
     else
         say_fail "module ${module} is unavailable: install linux-modules-extra for your kernel"
     fi

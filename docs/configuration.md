@@ -55,6 +55,8 @@ existing install, a one-time credential may be written to
 | `COMPUTE_GATEWAY_IP` | `172.16.0.1` | Sandbox gateway. |
 | `COMPUTE_PHYSICAL_NIC` | — | Uplink NIC for `nic`/`wired` modes. |
 | `COMPUTE_NETWORK_BASE_DOMAIN` | — | Base domain used for sandbox networking. |
+| `COMPUTE_LINKED_BRIDGES` | — | Comma-separated host bridges to veth-link to the sandbox bridge. |
+| `COMPUTE_LINK_OTHER_BRIDGES` | `false` | Link every host bridge to the sandbox bridge. Legacy behavior; creates L2 loops on shared hosts. |
 | `COMPUTE_DEFAULT_VCPUS` | `1` | Default sandbox vCPUs. |
 | `COMPUTE_DEFAULT_MEMORY_MB` | `2048` | Default sandbox memory. |
 | `COMPUTE_DEFAULT_DISK_MB` | `51200` | Default sandbox disk (50 GiB). |
@@ -141,10 +143,16 @@ Workers are configured through the same environment plus:
 | `COMPUTE_WORKER_BOOT_TIMEOUT_SECONDS` | `90` | MicroVM boot timeout. |
 | `COMPUTE_WORKER_ALLOW_LOCAL_EXEC` | `false` | Development-only host-shell execution. Never enable in production. |
 
-The worker keeps its own SQLite database and re-adopts its running microVMs
-after a restart. Enrollment tokens are single-use but bound to the worker name,
-so a restarted worker with the same name and token reconnects safely; a
-different name is rejected.
+The worker keeps its own SQLite database and VM state under
+`COMPUTE_WORKER_STATE_DIR`. Because the worker runs Firecracker inside its own
+container/host, restarting the worker process or container terminates its
+in-flight microVMs; the control plane then re-schedules unfinished assignments.
+Enrollment tokens are single-use. A token created with `--name` is bound to that
+worker name, while a token created without `--name` binds to the first worker
+that enrolls. In both cases the same worker name may reconnect after a restart,
+including after the token's enrollment expiry; a different name is rejected.
+Use `compute worker token create --name <worker-name>` (or set a stable
+`COMPUTE_WORKER_NAME`) for multi-worker deployments.
 
 ## JSON config file
 
