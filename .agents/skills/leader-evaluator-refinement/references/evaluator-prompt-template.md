@@ -11,6 +11,7 @@ Use this template when dispatching zero-context evaluators (`Evaluator 1` and `E
 - **Deliverable Artifact**: `{{DELIVERABLE_PATH_OR_CONTENT}}`
 - **Domain / Artifact Type**: {{DOMAIN_OR_ARTIFACT_TYPE}} (e.g. Code, Document, Architecture, Analysis, Specification)
 - **Model Family**: {{MODEL_FAMILY_ID}}
+- **Round**: {{ROUND_NUMBER}} (1 = Initial Evaluation, 2+ = Refinement Delta)
 
 ## Invariant Mandate:
 - **Zero Duplicate Models**: Evaluator 1 and Evaluator 2 MUST be powered by completely distinct model families. Never use duplicate models, duplicate providers, or sibling variants of the same model family across evaluations.
@@ -19,6 +20,11 @@ Use this template when dispatching zero-context evaluators (`Evaluator 1` and `E
 
 ## Technical Specification & Intent:
 {{MILESTONE_REQUIREMENTS_AND_ACCEPTANCE_CRITERIA}}
+
+{{#IF_REFINEMENT}}
+### Prior Defects Targeted for Remediation:
+{{PREVIOUS_ROUND_FINDINGS_SUMMARY}}
+{{/IF_REFINEMENT}}
 
 ---
 
@@ -35,23 +41,58 @@ You MUST actively formulate negative hypotheses and execute independent stress-t
 
 *Note: Clean up any temporary test scripts, probes, or scratch files immediately after recording your findings.*
 
-### 2. Integrity, Objectivity & Strict Honesty
+### 2. Fast-Fail / Short-Circuit Optimization
+To optimize evaluation cost and avoid wasting tokens:
+- If an empirical probe uncovers a **Critical Defect** (e.g., compile/build failure, security vulnerability, data loss, process crash, or fundamental violation of core specifications), **short-circuit further testing immediately**.
+- Log the critical finding, cite the reproduction payload, and emit the report with a failing score ($\le 6.5$). Do NOT burn tokens exhaustively cataloging secondary minor issues when a blocking failure is present.
+
+### 3. Delta Scope in Refinement Rounds (Round 2+)
+In refinement rounds ($Round \ge 2$):
+- Focus verification probes strictly on:
+  1. Verifying remediation of previously reported defects.
+  2. Testing for regressions on directly affected interfaces/code boundaries.
+- Do NOT spend tokens re-evaluating already-verified, untouched components unless touched by the regression boundary.
+
+### 4. Integrity, Objectivity & Strict Honesty
 Be completely honest, objective, and evidence-based. If thorough probing and deep inspection reveal no defects and the deliverable satisfies all technical requirements, **report plainly that there are no issues found**.
 
 **Do not invent, fabricate, or exaggerate hypothetical defects.** Any defect reported MUST be backed by verified, reproducible evidence (exact file citation, section or line number, and reproducible probe output or concrete counter-example). If all requirements are met and all probes pass, award an honest passing score (`> 8.0`) and verdict `PASS`.
 
-### 3. Required Report Structure
-Your evaluation report must follow this structure:
-1. **Verification Performed**: Summary of tools, inspection methods, commands, or probe tests executed.
-2. **Adversarial Findings (ordered by severity)**: For each issue found, document:
-   - Severity level (`Critical` / `High` / `Medium` / `Low`).
-   - Description and concrete counter-example / reproduction payload.
-   - Expected behavior vs. Observed behavior.
-   - Exact citation (`path/to/file:line` or `section_heading`).
-3. **Author Blindspots**: Explain why the author's self-checks or initial assumptions failed to catch these flaws.
-4. **Final Scoring**:
-   - `**Score: <numeric score from 0.0 to 10.0>**`
-   - `**Verdict: <PASS or FAIL>**` (PASS only if Score > 8.1)
+### 5. High-Density, Token-Efficient Output Format
+To conserve tokens across multiple evaluation rounds, **strictly eliminate conversational filler, preambles, instruction recaps, and narrative essays**. Output ONLY the structured sections below.
+
+**Token Budget**: Target $\le 150$ tokens for PASS; $\le 350$ tokens for FAIL.
+
+#### Format Option A: When Deliverable PASSES (No Defects Found)
+```markdown
+### Verification Probes
+- [PASS] <Probe 1: Brief description and outcome>
+- [PASS] <Probe 2: Brief description and outcome>
+
+### Findings
+None. All specification requirements and behavioral invariants verified.
+
+### Gate Result
+- **Score**: <score from 8.2 to 10.0> / 10.0
+- **Verdict**: PASS
+```
+
+#### Format Option B: When Defects Are Found (FAIL)
+```markdown
+### Verification Probes
+- [FAIL] <Probe description: brief failure outcome>
+- [PASS] <Probe description>
+
+### Adversarial Findings
+| # | Severity | Location (`file:line`) | Counter-Example / Reproduction Payload | Expected vs Observed | Root Cause (1 line) |
+|---|----------|------------------------|----------------------------------------|----------------------|---------------------|
+| 1 | Critical | `path/to/file:line`    | `<exact command or payload>`           | Exp: ... Got: ...    | <Concise root cause>|
+| 2 | High     | `path/to/file:line`    | `<exact command or payload>`           | Exp: ... Got: ...    | <Concise root cause>|
+
+### Gate Result
+- **Score**: <score from 0.0 to 8.1> / 10.0
+- **Verdict**: FAIL
+```
 
 ---
 

@@ -8,7 +8,7 @@ Use this template when dispatching a Leader agent for milestone execution, autho
 ## Task Context:
 - **Milestone / Task**: {{MILESTONE_TITLE}}
 - **Target Environment / Project Context**: `{{PROJECT_OR_WORKSPACE_CONTEXT}}`
-- **Refinement Round**: {{ROUND_NUMBER}} (Initial Creation or Refinement)
+- **Refinement Round**: {{ROUND_NUMBER}} (1 = Initial Creation, 2+ = Targeted Refinement)
 - **Domain / Deliverable Type**: {{DOMAIN_OR_DELIVERABLE_TYPE}}
 
 ---
@@ -20,9 +20,9 @@ Use this template when dispatching a Leader agent for milestone execution, autho
 ---
 
 ## Prior Evaluator Findings to Remediate:
-The previous evaluation round failed with the following concrete defects, counter-examples, or unhandled edge cases. You MUST resolve each finding and include evidence/tests proving the enhancement:
+The previous evaluation round identified the following concrete defects and reproduction payloads. Resolve each item with defensive hardening:
 
-{{AGGREGATED_EVALUATOR_FINDINGS}}
+{{AGGREGATED_EVALUATOR_FINDINGS_TABLE}}
 {{/IF_REFINEMENT}}
 
 ---
@@ -36,7 +36,7 @@ The previous evaluation round failed with the following concrete defects, counte
 2. **Comprehensive Baseline Verification**:
    - Run domain-appropriate checks (compilation, linters, analytical checks, proof audits, or test suites).
    - Author regression checks or concrete verification steps that explicitly prove edge cases are handled.
-3. **Artifact Deliverable Packaging**:
-   - Deliver the completed work product as a clean, self-contained artifact (e.g. file, diff, document, or schema) at `{{DELIVERABLE_TARGET_PATH}}`.
-   - Provide a concise summary of accomplishments, key decisions, and verification results.
+3. **Token-Efficient Artifact Packaging**:
+   - Deliver the completed work product as a clean, scoped artifact (e.g. file, patch diff, document, or schema) at `{{DELIVERABLE_TARGET_PATH}}`.
+   - Provide a concise summary of changes and verification evidence (< 200 tokens). Avoid narrative padding or duplicate text dumps.
 ```
