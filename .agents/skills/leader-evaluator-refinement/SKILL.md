@@ -2,17 +2,18 @@
 name: leader-evaluator-refinement
 description: >
   Universal multi-agent orchestration architecture using Leader-Evaluator dynamics with strict zero-context
-  adversarial evaluation gates and iterative refinement. Use this skill whenever executing complex, high-stakes tasks
-  across any domain (software development, system design, technical writing, research, analysis, strategy, or creative output)
-  that require decomposing work into milestones, assigning dedicated leader agents to author deliverables, and stress-testing
-  completed work with dual independent zero-context evaluators to continuously enhance results before acceptance. Triggers
-  when the user mentions "leader-evaluator", "adversarial evaluation", "dual evaluator gate", "iterative refinement",
-  "result enhancement", "multi-agent review gate", or asks to eliminate blindspots and false-positive green lights.
+  adversarial evaluation gates, token-efficient telemetry, and iterative refinement. Use this skill whenever
+  executing complex, high-stakes tasks across any domain (software development, system design, technical writing,
+  research, analysis, strategy, or creative output) that require decomposing work into milestones, assigning
+  dedicated leader agents to author deliverables, and stress-testing completed work with dual independent zero-context
+  evaluators to continuously enhance results before acceptance. Triggers when the user mentions "leader-evaluator",
+  "adversarial evaluation", "dual evaluator gate", "iterative refinement", "result enhancement", "multi-agent review gate",
+  "cost optimization", "token efficiency", or asks to eliminate blindspots and false-positive green lights.
 ---
 
 # Leader-Evaluator Multi-Agent Refinement
 
-A universal, domain-agnostic orchestration pattern for high-assurance task execution and continuous result enhancement. It coordinates a **Master Orchestrator**, dedicated **Leader Agents** (creation and execution), and independent **Zero-Context Adversarial Evaluators** (verification and stress-testing) through a rigorous quality gate.
+A universal, domain-agnostic orchestration pattern for high-assurance task execution, token-efficient verification, and continuous result enhancement. It coordinates a **Master Orchestrator**, dedicated **Leader Agents** (creation and execution), and independent **Zero-Context Adversarial Evaluators** (verification and stress-testing) through a rigorous quality gate.
 
 ```
        +-------------------------------------------------------+
@@ -36,7 +37,8 @@ A universal, domain-agnostic orchestration pattern for high-assurance task execu
 +--------------------------+               +--------------------------+
 |  Zero-Context Evaluator 1| (Parallel)    |  Zero-Context Evaluator 2|
 |   (Perspective / Model A)|               |   (Perspective / Model B)|
-|   [Adversarial Probing]  |               |   [Adversarial Probing]  |
+|  [Fast-Fail Probe Logic] |               |  [Fast-Fail Probe Logic] |
+|   [Token-Dense Output]   |               |   [Token-Dense Output]   |
 +------------+-------------+               +-------------+------------+
              |                                           |
              +---------------------+---------------------+
@@ -62,8 +64,9 @@ A universal, domain-agnostic orchestration pattern for high-assurance task execu
 Standard single-agent or unstructured multi-agent workflows suffer from two fatal failure modes across any domain or project:
 1. **Context Pollution & Author Bias**: An agent creating complex deliverables rationalizes its own oversights, accumulates noisy conversational context, and develops blindspots to regressions, omissions, or flawed assumptions.
 2. **The "Happy-Path Mirage" (False Green Lights)**: Typical evaluators act as passive checklist checkers—if self-reported checks or basic tests pass, the evaluator gives an unearned high score, overlooking subtle vulnerabilities, logical fallacies, edge-case failures, and unhandled boundary conditions.
+3. **The Multi-Round Token Drain**: Unconstrained evaluators generate verbose prose essays, repetitive conversational commentary, and redundant descriptions of passing checks. Over multiple iterative refinement rounds, this inflates token consumption exponentially and pollutes orchestrator context.
 
-The Leader-Evaluator Refinement framework eliminates these failure modes through **strict context isolation**, **complementary evaluation perspectives**, and **mandatory adversarial stress-testing**, driving systematic enhancement of deliverables.
+The Leader-Evaluator Refinement framework eliminates these failure modes through **strict context isolation**, **complementary evaluation perspectives**, **mandatory adversarial stress-testing**, and **token-dense diagnostic telemetry**, driving systematic enhancement of deliverables at minimal inference cost.
 
 ---
 
@@ -122,6 +125,15 @@ Refinement is the active mechanism of results enhancement:
 - The Leader refines the deliverable specifically targeting diagnosed weaknesses.
 - Fresh zero-context evaluators re-assess the refined output, ensuring progressive elevation of quality until excellence is proven.
 
+### 9. Token & Cost Efficiency (High-Density Telemetry & Fast-Fail Gating)
+To eliminate token waste across multiple evaluation rounds without compromising accuracy:
+- **Token-Dense Diagnostic Telemetry**: Evaluators output structured tables and concise bullet lists instead of narrative essays, preambles, and conversational filler. Every output token must carry diagnostic value.
+- **Fast-Path Clean PASS ($\le 150$ tokens)**: When a deliverable satisfies all requirements and passes all adversarial probes, the evaluator emits a minimal verification receipt. No verbose re-explanation of passing code.
+- **Fast-Fail / Short-Circuit Probing**: If an evaluator uncovers a reproducible `Critical` defect (score $\le 6.5$), it stops further probing immediately, records the blocker with reproduction evidence, and fails the gate. Secondary minor issues need not be probed when a fundamental failure requires remediation.
+- **Delta Scope in Refinement Rounds**: In Round 2+, evaluators verify only the remediation of previously reported defects and regression boundaries of modified sections, ignoring untouched, verified components.
+- **Orchestrator Context Compression**: The Orchestrator digests evaluator tables into a dense, deduplicated remediation punchlist (< 200 tokens) for the Leader, preventing exponential context bloat.
+- **Cost-Optimized Model Tiering**: Heterogeneity does not require dual ultra-heavy models. Pair high-speed, cost-effective frontier models across distinct providers (e.g. DeepSeek-R1/V3 paired with Gemini 2.0 Flash/Flash-Thinking or Claude 3.5 Haiku/Sonnet) to minimize cost per round.
+
 ---
 
 ## Step-by-Step Orchestration Lifecycle
@@ -138,20 +150,24 @@ Each milestone specification must define:
 Spawn a dedicated Leader Agent:
 - Pass the milestone specification, target project context, and constraints.
 - Leader performs deep work: generates code, writes text, drafts schemas, or builds analyses, running baseline verification as appropriate.
-- When complete, Leader packages the deliverable artifact (e.g. patch diff, output document, artifact file) and summarizes key outcomes.
+- When complete, Leader packages the deliverable artifact as a clean, scoped output (diff or targeted artifact) and provides a concise (< 200 tokens) outcome summary.
 
-### Phase 3: Parallel Zero-Context Evaluators
+### Phase 3: Parallel Zero-Context Evaluators (Cost & Token Optimized)
 Spawn two independent evaluator tasks concurrently with the **Adversarial Evaluator Prompt**:
 - **Evaluator 1**: Model Family A (e.g. DeepSeek reasoning architecture) — Rigorous Stress-Testing / Red-Team Perspective.
 - **Evaluator 2**: Model Family B (e.g. Gemini / Claude frontier architecture — **strictly distinct model family from Evaluator 1**) — Architectural Coherence / Requirements Compliance Perspective.
 
 > [!IMPORTANT]
-> **Zero Duplicate Models Mandate**: Under no circumstances should duplicate models, duplicate providers, or sibling variants of the same model family be assigned to both evaluators. True adversarial independence requires cognitive and architectural heterogeneity. Never use duplicate models for evaluations.
+> **Zero Duplicate Models Mandate**: Under no circumstances should duplicate models, duplicate providers, or sibling variants of the same model family be assigned to both evaluators. Cognitive heterogeneity is mandatory. Pair cost-effective models across families to keep expenses low.
 
-Both evaluators receive identical inputs:
+Both evaluators receive:
 - Technical Milestone Specification.
 - The Deliverable Artifact or resulting state.
-- Adversarial evaluation instructions (see [references/evaluator-prompt-template.md](./references/evaluator-prompt-template.md)).
+- Adversarial evaluation instructions with token budget directives (see [references/evaluator-prompt-template.md](./references/evaluator-prompt-template.md)).
+
+Evaluators apply **fast-fail short-circuiting** on critical defects and output structured, dense telemetry:
+- **Clean PASS**: Target $\le 150$ tokens.
+- **FAIL with Defects**: Target $\le 350$ tokens (tabular diagnostic format).
 
 ### Phase 4: Gate Evaluation & Score Calibration
 When both evaluators complete:
@@ -161,11 +177,11 @@ When both evaluators complete:
 
 ### Phase 5: Remediation & Refinement (Result Enhancement)
 1. Extract all verified deficiencies, failing edge cases, counter-examples, and exact citations from the failing evaluator(s).
-2. Format into an actionable **Enhancement Brief**:
-   - List the exact reproducibility steps or failure demonstrations.
-   - Specify the required remediation and regression verification.
+2. Synthesize into a compact **Enhancement Brief** (< 200 tokens):
+   - Dense bulleted punchlist of exact reproduction commands/payloads and citations.
+   - Specific expected vs observed outcomes to remediate.
 3. Launch the Leader in a dedicated refinement round (e.g. `leader-m1-refinement-r2`).
-4. Once refined, produce an updated deliverable and spawn **fresh, zero-context Evaluators**. Repeat until both pass.
+4. Once refined, produce an updated deliverable and spawn **fresh, zero-context Evaluators** with delta scope (verifying fixes and regression boundaries). Repeat until both pass.
 
 ---
 
