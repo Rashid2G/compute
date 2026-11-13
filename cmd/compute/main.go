@@ -197,6 +197,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "Tools & Utilities:")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
+	fmt.Fprintln(w, "  doctor, check      Print daemon readiness checks with remediation for failures")
 	fmt.Fprintln(w, "  version, -v        Display version, build, and release information (--client, --short, --json)")
 	fmt.Fprintln(w, "  gui, web, ui       Launch the Web UI dashboard (--port, --addr, --daemon)")
 	fmt.Fprintln(w, "  completion         Generate shell autocompletion script (bash, zsh, fish)")
@@ -1178,9 +1179,11 @@ func handleWorkerCommand(ctx context.Context, client *DaemonClient, args []strin
 		}
 		tokenCmd := flag.NewFlagSet("worker token create", flag.ExitOnError)
 		pool := tokenCmd.String("pool", "default", "Worker pool ID")
+		name := tokenCmd.String("name", "", "Worker name to bind the token to (default: bind to the first worker that enrolls)")
 		tokenCmd.Parse(args[2:])
 
 		resp, err := client.CreateWorkerToken(ctx, api.WorkerTokenCreateRequest{
+			Name:   *name,
 			PoolID: *pool,
 		})
 		if err != nil {

@@ -84,6 +84,8 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_GATEWAY_IP", &cfg.Network.GatewayIP)
 	env.strInto("COMPUTE_PHYSICAL_NIC", &cfg.Network.PhysicalNIC)
 	env.strInto("COMPUTE_NETWORK_BASE_DOMAIN", &cfg.Network.BaseDomain)
+	env.boolInto("COMPUTE_LINK_OTHER_BRIDGES", &cfg.Network.LinkAllBridges)
+	env.csvInto("COMPUTE_LINKED_BRIDGES", &cfg.Network.LinkedBridges)
 
 	// Default VM specs.
 	env.intInto("COMPUTE_DEFAULT_VCPUS", &cfg.Defaults.VCPUs)

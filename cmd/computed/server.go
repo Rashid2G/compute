@@ -3209,9 +3209,9 @@ func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
 			poolID = "default"
 		}
 		name := req.Name
-		if name == "" {
-			name = "worker-token"
-		}
+		// An empty name means "unbound": the daemon binds the token to the
+		// first worker that enrolls with it, and that worker may reconnect
+		// later. A caller-supplied name pins enrollment to a worker name.
 		tokenStr := fmt.Sprintf("mft_%s", uuid.NewString()[:16])
 		expiresAt := time.Now().UTC().Add(30 * time.Minute)
 		now := time.Now().UTC()
