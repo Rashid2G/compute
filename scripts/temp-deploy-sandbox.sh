@@ -16,8 +16,9 @@
 # runs the new daemon plus the matching UI, and both are testable end-to-end
 # through a single URL.
 #
-# Prints the Tailscale URL so reviewers can verify changes live on the tailnet.
-# Designed to be launched in the background without blocking PR creation.
+# Prints the preview URL (path-based ingress on the host daemon) so reviewers
+# can verify changes live. Designed to be launched in the background without
+# blocking PR creation.
 
 set -euo pipefail
 
@@ -74,7 +75,7 @@ Usage: $(basename "$0") <pr-number> [guest-port]
 
 Spin up an isolated Firecracker microVM sandbox on ${TARGET_HOST} (running on the
 main deployment deployed from the dev branch) for the PR preview, deploy ONLY the
-services changed by the PR into the guest, and output its Tailscale URL.
+services changed by the PR into the guest, and output its preview URL.
 
 Service selection (diff against ${BASE_REF}):
   web/** or internal/gui/** or cmd/compute/** -> new GUI server in guest (always the front door)
@@ -277,40 +278,25 @@ ssh -o BatchMode=yes "${TARGET_HOST}" "
     ${CLI_BIN} sandbox start '${SANDBOX_NAME}'
 "
 
-# 4. Wait for guest addresses. On the docker-compose deployment, guest bridge
-# IPs are not reachable from the lab host (guest taps live in the container's
-# network namespace), so provisioning goes over the guest TAILNET IP. The
-# bridge IP is kept only as a fallback for host-native deployments.
-log "Waiting for guest Tailscale provisioning (this can take 1-3 minutes)..."
-TAILNET_IP=""
-TAILNET_DNS=""
-BRIDGE_IP=""
+# 4. Wait for the guest bridge IP. On the docker-compose deployment the daemon
+# runs with network_mode: host, so guest bridge IPs (172.16.0.0/16) are
+# directly reachable from the lab host and used for SSH provisioning.
+log "Waiting for guest IP assignment (this can take 1-3 minutes)..."
+GUEST_MGMT_IP=""
 for i in $(seq 1 90); do
     INFO_OUT="$(ssh -o BatchMode=yes "${TARGET_HOST}" "${CLI_BIN} sandbox info '${SANDBOX_NAME}'" 2>/dev/null || true)"
-    if [[ -z "${TAILNET_IP}" ]]; then
-        TAILNET_IP="$(echo "${INFO_OUT}" | awk '/Tailnet IP:/ {print $3}' | tr -d '\r')"
-        [[ "${TAILNET_IP}" == "—" ]] && TAILNET_IP=""
-        TAILNET_DNS="$(echo "${INFO_OUT}" | awk '/Tailnet DNS:/ {print $3}' | tr -d '\r')"
-        [[ "${TAILNET_DNS}" == "—" ]] && TAILNET_DNS=""
-    fi
-    if [[ -z "${BRIDGE_IP}" ]]; then
-        BRIDGE_IP="$(echo "${INFO_OUT}" | awk '/IP Address:/ {print $3}' | tr -d '\r')"
-        [[ "${BRIDGE_IP}" == "—" ]] && BRIDGE_IP=""
-    fi
-    [[ -n "${TAILNET_IP}" ]] && break
+    GUEST_MGMT_IP="$(echo "${INFO_OUT}" | awk '/IP Address:/ {print $3}' | tr -d '\r')"
+    [[ "${GUEST_MGMT_IP}" == "—" || "${GUEST_MGMT_IP}" == "dhcp" ]] && GUEST_MGMT_IP=""
+    [[ -n "${GUEST_MGMT_IP}" ]] && break
     sleep 2
 done
 
-if [[ -n "${TAILNET_IP}" ]]; then
-    GUEST_MGMT_IP="${TAILNET_IP}"
-elif [[ -n "${BRIDGE_IP}" ]]; then
-    warn "Tailnet IP not assigned; falling back to bridge IP ${BRIDGE_IP} (only reachable on host-native deployments)."
-    GUEST_MGMT_IP="${BRIDGE_IP}"
+if [[ -n "${GUEST_MGMT_IP}" ]]; then
+    log "Guest management IP: ${GUEST_MGMT_IP}"
 else
-    echo "Error: sandbox '${SANDBOX_NAME}' has no reachable IP (bridge or tailnet); cannot install services." >&2
+    echo "Error: sandbox '${SANDBOX_NAME}' has no reachable bridge IP; cannot install services." >&2
     exit 1
 fi
-log "Guest management IP: ${GUEST_MGMT_IP}"
 
 # ---------------------------------------------------------------------------
 # 5. Locate the daemon SSH key on the lab host (used to provision guests)
@@ -472,9 +458,10 @@ if [[ "${NEED_DAEMON}" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Resolve Tailscale URLs and print the summary
+# 9. Resolve the preview URLs and print the summary
 # ---------------------------------------------------------------------------
-HOST_IP="$(ssh -o BatchMode=yes "${TARGET_HOST}" "tailscale ip -4 2>/dev/null || hostname -I | awk '{print \$1}'" | tr -d '\r')"
+HOST_IP="$(ssh -o BatchMode=yes "${TARGET_HOST}" "hostname -I | awk '{print \$1}'" | tr -d '\r' | awk '{print $1}')"
+PREVIEW_URL="http://${HOST_IP}:18080/preview/${SANDBOX_NAME}/${GUEST_PORT}/"
 
 echo ""
 success "Temporary preview deployment is running!"
@@ -482,17 +469,8 @@ echo "=================================================================="
 echo "Sandbox Name:      ${SANDBOX_NAME}"
 echo "Services (NEW):    ${SERVICES_NEW}"
 echo "Services (REUSED): ${SERVICES_REUSED:-none}"
-if [[ -n "${TAILNET_DNS}" && "${TAILNET_DNS}" != "—" ]]; then
-    echo "Tailscale DNS URL: http://${TAILNET_DNS}:${GUEST_PORT}"
-fi
-if [[ -n "${TAILNET_IP}" ]]; then
-    echo "Tailscale IP URL:  http://${TAILNET_IP}:${GUEST_PORT}"
-else
-    echo "Tailscale IP URL:  (pending) — run 'ssh ${TARGET_HOST} ${CLI_BIN} sandbox info ${SANDBOX_NAME}' in ~1 min"
-fi
-if [[ -n "${HOST_IP}" ]]; then
-    echo "Ingress Proxy URL: http://${HOST_IP}:18080/preview/${SANDBOX_NAME}/${GUEST_PORT}/"
-fi
+echo "Preview URL:       ${PREVIEW_URL}"
+echo "Deployments Home:  http://${HOST_IP}:18080/  (lists all deployments)"
 echo "SSH Command:       compute ssh ${SANDBOX_NAME}"
 echo "=================================================================="
 echo "Teardown command:  ssh ${TARGET_HOST} \"${CLI_BIN} sandbox stop '${SANDBOX_NAME}' && ${CLI_BIN} sandbox delete '${SANDBOX_NAME}' && rm -rf '${STAGE_DIR}'\""

@@ -1,4 +1,4 @@
-.PHONY: all build build-ui dev-ui dev run test test-coverage test-features bench bench-unit clean setup-host install systemd build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab preview-deploy temp-deploy
+.PHONY: all build build-ui dev-ui dev run test test-coverage test-features bench bench-unit clean setup-host install systemd build-rootfs deploy deploy-ui deploy-restart remote-status remote-logs deploy-lab deploy-lab-ui remote-status-lab preview-deploy preview-stop deploy-current temp-deploy
 
 all: build
 
@@ -90,6 +90,17 @@ remote-logs:
 
 preview-deploy:
 	./scripts/temp-deploy-sandbox.sh $(PR)
+
+# Deploy a preview for whatever branch/worktree you are currently in.
+#   make deploy-current                (name derived from branch or its PR)
+#   make deploy-current ARGS="--name my-branch-name"
+#   make deploy-current ARGS="--stop"  (teardown for the current branch)
+deploy-current:
+	./scripts/deploy-current.sh $(ARGS)
+
+# Stop and remove a preview sandbox by PR number or name.
+preview-stop:
+	./scripts/deploy-current.sh --stop $(PR)
 
 temp-deploy: preview-deploy
 
