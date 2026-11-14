@@ -21,7 +21,7 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
 - `internal/vm`, `internal/firecracker`, `internal/node`: VM lifecycle, Firecracker integration, worker runtime and guest operations.
 - `internal/network`, `internal/storage`, `internal/image`, `internal/scheduler`, `internal/jobs`: host networking, volumes, images, placement and jobs.
 - `pkg/api`, `pkg/client`: shared API contracts and Go client.
-- `internal/gui`: embedded GUI assets/server; `web`: React/Vite source.
+- `internal/gui`: embedded GUI assets/server (`internal/gui/assets` is built from `web/`); `web`: React/Vite source.
 - `sdk/`: language SDKs; `config/`, `scripts/`, Dockerfiles and `Makefile`: operations and packaging.
 
 ## Engineering rules
@@ -30,21 +30,25 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
 - Keep API request/response changes consistent across server, `pkg/api`, CLI/client, web UI, and SDKs. Handle malformed input and authorization at the boundary.
 - For database changes, add a new migration; do not rewrite migrations that may have shipped.
 - VM, filesystem, network, and process operations need explicit cleanup on errors and safe retry/reconciliation behavior. Avoid shell interpolation of user-controlled values.
-- UI changes should preserve the existing design system, keyboard operation, accessible labels/focus behavior, and loading/empty/error states.
+- UI changes should preserve the existing design system, keyboard operation, accessible labels/focus behavior, and loading/empty/error states. When editing `web/`, regenerate and commit `internal/gui/assets/` (`cd web && npm run build`).
 - Add or update focused tests for behavior changes. Do not claim a feature works from compilation alone.
-- Do not add dependencies or change generated/build artifacts unless the task requires it. Do not commit secrets, local state, VM disks, screenshots, or binaries unintentionally.
+- Do not add unrelated dependencies or change generated/build artifacts unless the task requires it. Do not commit secrets, local state, VM disks, screenshots, or binaries unintentionally.
 
 ## Build and verification
 
 - Go build: `make build`
 - Go tests: `make test` (or focused `go test ./path/...` while iterating)
-- Web typecheck/build: `cd web && npm run typecheck && npm run build` (Bun is also supported by the Makefile)
-- Full integration suite: `make test-features` (requires running daemon + Linux/KVM host); lab suite: `ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"`.
-- Distinguish checks actually run from checks not run.
+- Web typecheck/build: `cd web && ( [ -d node_modules ] || npm ci ) && npm run typecheck && npm run build` (Bun is also supported by the Makefile)
+- Full integration suite: `make test-features` (requires running daemon + Linux/KVM host); lab suite: `ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"` (runs against the shared lab daemon — run only when testing lab integration explicitly).
+- Distinguish checks actually run from checks not run (including if `compute-lab` / SSH is unreachable).
 
 ## Standard development workflow
 
-All code, test, and config changes follow this 6-step flow:
+**Delivery modes**:
+- **PR delivery flow (default)** — Use for all standard implementation, bugfix, and config tasks. Follow all 6 steps below.
+- **Local-only edits** — Only when the user explicitly asks for local-only changes (or explicitly says not to commit/open a PR): still inspect `git status --short`, verify tests locally, and stop without committing, pushing, preview-deploying, or opening a PR.
+
+**6-step PR delivery flow**:
 
 1. **Plan**: Inspect relevant packages, tests, config, and `git status --short`; formulate a minimal plan before editing.
 2. **Implement in a `dev` worktree**:
@@ -54,34 +58,34 @@ All code, test, and config changes follow this 6-step flow:
      git fetch origin && git worktree add ../on-demand-vms-<topic> -b <type>/<topic> origin/dev
      ```
      Use prefixes `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` (include the issue number when applicable, e.g. `fix/42-queue-starvation`).
-   - Use scoped commits (`feat: ...`, `fix: ...`, `docs: ...`); do not commit or push unless requested or following the PR flow. Clean up the worktree (`git worktree remove`) after merge.
-3. **Test & verify**: Add/update focused tests and verify locally (`make test`, `cd web && npm run typecheck && npm run build`, and `git diff --check`).
-4. **Capture evidence**: Provide concrete evidence of the end change (verified command output or UI screenshots, kept out of commits unless requested).
-5. **Deploy a PR preview (mandatory)**: Run `make deploy-current` from the worktree (see the `deploy` skill), verify the preview URL (`http://compute-lab:18080/preview/<name>/8080/`) and deployments homepage (`http://compute-lab:18080/`), and include both in the PR and final report.
-6. **Open a PR targeting `dev`**: Push (`git push -u origin <branch>`) and run `gh pr create --base dev`.
-   - **Issue linking**: Use `Closes #<n>` only when the PR fully resolves the issue; otherwise use `Refs #<n>` and post a progress comment on the issue (`gh issue comment <n> ...`) keeping it open. Never close an issue without a linked commit/PR or written reason.
+   - Use scoped commits (`feat: ...`, `fix: ...`, `docs: ...`); do not amend or force-push without explicit direction. Clean up the worktree (`git worktree remove`) after merge.
+3. **Test & verify**: Add/update focused tests and run `make test` (for Go/GUI changes) and/or `cd web && npm run typecheck && npm run build` (installing `node_modules` via `npm ci` in a fresh worktree if absent, and staging rebuilt `internal/gui/assets/`). Run `git diff --check`.
+4. **Capture evidence**: Record verified command output or UI screenshots (keep screenshots out of commits unless requested).
+5. **Open PR targeting `dev`**: Commit your verified changes, push (`git push -u origin <branch>`), and open the PR (`gh pr create --base dev`).
+   - **Issue linking**: Use `Closes #<n>` when the PR fully satisfies the issue's acceptance criteria; otherwise use `Refs #<n>` and post a progress comment on the issue (`gh issue comment <n> ...`) keeping it open. Never close an issue without a linked commit/PR or written reason.
    - Persist any out-of-scope bug or follow-up as a GitHub issue (see the `github-issues` skill).
+6. **Deploy & verify PR preview (mandatory)**: Run `make deploy-current` from the PR's worktree after opening the PR (so the sandbox is named `pr-<n>`; see the `deploy` skill). Verify the deployments homepage (`http://192.168.1.70:18080/`) and preview URL (`http://192.168.1.70:18080/preview/pr-<n>/8080/`), and add both to the PR description/comment and your final report. If `compute-lab` is unreachable from your environment, report that explicitly instead of skipping silently.
 
 ## Deployment targets
 
 The primary deployment host is `compute-lab` (`192.168.1.70`, reachable via `ssh compute-lab` with non-interactive SSH key / `BatchMode=yes`), serving GUI on `:8080` and daemon API on `:18080` (deployed checkout `/home/rashid/on-demand-vms`).
 
-- **PR previews**: `make deploy-current` / `make preview-stop`
+- **PR previews**: `make deploy-current` / `make deploy-current ARGS="--stop --name pr-<n>"`
 - **Main lab deploys** (restarts live shared services — run only when explicitly requested or required by the task, and verify with `make remote-status`): `make deploy` (Go/config/scripts) or `make deploy-ui` (`web/` changes)
 - **DNS/edge (docker-compose)**: authoritative DNS responder for `compute-lab.tailb1be99.ts.net` on port 53 (UDP+TCP) and HTTP edge listener on port 80, published on `192.168.1.70` and `100.78.129.96`. Sandbox hostnames are `<sandbox>.<username>.compute-lab.tailb1be99.ts.net`; `api`/`gui`/`www` and the zone apex route to the daemon (see `docs/dns-ssh.md`).
 
-See the `deploy` skill for full preview, troubleshooting, and main/local deployment details.
+See the `deploy` skill for full preview, auth/verification, troubleshooting, and main/local deployment details.
 
 ## Agent delegation
 
-Work independently unless the user or task explicitly requests delegation. When delegating, pass this file plus a bounded task, relevant paths, expected output, and shared-worktree coordination instructions. Do not claim a separate issue/thread was created unless the tool confirms it.
+Work independently unless the user or task explicitly requests delegation, or invokes the `leader-evaluator-refinement` workflow. When delegating, pass this file plus a bounded task, relevant paths, expected output, and shared-worktree coordination instructions. Do not claim a separate issue/thread was created unless the tool confirms it.
 
 ## Skills and operational context
 
 - **Precedence**: Explicit user instructions > `AGENTS.md` > `.agents/skills/<name>/SKILL.md`. If a skill conflicts with `AGENTS.md`, follow `AGENTS.md`.
 - **Available skills** (load only when the task needs their deeper procedures, CLI references, or templates):
-  - `deploy` — PR preview sandboxes (`make deploy-current`, `make preview-stop`), `compute-lab` deployments, logs, and local/lab test suites.
-  - `github-issues` — Issue templates, triage labels, resuming work, and PR/issue linking rules.
-  - `compute` — `compute` CLI & REST API for Firecracker sandboxes, distributed jobs, ingress routing, and dogfooding.
-  - `leader-evaluator-refinement` — Multi-agent Leader + dual zero-context adversarial Evaluator orchestration.
-- **Keeping context current**: When factual operational details change (e.g., host IPs, ports, paths, build flags), update the relevant skill in-place with facts only (no session logs or narrative). Never alter workflows, branching rules, verification gates, or security policies without explicit user approval.
+  - `deploy` — PR preview sandboxes (`make deploy-current`, teardown), `compute-lab` deployments, auth/health checks, guest logs, and local/lab test suites.
+  - `github-issues` — Issue templates, triage labels, resuming work, and PR/issue linking details.
+  - `compute` — Operating the `compute` CLI & REST API for Firecracker sandboxes, distributed jobs, ingress routing, and dogfooding (do not load for routine codebase edits just because files mention `compute` or `sandbox`).
+  - `leader-evaluator-refinement` — Multi-agent Leader + dual zero-context adversarial Evaluator orchestration (when requested or invoked for high-stakes multi-agent review).
+- **Keeping context current**: When factual operational details change (e.g., host IPs, ports, paths, build flags), update both the relevant skill(s) and any matching facts in `AGENTS.md` in-place (facts only; no session logs or narrative). Never alter workflows, branching rules, verification gates, or security policies without explicit user approval.
