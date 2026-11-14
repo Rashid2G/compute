@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -176,11 +178,116 @@ func TestRenderDeploymentsPageEscapesNames(t *testing.T) {
 		Name:    `<script>alert(1)</script>`,
 		OwnerID: `o<"w"ner`,
 		Status:  db.StatusRunning,
-	}}, "http://127.0.0.1:8080/")
+	}}, "http://127.0.0.1:8080/", nil)
 	if strings.Contains(out, "<script>alert(1)</script>") {
 		t.Errorf("sandbox name must be HTML-escaped, got:\n%s", out)
 	}
 	if !strings.Contains(out, "&lt;script&gt;") {
 		t.Errorf("expected escaped name in output:\n%s", out)
+	}
+}
+
+func TestSetGUIHandlerDoesNotConflictWithRoot(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	guiMux := http.NewServeMux()
+	guiMux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("console.log('gui');"))
+	})
+	env.server.SetGUIHandler(guiMux)
+
+	resRoot, err := http.Get(env.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyRoot, _ := io.ReadAll(resRoot.Body)
+	resRoot.Body.Close()
+	if resRoot.StatusCode != http.StatusOK || !strings.Contains(string(bodyRoot), "Deployments") {
+		t.Fatalf("expected deployments homepage at /, got %d: %s", resRoot.StatusCode, string(bodyRoot))
+	}
+
+	resAsset, err := http.Get(env.ts.URL + "/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyAsset, _ := io.ReadAll(resAsset.Body)
+	resAsset.Body.Close()
+	if resAsset.StatusCode != http.StatusOK || string(bodyAsset) != "console.log('gui');" {
+		t.Fatalf("expected guiHandler to serve /app.js, got %d: %s", resAsset.StatusCode, string(bodyAsset))
+	}
+
+	resAPI, err := http.Get(env.ts.URL + "/api/v1/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyAPI, _ := io.ReadAll(resAPI.Body)
+	resAPI.Body.Close()
+	if resAPI.StatusCode != http.StatusOK || !strings.Contains(string(bodyAPI), "ok") {
+		t.Errorf("expected healthy API with mounted GUI, got %d: %s", resAPI.StatusCode, string(bodyAPI))
+	}
+}
+
+func TestHandleRootPreviewModeServesGUI(t *testing.T) {
+	t.Setenv("COMPUTE_DEPLOYMENTS_INDEX", "false")
+	env := newMultiTenantServer(t)
+
+	guiMux := http.NewServeMux()
+	guiMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("PR_WEB_UI"))
+	})
+	env.server.SetGUIHandler(guiMux)
+
+	resRoot, err := http.Get(env.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyRoot, _ := io.ReadAll(resRoot.Body)
+	resRoot.Body.Close()
+	if resRoot.StatusCode != http.StatusOK || string(bodyRoot) != "PR_WEB_UI" {
+		t.Fatalf("expected GUI at / when COMPUTE_DEPLOYMENTS_INDEX=false, got %d: %s", resRoot.StatusCode, string(bodyRoot))
+	}
+}
+
+// TestDeploymentsIndexListsDockerPreviews verifies that docker preview
+// manifests (data/previews/*.json) are listed on the homepage with their
+// direct URLs.
+func TestDeploymentsIndexListsDockerPreviews(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	manifest := `{"name":"pr-99","url":"http://192.168.1.70:19037/","port":19037,"branch":"feat/x","commit":"abc1234","created":"2026-11-14T00:00:00Z"}`
+	tmpRoot := t.TempDir()
+	env.server.cfg.Server.DBPath = filepath.Join(tmpRoot, "db", "compute.db")
+	previewsDir := previewsDirFor(env.server.cfg.Server.DBPath)
+	if err := os.MkdirAll(previewsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previewsDir, "pr-99.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Malformed manifests must be ignored gracefully.
+	if err := os.WriteFile(filepath.Join(previewsDir, "broken.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := http.Get(env.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	out := string(body)
+	for _, want := range []string{
+		`href="http://192.168.1.70:19037/"`,
+		"pr-99",
+		"feat/x @ abc1234",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected homepage to contain %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "broken") {
+		t.Errorf("malformed manifest must not appear, got:\n%s", out)
 	}
 }
