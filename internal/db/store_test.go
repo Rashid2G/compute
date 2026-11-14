@@ -1059,3 +1059,84 @@ func TestStore_MigratesSSHPasswordEnabled(t *testing.T) {
 		t.Fatalf("migrated list = %+v, want one VM with ssh_password_enabled=false", all)
 	}
 }
+
+func TestStore_NetworkIsolationPersistenceAndMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "iso.db")
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	ctx := context.Background()
+
+	vmAcc := &VM{
+		ID:               "vm-iso-default",
+		InternalID:       "ins_iso_default",
+		Name:             "vm-iso-default",
+		OwnerID:          "usr_1",
+		Status:           StatusRunning,
+		IPAddress:        "172.16.0.21",
+		MACAddress:       "06:00:ac:10:00:15",
+		TAPDevice:        "mftap-21",
+		NetworkIsolation: "", // should normalize to account
+	}
+	vmIso := &VM{
+		ID:               "vm-iso-only",
+		InternalID:       "ins_iso_only",
+		Name:             "vm-iso-only",
+		OwnerID:          "usr_1",
+		Status:           StatusRunning,
+		IPAddress:        "172.16.0.22",
+		MACAddress:       "06:00:ac:10:00:16",
+		TAPDevice:        "mftap-22",
+		NetworkIsolation: NetworkIsolationIsolated,
+	}
+	if err := store.SaveVM(ctx, vmAcc); err != nil {
+		t.Fatalf("SaveVM vmAcc: %v", err)
+	}
+	if err := store.SaveVM(ctx, vmIso); err != nil {
+		t.Fatalf("SaveVM vmIso: %v", err)
+	}
+
+	gotAcc, err := store.GetVMByOwner(ctx, "usr_1", "vm-iso-default")
+	if err != nil || gotAcc == nil || gotAcc.NetworkIsolation != NetworkIsolationAccount {
+		t.Fatalf("expected default network_isolation=account, got %+v (err=%v)", gotAcc, err)
+	}
+	gotIso, err := store.GetVMByOwner(ctx, "usr_1", "vm-iso-only")
+	if err != nil || gotIso == nil || gotIso.NetworkIsolation != NetworkIsolationIsolated {
+		t.Fatalf("expected network_isolation=isolated, got %+v (err=%v)", gotIso, err)
+	}
+
+	alloc, err := store.GetNetworkAllocation(ctx, "mftap-22")
+	if err != nil || alloc == nil || alloc.NetworkIsolation != NetworkIsolationIsolated {
+		t.Fatalf("expected allocation network_isolation=isolated, got %+v (err=%v)", alloc, err)
+	}
+	allocs, err := store.GetNetworkAllocations(ctx)
+	if err != nil || len(allocs) != 2 {
+		t.Fatalf("expected 2 allocations, got %d (err=%v)", len(allocs), err)
+	}
+
+	// Simulate pre-migration DB lacking network_isolation column.
+	if _, err := store.db.Exec("ALTER TABLE vms DROP COLUMN network_isolation"); err != nil {
+		store.Close()
+		t.Fatalf("drop network_isolation failed: %v", err)
+	}
+	_ = store.Close()
+
+	reopened, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+
+	listed, err := reopened.ListVMsByOwner(ctx, "usr_1")
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("ListVMsByOwner after migration: %d (err=%v)", len(listed), err)
+	}
+	for _, v := range listed {
+		if v.NetworkIsolation != NetworkIsolationAccount {
+			t.Fatalf("expected migrated VM %s to default to account, got %q", v.ID, v.NetworkIsolation)
+		}
+	}
+}

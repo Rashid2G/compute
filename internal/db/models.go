@@ -1,8 +1,42 @@
 package db
 
 import (
+	"strings"
 	"time"
 )
+
+// Network isolation modes control whether a sandbox can reach other non-isolated
+// sandboxes in the same user account or is completely isolated on its own.
+const (
+	NetworkIsolationAccount  = "account"
+	NetworkIsolationIsolated = "isolated"
+)
+
+// NormalizeNetworkIsolation canonicalizes a sandbox network isolation mode.
+// Empty string defaults to NetworkIsolationAccount. Returns ("", false) for
+// unrecognized non-empty values.
+func NormalizeNetworkIsolation(mode string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", NetworkIsolationAccount, "shared", "all", "same-account", "same_account", "peers":
+		return NetworkIsolationAccount, true
+	case NetworkIsolationIsolated, "self", "private", "none", "standalone":
+		return NetworkIsolationIsolated, true
+	default:
+		return "", false
+	}
+}
+
+// IsNetworkIsolated reports whether the VM is configured to be isolated on its own.
+func IsNetworkIsolated(vm *VM) bool {
+	if vm == nil {
+		return false
+	}
+	mode, ok := NormalizeNetworkIsolation(vm.NetworkIsolation)
+	if !ok {
+		return false
+	}
+	return mode == NetworkIsolationIsolated
+}
 
 // VMStatus represents the state of a VM
 type VMStatus string
@@ -39,6 +73,7 @@ type VM struct {
 	IPAddress          string   `json:"ip_address"`
 	PublicIP           string   `json:"public_ip"`
 	PublicIPEnabled    bool     `json:"public_ip_enabled"`
+	NetworkIsolation   string   `json:"network_isolation"`
 	MACAddress         string   `json:"mac_address"`
 	TAPDevice          string   `json:"tap_device"`
 	TailscaleEnabled   bool     `json:"tailscale_enabled"`
@@ -102,16 +137,17 @@ type Template struct {
 
 // NetworkAllocation represents an assigned network lease
 type NetworkAllocation struct {
-	VMID            string    `json:"vm_id"`
-	VMName          string    `json:"vm_name"`
-	OwnerID         string    `json:"-"`
-	Status          VMStatus  `json:"status"`
-	IPAddress       string    `json:"ip_address"`
-	PublicIP        string    `json:"public_ip,omitempty"`
-	PublicIPEnabled bool      `json:"public_ip_enabled"`
-	MACAddress      string    `json:"mac_address"`
-	TAPDevice       string    `json:"tap_device"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	VMID             string    `json:"vm_id"`
+	VMName           string    `json:"vm_name"`
+	OwnerID          string    `json:"-"`
+	Status           VMStatus  `json:"status"`
+	IPAddress        string    `json:"ip_address"`
+	PublicIP         string    `json:"public_ip,omitempty"`
+	PublicIPEnabled  bool      `json:"public_ip_enabled"`
+	NetworkIsolation string    `json:"network_isolation"`
+	MACAddress       string    `json:"mac_address"`
+	TAPDevice        string    `json:"tap_device"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // SSHKey represents a stored user public SSH key

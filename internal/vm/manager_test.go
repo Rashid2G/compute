@@ -947,3 +947,128 @@ func TestVMStatusOutageRecovery(t *testing.T) {
 		t.Fatalf("expected StartDesiredVMs to restart desired running VM after outage")
 	}
 }
+
+func TestVMNetworkIsolationModesAndAccountReconciliation(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, runner := testManager(t)
+
+	vmA, err := m.CreateVM(ctx, CreateRequest{Name: "alice-a", OwnerID: "usr_alice"})
+	if err != nil {
+		t.Fatalf("create vmA: %v", err)
+	}
+	if vmA.NetworkIsolation != db.NetworkIsolationAccount {
+		t.Fatalf("expected default network_isolation=account, got %q", vmA.NetworkIsolation)
+	}
+
+	vmB, err := m.CreateVM(ctx, CreateRequest{Name: "alice-b", OwnerID: "usr_alice", NetworkIsolation: "account"})
+	if err != nil {
+		t.Fatalf("create vmB: %v", err)
+	}
+
+	vmC, err := m.CreateVM(ctx, CreateRequest{Name: "alice-org", OwnerID: "org_alice"})
+	if err != nil {
+		t.Fatalf("create vmC (personal org): %v", err)
+	}
+
+	isoTrue := true
+	vmD, err := m.CreateVM(ctx, CreateRequest{Name: "alice-iso", OwnerID: "usr_alice", Isolated: &isoTrue})
+	if err != nil {
+		t.Fatalf("create vmD (isolated): %v", err)
+	}
+	if vmD.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected vmD network_isolation=isolated, got %q", vmD.NetworkIsolation)
+	}
+
+	vmOther, err := m.CreateVM(ctx, CreateRequest{Name: "bob-a", OwnerID: "usr_bob"})
+	if err != nil {
+		t.Fatalf("create vmOther: %v", err)
+	}
+
+	// Conflicting or invalid values must fail.
+	if _, err := m.CreateVM(ctx, CreateRequest{Name: "bad-mode", OwnerID: "usr_alice", NetworkIsolation: "public"}); err == nil {
+		t.Fatalf("expected invalid network_isolation error")
+	}
+	if _, err := m.CreateVM(ctx, CreateRequest{Name: "conflict-mode", OwnerID: "usr_alice", NetworkIsolation: "account", Isolated: &isoTrue}); err == nil {
+		t.Fatalf("expected conflicting network_isolation error")
+	}
+
+	// Mark all VMs running so reconciliation builds peer allowlists.
+	for _, v := range []*db.VM{vmA, vmB, vmC, vmD, vmOther} {
+		v.Status = db.StatusRunning
+		if err := store.SaveVM(ctx, v); err != nil {
+			t.Fatalf("save running vm %s: %v", v.Name, err)
+		}
+	}
+
+	runner.calls = nil
+	m.reconcileAccountNetworkIsolation(ctx, "usr_alice")
+
+	var aAllowsB, aAllowsC, aAllowsD, aAllowsOther bool
+	var dIsolatedOn, dHasAccept bool
+	for _, call := range runner.calls {
+		line := strings.Join(call, " ")
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmB.TAPDevice)) {
+			aAllowsB = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmC.TAPDevice)) {
+			aAllowsC = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmD.TAPDevice)) {
+			aAllowsD = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmOther.TAPDevice)) {
+			aAllowsOther = true
+		}
+		if strings.Contains(line, fmt.Sprintf("bridge link set dev %s isolated on", vmD.TAPDevice)) {
+			dIsolatedOn = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s", vmD.TAPDevice)) && strings.Contains(line, "-j ACCEPT") {
+			dHasAccept = true
+		}
+	}
+	if !aAllowsB || !aAllowsC {
+		t.Errorf("expected vmA to allow vmB (%v) and personal-org vmC (%v)", aAllowsB, aAllowsC)
+	}
+	if aAllowsD || aAllowsOther {
+		t.Errorf("vmA must not allow isolated vmD (%v) or other-tenant vmOther (%v)", aAllowsD, aAllowsOther)
+	}
+	if !dIsolatedOn || dHasAccept {
+		t.Errorf("expected isolated vmD to have bridge isolated on (%v) and no ACCEPT rules (%v)", dIsolatedOn, dHasAccept)
+	}
+
+	// Switch vmB to isolated live via UpdateVMConfig.
+	runner.calls = nil
+	isoMode := db.NetworkIsolationIsolated
+	updatedB, err := m.UpdateVMConfig(ctx, vmB.InternalID, UpdateVMConfigRequest{NetworkIsolation: &isoMode})
+	if err != nil {
+		t.Fatalf("UpdateVMConfig vmB -> isolated: %v", err)
+	}
+	if updatedB.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected vmB isolated after update, got %q", updatedB.NetworkIsolation)
+	}
+	var bIsolatedOn, aStillAllowsB, aStillAllowsC bool
+	for _, call := range runner.calls {
+		line := strings.Join(call, " ")
+		if strings.Contains(line, fmt.Sprintf("bridge link set dev %s isolated on", vmB.TAPDevice)) {
+			bIsolatedOn = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmB.TAPDevice)) && !strings.Contains(line, " -D ") {
+			aStillAllowsB = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmC.TAPDevice)) && !strings.Contains(line, " -D ") {
+			aStillAllowsC = true
+		}
+	}
+	if !bIsolatedOn || aStillAllowsB || !aStillAllowsC {
+		t.Errorf("unexpected rules after live isolation of vmB: bIsolatedOn=%v aAllowsB=%v aAllowsC=%v", bIsolatedOn, aStillAllowsB, aStillAllowsC)
+	}
+
+	// Clone inherits source VM network isolation when omitted.
+	cloneOfD, err := m.CloneVM(ctx, vmD.InternalID, CreateRequest{Name: "alice-iso-clone", OwnerID: "usr_alice"})
+	if err != nil {
+		t.Fatalf("CloneVM vmD: %v", err)
+	}
+	if cloneOfD.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected cloned VM to inherit isolated mode, got %q", cloneOfD.NetworkIsolation)
+	}
+}

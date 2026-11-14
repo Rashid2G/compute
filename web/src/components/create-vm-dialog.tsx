@@ -6,6 +6,7 @@ import type {
   CreateVMRequest,
   CustomImage,
   DaemonConfig,
+  NetworkIsolationMode,
   SSHKey,
   StatsResult,
   Template,
@@ -60,6 +61,8 @@ export function CreateVMDialog({
   const [sshKeyId, setSshKeyId] = useState('');
   const [sshPassword, setSshPassword] = useState('');
   const [setupScript, setSetupScript] = useState('');
+  const [networkIsolation, setNetworkIsolation] =
+    useState<NetworkIsolationMode>('account');
   const [protectedVM, setProtectedVM] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -114,6 +117,7 @@ export function CreateVMDialog({
     if (!open) {
       setSshPassword('');
       setSshKeyId('');
+      setNetworkIsolation('account');
     }
   }, [open]);
 
@@ -144,6 +148,7 @@ export function CreateVMDialog({
         memory_mb: memoryMb,
         disk_mb: calculatedDiskMb,
         public_ip_enabled: true,
+        network_isolation: networkIsolation,
         protected: protectedVM,
         ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
         ssh_no_default_key: sshKeyId === 'none' || undefined,
@@ -165,6 +170,7 @@ export function CreateVMDialog({
     setSandboxName('');
     setSshPassword('');
     setSetupScript('');
+    setNetworkIsolation('account');
     setProtectedVM(false);
     setCount(1);
 
@@ -450,6 +456,48 @@ export function CreateVMDialog({
               placeholder="#!/bin/bash&#10;apt-get update && apt-get install -y nginx"
               className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Sandbox network access
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setNetworkIsolation('account')}
+                className={cn(
+                  'flex flex-col items-start border px-3 py-2 text-left transition-colors',
+                  networkIsolation === 'account'
+                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    : 'border-border bg-background text-foreground hover:border-foreground/40',
+                )}
+              >
+                <span className="text-[12px] font-medium leading-tight">
+                  Account sandboxes
+                </span>
+                <span className="mt-1 text-[10px] text-muted-foreground leading-tight">
+                  Can communicate with all non-isolated sandboxes in your account
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setNetworkIsolation('isolated')}
+                className={cn(
+                  'flex flex-col items-start border px-3 py-2 text-left transition-colors',
+                  networkIsolation === 'isolated'
+                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    : 'border-border bg-background text-foreground hover:border-foreground/40',
+                )}
+              >
+                <span className="text-[12px] font-medium leading-tight">
+                  Isolated
+                </span>
+                <span className="mt-1 text-[10px] text-muted-foreground leading-tight">
+                  Isolated on its own; blocked from other sandboxes
+                </span>
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-2 pt-1 pb-1">

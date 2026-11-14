@@ -106,7 +106,6 @@ func main() {
 		handleNetworkCommand(ctx, client, os.Args[2:])
 		return
 
-
 	case "worker", "workers":
 		handleWorkerCommand(ctx, client, os.Args[2:])
 		return
@@ -261,10 +260,24 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
 		noSSHKey := createCmd.Bool("no-ssh-key", false, "Exclude the account's default SSH key from this sandbox")
 		sshPassword := createCmd.String("ssh-password", "", "Optional SSH password for compute/root (min 8 chars; use '-' to read from stdin)")
+		networkIsolation := createCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' (communicate with account sandboxes) or 'isolated' (own sandbox only)")
+		isolated := createCmd.Bool("isolated", false, "Isolate this sandbox on its own network (shorthand for --network-isolation isolated)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
 		startNow := createCmd.Bool("start", false, "Immediately boot/start the sandbox after creation")
 		bootNow := createCmd.Bool("boot", false, "Alias for --start")
 		createCmd.Parse(subArgs)
+
+		isolatedSet := false
+		createCmd.Visit(func(f *flag.Flag) {
+			if f.Name == "isolated" {
+				isolatedSet = true
+			}
+		})
+		var isolatedPtr *bool
+		if isolatedSet {
+			val := *isolated
+			isolatedPtr = &val
+		}
 
 		password := *sshPassword
 		if password == "-" {
@@ -297,18 +310,20 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			}
 		}
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:            *name,
-			Tier:            *tier,
-			VCPUs:           *vcpus,
-			MemoryMB:        *mem,
-			DiskMB:          *disk,
-			Image:           *image,
-			Template:        *template,
-			SSHKeyID:        sshKeyID,
-			SSHPublicKey:    sshPublicKey,
-			SSHNoDefaultKey: *noSSHKey,
-			SSHPassword:     password,
-			Protected:       protected,
+			Name:             *name,
+			Tier:             *tier,
+			VCPUs:            *vcpus,
+			MemoryMB:         *mem,
+			DiskMB:           *disk,
+			Image:            *image,
+			Template:         *template,
+			SSHKeyID:         sshKeyID,
+			SSHPublicKey:     sshPublicKey,
+			SSHNoDefaultKey:  *noSSHKey,
+			SSHPassword:      password,
+			Protected:        protected,
+			NetworkIsolation: *networkIsolation,
+			Isolated:         isolatedPtr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
@@ -318,8 +333,12 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		if v.Protected {
 			protMsg = " [protected]"
 		}
-		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s%s (vCPUs=%d, RAM=%dMB)\n",
-			v.ID, v.Name, v.IPAddress, v.Status, protMsg, v.VCPUs, v.MemoryMB)
+		netMode := v.NetworkIsolation
+		if netMode == "" {
+			netMode = db.NetworkIsolationAccount
+		}
+		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s Network=%s%s (vCPUs=%d, RAM=%dMB)\n",
+			v.ID, v.Name, v.IPAddress, v.Status, netMode, protMsg, v.VCPUs, v.MemoryMB)
 		if v.SSHPasswordEnabled {
 			fmt.Println("SSH auth:        password enabled for compute and root (embedded public keys also accepted)")
 		} else {
@@ -525,6 +544,15 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		} else {
 			fmt.Printf("  SSH auth:      public key only\n")
 		}
+		netMode := v.NetworkIsolation
+		if netMode == "" {
+			netMode = db.NetworkIsolationAccount
+		}
+		if netMode == db.NetworkIsolationIsolated {
+			fmt.Printf("  Network:       isolated (own sandbox only)\n")
+		} else {
+			fmt.Printf("  Network:       account (can communicate with all account sandboxes)\n")
+		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
 
@@ -554,6 +582,26 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			os.Exit(1)
 		}
 		fmt.Printf("Sandbox %s: deletion protection disabled\n", v.Name)
+
+	case "network-isolation":
+		if len(subArgs) < 2 {
+			printCommandError("missing required sandbox or mode.", "Usage: compute sandbox network-isolation <name|id> <account|isolated>", "sandbox")
+		}
+		targetRef, err := resolveSandboxReference(ctx, client, subArgs[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving sandbox %s: %v\n", subArgs[0], err)
+			os.Exit(1)
+		}
+		mode, ok := db.NormalizeNetworkIsolation(subArgs[1])
+		if !ok {
+			printCommandError(fmt.Sprintf("invalid network isolation mode %q (expected 'account' or 'isolated').", subArgs[1]), "Usage: compute sandbox network-isolation <name|id> <account|isolated>", "sandbox")
+		}
+		updated, err := client.SetVMNetworkIsolation(ctx, targetRef.ID, mode)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating network isolation for sandbox %s: %v\n", subArgs[0], err)
+			os.Exit(1)
+		}
+		fmt.Printf("Sandbox %s: network isolation set to %s\n", updated.Name, updated.NetworkIsolation)
 
 	case "images", "image":
 		handleImageCommand(ctx, client, append([]string{"list"}, subArgs...))
@@ -1587,11 +1635,27 @@ func handleTemplateCommand(ctx context.Context, client *DaemonClient, args []str
 		launchCmd := flag.NewFlagSet("template launch", flag.ExitOnError)
 		name := launchCmd.String("name", "", "Name for launched VM")
 		tier := launchCmd.String("tier", "", "VM tier ('1vcpu', '2vcpu', '4vcpu')")
+		networkIsolation := launchCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' or 'isolated'")
+		isolated := launchCmd.Bool("isolated", false, "Isolate this sandbox on its own network")
 		launchCmd.Parse(args[2:])
 
+		isolatedSet := false
+		launchCmd.Visit(func(f *flag.Flag) {
+			if f.Name == "isolated" {
+				isolatedSet = true
+			}
+		})
+		var isolatedPtr *bool
+		if isolatedSet {
+			val := *isolated
+			isolatedPtr = &val
+		}
+
 		v, err := client.LaunchTemplate(ctx, tplName, vm.CreateRequest{
-			Name: *name,
-			Tier: *tier,
+			Name:             *name,
+			Tier:             *tier,
+			NetworkIsolation: *networkIsolation,
+			Isolated:         isolatedPtr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error launching VM from template %s: %v\n", tplName, err)

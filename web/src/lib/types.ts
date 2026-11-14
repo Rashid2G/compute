@@ -6,6 +6,8 @@ export type VMStatus =
   | 'stopped'
   | 'failed';
 
+export type NetworkIsolationMode = 'account' | 'isolated';
+
 export interface HealthResult {
   status: string;
   version?: string;
@@ -23,6 +25,7 @@ export interface VM {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
+  network_isolation?: NetworkIsolationMode;
   mac_address: string;
   tap_device: string;
   rootfs_path: string;
@@ -90,6 +93,8 @@ export interface CreateVMRequest {
   public_ip?: boolean;
   public_ip_enabled?: boolean;
   dedicated_ip?: boolean;
+  network_isolation?: NetworkIsolationMode;
+  isolated?: boolean;
   protected?: boolean;
   ssh_key_id?: string;
   ssh_public_key?: string;
@@ -144,6 +149,7 @@ export interface NetworkAllocation {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
+  network_isolation?: NetworkIsolationMode;
   mac_address: string;
   tap_device: string;
   updated_at: string;
@@ -156,6 +162,7 @@ export interface NetworkInspectResult {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
+  network_isolation?: NetworkIsolationMode;
   mac_address: string;
   tap_device: string;
   bridge_name: string;
@@ -233,6 +240,8 @@ export interface LaunchTemplateRequest {
   name: string;
   vcpus?: number;
   memory_mb?: number;
+  network_isolation?: NetworkIsolationMode;
+  isolated?: boolean;
 }
 
 export interface DaemonConfig {

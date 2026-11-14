@@ -2727,3 +2727,124 @@ func TestMultiTenant_APIKeyConcreteExpiration(t *testing.T) {
 		t.Errorf("expected 401 Unauthorized for 2020-01-01 key, got %d (%s)", resp.StatusCode, string(body))
 	}
 }
+
+func TestSandboxNetworkIsolationAPI(t *testing.T) {
+	env := newMultiTenantServer(t)
+	ts := env.ts
+
+	mtSignup(t, ts, "alice-net@example.com", "alice-net", "password1234")
+	aliceToken, _ := mtLogin(t, ts, "alice-net", "password1234")
+
+	mtSignup(t, ts, "bob-net@example.com", "bob-net", "password1234")
+	bobToken, _ := mtLogin(t, ts, "bob-net", "password1234")
+
+	// 1. Default creation uses "account"
+	resp, vmDefault := mtCreateVM(t, ts, aliceToken, map[string]interface{}{
+		"name": "alice-net-1",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 for default create, got %d", resp.StatusCode)
+	}
+	if vmDefault.NetworkIsolation != db.NetworkIsolationAccount {
+		t.Fatalf("expected default network_isolation=account, got %q", vmDefault.NetworkIsolation)
+	}
+
+	// 2. Explicit "isolated" creation
+	resp, vmIsolated := mtCreateVM(t, ts, aliceToken, map[string]interface{}{
+		"name":              "alice-net-2",
+		"network_isolation": "isolated",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 for isolated create, got %d", resp.StatusCode)
+	}
+	if vmIsolated.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected isolated mode, got %q", vmIsolated.NetworkIsolation)
+	}
+
+	// 3. Invalid or conflicting settings return 400 Bad Request
+	badResp, _ := mtRequest(t, ts, http.MethodPost, "/api/v1/vms", aliceToken, map[string]interface{}{
+		"name":              "alice-bad-mode",
+		"network_isolation": "everyone",
+	})
+	if badResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid network_isolation, got %d", badResp.StatusCode)
+	}
+	conflictResp, _ := mtRequest(t, ts, http.MethodPost, "/api/v1/vms", aliceToken, map[string]interface{}{
+		"name":              "alice-conflict-mode",
+		"network_isolation": "account",
+		"isolated":          true,
+	})
+	if conflictResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for conflicting network_isolation+isolated, got %d", conflictResp.StatusCode)
+	}
+
+	// 4. Toggle via POST /api/v1/vms/{id}/network-isolation and PATCH /api/v1/vms/{id}
+	toggleResp, toggleBody := mtRequest(t, ts, http.MethodPost, "/api/v1/vms/"+vmDefault.ID+"/network-isolation", aliceToken, map[string]interface{}{
+		"network_isolation": "isolated",
+	})
+	if toggleResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 toggling isolation, got %d (%s)", toggleResp.StatusCode, string(toggleBody))
+	}
+	var updated db.VM
+	if err := json.Unmarshal(toggleBody, &updated); err != nil {
+		t.Fatalf("decode updated VM: %v", err)
+	}
+	if updated.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected network_isolation=isolated after toggle, got %q", updated.NetworkIsolation)
+	}
+
+	// Invalid toggle returns 400
+	badToggle, _ := mtRequest(t, ts, http.MethodPost, "/api/v1/vms/"+vmDefault.ID+"/network-isolation", aliceToken, map[string]interface{}{
+		"network_isolation": "bogus",
+	})
+	if badToggle.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid toggle mode, got %d", badToggle.StatusCode)
+	}
+
+	// PATCH back to account
+	patchResp, patchBody := mtRequest(t, ts, http.MethodPatch, "/api/v1/vms/"+vmDefault.ID, aliceToken, map[string]interface{}{
+		"network_isolation": "account",
+	})
+	if patchResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 patching network_isolation, got %d (%s)", patchResp.StatusCode, string(patchBody))
+	}
+	if err := json.Unmarshal(patchBody, &updated); err != nil {
+		t.Fatalf("decode patched VM: %v", err)
+	}
+	if updated.NetworkIsolation != db.NetworkIsolationAccount {
+		t.Fatalf("expected network_isolation=account after PATCH, got %q", updated.NetworkIsolation)
+	}
+
+	// 5. Network inspect and allocations reflect network_isolation
+	inspResp, inspBody := mtRequest(t, ts, http.MethodGet, "/api/v1/network/inspect/"+vmIsolated.ID, aliceToken, nil)
+	if inspResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from network inspect, got %d (%s)", inspResp.StatusCode, string(inspBody))
+	}
+	var insp vm.NetworkInspectResult
+	if err := json.Unmarshal(inspBody, &insp); err != nil {
+		t.Fatalf("decode inspect: %v", err)
+	}
+	if insp.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected inspect network_isolation=isolated, got %q", insp.NetworkIsolation)
+	}
+
+	allocResp, allocBody := mtRequest(t, ts, http.MethodGet, "/api/v1/network/allocations", aliceToken, nil)
+	if allocResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from network allocations, got %d (%s)", allocResp.StatusCode, string(allocBody))
+	}
+	var allocs []db.NetworkAllocation
+	if err := json.Unmarshal(allocBody, &allocs); err != nil {
+		t.Fatalf("decode allocations: %v", err)
+	}
+	if len(allocs) != 2 {
+		t.Fatalf("expected 2 allocations for Alice, got %d", len(allocs))
+	}
+
+	// 6. Another tenant (Bob) cannot modify Alice's sandbox network isolation
+	crossResp, _ := mtRequest(t, ts, http.MethodPost, "/api/v1/vms/"+vmDefault.ID+"/network-isolation", bobToken, map[string]interface{}{
+		"network_isolation": "isolated",
+	})
+	if crossResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 when Bob tries to modify Alice's VM isolation, got %d", crossResp.StatusCode)
+	}
+}

@@ -140,6 +140,7 @@ export function InspectVMDialog({
                 <Fact label="PID" value={vm.pid ? String(vm.pid) : '—'} />
                 <Fact label="Dedicated IP" value={vm.ip_address} />
                 <Fact label="Public IP" value={vm.public_ip_enabled ? (vm.public_ip || vm.ip_address) : 'Disabled (off)'} />
+                <Fact label="Sandbox Network" value={vm.network_isolation === 'isolated' ? 'Isolated (own sandbox only)' : 'Account (all account sandboxes)'} mono={false} />
                 <Fact label="MAC" value={vm.mac_address} />
                 <Fact label="TAP" value={vm.tap_device} />
                 <Fact label="SSH Key" value={vm.ssh_key_name || (vm.ssh_public_key ? 'Custom Key' : 'Default Key')} mono={false} />
@@ -210,6 +211,13 @@ export function InspectVMDialog({
                 <Fact label="Dedicated IP" value={vm.ip_address} />
                 <Fact label="Public IP" value={vm.public_ip_enabled ? (vm.public_ip || vm.ip_address) : 'Disabled (off)'} />
                 <Fact label="Public Access" value={vm.public_ip_enabled ? 'ON (Dedicated on main network)' : 'OFF (Private only)'} mono={false} />
+                <Fact
+                  label="Sandbox Network"
+                  value={(network?.network_isolation || vm.network_isolation) === 'isolated'
+                    ? 'Isolated (own sandbox only)'
+                    : 'Account (all account sandboxes)'}
+                  mono={false}
+                />
                 <Fact label="MAC" value={vm.mac_address} />
                 <Fact label="TAP" value={vm.tap_device} />
                 <Fact label="Bridge" value={network?.bridge_name || '—'} />
@@ -259,6 +267,58 @@ export function InspectVMDialog({
                   }}
                 >
                   {vm.public_ip_enabled ? "Turn Off Public IP" : "Turn On Public IP"}
+                </Button>
+              </div>
+
+              <div className="mt-3 flex items-center justify-between rounded-md border p-3.5 bg-secondary/15">
+                <div>
+                  <div className="text-xs font-medium flex items-center gap-1.5">
+                    <Network className="h-3.5 w-3.5 text-primary" />
+                    Sandbox-to-Sandbox Network
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    {(vm.network_isolation || 'account') === 'isolated'
+                      ? 'Isolated: blocked from communicating with all other sandboxes.'
+                      : 'Account: can communicate with other non-isolated sandboxes in your account.'}
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={(vm.network_isolation || 'account') === 'isolated' ? 'default' : 'outline'}
+                  onClick={() => {
+                    const targetVM = vm;
+                    const vmName = targetVM.name || targetVM.id;
+                    const nextMode =
+                      (targetVM.network_isolation || 'account') === 'isolated'
+                        ? 'account'
+                        : 'isolated';
+                    onOpenChange(false);
+                    const toastID = toast.loading(
+                      `Switching ${vmName} to ${nextMode === 'isolated' ? 'isolated' : 'account'} network…`,
+                    );
+                    void api
+                      .setVMNetworkIsolation(targetVM.id, nextMode)
+                      .then(() => {
+                        toast.success(
+                          nextMode === 'isolated'
+                            ? `${vmName} is now isolated on its own`
+                            : `${vmName} can now communicate with account sandboxes`,
+                          { id: toastID },
+                        );
+                        onUpdated?.();
+                      })
+                      .catch((err) => {
+                        toast.error(
+                          `Could not update network isolation for ${vmName}`,
+                          { id: toastID, description: errorMessage(err) },
+                        );
+                      });
+                  }}
+                >
+                  {(vm.network_isolation || 'account') === 'isolated'
+                    ? 'Allow Account Sandboxes'
+                    : 'Isolate Sandbox'}
                 </Button>
               </div>
             </TabsContent>

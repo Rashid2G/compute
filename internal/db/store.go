@@ -278,6 +278,7 @@ func (s *Store) initSchema() error {
 		ip_address TEXT NOT NULL,
 		public_ip TEXT NOT NULL DEFAULT '',
 		public_ip_enabled INTEGER NOT NULL DEFAULT 1,
+		network_isolation TEXT NOT NULL DEFAULT 'account',
 		mac_address TEXT NOT NULL,
 		tap_device TEXT NOT NULL,
 		tailscale_enabled INTEGER NOT NULL DEFAULT 0,
@@ -478,8 +479,8 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN all_sandboxes INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
 
-	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, and protected columns exist
-	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
+	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, network_isolation, and protected columns exist
+	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "network_isolation", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
 	_ = s.migrateTableColumns("images", []string{"internal_id", "owner_id"})
 	_ = s.migrateTableColumns("templates", []string{"internal_id", "owner_id"})
 	_ = s.migrateTableColumns("volumes", []string{"owner_id"})
@@ -548,6 +549,8 @@ func (s *Store) migrateTableColumns(tableName string, cols []string) error {
 		if !existing[col] {
 			if col == "owner_id" {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT 'default';", tableName, col))
+			} else if col == "network_isolation" {
+				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s TEXT NOT NULL DEFAULT 'account';", tableName, col))
 			} else if col == "public_ip_enabled" {
 				_, _ = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 1;", tableName, col))
 			} else if col == "protected" {
@@ -609,11 +612,16 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	if vm.PublicIPEnabled {
 		pubEnabledInt = 1
 	}
+	netIsolation, ok := NormalizeNetworkIsolation(vm.NetworkIsolation)
+	if !ok {
+		netIsolation = NetworkIsolationAccount
+	}
+	vm.NetworkIsolation = netIsolation
 
 	updateQuery := `
 	UPDATE vms SET
 		id = ?, name = ?, status = ?, desired_running = ?, vcpus = ?, memory_mb = ?, disk_mb = ?,
-		ip_address = ?, public_ip = ?, public_ip_enabled = ?,
+		ip_address = ?, public_ip = ?, public_ip_enabled = ?, network_isolation = ?,
 		mac_address = ?, tap_device = ?, tailscale_enabled = ?, tailnet_ip = ?, tailnet_dns = ?, tailscale_device_id = ?,
 		rootfs_path = ?,
 		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
@@ -622,7 +630,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	`
 	res, err := s.db.ExecContext(ctx, updateQuery,
 		vm.ID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
-		vm.IPAddress, vm.PublicIP, pubEnabledInt,
+		vm.IPAddress, vm.PublicIP, pubEnabledInt, netIsolation,
 		vm.MACAddress, vm.TAPDevice, boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
 		vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
@@ -640,16 +648,16 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	insertQuery := `
 	INSERT INTO vms (
 		id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb,
-		ip_address, public_ip, public_ip_enabled, mac_address, tap_device,
+		ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device,
 		tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 		rootfs_path, kernel_path,
 		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
 		pid, socket_path, protected, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err = s.db.ExecContext(ctx, insertQuery,
 		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
-		vm.IPAddress, vm.PublicIP, pubEnabledInt, vm.MACAddress, vm.TAPDevice,
+		vm.IPAddress, vm.PublicIP, pubEnabledInt, netIsolation, vm.MACAddress, vm.TAPDevice,
 		boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
 		vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
@@ -669,7 +677,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
+	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
 	       pid, socket_path, protected, created_at, updated_at
 	FROM vms
@@ -698,7 +706,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	var sshPasswordEnabledInt int
 	err := row.Scan(
 		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
-		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice,
+		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.NetworkIsolation, &vm.MACAddress, &vm.TAPDevice,
 		&tsEnabledInt, &vm.TailnetIP, &vm.TailnetDNS, &vm.TailscaleDeviceID, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
 		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.CreatedAt, &vm.UpdatedAt,
@@ -712,6 +720,11 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	vm.Status = VMStatus(status)
 	vm.DesiredRunning = desiredRunning != 0
 	vm.PublicIPEnabled = pubEnabledInt != 0
+	if norm, ok := NormalizeNetworkIsolation(vm.NetworkIsolation); ok {
+		vm.NetworkIsolation = norm
+	} else {
+		vm.NetworkIsolation = NetworkIsolationAccount
+	}
 	vm.Protected = protectedInt != 0
 	vm.TailscaleEnabled = tsEnabledInt != 0
 	vm.SSHPasswordEnabled = sshPasswordEnabledInt != 0
@@ -732,7 +745,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
+	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
 	       pid, socket_path, protected, created_at, updated_at
 	FROM vms
@@ -757,7 +770,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		var sshPasswordEnabledInt int
 		err := rows.Scan(
 			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
-			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.MACAddress, &vm.TAPDevice,
+			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.NetworkIsolation, &vm.MACAddress, &vm.TAPDevice,
 			&tsEnabledInt, &vm.TailnetIP, &vm.TailnetDNS, &vm.TailscaleDeviceID, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
 			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.CreatedAt, &vm.UpdatedAt,
@@ -768,6 +781,11 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		vm.Status = VMStatus(status)
 		vm.DesiredRunning = desiredRunning != 0
 		vm.PublicIPEnabled = pubEnabledInt != 0
+		if norm, ok := NormalizeNetworkIsolation(vm.NetworkIsolation); ok {
+			vm.NetworkIsolation = norm
+		} else {
+			vm.NetworkIsolation = NetworkIsolationAccount
+		}
 		vm.Protected = protectedInt != 0
 		vm.TailscaleEnabled = tsEnabledInt != 0
 		vm.SSHPasswordEnabled = sshPasswordEnabledInt != 0
@@ -857,7 +875,7 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, updated_at
+	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, updated_at
 	FROM vms WHERE ip_address != '' ORDER BY ip_address ASC;
 	`
 	rows, err := s.db.QueryContext(ctx, query)
@@ -871,9 +889,14 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 		var a NetworkAllocation
 		var status string
 		var pubEnabledInt int
-		if err := rows.Scan(&a.VMID, &a.VMName, &a.OwnerID, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
+		if err := rows.Scan(&a.VMID, &a.VMName, &a.OwnerID, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.NetworkIsolation, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt); err == nil {
 			a.Status = VMStatus(status)
 			a.PublicIPEnabled = pubEnabledInt != 0
+			if norm, ok := NormalizeNetworkIsolation(a.NetworkIsolation); ok {
+				a.NetworkIsolation = norm
+			} else {
+				a.NetworkIsolation = NetworkIsolationAccount
+			}
 			if a.PublicIPEnabled && a.PublicIP == "" && a.IPAddress != "" {
 				a.PublicIP = a.IPAddress
 			}
@@ -889,14 +912,14 @@ func (s *Store) GetNetworkAllocation(ctx context.Context, tapOrID string) (*Netw
 	defer s.mu.RUnlock()
 
 	query := `
-	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, mac_address, tap_device, updated_at
+	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, updated_at
 	FROM vms WHERE tap_device = ? OR id = ? OR name = ? LIMIT 1;
 	`
 	row := s.db.QueryRowContext(ctx, query, tapOrID, tapOrID, tapOrID)
 	var a NetworkAllocation
 	var status string
 	var pubEnabledInt int
-	err := row.Scan(&a.VMID, &a.VMName, &a.OwnerID, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt)
+	err := row.Scan(&a.VMID, &a.VMName, &a.OwnerID, &status, &a.IPAddress, &a.PublicIP, &pubEnabledInt, &a.NetworkIsolation, &a.MACAddress, &a.TAPDevice, &a.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -905,6 +928,11 @@ func (s *Store) GetNetworkAllocation(ctx context.Context, tapOrID string) (*Netw
 	}
 	a.Status = VMStatus(status)
 	a.PublicIPEnabled = pubEnabledInt != 0
+	if norm, ok := NormalizeNetworkIsolation(a.NetworkIsolation); ok {
+		a.NetworkIsolation = norm
+	} else {
+		a.NetworkIsolation = NetworkIsolationAccount
+	}
 	if a.PublicIPEnabled && a.PublicIP == "" && a.IPAddress != "" {
 		a.PublicIP = a.IPAddress
 	}
