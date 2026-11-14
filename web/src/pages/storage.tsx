@@ -42,7 +42,6 @@ export function StoragePage({
   const [volPool, setVolPool] = useState('default');
   const [volFs, setVolFs] = useState('ext4');
   const [volAttachVM, setVolAttachVM] = useState('');
-  const [creating, setCreating] = useState(false);
   const [pools, setPools] = useState<string[]>(['default']);
 
   const [attachModalVol, setAttachModalVol] = useState<VolumeRecord | null>(
@@ -110,89 +109,102 @@ export function StoragePage({
     (config?.resources?.max_total_disk_mb || 512000) / 1024,
   );
 
-  async function handleCreateVolume(e: React.FormEvent) {
+  function handleCreateVolume(e: React.FormEvent) {
     e.preventDefault();
-    if (!volName.trim()) return;
-    setCreating(true);
-    try {
-      const created = await api.createVolume({
-        name: volName.trim(),
-        size_gb: volSizeGB,
-        pool: volPool,
-        filesystem: volFs,
-        attached_vm: volAttachVM || undefined,
+    const name = volName.trim();
+    if (!name) return;
+    const payload = {
+      name,
+      size_gb: volSizeGB,
+      pool: volPool,
+      filesystem: volFs,
+      attached_vm: volAttachVM || undefined,
+    };
+    setCreateOpen(false);
+    setVolName('');
+    setVolAttachVM('');
+
+    const toastID = toast.loading(`Provisioning volume ${name}…`);
+    void api
+      .createVolume(payload)
+      .then(async (created) => {
+        toast.success(`Provisioned persistent volume ${created.name}`, {
+          id: toastID,
+        });
+        await loadVolumes();
+        onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Provisioned persistent volume ${created.name}`);
-      setCreateOpen(false);
-      setVolName('');
-      setVolAttachVM('');
-      await loadVolumes();
-      onRefresh?.();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setCreating(false);
-    }
   }
 
-  async function handleAttach(e: React.FormEvent) {
+  function handleAttach(e: React.FormEvent) {
     e.preventDefault();
     if (!attachModalVol || !selectedVMForAttach) return;
-    try {
-      await api.attachVolume(attachModalVol.id, selectedVMForAttach);
-      toast.success(
-        `Attached ${attachModalVol.name} to ${selectedVMForAttach}`,
-      );
-      setAttachModalVol(null);
-      setSelectedVMForAttach('');
-      await loadVolumes();
-      onRefresh?.();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
+    const vol = attachModalVol;
+    const targetVM = selectedVMForAttach;
+    setAttachModalVol(null);
+    setSelectedVMForAttach('');
+
+    const toastID = toast.loading(`Attaching ${vol.name} to ${targetVM}…`);
+    void api
+      .attachVolume(vol.id, targetVM)
+      .then(async () => {
+        toast.success(`Attached ${vol.name} to ${targetVM}`, { id: toastID });
+        await loadVolumes();
+        onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
+      });
   }
 
   async function handleDetach(vol: VolumeRecord) {
+    const toastID = toast.loading(`Detaching ${vol.name}…`);
     try {
       await api.detachVolume(vol.id);
-      toast.success(`Detached ${vol.name}`);
+      toast.success(`Detached ${vol.name}`, { id: toastID });
       await loadVolumes();
       onRefresh?.();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     }
   }
 
   async function handleExpand(vol: VolumeRecord) {
+    const toastID = toast.loading(`Expanding ${vol.name} by +10 GB…`);
     try {
       await api.expandVolume(vol.id, 10);
-      toast.success(`Expanded ${vol.name} by +10 GB`);
+      toast.success(`Expanded ${vol.name} by +10 GB`, { id: toastID });
       await loadVolumes();
       onRefresh?.();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     }
   }
 
   async function handleSnapshot(vol: VolumeRecord) {
+    const toastID = toast.loading(`Snapshotting ${vol.name}…`);
     try {
       await api.snapshotVolume(vol.id);
-      toast.success(`Created block snapshot of ${vol.name}`);
+      toast.success(`Created block snapshot of ${vol.name}`, { id: toastID });
       await loadVolumes();
       onRefresh?.();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     }
   }
 
   async function handleDelete(vol: VolumeRecord) {
+    const toastID = toast.loading(`Deleting volume ${vol.name}…`);
     try {
       await api.deleteVolume(vol.id);
-      toast.success(`Deleted volume ${vol.name}`);
+      toast.success(`Deleted volume ${vol.name}`, { id: toastID });
       await loadVolumes();
       onRefresh?.();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     }
   }
 
@@ -394,10 +406,9 @@ export function StoragePage({
             </button>
             <button
               type="submit"
-              disabled={creating}
               className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
             >
-              {creating ? 'Provisioning…' : 'Create Volume'}
+              Create Volume
             </button>
           </div>
         </form>

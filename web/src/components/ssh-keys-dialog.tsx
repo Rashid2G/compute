@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Copy, Key, Loader2, Plus, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -26,8 +27,6 @@ export function SSHKeysDialog({
 }) {
   const [keys, setKeys] = useState<SSHKey[]>([]);
   const [loading, setLoading] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [togglingDefaultId, setTogglingDefaultId] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -55,43 +54,56 @@ export function SSHKeysDialog({
     }
   }, [open]);
 
-  async function handleAddKey(e: React.FormEvent) {
+  function handleAddKey(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !publicKey.trim() || adding) return;
+    const keyName = name.trim();
+    const pubKey = publicKey.trim();
+    if (!keyName || !pubKey) return;
 
-    setAdding(true);
+    const payload = {
+      name: keyName,
+      public_key: pubKey,
+      all_sandboxes: allSandboxes,
+    };
+
     setError(null);
-    try {
-      const created = await api.createKey({
-        name: name.trim(),
-        public_key: publicKey.trim(),
-        all_sandboxes: allSandboxes,
+    setName('');
+    setPublicKey('');
+    setAllSandboxes(false);
+    onOpenChange(false);
+
+    const toastID = toast.loading(`Adding SSH key "${keyName}"…`);
+    void api
+      .createKey(payload)
+      .then((created) => {
+        setKeys((prev) => [created, ...prev]);
+        onKeyAdded?.(created);
+        toast.success(`Added SSH key "${created.name}"`, { id: toastID });
+      })
+      .catch((err) => {
+        toast.error(`Could not add SSH key "${keyName}"`, {
+          id: toastID,
+          description: errorMessage(err),
+        });
       });
-      setName('');
-      setPublicKey('');
-      setAllSandboxes(false);
-      setKeys((prev) => [created, ...prev]);
-      if (onKeyAdded) {
-        onKeyAdded(created);
-      }
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setAdding(false);
-    }
   }
 
-  async function handleDeleteKey(id: string) {
-    if (deletingId) return;
-    setDeletingId(id);
-    try {
-      await api.deleteKey(id);
-      setKeys((prev) => prev.filter((k) => k.id !== id));
-    } catch (err) {
-      setError(errorMessage(err));
-    } finally {
-      setDeletingId(null);
-    }
+  function handleDeleteKey(key: SSHKey) {
+    const label = key.name || key.id;
+    onOpenChange(false);
+    const toastID = toast.loading(`Deleting SSH key "${label}"…`);
+    void api
+      .deleteKey(key.id)
+      .then(() => {
+        setKeys((prev) => prev.filter((k) => k.id !== key.id));
+        toast.success(`Deleted SSH key "${label}"`, { id: toastID });
+      })
+      .catch((err) => {
+        toast.error(`Could not delete SSH key "${label}"`, {
+          id: toastID,
+          description: errorMessage(err),
+        });
+      });
   }
 
   async function handleToggleAll(key: SSHKey) {
@@ -172,7 +184,6 @@ export function SSHKeysDialog({
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. macbook-pro or id_ed25519"
                 className="text-xs"
-                disabled={adding}
               />
             </div>
             <div className="space-y-1.5">
@@ -185,7 +196,6 @@ export function SSHKeysDialog({
                 onChange={(e) => setPublicKey(e.target.value)}
                 placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@machine"
                 rows={3}
-                disabled={adding}
                 className="w-full resize-none rounded-md border bg-background px-3 py-2 font-mono text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>
@@ -194,15 +204,14 @@ export function SSHKeysDialog({
                 id="key-all-sandboxes"
                 checked={allSandboxes}
                 onCheckedChange={(checked) => setAllSandboxes(checked === true)}
-                disabled={adding}
               />
               <Label htmlFor="key-all-sandboxes" className="text-xs font-normal">
                 Apply to all current and future sandboxes
               </Label>
             </div>
             <div className="flex justify-end pt-1">
-              <Button type="submit" size="sm" disabled={!name.trim() || !publicKey.trim() || adding}>
-                {adding ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Plus className="mr-1.5 h-3.5 w-3.5" />}
+              <Button type="submit" size="sm" disabled={!name.trim() || !publicKey.trim()}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
                 Add Public Key
               </Button>
             </div>
@@ -297,15 +306,10 @@ export function SSHKeysDialog({
                         variant="ghost"
                         size="icon-sm"
                         className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-                        disabled={deletingId === k.id}
-                        onClick={() => handleDeleteKey(k.id)}
+                        onClick={() => handleDeleteKey(k)}
                         title="Delete key"
                       >
-                        {deletingId === k.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
+                        <Trash2 className="h-3.5 w-3.5" />
                       </Button>
                       {copiedId === k.id && (
                         <span className="text-[10px] text-emerald-500">Copied!</span>

@@ -59,6 +59,7 @@ export function NetworkPage({
 
   async function handlePrune() {
     setPruning(true);
+    const toastID = toast.loading('Pruning orphaned TAP interfaces…');
     try {
       const res = await api.pruneNetwork();
       const count = res.pruned_taps?.length ?? 0;
@@ -66,10 +67,11 @@ export function NetworkPage({
         count > 0
           ? `Pruned ${count} orphaned TAP interface(s)`
           : '0 orphaned TAP interfaces found · Bridge clean',
+        { id: toastID },
       );
       onRefresh();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     } finally {
       setPruning(false);
     }
@@ -87,24 +89,34 @@ export function NetworkPage({
     }
   }
 
-  async function handleCreatePortForward(e: React.FormEvent) {
+  function handleCreatePortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!pfVmId) return;
     const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
-    try {
-      await api.createPortForward({
-        host_port: pfHostPort,
-        guest_port: pfGuestPort,
-        vm_id: pfVmId,
-        vm_name: vmAlloc?.vm_name || pfVmId,
-        protocol: pfProto,
+    const payload = {
+      host_port: pfHostPort,
+      guest_port: pfGuestPort,
+      vm_id: pfVmId,
+      vm_name: vmAlloc?.vm_name || pfVmId,
+      protocol: pfProto,
+    };
+    setAddPfOpen(false);
+
+    const toastID = toast.loading(
+      `Adding DNAT port forward :${payload.host_port} -> :${payload.guest_port}…`,
+    );
+    void api
+      .createPortForward(payload)
+      .then(async () => {
+        toast.success(
+          `Added DNAT port forward :${payload.host_port} -> :${payload.guest_port}`,
+          { id: toastID },
+        );
+        await loadPortForwards();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Added DNAT port forward :${pfHostPort} -> :${pfGuestPort}`);
-      setAddPfOpen(false);
-      await loadPortForwards();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   return (
