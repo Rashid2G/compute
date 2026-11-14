@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, ShieldOff, TriangleAlert } from 'lucide-react';
+import { ShieldOff, TriangleAlert } from 'lucide-react';
 
 import {
   AlertDialog,
@@ -19,7 +19,7 @@ interface UnprotectVMDialogProps {
   vms: VM[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (ids: string[]) => Promise<void>;
+  onConfirm: (ids: string[]) => Promise<void> | void;
 }
 
 export function UnprotectVMDialog({
@@ -29,7 +29,6 @@ export function UnprotectVMDialog({
   onConfirm,
 }: UnprotectVMDialogProps) {
   const [confirmation, setConfirmation] = useState('');
-  const [submitting, setSubmitting] = useState(false);
 
   const isBulk = vms.length > 1;
   const expected = useMemo(
@@ -42,25 +41,20 @@ export function UnprotectVMDialog({
   useEffect(() => {
     if (!open) {
       setConfirmation('');
-      setSubmitting(false);
     }
   }, [open]);
 
   const matches = expected.length > 0 && confirmation.trim() === expected;
 
-  async function confirm(event: React.MouseEvent) {
+  function confirm(event: React.MouseEvent) {
     event.preventDefault();
-    if (!matches || submitting || vms.length === 0) return;
+    if (!matches || vms.length === 0) return;
 
-    setSubmitting(true);
-    try {
-      await onConfirm(vms.map((vm) => vm.id));
-      onOpenChange(false);
-    } catch {
-      // The caller reports the failure; keep the dialog open for retry.
-    } finally {
-      setSubmitting(false);
-    }
+    const targetIds = vms.map((vm) => vm.id);
+    onOpenChange(false);
+    void Promise.resolve(onConfirm(targetIds)).catch(() => {
+      // The caller reports failures via toast notifications.
+    });
   }
 
   return (
@@ -139,28 +133,21 @@ export function UnprotectVMDialog({
             autoCapitalize="off"
             spellCheck={false}
             autoFocus
-            disabled={submitting}
             aria-invalid={confirmation.length > 0 && !matches}
             className="font-mono"
           />
         </div>
 
         <AlertDialogFooter className="mt-3 flex flex-row justify-end gap-2">
-          <AlertDialogCancel
-            disabled={submitting}
-            className="border-border bg-background hover:bg-muted text-foreground px-4"
-          >
+          <AlertDialogCancel className="border-border bg-background hover:bg-muted text-foreground px-4">
             Cancel
           </AlertDialogCancel>
           <AlertDialogAction
             onClick={confirm}
-            disabled={!matches || submitting}
+            disabled={!matches}
             className="bg-destructive hover:bg-destructive/90 text-destructive-foreground font-medium px-4 inline-flex items-center disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {submitting ? (
-              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-            ) : null}
-            {submitting ? 'Removing…' : 'Remove protection'}
+            Remove protection
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

@@ -34,24 +34,34 @@ export function ApiPage({ config }: ApiPageProps) {
     void loadData();
   }, [loadData]);
 
-  async function handleCreateProfile(e: React.FormEvent) {
+  function handleCreateProfile(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim()) return;
-    try {
-      await api.createAgentProfile({
-        name: name.trim(),
-        provider,
-        upstream_url: upstreamUrl,
-        inject_header: injectHeader,
-        secret_ref: secretRef,
+    const profileName = name.trim();
+    if (!profileName) return;
+    const payload = {
+      name: profileName,
+      provider,
+      upstream_url: upstreamUrl,
+      inject_header: injectHeader,
+      secret_ref: secretRef,
+    };
+    setName('');
+    setAddOpen(false);
+
+    const toastID = toast.loading(
+      `Creating agent proxy profile "${profileName}"…`,
+    );
+    void api
+      .createAgentProfile(payload)
+      .then(async () => {
+        toast.success(`Created agent proxy profile "${profileName}"`, {
+          id: toastID,
+        });
+        await loadData();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Created agent proxy profile "${name.trim()}"`);
-      setName('');
-      setAddOpen(false);
-      await loadData();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   const endpoints = [
