@@ -57,11 +57,11 @@ if [[ -z "${PR_ARG}" ]]; then
     exit 1
 fi
 
-# Ensure sandbox name follows pr-<PR_NUMBER> naming
-if [[ "${PR_ARG}" =~ ^pr- ]]; then
-    SANDBOX_NAME="${PR_ARG}"
-else
+# Use pr-<n> for numeric PR args; preserve explicit/branch-derived sandbox names.
+if [[ "${PR_ARG}" =~ ^[0-9]+$ ]]; then
     SANDBOX_NAME="pr-${PR_ARG}"
+else
+    SANDBOX_NAME="$(echo "${PR_ARG}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-63)"
 fi
 STAGE_DIR="/tmp/${SANDBOX_NAME}-preview"
 
@@ -192,11 +192,12 @@ log "Services REUSED from compute-lab:  ${SERVICES_REUSED:-none (full stack in g
 # 2. Build the required linux binaries (and web assets if the UI changed)
 # ---------------------------------------------------------------------------
 BUILD_DIR="bin/preview"
+rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"
 
 if [[ "${WEB_CHANGED}" -eq 1 ]]; then
     log "Building web UI assets (web/ changed)..."
-    if ! (cd web && { [[ -d node_modules ]] || npm ci --silent; } && npm run build); then
+    if ! (cd web && { [[ -x node_modules/.bin/tsc ]] || npm ci --silent; } && npm run build); then
         warn "Web UI build failed; falling back to committed assets in internal/gui/assets (UI may be stale)."
     fi
 fi
@@ -304,7 +305,12 @@ fi
 GUEST_SSH_KEY="${COMPUTE_GUEST_SSH_KEY:-}"
 if [[ -z "${GUEST_SSH_KEY}" ]]; then
     GUEST_SSH_KEY="$(ssh -o BatchMode=yes "${TARGET_HOST}" "
-        for cand in /var/lib/compute/images/ssh/id_ed25519 '${TARGET_DIR}/data/images/ssh/id_ed25519'; do
+        if sudo -n docker ps -q --filter 'name=computed' 2>/dev/null | grep -q .; then
+            set -- '${TARGET_DIR}/data/images/ssh/id_ed25519' /var/lib/compute/images/ssh/id_ed25519
+        else
+            set -- /var/lib/compute/images/ssh/id_ed25519 '${TARGET_DIR}/data/images/ssh/id_ed25519'
+        fi
+        for cand in \"\$@\"; do
             if sudo -n test -f \"\$cand\" 2>/dev/null || test -f \"\$cand\" 2>/dev/null; then
                 echo \"\$cand\"; break
             fi
@@ -316,7 +322,7 @@ if [[ -z "${GUEST_SSH_KEY}" ]]; then
     exit 1
 fi
 
-GUEST_SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -i ${GUEST_SSH_KEY}"
+GUEST_SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -i ${GUEST_SSH_KEY}"
 
 # Wait for guest SSH to accept connections
 log "Waiting for guest SSH on ${GUEST_USER}@${GUEST_MGMT_IP}..."
@@ -375,12 +381,15 @@ sleep 1
 
 if [ "\${DEPLOY_DAEMON}" = "1" ]; then
     # New daemon runs guest-local; the GUI proxies to it over loopback.
+    # Preview guests lack /dev/kvm, firecracker, and host base images, so allow
+    # degraded startup when running computed inside the sandbox.
     sudo -n mkdir -p /etc/compute /var/lib/compute/data /var/lib/compute/images /var/lib/compute/vms /var/log/compute
     sudo -n cp "\${PREVIEW_DIR}/bin/daemon.json" /etc/compute/daemon.json
-    sudo -n bash -c "nohup '\${PREVIEW_DIR}/bin/computed' -config /etc/compute/daemon.json >/var/log/compute/computed.log 2>&1 & disown"
+    sudo -n bash -c "COMPUTE_ALLOW_UNREADY_STARTUP=true nohup '\${PREVIEW_DIR}/bin/computed' -config /etc/compute/daemon.json >/var/log/compute/computed.log 2>&1 & disown"
     DAEMON_URL="http://127.0.0.1:18080"
     for i in \$(seq 1 45); do
         curl -sf --connect-timeout 2 "\${DAEMON_URL}/api/v1/health" >/dev/null 2>&1 && break
+        pgrep -f "\${PREVIEW_DIR}/bin/computed" >/dev/null 2>&1 || { echo "ERROR: computed exited early:" >&2; sudo -n tail -n 20 /var/log/compute/computed.log >&2; break; }
         sleep 1
     done
 else

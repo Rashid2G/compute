@@ -184,3 +184,34 @@ func TestRenderDeploymentsPageEscapesNames(t *testing.T) {
 		t.Errorf("expected escaped name in output:\n%s", out)
 	}
 }
+
+func TestSetGUIHandlerDoesNotConflictWithRoot(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	guiMux := http.NewServeMux()
+	guiMux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("console.log('gui');"))
+	})
+	env.server.SetGUIHandler(guiMux)
+
+	resRoot, err := http.Get(env.ts.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyRoot, _ := io.ReadAll(resRoot.Body)
+	resRoot.Body.Close()
+	if resRoot.StatusCode != http.StatusOK || !strings.Contains(string(bodyRoot), "Deployments") {
+		t.Fatalf("expected deployments homepage at /, got %d: %s", resRoot.StatusCode, string(bodyRoot))
+	}
+
+	resAsset, err := http.Get(env.ts.URL + "/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyAsset, _ := io.ReadAll(resAsset.Body)
+	resAsset.Body.Close()
+	if resAsset.StatusCode != http.StatusOK || string(bodyAsset) != "console.log('gui');" {
+		t.Fatalf("expected guiHandler to serve /app.js, got %d: %s", resAsset.StatusCode, string(bodyAsset))
+	}
+}
