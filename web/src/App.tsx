@@ -348,6 +348,7 @@ export default function App() {
         vcpus: cluster.config?.defaults?.vcpus || 2,
         memory_mb: cluster.config?.defaults?.memory_mb || 2048,
         public_ip_enabled: true,
+        network_isolation: 'account',
       },
       true,
     );
