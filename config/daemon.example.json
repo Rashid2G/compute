@@ -62,26 +62,6 @@
     "host_addresses": [
       "127.0.0.1"
     ]
-  },
-  "tailscale": {
-    "enabled": false,
-    "api_key": "",
-    "tailnet": "-",
-    "node_tag": "tag:compute-master",
-    "sandbox_tag": "tag:compute-sandbox",
-    "hostname_prefix": "compute",
-    "auto_install_guest": true,
-    "default_sandboxes": false,
-    "service_gateway": {
-      "enabled": false,
-      "host_tag": "tag:compute-master",
-      "service_tag": "tag:compute-sandbox",
-      "auto_approve": true,
-      "scan_interval_seconds": 30,
-      "expose_loopback": false,
-      "exclude_ports": [
-        25
-      ]
-    }
   }
 }
+

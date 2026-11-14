@@ -109,7 +109,7 @@ export function SSHTerminalWindow({
             {vm ? <StatusBadge status={vm.status} /> : null}
           </div>
 
-          <span className="hidden sm:inline-block font-mono text-[11px] text-muted-foreground" title={vm?.hostname || vm?.tailnet_dns || undefined}>
+          <span className="hidden sm:inline-block font-mono text-[11px] text-muted-foreground" title={vm?.hostname || undefined}>
             {access.sshHost || vm?.ip_address || vm?.public_ip || 'no-address'}
           </span>
         </div>

@@ -21,7 +21,6 @@ import type {
   NetworkInspectResult,
   OTelConfigRecord,
   PortForwardRecord,
-  TailscaleStatus,
   ProcessInfo,
   QueueResult,
   SSHKey,
@@ -325,10 +324,6 @@ export const api = {
 
   listPortForwards(): Promise<PortForwardRecord[]> {
     return request<PortForwardRecord[]>('/network/port-forwards');
-  },
-
-  tailscaleStatus(): Promise<TailscaleStatus> {
-    return request<TailscaleStatus>('/tailscale/status');
   },
 
   createPortForward(payload: {

@@ -51,23 +51,6 @@
     "base_domain": "",
     "extra_base_domains": [],
     "host_addresses": []
-  },
-  "tailscale": {
-    "enabled": false,
-    "api_key": "",
-    "tailnet": "-",
-    "node_tag": "tag:compute-master",
-    "sandbox_tag": "tag:compute-sandbox",
-    "hostname_prefix": "compute",
-    "auto_install_guest": true,
-    "default_sandboxes": false,
-    "service_gateway": {
-      "enabled": false,
-      "host_tag": "tag:compute-master",
-      "service_tag": "tag:compute-sandbox",
-      "auto_approve": true,
-      "scan_interval_seconds": 30,
-      "expose_loopback": false
-    }
   }
 }
+
