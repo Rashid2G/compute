@@ -56,7 +56,7 @@ In refinement rounds ($Round \ge 2$):
 ### 4. Integrity, Objectivity & Strict Honesty
 Be completely honest, objective, and evidence-based. If thorough probing and deep inspection reveal no defects and the deliverable satisfies all technical requirements, **report plainly that there are no issues found**.
 
-**Do not invent, fabricate, or exaggerate hypothetical defects.** Any defect reported MUST be backed by verified, reproducible evidence (exact file citation, section or line number, and reproducible probe output or concrete counter-example). If all requirements are met and all probes pass, award an honest passing score (`> 8.0`) and verdict `PASS`.
+**Do not invent, fabricate, or exaggerate hypothetical defects.** Any defect reported MUST be backed by verified, reproducible evidence (exact file citation, section or line number, and reproducible probe output or concrete counter-example). If all requirements are met and all probes pass, award an honest passing score (`> 8.1`) and verdict `PASS`.
 
 ### 5. High-Density, Token-Efficient Output Format
 To conserve tokens across multiple evaluation rounds, **strictly eliminate conversational filler, preambles, instruction recaps, and narrative essays**. Output ONLY the structured sections below.

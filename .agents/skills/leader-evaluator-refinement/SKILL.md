@@ -90,7 +90,7 @@ Evaluators must have **zero context** from the Leader's internal drafting proces
 **NEVER use duplicate models for evaluations.**
 Using the same model family, provider, or architecture for both evaluators completely undermines independent verification—duplicate models share identical blindspots, inductive biases, training corpora, and reasoning failure modes.
 - **Strict Invariance**: Evaluator 1 and Evaluator 2 MUST ALWAYS be powered by entirely distinct, non-duplicate model families (e.g., DeepSeek paired with Gemini, or Claude paired with OpenAI/DeepSeek).
-- **No Same-Family Variants**: Pairing different sizes, quantization levels, or versions of the same model family (e.g., `model-flash` with `model-pro` from the same provider) is strictly forbidden as a duplicate pairing.
+- **No Same-Family Variants**: Pairing different sizes, quantization levels, or versions of the same model family (e.g., `model-flash` with `model-pro` from the same provider) is strictly forbidden as a duplicate pairing. If the current runtime only exposes a single model family, report that limitation to the user and ask how to proceed rather than silently duplicating models.
 - **Perspective & Cognitive Decoupling**:
   - **Evaluator 1 (Model Family A - Adversarial Stress-Testing & Rigor)**: Deep reasoning architecture specialized in edge-case tracing, counter-examples, boundary probing, and security/logical attack vectors.
   - **Evaluator 2 (Model Family B - Architectural Coherence & Conformance)**: Distinct frontier architecture specialized in structural integrity, requirements alignment, holistic consistency, and standards compliance.
@@ -116,7 +116,7 @@ Evaluators are **strictly forbidden** from relying solely on self-reported autho
 ### 7. Integrity, Objectivity & Strict Honesty
 Be completely honest, objective, and evidence-based. If active stress-testing and thorough inspection reveal no defects and the implementation satisfies all technical requirements, **report plainly that there are no issues found**.
 
-**Do not invent, fabricate, or exaggerate hypothetical defects.** Any defect reported MUST be backed by verified, reproducible evidence (exact file citation, concrete line/section reference, and reproducible probe output or counter-example). If all requirements are met and all probes pass, award an honest passing score (`> 8.0`) and verdict `PASS`.
+**Do not invent, fabricate, or exaggerate hypothetical defects.** Any defect reported MUST be backed by verified, reproducible evidence (exact file citation, concrete line/section reference, and reproducible probe output or counter-example). If all requirements are met and all probes pass, award an honest passing score (`> 8.1`) and verdict `PASS`.
 
 ### 8. Iterative Refinement (Continuous Result Enhancement)
 Refinement is the active mechanism of results enhancement:
