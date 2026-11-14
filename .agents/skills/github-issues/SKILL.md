@@ -79,9 +79,7 @@ gh issue view <n>
 ```
 
 ## Automating in PRs
-- A PR merged into `dev` closes issues only when the final fix reaches the branch that ships.
-  For fixes that must go through `dev` first, use `Refs #n` and close after promotion to `main`,
-  unless the user says otherwise.
+- All agent PRs target `dev`. Use `Closes #n` when the PR fully satisfies the issue's acceptance criteria (unless the user explicitly asks to keep it open until promotion to `main`); otherwise use `Refs #n` and leave a progress comment.
 
 ## Rules
 - Never close an issue without a linked commit/PR or a written reason.

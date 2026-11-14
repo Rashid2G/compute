@@ -1,6 +1,7 @@
 ---
 name: deploy
 description: >
+description: >
   Deploy on-demand-vms changes: mandatory per-PR live Docker Compose preview stacks
   on compute-lab (`make deploy-current`, `make preview-stop`, port 19000-19099 URLs
   and deployments homepage), main lab deployments (`make deploy`, `make deploy-ui` on
@@ -13,13 +14,13 @@ description: >
 
 ## Target Environment
 
-- **Host alias**: `compute-lab` (`192.168.1.70`, SSH with non-interactive key / `BatchMode=yes`)
-- **Main Daemon API**: `http://127.0.0.1:18080` (on VM) / `http://192.168.1.70:18080`
-- **Main GUI**: `http://127.0.0.1:8080` (on VM)
+- **Host alias**: `compute-lab` (`192.168.1.70`, SSH with non-interactive key / `BatchMode=yes`; passwordless `sudo -n` required on remote for preview provisioning)
+- **Main Daemon API**: `http://127.0.0.1:18080` (on VM) / `http://192.168.1.70:18080` (LAN)
+- **Main GUI**: `http://127.0.0.1:8080` (on VM) / `http://192.168.1.70:8080` (LAN)
 - **Deployments Homepage**: `http://192.168.1.70:18080/` (lists main dev GUI + all active preview stacks)
 - **Deployed checkout**: `/home/rashid/on-demand-vms`
 
-Never print secrets, private keys, SSH config contents, or tokens in logs or reports.
+Note: `compute-lab` is an SSH alias in `~/.ssh/config` and may not resolve in local DNS/HTTP; use `192.168.1.70` (or the `HOST_IP` printed by the deploy script) for `curl` and browser URLs. Never print secrets, private keys, SSH config contents, or tokens in logs or reports.
 
 ---
 
@@ -32,15 +33,16 @@ Every PR must have a live preview Docker Compose stack deployed on `compute-lab`
 
 ### How previews work
 
-- Each preview runs as its own isolated Docker Compose stack (`preview-<name>`) on `compute-lab`'s Docker daemon, named `pr-<number>` (or the sanitized branch name when no PR exists yet, e.g. `feat/add-thing` -> `feat-add-thing`).
+- Each preview runs as its own isolated Docker Compose stack (`preview-<name>`) on `compute-lab`'s Docker daemon, named `pr-<number>` (when an open PR exists for the branch; otherwise the sanitized branch name, e.g. `feat/add-thing` -> `feat-add-thing`).
+- **Recommended timing**: Commit, push, and run `gh pr create --base dev` **before** running `make deploy-current` so `gh pr view` detects the PR number and names the stack `pr-<n>` cleanly (avoiding orphaned branch-named stacks).
 - `scripts/preview-docker.sh` builds the PR's `computed` Linux binary (with the PR's embedded Web UI), picks a stable free slot (`19000`–`19099`, bridge `mft3brp<slot>`, subnet `172.<100+slot>.0.0/16`), sets `COMPUTE_DEPLOYMENTS_INDEX=false` so `/` serves the PR's Web UI directly, disables `:53` DNS and `:80` edge (`dev` owns those), and inherits authentication credentials from the lab `.env`.
 - Reviewers access the preview directly at `http://192.168.1.70:<port>/`.
 - Each deploy writes a manifest to `/home/rashid/on-demand-vms/data/previews/<name>.json`, which the main `dev` daemon's deployments homepage at `http://192.168.1.70:18080/` lists alongside `dev` (unauthenticated, exposing only deployment names, branches, and status).
 
 ### Preview workflow
 
-1. Commit your changes in your `dev`-based worktree.
-2. Deploy from the current worktree (no PR number required):
+1. Commit your verified changes in your `dev`-based worktree (no stray uncommitted/untracked files), push, and open the PR (`gh pr create --base dev`).
+2. Deploy from the current worktree:
    ```bash
    make deploy-current
    ```
@@ -48,10 +50,11 @@ Every PR must have a live preview Docker Compose stack deployed on `compute-lab`
 3. Verify the printed preview URL, auth, and deployments homepage:
    ```bash
    curl -sf -o /dev/null -w '%{http_code}\n' http://192.168.1.70:<port>/api/v1/health
-   curl -sf http://192.168.1.70:18080/ | head -n 5
+   curl -sf http://192.168.1.70:18080/ | head -n 20
    ```
-   Also confirm Web UI HTML is served at `/` and auth is enabled (unauthenticated `/api/v1/auth/me` returns `401`, never `"authentication manager not enabled"`). For UI changes, capture a browser screenshot as evidence if applicable.
-4. Include both `http://192.168.1.70:<port>/` and `http://192.168.1.70:18080/` in the PR description/comment and final report.
+   Also confirm Web UI HTML is served at `/` and auth is enabled (unauthenticated `/api/v1/auth/me` returns `401`, never `"authentication manager not enabled"`). For UI changes, verify in a browser/screenshot if credentials/browser are available, or note any unauthenticated limitation honestly.
+4. Add both `http://192.168.1.70:<port>/` and `http://192.168.1.70:18080/` to the PR description/comment and final report.
+5. If `compute-lab` / `192.168.1.70` is unreachable from your current execution environment, report `make deploy-current` as **not run (network/SSH unreachable)** rather than skipping silently.
 
 ### Preview troubleshooting & teardown
 
@@ -67,8 +70,9 @@ Every PR must have a live preview Docker Compose stack deployed on `compute-lab`
   ```
 - **Teardown** (when a PR is closed/merged or cleanup is requested):
   ```bash
-  make preview-stop PR=<n>            # by PR number or name
-  make deploy-current ARGS="--stop"   # for the current branch
+  make preview-stop PR=<n>                         # by PR number or name
+  make deploy-current ARGS="--stop --name pr-<n>"   # stop any preview stack by exact name
+  make deploy-current ARGS="--stop"                # stop current branch/PR preview (from its worktree)
   ```
 - **Scripts & env overrides**:
   - `scripts/preview-docker.sh` (Docker engine), `scripts/deploy-current.sh` (name derivation + CLI wrapper), `Makefile` targets `deploy-current`, `preview-deploy`, `preview-stop`.
@@ -93,7 +97,7 @@ Always verify service health (`make remote-status`) after deploying to main.
 
 - **Local daemon**: `make setup-host` (sudo, configures host bridge/iptables) then `make build && make dev` (serves `127.0.0.1:18080`).
 - **Local feature suite**: `make test-features` (requires running daemon + suitable Linux/KVM host).
-- **Lab feature suite**:
+- **Lab feature suite** (runs against the shared live `compute-lab` daemon — run only when testing lab integration explicitly):
   ```bash
   ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"
   ```
