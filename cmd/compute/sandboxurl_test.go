@@ -18,19 +18,9 @@ import (
 
 const (
 	testDelegatedHostname = "spark.alice.sandbox.example.com"
-	testMagicDNSHostname  = "spark.alice.compute-lab.tailb1be99.ts.net"
 )
 
 func TestSandboxAccessSSHPrecedence(t *testing.T) {
-	base := &db.VM{
-		ID:         "vm-1",
-		Name:       "spark",
-		IPAddress:  "172.16.0.2",
-		TailnetIP:  "100.101.102.103",
-		Hostname:   testDelegatedHostname,
-		TailnetDNS: "spark.tailb1be99.ts.net",
-	}
-
 	cases := []struct {
 		name        string
 		vm          *db.VM
@@ -39,13 +29,6 @@ func TestSandboxAccessSSHPrecedence(t *testing.T) {
 		resolvable  bool
 		noteContain string
 	}{
-		{
-			name:       "tailnet DNS wins over hostname",
-			vm:         base,
-			wantHost:   "spark.tailb1be99.ts.net",
-			wantKind:   SSHHostTailnetDNS,
-			resolvable: true,
-		},
 		{
 			name: "hostname with delegated zone",
 			vm: &db.VM{
@@ -58,23 +41,12 @@ func TestSandboxAccessSSHPrecedence(t *testing.T) {
 			noteContain: "delegated",
 		},
 		{
-			name: "hostname under MagicDNS is labelled as not delegating",
+			name: "public IP before guest IP",
 			vm: &db.VM{
-				ID: "vm-1", Name: "spark", IPAddress: "172.16.0.2",
-				Hostname: testMagicDNSHostname,
+				ID: "vm-1", Name: "spark", IPAddress: "172.16.0.2", PublicIP: "198.51.100.1",
 			},
-			wantHost:    testMagicDNSHostname,
-			wantKind:    SSHHostHostname,
-			resolvable:  false,
-			noteContain: "MagicDNS",
-		},
-		{
-			name: "tailnet IP before guest IP",
-			vm: &db.VM{
-				ID: "vm-1", Name: "spark", IPAddress: "172.16.0.2", TailnetIP: "100.101.102.103",
-			},
-			wantHost:   "100.101.102.103",
-			wantKind:   SSHHostTailnetIP,
+			wantHost:   "198.51.100.1",
+			wantKind:   SSHHostPublicIP,
 			resolvable: true,
 		},
 		{
@@ -115,8 +87,8 @@ func TestSandboxAccessSSHPrecedence(t *testing.T) {
 }
 
 func TestSandboxAccessCustomSSHUser(t *testing.T) {
-	acc := sandboxAccessForVM(&db.VM{Name: "spark", TailnetDNS: "spark.tailb1be99.ts.net"}, "root", 0)
-	if acc.SSH != "ssh root@spark.tailb1be99.ts.net" {
+	acc := sandboxAccessForVM(&db.VM{Name: "spark", Hostname: testDelegatedHostname}, "root", 0)
+	if acc.SSH != "ssh root@"+testDelegatedHostname {
 		t.Fatalf("SSH = %q", acc.SSH)
 	}
 }
@@ -135,28 +107,6 @@ func TestSandboxAccessURL(t *testing.T) {
 		}
 		if !strings.Contains(acc.URLNote, "delegated") {
 			t.Fatalf("URLNote = %q", acc.URLNote)
-		}
-	})
-
-	t.Run("MagicDNS zone hides the URL with a hint", func(t *testing.T) {
-		acc := sandboxAccessForVM(&db.VM{Name: "spark", Hostname: testMagicDNSHostname}, "compute", 0)
-		if acc.URLResolvable {
-			t.Fatalf("URLResolvable = true for a ts.net zone")
-		}
-		if acc.URL != "" {
-			t.Fatalf("URL = %q, want empty", acc.URL)
-		}
-		if acc.URLHost != testMagicDNSHostname {
-			t.Fatalf("URLHost = %q", acc.URLHost)
-		}
-		if !strings.Contains(acc.URLNote, "MagicDNS") || !strings.Contains(acc.URLNote, "delegated") {
-			t.Fatalf("URLNote = %q", acc.URLNote)
-		}
-		if acc.Zone != "compute-lab.tailb1be99.ts.net" {
-			t.Fatalf("Zone = %q", acc.Zone)
-		}
-		if !acc.ZoneIsMagicDNS {
-			t.Fatalf("ZoneIsMagicDNS = false")
 		}
 	})
 
@@ -215,13 +165,6 @@ func TestSandboxAccessPortURLs(t *testing.T) {
 		}
 	})
 
-	t.Run("MagicDNS zone suppresses port URLs", func(t *testing.T) {
-		acc := sandboxAccessForVM(&db.VM{Name: "spark", Hostname: testMagicDNSHostname}, "compute", 8080)
-		if acc.PortURL != "" || acc.LegacyPortURL != "" {
-			t.Fatalf("port URLs = %q / %q, want empty", acc.PortURL, acc.LegacyPortURL)
-		}
-	})
-
 	t.Run("no port requested", func(t *testing.T) {
 		acc := sandboxAccessForVM(&db.VM{Name: "spark", Hostname: testDelegatedHostname}, "compute", 0)
 		if acc.PortURL != "" {
@@ -233,19 +176,15 @@ func TestSandboxAccessPortURLs(t *testing.T) {
 func TestSandboxAccessLines(t *testing.T) {
 	acc := sandboxAccessForVM(&db.VM{
 		ID: "vm-1", Name: "spark", IPAddress: "172.16.0.2",
-		Hostname: testMagicDNSHostname, TailnetDNS: "spark.tailb1be99.ts.net",
+		Hostname: testDelegatedHostname,
 	}, "compute", 0)
 	lines := strings.Join(sandboxAccessLines(acc), "\n")
 	for _, want := range []string{
 		"Hostname:",
-		testMagicDNSHostname,
-		"Tailnet DNS:",
-		"spark.tailb1be99.ts.net",
+		testDelegatedHostname,
 		"SSH:",
-		"ssh compute@spark.tailb1be99.ts.net",
+		"ssh compute@" + testDelegatedHostname,
 		"URL:",
-		"URL note:",
-		"MagicDNS",
 		"CLI:",
 		"compute ssh spark",
 	} {
@@ -283,8 +222,8 @@ func TestMatchSandboxReference(t *testing.T) {
 	vms := []*db.VM{
 		{
 			ID: "vm-1", Name: "spark", InternalID: "ins_1",
-			Hostname: testDelegatedHostname, TailnetDNS: "spark.tailb1be99.ts.net",
-			TailnetIP: "100.101.102.103", IPAddress: "172.16.0.2",
+			Hostname: testDelegatedHostname,
+			PublicIP: "198.51.100.1", IPAddress: "172.16.0.2",
 		},
 		{ID: "vm-2", Name: "other"},
 	}
@@ -297,8 +236,7 @@ func TestMatchSandboxReference(t *testing.T) {
 		{"ins_1", "vm-1"},
 		{testDelegatedHostname, "vm-1"},
 		{strings.ToUpper(testDelegatedHostname) + ".", "vm-1"},
-		{"spark.tailb1be99.ts.net", "vm-1"},
-		{"100.101.102.103", "vm-1"},
+		{"198.51.100.1", "vm-1"},
 		{"172.16.0.2", "vm-1"},
 		{"other", "vm-2"},
 		{"missing", ""},
@@ -322,7 +260,7 @@ func TestMatchSandboxReference(t *testing.T) {
 func TestURLCommandPrintsURLAndResolvesHostname(t *testing.T) {
 	created := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
 	mux := http.NewServeMux()
-	vmJSON := fmt.Sprintf(`{"id":"vm-1","name":"spark","status":"running","ip_address":"172.16.0.2","hostname":%q,"tailnet_dns":"spark.tailb1be99.ts.net","vcpus":2,"memory_mb":1024,"created_at":%q}`,
+	vmJSON := fmt.Sprintf(`{"id":"vm-1","name":"spark","status":"running","ip_address":"172.16.0.2","hostname":%q,"vcpus":2,"memory_mb":1024,"created_at":%q}`,
 		testDelegatedHostname, created.Format(time.RFC3339))
 	mux.HandleFunc("/api/v1/vms", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -374,36 +312,6 @@ func TestURLCommandPrintsURLAndResolvesHostname(t *testing.T) {
 	}
 	if acc.PortURL != "http://8080-spark.alice.sandbox.example.com/" {
 		t.Fatalf("PortURL = %q", acc.PortURL)
-	}
-}
-
-func TestURLCommandFallsBackToSSHForMagicDNS(t *testing.T) {
-	vmPayload := `{"id":"vm-1","name":"spark","status":"running","ip_address":"172.16.0.2","hostname":"spark.alice.compute-lab.tailb1be99.ts.net","tailnet_dns":"spark.tailb1be99.ts.net"}`
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/vms/", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, vmPayload)
-	})
-	mux.HandleFunc("/api/v1/vms", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "[%s]", vmPayload)
-	})
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	cmd := exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "url spark")
-	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("url spark failed: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
-	}
-	if strings.TrimSpace(stdout.String()) != "ssh compute@spark.tailb1be99.ts.net" {
-		t.Fatalf("stdout = %q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "MagicDNS") {
-		t.Fatalf("stderr hint missing: %q", stderr.String())
 	}
 }
 

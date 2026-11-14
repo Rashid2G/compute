@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -1447,21 +1446,6 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			status = "active"
-			// Publish a tailnet Service so the port has a stable MagicDNS name.
-			// Services are TCP-only (Tailscale limitation); failures leave the
-			// regular host-local URL in place.
-			if req.Subdomain == "" && protocol == "tcp" {
-				if svc, err := s.vmMgr.PublishTailscaleService(ctx, targetVM, req.GuestPort); err != nil {
-					log.Printf("[port-forward] %s: tailscale service publish for :%d failed: %v", targetVM.ID, req.GuestPort, err)
-				} else if svc != nil && svc.URL != "" {
-					publicURL = svc.URL
-				}
-				// Single-host Service gateway: the sandbox port is published by
-				// the host's own Service, whose name/VIP are deterministic.
-				if svcURL := s.gatewayServiceURL(ctx, targetVM, req.GuestPort); svcURL != "" {
-					publicURL = svcURL
-				}
-			}
 		}
 
 		pfOwner := ownerID
@@ -1499,7 +1483,6 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.recordEvent("port_forward.created", getActor(r), fmt.Sprintf("%d->%d", pf.HostPort, pf.GuestPort), "delivered", 15, pf)
-		s.kickTailscaleGateway()
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pf)
 
@@ -1542,14 +1525,12 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 			if v, _ := st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID); v != nil && v.IPAddress != "" {
 				_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 			}
-			s.vmMgr.UnpublishTailscaleService(ctx, pf.VMID, pf.GuestPort)
 		}
 		if err := st.DeletePortForward(ctx, id); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		s.recordEvent("port_forward.deleted", getActor(r), id, "delivered", 15, nil)
-		s.kickTailscaleGateway()
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	default:

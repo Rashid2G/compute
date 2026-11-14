@@ -19,7 +19,6 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/version"
 )
@@ -239,35 +238,7 @@ func main() {
 		CgroupDevOverride:         !globalCfg.Server.CgroupEnforce,
 		Defaults:                  globalCfg.Defaults,
 		Resources:                 globalCfg.Resources,
-		TailscaleDefaultSandboxes: globalCfg.Tailscale.Enabled && globalCfg.Tailscale.DefaultSandboxes && !globalCfg.Tailscale.ServiceGatewayEnabled(),
 	}, store, netMgr, storMgr)
-
-	// Wire the tailnet integration.
-	//
-	// The Service gateway is the default model: this host is the only tailnet
-	// device and sandboxes stay on the local bridge. Per-sandbox device
-	// provisioning is legacy and only wired when explicitly requested.
-	gatewayEnabled := globalCfg.Tailscale.ServiceGatewayEnabled()
-	if gatewayEnabled && globalCfg.Tailscale.APIKey != "" {
-		log.Printf("[computed] Tailscale Service gateway mode: sandboxes stay on the local bridge; this host exposes per-sandbox Services")
-	} else if globalCfg.Tailscale.Enabled && globalCfg.Tailscale.APIKey != "" &&
-		(globalCfg.Tailscale.LegacyPerSandboxDevices || globalCfg.Tailscale.DefaultSandboxes) {
-		tsClient := tailscale.NewClient(globalCfg.Tailscale.APIKey, globalCfg.Tailscale.Tailnet)
-		vmMgr.SetTailscaleProvisioner(&tailscale.Provisioner{
-			Client:        tsClient,
-			SandboxTag:    globalCfg.Tailscale.ResolvedSandboxTag(),
-			KeyExpirySecs: globalCfg.Tailscale.KeyExpirySeconds,
-			AutoInstall:   globalCfg.Tailscale.AutoInstallResolved(),
-			Logger:        log.Default(),
-		})
-		log.Printf("[computed] Tailscale legacy per-sandbox device mode enabled (sandbox tag %s)", globalCfg.Tailscale.ResolvedSandboxTag())
-	} else if globalCfg.Tailscale.Enabled {
-		if globalCfg.Tailscale.APIKey == "" {
-			log.Printf("[computed] Tailscale enabled but no API key configured; sandbox tailnet addressing unavailable")
-		} else {
-			log.Printf("[computed] Tailscale enabled but no Service gateway and no legacy mode; tailnet addressing disabled for sandboxes")
-		}
-	}
 
 	// Reconcile and prune any leftover orphan TAPs from previous runs
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -295,11 +266,6 @@ func main() {
 
 	// Start continuous background status monitor to detect microVM exits and maintain synced status
 	vmMgr.StartStatusMonitor(context.Background(), 3*time.Second)
-
-	// Single-host Tailscale Service gateway: one tailnet device (this host)
-	// exposes every sandbox as a Service while sandboxes stay on the local
-	// bridge. Started before DNS so VIP answers are available.
-	server.startTailscaleGateway()
 
 	// Built-in DNS responder: gives every sandbox a routable
 	// <sandbox>.<username>.<base-domain> name. SSH carries no hostname, so the

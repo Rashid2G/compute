@@ -10,12 +10,11 @@ import (
 
 func TestSandboxAddresses(t *testing.T) {
 	vm := &db.VM{
-		TailnetIP: "100.64.0.5",
 		IPAddress: "172.16.3.7",
 	}
 	ips := sandboxAddresses(vm)
-	if len(ips) != 2 || !ips[0].Equal(net.ParseIP("100.64.0.5")) || !ips[1].Equal(net.ParseIP("172.16.3.7")) {
-		t.Fatalf("want tailnet first then guest, got %v", ips)
+	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("172.16.3.7")) {
+		t.Fatalf("want guest IP, got %v", ips)
 	}
 
 	ips = sandboxAddresses(&db.VM{IPAddress: "dhcp"})

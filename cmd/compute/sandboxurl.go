@@ -15,12 +15,10 @@ import (
 
 // SSH host kinds returned in SandboxAccess.SSHHostKind.
 const (
-	SSHHostTailnetDNS = "tailnet_dns"
-	SSHHostHostname   = "hostname"
-	SSHHostTailnetIP  = "tailnet_ip"
-	SSHHostIP         = "ip_address"
-	SSHHostPublicIP   = "public_ip"
-	SSHHostNone       = "none"
+	SSHHostHostname = "hostname"
+	SSHHostIP       = "ip_address"
+	SSHHostPublicIP = "public_ip"
+	SSHHostNone     = "none"
 )
 
 // Immutable labels for the URL source.
@@ -31,23 +29,14 @@ const (
 )
 
 // SandboxAccess is the display model for reaching a sandbox over SSH and
-// HTTP. It is derived only from data the API already exposes (tailnet_dns,
-// hostname, tailnet_ip, ip_address) so it stays base-domain agnostic.
-//
-// The GUI mirrors this logic in web/src/lib/sandbox-access.ts; keep both in
-// sync when changing the precedence or hints.
+// HTTP.
 type SandboxAccess struct {
 	Sandbox string `json:"sandbox"`
 
 	// Hostname is the transient "<sandbox>.<username>.<zone>" name returned by
 	// the API when the DNS responder is configured.
-	Hostname   string `json:"hostname,omitempty"`
-	TailnetDNS string `json:"tailnet_dns,omitempty"`
-	Zone       string `json:"zone,omitempty"`
-	// ZoneIsMagicDNS reports that the zone belongs to Tailscale's MagicDNS
-	// namespace (*.ts.net), where the daemon's authoritative records are not
-	// consulted by tailnet clients.
-	ZoneIsMagicDNS bool `json:"zone_is_magicdns,omitempty"`
+	Hostname string `json:"hostname,omitempty"`
+	Zone     string `json:"zone,omitempty"`
 
 	SSH           string `json:"ssh,omitempty"`
 	SSHHost       string `json:"ssh_host,omitempty"`
@@ -94,45 +83,28 @@ func sandboxAccessForVM(v *db.VM, sshUser string, port int) SandboxAccess {
 		acc.Sandbox = strings.TrimSpace(v.ID)
 	}
 	acc.Hostname = normalizeHostname(v.Hostname)
-	acc.TailnetDNS = normalizeHostname(v.TailnetDNS)
 
 	sandboxLabel, tenant, zone, hostnameOK := splitSandboxHostname(acc.Hostname)
 	acc.Zone = zone
-	acc.ZoneIsMagicDNS = isMagicDNSZone(zone)
-	zoneDelegated := hostnameOK && zone != "" && !acc.ZoneIsMagicDNS
+	zoneDelegated := hostnameOK && zone != ""
 
 	// SSH target selection.
 	switch {
-	case acc.TailnetDNS != "":
-		acc.SSHHost = acc.TailnetDNS
-		acc.SSHHostKind = SSHHostTailnetDNS
-		acc.SSHResolvable = true
 	case acc.Hostname != "":
 		acc.SSHHost = acc.Hostname
 		acc.SSHHostKind = SSHHostHostname
 		acc.SSHResolvable = zoneDelegated
-		if acc.ZoneIsMagicDNS {
-			acc.SSHNote = fmt.Sprintf(
-				"%s is under %s, which MagicDNS answers itself; it does not resolve from tailnet clients until the zone is delegated to this daemon.",
-				acc.Hostname, acc.Zone)
-		} else {
-			acc.SSHNote = fmt.Sprintf("%s requires %s to be delegated to this daemon's DNS responder.", acc.Hostname, acc.Zone)
-		}
-	case strings.TrimSpace(v.TailnetIP) != "":
-		acc.SSHHost = strings.TrimSpace(v.TailnetIP)
-		acc.SSHHostKind = SSHHostTailnetIP
-		acc.SSHResolvable = true
-		acc.SSHNote = "No DNS name yet; using the sandbox tailnet IP."
-	case strings.TrimSpace(v.IPAddress) != "":
-		acc.SSHHost = strings.TrimSpace(v.IPAddress)
-		acc.SSHHostKind = SSHHostIP
-		acc.SSHResolvable = true
-		acc.SSHNote = "No DNS name yet; using the sandbox guest IP, which needs routing or a subnet route."
+		acc.SSHNote = fmt.Sprintf("%s requires %s to be delegated to this daemon's DNS responder.", acc.Hostname, acc.Zone)
 	case strings.TrimSpace(v.PublicIP) != "":
 		acc.SSHHost = strings.TrimSpace(v.PublicIP)
 		acc.SSHHostKind = SSHHostPublicIP
 		acc.SSHResolvable = true
 		acc.SSHNote = "No DNS name yet; using the public IP."
+	case strings.TrimSpace(v.IPAddress) != "":
+		acc.SSHHost = strings.TrimSpace(v.IPAddress)
+		acc.SSHHostKind = SSHHostIP
+		acc.SSHResolvable = true
+		acc.SSHNote = "No DNS name yet; using the sandbox guest IP."
 	default:
 		acc.SSHNote = "No address is assigned to this sandbox yet."
 	}
@@ -144,11 +116,6 @@ func sandboxAccessForVM(v *db.VM, sshUser string, port int) SandboxAccess {
 	switch {
 	case acc.Hostname == "":
 		acc.URLNote = "No sandbox DNS name is configured. Enable the daemon DNS responder with a base domain to publish an HTTP URL."
-	case acc.ZoneIsMagicDNS:
-		acc.URLHost = acc.Hostname
-		acc.URLNote = fmt.Sprintf(
-			"Sandbox HTTP names under %s are intercepted by MagicDNS and do not resolve from tailnet clients. HTTP ingress stays hidden until the zone is delegated to this daemon (see issue #16 for the domain decision).",
-			acc.Zone)
 	case !hostnameOK:
 		acc.URLNote = fmt.Sprintf("Could not derive a zone from the sandbox hostname %q.", acc.Hostname)
 	default:
@@ -203,7 +170,6 @@ func sandboxAccessLines(a SandboxAccess) []string {
 	}
 	lines := []string{
 		line("Hostname", valueOrDash(a.Hostname)),
-		line("Tailnet DNS", valueOrDash(a.TailnetDNS)),
 		line("SSH", valueOrDash(a.SSH)),
 	}
 	if a.SSHNote != "" {
@@ -258,14 +224,6 @@ func splitSandboxHostname(hostname string) (sandbox, tenant, zone string, ok boo
 	return "", "", "", false
 }
 
-// isMagicDNSZone reports whether zone belongs to Tailscale's own MagicDNS
-// namespace. MagicDNS answers every *.ts.net query itself, so authoritative
-// records for a zone under ts.net never reach tailnet clients.
-func isMagicDNSZone(zone string) bool {
-	z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
-	return z == "ts.net" || strings.HasSuffix(z, ".ts.net")
-}
-
 func normalizeHostname(hostname string) string {
 	return strings.TrimSuffix(strings.TrimSpace(hostname), ".")
 }
@@ -290,8 +248,8 @@ func matchSandboxReference(vms []*db.VM, ref string) *db.VM {
 			continue
 		}
 		for _, candidate := range []string{
-			v.ID, v.Name, v.InternalID, v.Hostname, v.TailnetDNS,
-			v.TailnetIP, v.IPAddress, v.PublicIP,
+			v.ID, v.Name, v.InternalID, v.Hostname,
+			v.IPAddress, v.PublicIP,
 		} {
 			if candidate != "" && normalizeReference(candidate) == wanted {
 				return v
@@ -306,7 +264,7 @@ func normalizeReference(ref string) string {
 }
 
 // resolveSandboxReference resolves a CLI reference (ID, name, DNS hostname,
-// tailnet DNS name, or IP) against the daemon. The daemon's own lookup only
+// or IP) against the daemon. The daemon's own lookup only
 // understands IDs and names, so hostnames fall back to a client-side match
 // against the list response.
 func resolveSandboxReference(ctx context.Context, client *DaemonClient, ref string) (*db.VM, error) {
@@ -324,7 +282,7 @@ func resolveSandboxReference(ctx context.Context, client *DaemonClient, ref stri
 	if v := matchSandboxReference(vms, ref); v != nil {
 		return v, nil
 	}
-	return nil, fmt.Errorf("sandbox %q not found (tried ID, name, hostname, tailnet DNS, and IP)", ref)
+	return nil, fmt.Errorf("sandbox %q not found (tried ID, name, hostname, and IP)", ref)
 }
 
 // splitURLArgs separates flag tokens from positional tokens so `compute url
