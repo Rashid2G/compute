@@ -412,23 +412,25 @@ func (m *Manager) SetResourceLimits(limits config.ResourceLimits) {
 }
 
 type CreateRequest struct {
-	Name            string `json:"name"`
-	OwnerID         string `json:"owner_id,omitempty"`
-	Tier            string `json:"tier,omitempty"`       // "1vcpu", "2vcpu", "4vcpu" (or "micro", "small", "medium")
-	VCPUs           int    `json:"vcpus"`                // 1, 2, or 4
-	MemoryMB        int    `json:"memory_mb,omitempty"`  // Optional: default 2048, 4096, 8192
-	DiskMB          int    `json:"disk_mb,omitempty"`    // 51200 (50GB) or 102400 (100GB)
-	Image           string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
-	Template        string `json:"template,omitempty"`   // VM Template name or ID to launch from
-	CloneFrom       string `json:"clone_from,omitempty"` // VM ID to clone persistent disk from
-	IPAddress       string `json:"ip_address,omitempty"`
-	MACAddress      string `json:"mac_address,omitempty"`
-	PublicIP        *bool  `json:"public_ip,omitempty"`
-	PublicIPEnabled *bool  `json:"public_ip_enabled,omitempty"`
-	DedicatedIP     *bool  `json:"dedicated_ip,omitempty"`
-	DHCP            *bool  `json:"dhcp,omitempty"`
-	SSHKeyID     string `json:"ssh_key_id,omitempty"`
-	SSHPublicKey string `json:"ssh_public_key,omitempty"`
+	Name             string `json:"name"`
+	OwnerID          string `json:"owner_id,omitempty"`
+	Tier             string `json:"tier,omitempty"`       // "1vcpu", "2vcpu", "4vcpu" (or "micro", "small", "medium")
+	VCPUs            int    `json:"vcpus"`                // 1, 2, or 4
+	MemoryMB         int    `json:"memory_mb,omitempty"`  // Optional: default 2048, 4096, 8192
+	DiskMB           int    `json:"disk_mb,omitempty"`    // 51200 (50GB) or 102400 (100GB)
+	Image            string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
+	Template         string `json:"template,omitempty"`   // VM Template name or ID to launch from
+	CloneFrom        string `json:"clone_from,omitempty"` // VM ID to clone persistent disk from
+	IPAddress        string `json:"ip_address,omitempty"`
+	MACAddress       string `json:"mac_address,omitempty"`
+	PublicIP         *bool  `json:"public_ip,omitempty"`
+	PublicIPEnabled  *bool  `json:"public_ip_enabled,omitempty"`
+	DedicatedIP      *bool  `json:"dedicated_ip,omitempty"`
+	NetworkIsolation string `json:"network_isolation,omitempty"` // "account" (default) or "isolated"
+	Isolated         *bool  `json:"isolated,omitempty"`          // Convenience boolean alias: true => "isolated", false => "account"
+	DHCP             *bool  `json:"dhcp,omitempty"`
+	SSHKeyID         string `json:"ssh_key_id,omitempty"`
+	SSHPublicKey     string `json:"ssh_public_key,omitempty"`
 	// SSHNoDefaultKey opts out of the caller's default account key. When a
 	// creation request names no key explicitly and this flag is false, the
 	// control plane injects the owner's default key automatically. Clients
@@ -456,6 +458,8 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 	aux := struct {
 		RawPublicIP    interface{} `json:"public_ip,omitempty"`
 		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
+		RawIsolated    interface{} `json:"isolated,omitempty"`
+		RawIsolate     interface{} `json:"isolate,omitempty"`
 		RawDHCP        interface{} `json:"dhcp,omitempty"`
 		RawProtected   interface{} `json:"protected,omitempty"`
 		*Alias
@@ -495,6 +499,11 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 			r.PublicIP = b
 			r.PublicIPEnabled = b
 		}
+	}
+	if b := parseBool(aux.RawIsolated); b != nil {
+		r.Isolated = b
+	} else if b := parseBool(aux.RawIsolate); b != nil {
+		r.Isolated = b
 	}
 	if b := parseBool(aux.RawDHCP); b != nil {
 		r.DHCP = b
@@ -538,18 +547,19 @@ type ExecStreamEvent struct {
 }
 
 type NetworkInspectResult struct {
-	VMID            string `json:"vm_id"`
-	VMName          string `json:"vm_name"`
-	Status          string `json:"status"`
-	IPAddress       string `json:"ip_address"`
-	PublicIP        string `json:"public_ip,omitempty"`
-	PublicIPEnabled bool   `json:"public_ip_enabled"`
-	MACAddress      string `json:"mac_address"`
-	TAPDevice       string `json:"tap_device"`
-	BridgeName      string `json:"bridge_name"`
-	Gateway         string `json:"gateway"`
-	Reachable       bool   `json:"reachable"`
-	Connectivity    string `json:"connectivity"`
+	VMID             string `json:"vm_id"`
+	VMName           string `json:"vm_name"`
+	Status           string `json:"status"`
+	IPAddress        string `json:"ip_address"`
+	PublicIP         string `json:"public_ip,omitempty"`
+	PublicIPEnabled  bool   `json:"public_ip_enabled"`
+	NetworkIsolation string `json:"network_isolation"`
+	MACAddress       string `json:"mac_address"`
+	TAPDevice        string `json:"tap_device"`
+	BridgeName       string `json:"bridge_name"`
+	Gateway          string `json:"gateway"`
+	Reachable        bool   `json:"reachable"`
+	Connectivity     string `json:"connectivity"`
 }
 
 type QueueItem struct {
@@ -864,6 +874,145 @@ func validateSSHPassword(password string) error {
 	return nil
 }
 
+func resolveNetworkIsolation(mode string, isolated *bool) (string, error) {
+	trimmed := strings.TrimSpace(mode)
+	if trimmed != "" {
+		norm, ok := db.NormalizeNetworkIsolation(trimmed)
+		if !ok {
+			return "", fmt.Errorf("invalid network_isolation %q: expected %q or %q", mode, db.NetworkIsolationAccount, db.NetworkIsolationIsolated)
+		}
+		if isolated != nil {
+			want := db.NetworkIsolationAccount
+			if *isolated {
+				want = db.NetworkIsolationIsolated
+			}
+			if norm != want {
+				return "", fmt.Errorf("conflicting network isolation settings: network_isolation=%q and isolated=%t", mode, *isolated)
+			}
+		}
+		return norm, nil
+	}
+	if isolated != nil {
+		if *isolated {
+			return db.NetworkIsolationIsolated, nil
+		}
+		return db.NetworkIsolationAccount, nil
+	}
+	return db.NetworkIsolationAccount, nil
+}
+
+func sameAccountOwners(ownerA, ownerB string) bool {
+	a := strings.TrimSpace(ownerA)
+	b := strings.TrimSpace(ownerB)
+	if a == "" {
+		a = "default"
+	}
+	if b == "" {
+		b = "default"
+	}
+	if a == b {
+		return true
+	}
+	// Match a user account (usr_<id>) with its personal organization (org_<id>).
+	if strings.HasPrefix(a, "usr_") && b == "org_"+strings.TrimPrefix(a, "usr_") {
+		return true
+	}
+	if strings.HasPrefix(b, "usr_") && a == "org_"+strings.TrimPrefix(b, "usr_") {
+		return true
+	}
+	return false
+}
+
+func (m *Manager) listVMsForIsolation(ctx context.Context) []*db.VM {
+	if m.store != nil {
+		if vms, err := m.store.ListVMs(ctx); err == nil {
+			return vms
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	seen := make(map[string]bool)
+	var out []*db.VM
+	for _, v := range m.vms {
+		if v == nil {
+			continue
+		}
+		key := v.InternalID
+		if key == "" {
+			key = v.ID
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+func (m *Manager) buildIsolationConfigForVM(targetVM *db.VM, allVMs []*db.VM) network.IsolationConfig {
+	isolated := db.IsNetworkIsolated(targetVM)
+	cfg := network.IsolationConfig{
+		TAPDevice:        targetVM.TAPDevice,
+		IPAddress:        targetVM.IPAddress,
+		MACAddress:       targetVM.MACAddress,
+		OwnerID:          targetVM.OwnerID,
+		Isolated:         isolated,
+		AllowSameAccount: !isolated,
+	}
+	if isolated {
+		return cfg
+	}
+	for _, peer := range allVMs {
+		if peer == nil || peer.TAPDevice == "" || peer.TAPDevice == targetVM.TAPDevice {
+			continue
+		}
+		if peer.InternalID != "" && targetVM.InternalID != "" {
+			if peer.InternalID == targetVM.InternalID {
+				continue
+			}
+		} else if peer.ID == targetVM.ID {
+			continue
+		}
+		if peer.Status != db.StatusRunning {
+			continue
+		}
+		if db.IsNetworkIsolated(peer) {
+			continue
+		}
+		if sameAccountOwners(targetVM.OwnerID, peer.OwnerID) {
+			cfg.AllowedPeerTAPs = append(cfg.AllowedPeerTAPs, peer.TAPDevice)
+		}
+	}
+	return cfg
+}
+
+func (m *Manager) applyVMNetworkIsolation(ctx context.Context, targetVM *db.VM) {
+	if m.netMgr == nil || targetVM == nil || targetVM.TAPDevice == "" {
+		return
+	}
+	allVMs := m.listVMsForIsolation(ctx)
+	isoCfg := m.buildIsolationConfigForVM(targetVM, allVMs)
+	_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
+}
+
+func (m *Manager) reconcileAccountNetworkIsolation(ctx context.Context, ownerID string) {
+	if m.netMgr == nil {
+		return
+	}
+	allVMs := m.listVMsForIsolation(ctx)
+	for _, v := range allVMs {
+		if v == nil || v.TAPDevice == "" || v.Status != db.StatusRunning {
+			continue
+		}
+		if !sameAccountOwners(v.OwnerID, ownerID) {
+			continue
+		}
+		isoCfg := m.buildIsolationConfigForVM(v, allVMs)
+		_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
+	}
+}
+
 // CreateVM reserves networking, validates disk space and images, and registers a created VM
 func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, error) {
 	uid := uuid.New().String()
@@ -875,6 +1024,10 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		ownerID = "default"
 	}
 	if err := validateSSHPassword(req.SSHPassword); err != nil {
+		return nil, err
+	}
+	networkIsolation, err := resolveNetworkIsolation(req.NetworkIsolation, req.Isolated)
+	if err != nil {
 		return nil, err
 	}
 	// Internal job service processes may consume images/templates that the
@@ -1277,6 +1430,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		IPAddress:          ip,
 		PublicIP:           publicIP,
 		PublicIPEnabled:    publicIPEnabled,
+		NetworkIsolation:   networkIsolation,
 		MACAddress:         mac,
 		TAPDevice:          tapDev,
 		TailscaleEnabled:   false,
@@ -1312,6 +1466,11 @@ func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest
 		if srcVM != nil {
 			req.PublicIP = &srcVM.PublicIPEnabled
 			req.PublicIPEnabled = &srcVM.PublicIPEnabled
+		}
+	}
+	if strings.TrimSpace(req.NetworkIsolation) == "" && req.Isolated == nil && srcVM != nil {
+		if norm, ok := db.NormalizeNetworkIsolation(srcVM.NetworkIsolation); ok {
+			req.NetworkIsolation = norm
 		}
 	}
 	if req.Protected == nil && srcVM != nil {
@@ -1360,6 +1519,7 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 	if err := m.saveVMRecord(ctx, vm); err != nil {
 		return err
 	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 	m.maybeSyncSSHKeys(vm)
 	return nil
 }
@@ -1379,24 +1539,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 	}
 
 	// Apply L2/L3 Anti-Spoofing and Bridge Port Isolation
-	if m.netMgr != nil {
-		isoCfg := network.IsolationConfig{
-			TAPDevice:  vm.TAPDevice,
-			IPAddress:  vm.IPAddress,
-			MACAddress: vm.MACAddress,
-			OwnerID:    vm.OwnerID,
-		}
-		if vm.OwnerID != "" && vm.OwnerID != "default" && m.store != nil {
-			if peers, err := m.store.ListVMsByOwner(ctx, vm.OwnerID); err == nil {
-				for _, peer := range peers {
-					if peer != nil && peer.ID != vm.ID && peer.TAPDevice != "" && peer.Status == db.StatusRunning {
-						isoCfg.AllowedPeerTAPs = append(isoCfg.AllowedPeerTAPs, peer.TAPDevice)
-					}
-				}
-			}
-		}
-		_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
-	}
+	m.applyVMNetworkIsolation(ctx, vm)
 
 	// 2. Setup Cgroups v2 resource limits
 	if m.cgroupMgr != nil {
@@ -1662,12 +1805,7 @@ func (m *Manager) pollDHCPLease(vmID, mac string, publicIPEnabled bool) {
 				}
 				_ = m.saveVMRecord(context.Background(), vm)
 				_ = m.netMgr.ConfigureVMPublicIP(context.Background(), leasedIP, vm.TAPDevice, publicIPEnabled)
-				_ = m.netMgr.ApplyAntiSpoofAndIsolation(context.Background(), network.IsolationConfig{
-					TAPDevice:  vm.TAPDevice,
-					IPAddress:  leasedIP,
-					MACAddress: vm.MACAddress,
-					OwnerID:    vm.OwnerID,
-				})
+				m.reconcileAccountNetworkIsolation(context.Background(), vm.OwnerID)
 			}
 			vmLock.Unlock()
 			return true
@@ -1796,6 +1934,7 @@ func (m *Manager) processQueue(ctx context.Context) {
 			if err := m.startVMProcess(ctx, v); err == nil {
 				v.Status = db.StatusRunning
 				_ = m.saveVMRecord(ctx, v)
+				m.reconcileAccountNetworkIsolation(ctx, v.OwnerID)
 				vmLock.Unlock()
 				m.queueMu.Lock()
 				delete(m.queueReasons, id)
@@ -1945,6 +2084,7 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 		vmLock.Unlock()
 		return err
 	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 
 	vmLock.Unlock()
 	m.processQueue(ctx)
@@ -1987,6 +2127,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	if err := m.netMgr.SetupTAP(ctx, vm.TAPDevice); err != nil {
 		return fmt.Errorf("failed to setup TAP device: %w", err)
 	}
+	m.applyVMNetworkIsolation(ctx, vm)
 
 	// 2. Setup Cgroups v2 resource limits
 	if m.cgroupMgr != nil {
@@ -2031,6 +2172,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 			if m.cgroupMgr != nil {
 				_ = m.cgroupMgr.Teardown(vm.ID)
 			}
+			_ = m.netMgr.RemoveAntiSpoofAndIsolation(ctx, network.IsolationConfig{TAPDevice: vm.TAPDevice})
 			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 			_ = os.Remove(sockPath)
 		}
@@ -2137,6 +2279,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	if err := m.saveVMRecord(ctx, vm); err != nil {
 		return err
 	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 	m.maybeSyncSSHKeys(vm)
 	return nil
 }
@@ -2236,7 +2379,11 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string) error {
 	vm.Status = db.StatusStopped
 	vm.DesiredRunning = false
 	vm.PID = 0
-	return m.saveVMRecord(ctx, vm)
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		return err
+	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
+	return nil
 }
 
 // StopVMForOwner stops only the VM belonging to ownerID. It is used by the
@@ -2384,6 +2531,7 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 
 	activeTAPs := make(map[string]bool)
 	knownTAPs := make(map[string]bool)
+	reconcileOwners := make(map[string]bool)
 	for _, v := range vms {
 		if v.TAPDevice != "" {
 			knownTAPs[v.TAPDevice] = true
@@ -2406,6 +2554,11 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 				}
 				_ = m.store.SaveVM(ctx, v)
 				_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
+				owner := v.OwnerID
+				if owner == "" {
+					owner = "default"
+				}
+				reconcileOwners[owner] = true
 			} else {
 				activeTAPs[v.TAPDevice] = true
 			}
@@ -2426,6 +2579,9 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs, knownTAPs)
 	m.mu.Unlock()
 
+	for owner := range reconcileOwners {
+		m.reconcileAccountNetworkIsolation(ctx, owner)
+	}
 	m.processQueue(ctx)
 	return pruned, err
 }
@@ -2587,28 +2743,35 @@ func (m *Manager) InspectNetworkForOwner(ctx context.Context, vmID, ownerID stri
 	if vm.PublicIPEnabled && publicIP == "" && vm.IPAddress != "" {
 		publicIP = vm.IPAddress
 	}
+	networkIsolation := db.NetworkIsolationAccount
+	if db.IsNetworkIsolated(vm) {
+		networkIsolation = db.NetworkIsolationIsolated
+	}
 	return &NetworkInspectResult{
-		VMID:            vm.ID,
-		VMName:          vm.Name,
-		Status:          string(vm.Status),
-		IPAddress:       vm.IPAddress,
-		PublicIP:        publicIP,
-		PublicIPEnabled: vm.PublicIPEnabled,
-		MACAddress:      vm.MACAddress,
-		TAPDevice:       vm.TAPDevice,
-		BridgeName:      bridgeName,
-		Gateway:         gwIP,
-		Reachable:       reachable,
-		Connectivity:    connStatus,
+		VMID:             vm.ID,
+		VMName:           vm.Name,
+		Status:           string(vm.Status),
+		IPAddress:        vm.IPAddress,
+		PublicIP:         publicIP,
+		PublicIPEnabled:  vm.PublicIPEnabled,
+		NetworkIsolation: networkIsolation,
+		MACAddress:       vm.MACAddress,
+		TAPDevice:        vm.TAPDevice,
+		BridgeName:       bridgeName,
+		Gateway:          gwIP,
+		Reachable:        reachable,
+		Connectivity:     connStatus,
 	}, nil
 }
 
 // UpdateVMConfigRequest defines configuration options that can be updated on an existing VM
 type UpdateVMConfigRequest struct {
-	PublicIP        *bool `json:"public_ip,omitempty"`
-	PublicIPEnabled *bool `json:"public_ip_enabled,omitempty"`
-	DedicatedIP     *bool `json:"dedicated_ip,omitempty"`
-	Protected       *bool `json:"protected,omitempty"`
+	PublicIP         *bool   `json:"public_ip,omitempty"`
+	PublicIPEnabled  *bool   `json:"public_ip_enabled,omitempty"`
+	DedicatedIP      *bool   `json:"dedicated_ip,omitempty"`
+	Protected        *bool   `json:"protected,omitempty"`
+	NetworkIsolation *string `json:"network_isolation,omitempty"`
+	Isolated         *bool   `json:"isolated,omitempty"`
 }
 
 func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
@@ -2617,6 +2780,8 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 		RawPublicIP    interface{} `json:"public_ip,omitempty"`
 		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
 		RawProtected   interface{} `json:"protected,omitempty"`
+		RawIsolated    interface{} `json:"isolated,omitempty"`
+		RawIsolate     interface{} `json:"isolate,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -2658,10 +2823,15 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 	if b := parseBool(aux.RawProtected); b != nil {
 		r.Protected = b
 	}
+	if b := parseBool(aux.RawIsolated); b != nil {
+		r.Isolated = b
+	} else if b := parseBool(aux.RawIsolate); b != nil {
+		r.Isolated = b
+	}
 	return nil
 }
 
-// UpdateVMConfig updates configuration parameters on an existing VM (such as toggling dedicated public IP on or off)
+// UpdateVMConfig updates configuration parameters on an existing VM (such as toggling dedicated public IP or network isolation)
 func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMConfigRequest) (*db.VM, error) {
 	vmLock := m.getVMLock(vmID)
 	vmLock.Lock()
@@ -2672,20 +2842,46 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 		return nil, fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
 
-	var changed bool
-	var enabled bool
-	if req.PublicIP != nil {
-		enabled = *req.PublicIP
-		changed = true
-	} else if req.PublicIPEnabled != nil {
-		enabled = *req.PublicIPEnabled
-		changed = true
-	} else if req.DedicatedIP != nil {
-		enabled = *req.DedicatedIP
-		changed = true
+	var nextNetworkIsolation string
+	var isolationChanged bool
+	if req.NetworkIsolation != nil || req.Isolated != nil {
+		var modeStr string
+		if req.NetworkIsolation != nil {
+			modeStr = *req.NetworkIsolation
+			if strings.TrimSpace(modeStr) == "" && req.Isolated == nil {
+				return nil, fmt.Errorf("invalid network_isolation %q: expected %q or %q", modeStr, db.NetworkIsolationAccount, db.NetworkIsolationIsolated)
+			}
+		}
+		resolved, err := resolveNetworkIsolation(modeStr, req.Isolated)
+		if err != nil {
+			return nil, err
+		}
+		nextNetworkIsolation = resolved
+		currentIsolation := db.NetworkIsolationAccount
+		if db.IsNetworkIsolated(vm) {
+			currentIsolation = db.NetworkIsolationIsolated
+		}
+		if currentIsolation != nextNetworkIsolation || vm.NetworkIsolation != nextNetworkIsolation {
+			isolationChanged = true
+		}
 	}
 
-	if changed {
+	var changed bool
+	var enabled bool
+	var publicIPChanged bool
+	if req.PublicIP != nil {
+		enabled = *req.PublicIP
+		publicIPChanged = true
+	} else if req.PublicIPEnabled != nil {
+		enabled = *req.PublicIPEnabled
+		publicIPChanged = true
+	} else if req.DedicatedIP != nil {
+		enabled = *req.DedicatedIP
+		publicIPChanged = true
+	}
+
+	if publicIPChanged {
+		changed = true
 		vm.PublicIPEnabled = enabled
 		if enabled {
 			vm.PublicIP = vm.IPAddress // Dedicated IP on main network is considered as public IP
@@ -2703,10 +2899,18 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 		changed = true
 	}
 
+	if isolationChanged {
+		vm.NetworkIsolation = nextNetworkIsolation
+		changed = true
+	}
+
 	if changed {
 		vm.UpdatedAt = time.Now().UTC()
 		if err := m.saveVMRecord(ctx, vm); err != nil {
 			return nil, fmt.Errorf("failed to save vm config: %w", err)
+		}
+		if isolationChanged && vm.Status == db.StatusRunning {
+			m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 		}
 	}
 
@@ -3300,6 +3504,7 @@ func (m *Manager) handleProcessExit(vmID string, pid int) {
 		if vm.PublicIPEnabled && vm.IPAddress != "" {
 			_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
 		}
+		m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 		go m.processQueue(context.Background())
 	}
 }

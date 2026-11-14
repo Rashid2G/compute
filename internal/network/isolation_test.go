@@ -468,3 +468,168 @@ func TestRemoveAntiSpoofIgnoresAbsentRules(t *testing.T) {
 		t.Fatalf("teardown of already-absent rules must be a no-op, got %v", err)
 	}
 }
+
+func TestAccountModeBridgeEbtablesAndRuleOrdering(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	// Pre-populate peer config to verify peer anti-spoofing re-pinning
+	if err := mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:        "mftap-peer1",
+		IPAddress:        "172.16.0.10",
+		MACAddress:       "06:00:ac:10:00:0a",
+		OwnerID:          "usr_alice",
+		AllowSameAccount: true,
+	}); err != nil {
+		t.Fatalf("ApplyAntiSpoofAndIsolation peer1 failed: %v", err)
+	}
+
+	runner.commands = nil
+	if err := mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:        "mftap-vm2",
+		IPAddress:        "172.16.0.11",
+		MACAddress:       "06:00:ac:10:00:0b",
+		OwnerID:          "usr_alice",
+		AllowSameAccount: true,
+		AllowedPeerTAPs:  []string{"mftap-peer1"},
+	}); err != nil {
+		t.Fatalf("ApplyAntiSpoofAndIsolation vm2 failed: %v", err)
+	}
+
+	var hasBridgeIsoOff bool
+	var hasEbDropOut, hasEbDropIn bool
+	var hasEbAccOut, hasEbAccIn bool
+	acceptIdx := -1
+	antiSpoofIdx := -1
+	rePinnedPeer := false
+
+	for i, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "bridge link set dev mftap-vm2 isolated off") {
+			hasBridgeIsoOff = true
+		}
+		if strings.Contains(line, "ebtables -A FORWARD -i mftap-vm2 -o mftap-+ -j DROP") {
+			hasEbDropOut = true
+		}
+		if strings.Contains(line, "ebtables -A FORWARD -i mftap-+ -o mftap-vm2 -j DROP") {
+			hasEbDropIn = true
+		}
+		if strings.Contains(line, "ebtables -I FORWARD 1 -i mftap-vm2 -o mftap-peer1 -j ACCEPT") {
+			hasEbAccOut = true
+			acceptIdx = i
+		}
+		if strings.Contains(line, "ebtables -I FORWARD 1 -i mftap-peer1 -o mftap-vm2 -j ACCEPT") {
+			hasEbAccIn = true
+			acceptIdx = i
+		}
+		if strings.Contains(line, "ebtables -I FORWARD 1 -i mftap-vm2 ! -s 06:00:ac:10:00:0b -j DROP") {
+			antiSpoofIdx = i
+		}
+		if strings.Contains(line, "ebtables -I FORWARD 1 -i mftap-peer1 ! -s 06:00:ac:10:00:0a -j DROP") {
+			rePinnedPeer = true
+		}
+	}
+
+	if !hasBridgeIsoOff {
+		t.Errorf("expected bridge isolated off in account mode")
+	}
+	if !hasEbDropOut || !hasEbDropIn {
+		t.Errorf("expected ebtables FORWARD mftap-+ DROP rules")
+	}
+	if !hasEbAccOut || !hasEbAccIn {
+		t.Errorf("expected ebtables bidirectional ACCEPT rules for same-account peer")
+	}
+	if acceptIdx < 0 || antiSpoofIdx <= acceptIdx {
+		t.Errorf("expected anti-spoof -I FORWARD 1 (%d) to run after ACCEPT -I FORWARD 1 (%d) so anti-spoof stays at top", antiSpoofIdx, acceptIdx)
+	}
+	if !rePinnedPeer {
+		t.Errorf("expected peer anti-spoof rule to be re-pinned after reciprocal ACCEPT")
+	}
+}
+
+func TestIsolatedModeOverridesPeers(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	if err := mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:        "mftap-iso",
+		IPAddress:        "172.16.0.20",
+		MACAddress:       "06:00:ac:10:00:14",
+		OwnerID:          "usr_alice",
+		Isolated:         true,
+		AllowSameAccount: true,
+		AllowedPeerTAPs:  []string{"mftap-peer1"},
+	}); err != nil {
+		t.Fatalf("ApplyAntiSpoofAndIsolation failed: %v", err)
+	}
+
+	var hasBridgeIsoOn bool
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "bridge link set dev mftap-iso isolated on") {
+			hasBridgeIsoOn = true
+		}
+		if strings.Contains(line, "-j ACCEPT") && !strings.Contains(line, " -D ") {
+			t.Errorf("isolated sandbox must not install peer ACCEPT rule: %s", line)
+		}
+	}
+	if !hasBridgeIsoOn {
+		t.Errorf("expected bridge isolated on when Isolated=true")
+	}
+}
+
+func TestRemoveTAPClearsReciprocalPeerRules(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	_ = mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:        "mftap-a",
+		IPAddress:        "172.16.0.10",
+		MACAddress:       "06:00:ac:10:00:0a",
+		OwnerID:          "usr_alice",
+		AllowSameAccount: true,
+		AllowedPeerTAPs:  []string{"mftap-b"},
+	})
+	_ = mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:        "mftap-b",
+		IPAddress:        "172.16.0.11",
+		MACAddress:       "06:00:ac:10:00:0b",
+		OwnerID:          "usr_alice",
+		AllowSameAccount: true,
+		AllowedPeerTAPs:  []string{"mftap-a"},
+	})
+
+	runner.commands = nil
+	if err := mgr.RemoveTAP(ctx, "mftap-b"); err != nil {
+		t.Fatalf("RemoveTAP failed: %v", err)
+	}
+
+	var delEbAToB, delIpAToB bool
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "ebtables -D FORWARD -i mftap-a -o mftap-b -j ACCEPT") {
+			delEbAToB = true
+		}
+		if strings.Contains(line, "iptables -D FORWARD -i mftap-a -o mftap-b -j ACCEPT") {
+			delIpAToB = true
+		}
+	}
+	if !delEbAToB || !delIpAToB {
+		t.Errorf("expected reciprocal ACCEPT rules on peer mftap-a to be cleaned up when mftap-b is removed")
+	}
+	if len(mgr.isolationConfigs["mftap-a"].AllowedPeerTAPs) != 0 {
+		t.Errorf("expected mftap-b to be pruned from mftap-a AllowedPeerTAPs, got %v", mgr.isolationConfigs["mftap-a"].AllowedPeerTAPs)
+	}
+}

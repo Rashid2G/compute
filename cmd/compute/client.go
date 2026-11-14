@@ -213,6 +213,14 @@ func (c *DaemonClient) UnprotectVM(ctx context.Context, id string) (*db.VM, erro
 	return &vm, err
 }
 
+func (c *DaemonClient) SetVMNetworkIsolation(ctx context.Context, id, mode string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/network-isolation", map[string]string{
+		"network_isolation": mode,
+	}, &vm)
+	return &vm, err
+}
+
 func (c *DaemonClient) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, error) {
 	var info network.NetworkInfo
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network", nil, &info)
@@ -239,7 +247,6 @@ func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, e
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/config", nil, &cfg)
 	return &cfg, err
 }
-
 
 func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {
 	var cfg config.GlobalConfig
@@ -466,7 +473,7 @@ func (c *DaemonClient) ApplyKey(ctx context.Context, idOrName string) (*KeyApply
 
 func (c *DaemonClient) ReconcileKeys(ctx context.Context) (*KeyApplyResult, error) {
 	var res struct {
-		Status string            `json:"status"`
+		Status string               `json:"status"`
 		Sync   *vm.SSHKeySyncResult `json:"sync"`
 	}
 	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys/reconcile", nil, &res); err != nil {

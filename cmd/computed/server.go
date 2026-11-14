@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -1089,7 +1090,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
+			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -1177,11 +1178,15 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
 			if err != nil {
+				if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
+					httpError(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
-			json.NewEncoder(w).Encode(updated)
+			s.encodeVM(w, updated)
 
 		default:
 			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1215,7 +1220,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	case "clone":
 		var req vm.CreateRequest
 		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
@@ -1231,7 +1239,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
+			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -1240,7 +1248,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		s.recordEvent("sandbox.cloned", getActor(r), cloned.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": cloned.ID})
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(cloned)
+		s.encodeVM(w, cloned)
 
 	case "run", "start":
 		if err := s.enforceRunQuota(ctx, r, v); err != nil {
@@ -1381,20 +1389,69 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(updated)
 
+	case "network-isolation":
+		var req vm.UpdateVMConfigRequest
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		q := r.URL.Query()
+		if val := strings.TrimSpace(q.Get("network_isolation")); val != "" {
+			req.NetworkIsolation = &val
+		} else if val := strings.TrimSpace(q.Get("mode")); val != "" {
+			req.NetworkIsolation = &val
+		}
+		if val := strings.TrimSpace(q.Get("isolated")); val != "" {
+			lower := strings.ToLower(val)
+			switch lower {
+			case "on", "true", "1", "yes", "enabled":
+				b := true
+				req.Isolated = &b
+			case "off", "false", "0", "no", "disabled":
+				b := false
+				req.Isolated = &b
+			default:
+				httpError(w, fmt.Sprintf("invalid isolated query parameter %q: expected boolean", val), http.StatusBadRequest)
+				return
+			}
+		}
+		if req.NetworkIsolation == nil && req.Isolated == nil {
+			httpError(w, "missing network_isolation or isolated parameter", http.StatusBadRequest)
+			return
+		}
+		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
+				httpError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("sandbox.network_isolation_updated", getActor(r), vmID, "delivered", 20, map[string]string{"network_isolation": updated.NetworkIsolation})
+		s.encodeVM(w, updated)
+
 	case "config":
 		var req vm.UpdateVMConfigRequest
 		if r.Body != nil {
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
 		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
 		if err != nil {
+			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
+				httpError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(updated)
+		s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
+		s.encodeVM(w, updated)
 
 	case "protect":
 		t := true
@@ -1733,7 +1790,10 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 		}
 		var req vm.CreateRequest
 		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
