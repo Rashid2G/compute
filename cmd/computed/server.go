@@ -637,6 +637,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/jobs/", s.wrapAuth(s.handleJobActions))
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
 	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
+	s.mux.HandleFunc("/", s.handleDeploymentsIndex)
 
 	// Volumes
 	s.mux.HandleFunc("/api/v1/volumes", s.wrapAuth(s.handleVolumes))

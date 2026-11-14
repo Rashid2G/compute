@@ -72,7 +72,8 @@ All coding agents modifying code, tests, or configurations in this repository mu
 2. **Implement**: Carry out implementation in a dedicated git worktree branched from `dev`. Follow Go, React/TypeScript, and configuration standards without introducing unnecessary dependencies.
 3. **Write tests and run them**: Add or update focused tests covering new behavior. Execute tests (`make test`, focused `go test ./...`, or `npm run typecheck && npm run build` for web) and ensure all pass.
 4. **Provide evidence of the end change**: If the change is visible or verifiable (such as a web UI update, CLI command output, or status display), provide concrete evidence (e.g. screenshots of the rendered UI or verified command output). Keep screenshots out of commits unless explicitly requested.
-5. **Create the PR**: Push the branch to `origin` and open a PR targeting `dev` (`gh pr create --base dev`), referencing any relevant GitHub issues (`Closes #n` or `Refs #n`).
+5. **Deploy a PR preview (mandatory)**: Every pull request must have a live preview deployed with the `preview-deploy` skill: run `make deploy-current` from the PR's worktree, verify the preview URL, and post it in the PR description plus the final report. See `.agents/skills/preview-deploy/SKILL.md`.
+6. **Create the PR**: Push the branch to `origin` and open a PR targeting `dev` (`gh pr create --base dev`), referencing any relevant GitHub issues (`Closes #n` or `Refs #n`).
 
 ## Branch, worktree, and release workflow
 
