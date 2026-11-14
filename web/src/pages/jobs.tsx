@@ -36,7 +36,6 @@ export function JobsPage({
   );
   const [jobRunnerTag, setJobRunnerTag] = useState('compute');
   const [jobPriority, setJobPriority] = useState(10);
-  const [submitting, setSubmitting] = useState(false);
 
   // Selected job logs drawer
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
@@ -78,39 +77,45 @@ export function JobsPage({
       .finally(() => setLogsLoading(false));
   }, [selectedJob]);
 
-  async function handleDispatchJob(e: React.FormEvent) {
+  function handleDispatchJob(e: React.FormEvent) {
     e.preventDefault();
-    if (!jobCommand.trim()) return;
-    setSubmitting(true);
-    try {
-      const created = await api.createJob({
-        type: 'command',
-        pool_id: 'default',
-        priority: jobPriority,
-        spec: {
-          command: jobCommand.trim(),
-          runs_on: jobRunnerTag,
-        },
+    const command = jobCommand.trim();
+    if (!command) return;
+    const payload = {
+      type: 'command',
+      pool_id: 'default',
+      priority: jobPriority,
+      spec: {
+        command,
+        runs_on: jobRunnerTag,
+      },
+    };
+    setDispatchOpen(false);
+
+    const toastID = toast.loading('Dispatching CI job…');
+    void api
+      .createJob(payload)
+      .then(async (created) => {
+        toast.success(`Dispatched CI job ${created.id}`, { id: toastID });
+        await loadJobs();
+        onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(`Failed to dispatch job: ${errorMessage(err)}`, {
+          id: toastID,
+        });
       });
-      toast.success(`Dispatched CI job ${created.id}`);
-      setDispatchOpen(false);
-      await loadJobs();
-      onRefresh?.();
-    } catch (err) {
-      toast.error(`Failed to dispatch job: ${errorMessage(err)}`);
-    } finally {
-      setSubmitting(false);
-    }
   }
 
   async function handleCancelJob(id: string) {
+    const toastID = toast.loading(`Canceling job ${id}…`);
     try {
       await api.cancelJob(id);
-      toast.success(`Canceled job ${id}`);
+      toast.success(`Canceled job ${id}`, { id: toastID });
       await loadJobs();
       onRefresh?.();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     }
   }
 
@@ -359,11 +364,10 @@ export function JobsPage({
               </button>
               <button
                 type="submit"
-                disabled={submitting}
                 className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180] disabled:opacity-50"
               >
                 <Play className="h-3 w-3 fill-current" />
-                <span>{submitting ? 'Dispatching…' : 'Run Job'}</span>
+                <span>Run Job</span>
               </button>
             </div>
           </div>

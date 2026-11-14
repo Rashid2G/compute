@@ -77,14 +77,12 @@ export function ImagesTemplatesPage({
   const [tplSourceVM, setTplSourceVM] = useState('');
   const [tplName, setTplName] = useState('');
   const [tplDesc, setTplDesc] = useState('');
-  const [creatingTpl, setCreatingTpl] = useState(false);
 
   // Build Custom Rootfs Image modal/form state
   const [buildImgOpen, setBuildImgOpen] = useState(false);
   const [imgName, setImgName] = useState('');
   const [imgBase, setImgBase] = useState('ubuntu');
   const [imgPackages, setImgPackages] = useState('curl, git, jq, htop');
-  const [buildingImg, setBuildingImg] = useState(false);
 
   const applyProfile = useCallback((p: EnvironmentProfileRecord) => {
     setSelectedProfileName(p.name);
@@ -196,26 +194,29 @@ export function ImagesTemplatesPage({
     }
   }
 
-  async function handleCreateTemplate(e: React.FormEvent) {
+  function handleCreateTemplate(e: React.FormEvent) {
     e.preventDefault();
-    if (!tplSourceVM || !tplName.trim()) return;
-    setCreatingTpl(true);
-    try {
-      await api.createTemplate({
-        vm_id: tplSourceVM,
-        name: tplName.trim(),
-        description: tplDesc.trim(),
+    const name = tplName.trim();
+    if (!tplSourceVM || !name) return;
+    const payload = {
+      vm_id: tplSourceVM,
+      name,
+      description: tplDesc.trim(),
+    };
+    setCreateTplOpen(false);
+    setTplName('');
+    setTplDesc('');
+
+    const toastID = toast.loading(`Creating snapshot template "${name}"…`);
+    void api
+      .createTemplate(payload)
+      .then(async () => {
+        toast.success(`Snapshot template "${name}" created`, { id: toastID });
+        await loadSnapshotsAndImages();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Snapshot template "${tplName.trim()}" created`);
-      setCreateTplOpen(false);
-      setTplName('');
-      setTplDesc('');
-      await loadSnapshotsAndImages();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setCreatingTpl(false);
-    }
   }
 
   async function handleLaunchFromTemplate(tpl: Template) {
@@ -235,29 +236,34 @@ export function ImagesTemplatesPage({
     }
   }
 
-  async function handleBuildImage(e: React.FormEvent) {
+  function handleBuildImage(e: React.FormEvent) {
     e.preventDefault();
-    if (!imgName.trim()) return;
-    setBuildingImg(true);
-    try {
-      const pkgs = imgPackages
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      await api.buildImage({
-        name: imgName.trim(),
-        base_image: imgBase,
-        packages: pkgs,
+    const name = imgName.trim();
+    if (!name) return;
+    const pkgs = imgPackages
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const payload = {
+      name,
+      base_image: imgBase,
+      packages: pkgs,
+    };
+    setBuildImgOpen(false);
+    setImgName('');
+
+    const toastID = toast.loading(`Starting custom rootfs build "${name}"…`);
+    void api
+      .buildImage(payload)
+      .then(async () => {
+        toast.success(`Started building custom rootfs "${name}"`, {
+          id: toastID,
+        });
+        await loadSnapshotsAndImages();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Started building custom rootfs "${imgName.trim()}"`);
-      setBuildImgOpen(false);
-      setImgName('');
-      await loadSnapshotsAndImages();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setBuildingImg(false);
-    }
   }
 
   // ============================================================================
@@ -812,10 +818,10 @@ export function ImagesTemplatesPage({
             </button>
             <button
               type="submit"
-              disabled={creatingTpl || !tplSourceVM}
+              disabled={!tplSourceVM}
               className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white disabled:opacity-50"
             >
-              {creatingTpl ? 'Creating…' : 'Save Template'}
+              Save Template
             </button>
           </div>
         </form>
@@ -879,10 +885,9 @@ export function ImagesTemplatesPage({
             </button>
             <button
               type="submit"
-              disabled={buildingImg}
               className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white disabled:opacity-50"
             >
-              {buildingImg ? 'Building…' : 'Start Build'}
+              Start Build
             </button>
           </div>
         </form>

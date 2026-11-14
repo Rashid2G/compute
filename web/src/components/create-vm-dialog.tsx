@@ -61,7 +61,6 @@ export function CreateVMDialog({
   const [sshPassword, setSshPassword] = useState('');
   const [setupScript, setSetupScript] = useState('');
   const [protectedVM, setProtectedVM] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [images, setImages] = useState<CustomImage[]>([]);
@@ -126,56 +125,56 @@ export function CreateVMDialog({
   // the request carries no ssh_key_id, so "" means "use the default key".
   const defaultKey = sshKeys.find((k) => k.is_default) ?? null;
 
-  async function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSubmitting(true);
-    try {
-      const baseName = sandboxName.trim();
-      const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
-      const totalToCreate = Math.max(1, count);
+    const baseName = sandboxName.trim();
+    const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
+    const totalToCreate = Math.max(1, count);
+    const trimmedScript = setupScript.trim() || undefined;
 
-      const creationTasks = Array.from({ length: totalToCreate }, async (_, i) => {
-        let name: string | undefined;
-        if (baseName) {
-          name = totalToCreate > 1 ? `${baseName}-${i + 1}` : baseName;
-        }
+    const payloads: CreateVMRequest[] = Array.from({ length: totalToCreate }, (_, i) => {
+      let name: string | undefined;
+      if (baseName) {
+        name = totalToCreate > 1 ? `${baseName}-${i + 1}` : baseName;
+      }
 
-        const payload: CreateVMRequest = {
-          name: name || undefined,
-          vcpus,
-          memory_mb: memoryMb,
-          disk_mb: calculatedDiskMb,
-          public_ip_enabled: true,
-          protected: protectedVM,
-          ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
-          ssh_no_default_key: sshKeyId === 'none' || undefined,
-          ssh_password: sshPassword || undefined,
-        };
+      const payload: CreateVMRequest = {
+        name: name || undefined,
+        vcpus,
+        memory_mb: memoryMb,
+        disk_mb: calculatedDiskMb,
+        public_ip_enabled: true,
+        protected: protectedVM,
+        ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
+        ssh_no_default_key: sshKeyId === 'none' || undefined,
+        ssh_password: sshPassword || undefined,
+      };
 
-        if (fromSource.startsWith('tpl:')) {
-          payload.template = fromSource.slice(4);
-        } else if (fromSource.startsWith('img:')) {
-          payload.image = fromSource.slice(4);
-        } else {
-          payload.image = 'ubuntu-24';
-        }
+      if (fromSource.startsWith('tpl:')) {
+        payload.template = fromSource.slice(4);
+      } else if (fromSource.startsWith('img:')) {
+        payload.image = fromSource.slice(4);
+      } else {
+        payload.image = 'ubuntu-24';
+      }
 
-        return onCreate(payload, true, {
-          setupScript: setupScript.trim() || undefined,
-        });
-      });
+      return payload;
+    });
 
-      await Promise.all(creationTasks);
+    onOpenChange(false);
+    setSandboxName('');
+    setSshPassword('');
+    setSetupScript('');
+    setProtectedVM(false);
+    setCount(1);
 
-      onOpenChange(false);
-      setSandboxName('');
-      setSshPassword('');
-      setSetupScript('');
-      setProtectedVM(false);
-      setCount(1);
-    } finally {
-      setSubmitting(false);
-    }
+    void Promise.allSettled(
+      payloads.map((payload) =>
+        onCreate(payload, true, {
+          setupScript: trimmedScript,
+        }),
+      ),
+    );
   }
 
   return (
@@ -489,16 +488,11 @@ export function CreateVMDialog({
           <div className="flex justify-end pt-2">
             <button
               type="submit"
-              disabled={submitting}
               className="flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>
-                {submitting
-                  ? 'Creating…'
-                  : count > 1
-                    ? `Create ${count} sandboxes`
-                    : 'Create'}
+                {count > 1 ? `Create ${count} sandboxes` : 'Create'}
               </span>
             </button>
           </div>

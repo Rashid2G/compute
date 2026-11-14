@@ -242,6 +242,7 @@ export default function App() {
           ? `Address ${created.ip_address}`
           : 'Address assigned automatically.',
       });
+      void cluster.refresh(true);
 
       if (autoStart) {
         const bootID = toast.loading(`Booting ${createdName}…`);
@@ -249,6 +250,7 @@ export default function App() {
           await api.runVM(created.id);
           toast.success(`${createdName} is running`, { id: bootID });
           setConsoleVMID(created.id);
+          void cluster.refresh(true);
         } catch (error) {
           toast.error(`Could not boot ${createdName}`, {
             id: bootID,
@@ -293,10 +295,11 @@ export default function App() {
 
 
   async function deleteVM(id: string) {
-    const toastID = toast.loading(`Deleting ${id}…`);
+    const vmName = cluster.vms.find((v) => v.id === id)?.name || id;
+    const toastID = toast.loading(`Deleting ${vmName}…`);
     try {
       await api.deleteVM(id);
-      toast.success('Sandbox deleted', {
+      toast.success(`${vmName} deleted`, {
         id: toastID,
         description: 'Process, network lease, and overlay disk removed.',
       });
@@ -304,7 +307,7 @@ export default function App() {
       if (inspectTarget?.id === id) setInspectTarget(null);
       await cluster.refresh(true);
     } catch (error) {
-      toast.error('Could not delete sandbox', {
+      toast.error(`Could not delete ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -586,6 +589,7 @@ export default function App() {
           vm={inspectTarget}
           open={inspectTarget !== null}
           onOpenChange={(open) => !open && setInspectTarget(null)}
+          onUpdated={() => void cluster.refresh(true)}
         />
 
         <DeleteVMDialog

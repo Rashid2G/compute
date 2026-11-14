@@ -31,7 +31,8 @@ import {
   TabsList,
   TabsTrigger,
 } from '@/components/ui/tabs';
-import { api } from '@/lib/api';
+import { toast } from 'sonner';
+import { api, errorMessage } from '@/lib/api';
 import { formatDateTime, formatMemory } from '@/lib/format';
 import type { NetworkInspectResult, VM } from '@/lib/types';
 
@@ -64,10 +65,12 @@ export function InspectVMDialog({
   vm,
   open,
   onOpenChange,
+  onUpdated,
 }: {
   vm: VM | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onUpdated?: () => void;
 }) {
   const [inspecting, setInspecting] = useState(false);
   const [network, setNetwork] = useState<NetworkInspectResult | null>(null);
@@ -230,12 +233,29 @@ export function InspectVMDialog({
                   type="button"
                   size="sm"
                   variant={vm.public_ip_enabled ? "outline" : "default"}
-                  onClick={async () => {
-                    const next = !vm.public_ip_enabled;
-                    await api.setVMPublicIP(vm.id, next);
-                    vm.public_ip_enabled = next;
-                    vm.public_ip = next ? vm.ip_address : '';
+                  onClick={() => {
+                    const targetVM = vm;
+                    const vmName = targetVM.name || targetVM.id;
+                    const next = !targetVM.public_ip_enabled;
                     onOpenChange(false);
+                    const toastID = toast.loading(
+                      `${next ? 'Enabling' : 'Disabling'} public IP for ${vmName}…`,
+                    );
+                    void api
+                      .setVMPublicIP(targetVM.id, next)
+                      .then(() => {
+                        toast.success(
+                          `Public IP ${next ? 'enabled' : 'disabled'} for ${vmName}`,
+                          { id: toastID },
+                        );
+                        onUpdated?.();
+                      })
+                      .catch((err) => {
+                        toast.error(
+                          `Could not update public IP for ${vmName}`,
+                          { id: toastID, description: errorMessage(err) },
+                        );
+                      });
                   }}
                 >
                   {vm.public_ip_enabled ? "Turn Off Public IP" : "Turn On Public IP"}
