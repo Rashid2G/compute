@@ -93,61 +93,84 @@ export function AccessPage() {
     setTimeout(() => setCopiedText(null), 1500);
   }
 
-  async function handleCreateAPIKey(e: React.FormEvent) {
+  function handleCreateAPIKey(e: React.FormEvent) {
     e.preventDefault();
-    if (!newKeyName.trim()) return;
-    try {
-      const created = await api.createAPIKey({
-        name: newKeyName.trim(),
-        scope: newKeyScope,
-        expires_at: newKeyExpiry,
+    const keyName = newKeyName.trim();
+    if (!keyName) return;
+    const payload = {
+      name: keyName,
+      scope: newKeyScope,
+      expires_at: newKeyExpiry,
+    };
+    setNewKeyName('');
+    setCreateKeyOpen(false);
+
+    const toastID = toast.loading(`Creating API key "${keyName}"…`);
+    void api
+      .createAPIKey(payload)
+      .then(async (created) => {
+        if (created.token) setCreatedPlainToken(created.token);
+        toast.success(`Created API key "${created.name}"`, { id: toastID });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      if (created.token) setCreatedPlainToken(created.token);
-      setNewKeyName('');
-      setCreateKeyOpen(false);
-      toast.success(`Created API key "${created.name}"`);
-      await loadAll();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
-  async function handleCreateSSHKey(e: React.FormEvent) {
+  function handleCreateSSHKey(e: React.FormEvent) {
     e.preventDefault();
-    if (!sshName.trim() || !sshPub.trim()) return;
-    try {
-      const created = await api.createKey({
-        name: sshName.trim(),
-        public_key: sshPub.trim(),
+    const keyName = sshName.trim();
+    const publicKey = sshPub.trim();
+    if (!keyName || !publicKey) return;
+    const payload = {
+      name: keyName,
+      public_key: publicKey,
+    };
+    setSshName('');
+    setSshPub('');
+    setAddSshOpen(false);
+
+    const toastID = toast.loading(`Adding SSH key "${keyName}"…`);
+    void api
+      .createKey(payload)
+      .then(async (created) => {
+        toast.success(`Added SSH key "${created.name}"`, { id: toastID });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      setSshName('');
-      setSshPub('');
-      setAddSshOpen(false);
-      toast.success(`Added SSH key "${created.name}"`);
-      await loadAll();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
-  async function handleCreateAgentProfile(e: React.FormEvent) {
+  function handleCreateAgentProfile(e: React.FormEvent) {
     e.preventDefault();
-    if (!agentName.trim()) return;
-    try {
-      await api.createAgentProfile({
-        name: agentName.trim(),
-        provider: agentProvider,
-        upstream_url: agentUpstream,
-        inject_header: agentHeader,
-        secret_ref: agentSecretRef,
+    const profileName = agentName.trim();
+    if (!profileName) return;
+    const payload = {
+      name: profileName,
+      provider: agentProvider,
+      upstream_url: agentUpstream,
+      inject_header: agentHeader,
+      secret_ref: agentSecretRef,
+    };
+    setAgentName('');
+    setAddAgentOpen(false);
+
+    const toastID = toast.loading(
+      `Creating agent proxy profile "${profileName}"…`,
+    );
+    void api
+      .createAgentProfile(payload)
+      .then(async () => {
+        toast.success('Created agent credential proxy profile', {
+          id: toastID,
+        });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      setAgentName('');
-      setAddAgentOpen(false);
-      toast.success('Created agent credential proxy profile');
-      await loadAll();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   async function handleCreateWorkerToken() {

@@ -145,7 +145,6 @@ export function InstancesPage({
   const [splitMenuOpen, setSplitMenuOpen] = useState(false);
   // Critical-action confirmation: list of VMs pending a stop confirmation.
   const [stopConfirmTargets, setStopConfirmTargets] = useState<VM[] | null>(null);
-  const [stopping, setStopping] = useState(false);
 
   const selectedVMs = useMemo(
     () => vms.filter((v) => selectedIds.includes(v.id)),
@@ -274,19 +273,16 @@ export function InstancesPage({
     }
   }
 
-  async function confirmStop() {
+  function confirmStop() {
     const targets = stopConfirmTargets ?? [];
-    if (targets.length === 0 || stopping) return;
-    setStopping(true);
-    try {
-      await Promise.all(targets.map((vm) => onStop(vm)));
-      setSelectedIds((prev) =>
-        prev.filter((id) => !targets.some((vm) => vm.id === id)),
-      );
-    } finally {
-      setStopping(false);
-      setStopConfirmTargets(null);
-    }
+    if (targets.length === 0) return;
+    setStopConfirmTargets(null);
+    setSelectedIds((prev) =>
+      prev.filter((id) => !targets.some((vm) => vm.id === id)),
+    );
+    void Promise.allSettled(
+      targets.map((vm) => Promise.resolve(onStop(vm))),
+    );
   }
 
   // Load tab-specific real telemetry when the selected sandbox or tab changes.
@@ -504,6 +500,7 @@ export function InstancesPage({
         return;
       }
     }
+    setSelectedIds([]);
     if (onBulkDelete) {
       await onBulkDelete(ids);
     } else {
@@ -516,7 +513,6 @@ export function InstancesPage({
         throw err;
       }
     }
-    setSelectedIds([]);
   }
 
   return (
@@ -1652,26 +1648,20 @@ export function InstancesPage({
           )}
 
           <AlertDialogFooter className="mt-3 flex flex-row justify-end gap-2">
-            <AlertDialogCancel
-              disabled={stopping}
-              className="border-border bg-background hover:bg-muted text-foreground px-4"
-            >
+            <AlertDialogCancel className="border-border bg-background hover:bg-muted text-foreground px-4">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
-                void confirmStop();
+                confirmStop();
               }}
-              disabled={stopping}
               className="bg-warning text-[#1c1400] hover:bg-warning/90 font-medium px-4 inline-flex items-center"
             >
-              {stopping ? (
-                <span className="mr-1.5 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              ) : (
-                <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
-              )}
-              {stopping ? 'Stopping…' : 'Stop sandbox'}
+              <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
+              {stopConfirmTargets && stopConfirmTargets.length > 1
+                ? `Stop ${stopConfirmTargets.length} sandboxes`
+                : 'Stop sandbox'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
