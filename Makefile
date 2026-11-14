@@ -89,7 +89,7 @@ remote-logs:
 	ssh $(LAB_HOST) "sudo journalctl -u computed.service -u compute-gui.service -n 50 -f --no-pager"
 
 preview-deploy:
-	./scripts/temp-deploy-sandbox.sh $(PR)
+	./scripts/deploy-current.sh $(PR)
 
 # Deploy a preview for whatever branch/worktree you are currently in.
 #   make deploy-current                (name derived from branch or its PR)
@@ -98,7 +98,7 @@ preview-deploy:
 deploy-current:
 	./scripts/deploy-current.sh $(ARGS)
 
-# Stop and remove a preview sandbox by PR number or name.
+# Stop and remove a preview stack by PR number or name.
 preview-stop:
 	./scripts/deploy-current.sh --stop $(PR)
 
