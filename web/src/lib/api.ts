@@ -19,6 +19,7 @@ import type {
   NetworkAllocation,
   NetworkConfig,
   NetworkInspectResult,
+  NetworkIsolationMode,
   OTelConfigRecord,
   PortForwardRecord,
   ProcessInfo,
@@ -235,7 +236,15 @@ export const api = {
     });
   },
 
-  updateVMConfig(id: string, payload: { public_ip?: boolean; protected?: boolean }): Promise<VM> {
+  updateVMConfig(
+    id: string,
+    payload: {
+      public_ip?: boolean;
+      protected?: boolean;
+      network_isolation?: NetworkIsolationMode;
+      isolated?: boolean;
+    },
+  ): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
@@ -319,6 +328,13 @@ export const api = {
     return request<VM>(`/vms/${encodeURIComponent(id)}/public-ip`, {
       method: 'POST',
       body: JSON.stringify({ public_ip_enabled: enabled }),
+    });
+  },
+
+  setVMNetworkIsolation(id: string, mode: NetworkIsolationMode): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/network-isolation`, {
+      method: 'POST',
+      body: JSON.stringify({ network_isolation: mode }),
     });
   },
 

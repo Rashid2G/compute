@@ -16,6 +16,7 @@ Usage:
   compute sandbox create [flags]
   compute sandbox start|stop|save-state|resume|delete <name|id|pattern>...
   compute sandbox protect|unprotect <name|id>
+  compute sandbox network-isolation <name|id> <account|isolated>
   compute sandbox info <name|id|hostname>
   compute sandbox url [flags] <name|id|hostname>
   compute sandbox file <read|write|list|mkdir|remove> <sandbox> [args...]
@@ -26,7 +27,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --protected, --start/--boot).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -34,6 +35,7 @@ Commands:
   delete, rm               Delete one or more sandboxes.
   protect                  Enable deletion protection on a sandbox.
   unprotect                Disable deletion protection on a sandbox.
+  network-isolation        Switch sandbox network access between 'account' (all account sandboxes) and 'isolated' (own sandbox only).
   images                   Discover available base and custom rootfs images.
   templates                Discover available reusable sandbox templates.
   file                     Interact with sandbox filesystem (read, write, list, mkdir, remove).
@@ -217,7 +219,7 @@ Commands:
 Usage:
   compute template list
   compute template create <name> --vm <name|id> [--desc <text>]
-  compute template launch <name|id> [--name <vm-name>] [--tier <tier>]
+  compute template launch <name|id> [--name <vm-name>] [--tier <tier>] [--network-isolation <account|isolated>] [--isolated]
   compute template inspect <name|id>
   compute template delete <name|id>
 

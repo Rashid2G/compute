@@ -525,12 +525,18 @@ func (m *Manager) SetupTAP(ctx context.Context, tapName string) error {
 
 // IsolationConfig specifies network parameters for TAP anti-spoofing and bridge isolation.
 type IsolationConfig struct {
-	TAPDevice       string   `json:"tap_device"`
-	IPAddress       string   `json:"ip_address"`
-	MACAddress      string   `json:"mac_address"`
-	OwnerID         string   `json:"owner_id,omitempty"`
-	AllowedPeerTAPs []string `json:"allowed_peer_taps,omitempty"`
-	AllowedPeerIPs  []string `json:"allowed_peer_ips,omitempty"`
+	TAPDevice        string   `json:"tap_device"`
+	IPAddress        string   `json:"ip_address"`
+	MACAddress       string   `json:"mac_address"`
+	OwnerID          string   `json:"owner_id,omitempty"`
+	Isolated         bool     `json:"isolated,omitempty"`
+	AllowSameAccount bool     `json:"allow_same_account,omitempty"`
+	AllowedPeerTAPs  []string `json:"allowed_peer_taps,omitempty"`
+	AllowedPeerIPs   []string `json:"allowed_peer_ips,omitempty"`
+}
+
+func isPortIsolated(cfg IsolationConfig) bool {
+	return cfg.Isolated || (!cfg.AllowSameAccount && len(cfg.AllowedPeerTAPs) == 0)
 }
 
 var (
@@ -592,6 +598,21 @@ func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationC
 	// Clean any previous rules for this TAP first to prevent duplication
 	_ = m.removeAntiSpoofAndIsolationLocked(ctx, cfg)
 
+	portIsolated := isPortIsolated(cfg)
+	var peerTAPs []string
+	if portIsolated {
+		cfg.AllowedPeerTAPs = nil
+	} else {
+		seenPeers := make(map[string]bool, len(cfg.AllowedPeerTAPs))
+		for _, peerTAP := range cfg.AllowedPeerTAPs {
+			if peerTAP != "" && peerTAP != cfg.TAPDevice && !seenPeers[peerTAP] {
+				seenPeers[peerTAP] = true
+				peerTAPs = append(peerTAPs, peerTAP)
+			}
+		}
+		cfg.AllowedPeerTAPs = peerTAPs
+	}
+
 	if m.isolationConfigs == nil {
 		m.isolationConfigs = make(map[string]IsolationConfig)
 	}
@@ -624,44 +645,91 @@ func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationC
 		})
 	}
 
-	// 1. Kernel Bridge Port Isolation (L2 lateral movement isolation on the bridge)
-	runSetup("bridge", "link", "set", "dev", cfg.TAPDevice, "isolated", "on")
-
-	// 2. DHCP Server Impersonation Blocking:
-	// A guest microVM on a TAP device must never act as a rogue DHCP server (UDP src port 67)
-	runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-p", "udp", "--sport", "67", "-j", "DROP")
-
-	// 3. L3 IP Anti-Spoofing:
-	// Drop any traffic from this TAP if the source IP does not match the assigned IP
-	if cfg.IPAddress != "" && cfg.IPAddress != "dhcp" {
-		runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-s", cfg.IPAddress, "-j", "DROP")
+	// 1. Kernel Bridge Port Isolation:
+	// Isolated sandboxes keep isolated=on so the bridge never forwards L2 frames
+	// between them and any other TAP port. Non-isolated same-account sandboxes
+	// use isolated=off so ebtables FORWARD controls exact peer-to-peer L2 access.
+	if portIsolated {
+		runSetup("bridge", "link", "set", "dev", cfg.TAPDevice, "isolated", "on")
+	} else {
+		runSetup("bridge", "link", "set", "dev", cfg.TAPDevice, "isolated", "off")
 	}
 
-	// 4. L2 MAC Anti-Spoofing & Rogue ARP Spoofing:
-	// Use extrapositioned negation ("! -s"/"! --source-mac"), which both legacy
-	// and nft-backed xtables accept without deprecation noise.
-	if cfg.MACAddress != "" && ebAvailable {
-		runSetup("ebtables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-s", cfg.MACAddress, "-j", "DROP")
-		runSetup("ebtables", "-I", "INPUT", "1", "-i", cfg.TAPDevice, "!", "-s", cfg.MACAddress, "-j", "DROP")
-	}
-	if cfg.MACAddress != "" && arpAvailable {
-		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "--source-mac", cfg.MACAddress, "-j", "DROP")
-	}
-	if cfg.IPAddress != "" && cfg.IPAddress != "dhcp" && arpAvailable {
-		runSetup("arptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "--source-ip", cfg.IPAddress, "-j", "DROP")
-	}
-
-	// 5. Bridge Port Isolation & Intra-Tenant Lateral Communication:
-	// If allowed peer TAPs (e.g. from the same tenant or organization) are provided, allow bi-directional traffic
-	for _, peerTAP := range cfg.AllowedPeerTAPs {
-		if peerTAP != "" && peerTAP != cfg.TAPDevice {
-			runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
-			runSetup("iptables", "-I", "FORWARD", "1", "-i", peerTAP, "-o", cfg.TAPDevice, "-j", "ACCEPT")
-		}
-	}
-	// Default: drop cross-tenant lateral movement to/from any other TAP device on the bridge
+	// 2. Default lateral isolation DROP rules at the tail of FORWARD (both L3 iptables and L2 ebtables):
+	// bridge-nf-call-iptables is disabled on the bridge so L2 traffic between TAPs is governed by ebtables FORWARD.
 	runSetup("iptables", "-A", "FORWARD", "-i", cfg.TAPDevice, "-o", "mftap-+", "-j", "DROP")
 	runSetup("iptables", "-A", "FORWARD", "-i", "mftap-+", "-o", cfg.TAPDevice, "-j", "DROP")
+	if ebAvailable {
+		runSetup("ebtables", "-A", "FORWARD", "-i", cfg.TAPDevice, "-o", "mftap-+", "-j", "DROP")
+		runSetup("ebtables", "-A", "FORWARD", "-i", "mftap-+", "-o", cfg.TAPDevice, "-j", "DROP")
+	}
+
+	// 3. Intra-account Lateral Communication:
+	// Insert peer ACCEPT rules BEFORE anti-spoof rules so step 4 places anti-spoof
+	// rules above ACCEPT rules in FORWARD.
+	if !portIsolated {
+		for _, peerTAP := range cfg.AllowedPeerTAPs {
+			runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
+			runSetup("iptables", "-I", "FORWARD", "1", "-i", peerTAP, "-o", cfg.TAPDevice, "-j", "ACCEPT")
+			if ebAvailable {
+				runSetup("ebtables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
+				runSetup("ebtables", "-I", "FORWARD", "1", "-i", peerTAP, "-o", cfg.TAPDevice, "-j", "ACCEPT")
+			}
+		}
+	}
+
+	// 4. Anti-spoofing & DHCP Server Impersonation Guards (inserted at position 1 after ACCEPTs):
+	installAntiSpoof := func(target IsolationConfig) {
+		// Rogue DHCP server blocking (UDP src port 67)
+		runSetup("iptables", "-I", "FORWARD", "1", "-i", target.TAPDevice, "-p", "udp", "--sport", "67", "-j", "DROP")
+
+		// L3 IP anti-spoofing
+		if target.IPAddress != "" && target.IPAddress != "dhcp" {
+			runSetup("iptables", "-I", "FORWARD", "1", "-i", target.TAPDevice, "!", "-s", target.IPAddress, "-j", "DROP")
+		}
+
+		// L2 MAC & ARP anti-spoofing
+		if target.MACAddress != "" && ebAvailable {
+			runSetup("ebtables", "-I", "FORWARD", "1", "-i", target.TAPDevice, "!", "-s", target.MACAddress, "-j", "DROP")
+			runSetup("ebtables", "-I", "INPUT", "1", "-i", target.TAPDevice, "!", "-s", target.MACAddress, "-j", "DROP")
+		}
+		if target.MACAddress != "" && arpAvailable {
+			runSetup("arptables", "-I", "FORWARD", "1", "-i", target.TAPDevice, "!", "--source-mac", target.MACAddress, "-j", "DROP")
+		}
+		if target.IPAddress != "" && target.IPAddress != "dhcp" && arpAvailable {
+			runSetup("arptables", "-I", "FORWARD", "1", "-i", target.TAPDevice, "!", "--source-ip", target.IPAddress, "-j", "DROP")
+		}
+	}
+	installAntiSpoof(cfg)
+
+	// Keep existing peers' anti-spoof rules ahead of the newly inserted -i <peer> -o <tap> ACCEPT rules.
+	if !portIsolated && len(cfg.AllowedPeerTAPs) > 0 {
+		deleteAntiSpoof := func(target IsolationConfig) {
+			runIgnore := func(name string, args ...string) {
+				_, _ = m.runner.Run(ctx, name, args...)
+			}
+			runIgnore("iptables", "-D", "FORWARD", "-i", target.TAPDevice, "-p", "udp", "--sport", "67", "-j", "DROP")
+			if target.IPAddress != "" && target.IPAddress != "dhcp" {
+				runIgnore("iptables", "-D", "FORWARD", "-i", target.TAPDevice, "!", "-s", target.IPAddress, "-j", "DROP")
+			}
+			if target.MACAddress != "" && ebAvailable {
+				runIgnore("ebtables", "-D", "FORWARD", "-i", target.TAPDevice, "!", "-s", target.MACAddress, "-j", "DROP")
+				runIgnore("ebtables", "-D", "INPUT", "-i", target.TAPDevice, "!", "-s", target.MACAddress, "-j", "DROP")
+			}
+			if target.MACAddress != "" && arpAvailable {
+				runIgnore("arptables", "-D", "FORWARD", "-i", target.TAPDevice, "!", "--source-mac", target.MACAddress, "-j", "DROP")
+			}
+			if target.IPAddress != "" && target.IPAddress != "dhcp" && arpAvailable {
+				runIgnore("arptables", "-D", "FORWARD", "-i", target.TAPDevice, "!", "--source-ip", target.IPAddress, "-j", "DROP")
+			}
+		}
+		for _, peerTAP := range cfg.AllowedPeerTAPs {
+			if peerCfg, ok := m.isolationConfigs[peerTAP]; ok {
+				deleteAntiSpoof(peerCfg)
+				installAntiSpoof(peerCfg)
+			}
+		}
+	}
 
 	return errors.Join(errs...)
 }
@@ -708,6 +776,41 @@ func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg Iso
 		}
 	}
 
+	// Collect all peers referenced either by targetCfg, cfg, or other TAPs' cached configs.
+	peerSet := make(map[string]bool)
+	var peersToClean []string
+	addPeer := func(p string) {
+		if p != "" && p != tapName && !peerSet[p] {
+			peerSet[p] = true
+			peersToClean = append(peersToClean, p)
+		}
+	}
+	for _, p := range targetCfg.AllowedPeerTAPs {
+		addPeer(p)
+	}
+	for _, p := range cfg.AllowedPeerTAPs {
+		addPeer(p)
+	}
+	for otherTAP, otherCfg := range m.isolationConfigs {
+		if otherTAP == tapName {
+			continue
+		}
+		var filtered []string
+		found := false
+		for _, p := range otherCfg.AllowedPeerTAPs {
+			if p == tapName {
+				found = true
+				continue
+			}
+			filtered = append(filtered, p)
+		}
+		if found {
+			addPeer(otherTAP)
+			otherCfg.AllowedPeerTAPs = filtered
+			m.isolationConfigs[otherTAP] = otherCfg
+		}
+	}
+
 	var errs []error
 	runTeardown := func(name string, args ...string) {
 		out, err := m.runner.Run(ctx, name, args...)
@@ -724,16 +827,18 @@ func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg Iso
 		errs = append(errs, fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err))
 	}
 
-	// Delete bridge isolation drop rules
+	// Delete bridge isolation drop rules (iptables + ebtables)
 	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", "mftap-+", "-j", "DROP")
 	runTeardown("iptables", "-D", "FORWARD", "-i", "mftap-+", "-o", targetCfg.TAPDevice, "-j", "DROP")
+	runTeardown("ebtables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", "mftap-+", "-j", "DROP")
+	runTeardown("ebtables", "-D", "FORWARD", "-i", "mftap-+", "-o", targetCfg.TAPDevice, "-j", "DROP")
 
-	// Delete intra-tenant accept rules
-	for _, peerTAP := range targetCfg.AllowedPeerTAPs {
-		if peerTAP != "" && peerTAP != targetCfg.TAPDevice {
-			runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
-			runTeardown("iptables", "-D", "FORWARD", "-i", peerTAP, "-o", targetCfg.TAPDevice, "-j", "ACCEPT")
-		}
+	// Delete intra-account accept rules (iptables + ebtables)
+	for _, peerTAP := range peersToClean {
+		runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
+		runTeardown("iptables", "-D", "FORWARD", "-i", peerTAP, "-o", targetCfg.TAPDevice, "-j", "ACCEPT")
+		runTeardown("ebtables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "-o", peerTAP, "-j", "ACCEPT")
+		runTeardown("ebtables", "-D", "FORWARD", "-i", peerTAP, "-o", targetCfg.TAPDevice, "-j", "ACCEPT")
 	}
 
 	// Delete DHCP guard

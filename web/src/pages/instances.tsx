@@ -1481,7 +1481,7 @@ export function InstancesPage({
             )}
 
             {deepDiveTab === 'network' && (
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-3 font-mono text-[12px]">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4 font-mono text-[12px]">
                 <div className="border border-border p-3 space-y-1">
                   <div className="text-[11px] text-muted-foreground">
                     Internal Bridge IP
@@ -1535,6 +1535,42 @@ export function InstancesPage({
                       className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
                     >
                       Toggle
+                    </button>
+                  </div>
+                </div>
+                <div className="border border-border p-3 space-y-1">
+                  <div className="text-[11px] text-muted-foreground">
+                    Sandbox-to-Sandbox Network
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-foreground">
+                      {(selectedVM.network_isolation || 'account') === 'isolated'
+                        ? 'Isolated (own sandbox only)'
+                        : 'Account (all account sandboxes)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextMode =
+                          (selectedVM.network_isolation || 'account') === 'isolated'
+                            ? 'account'
+                            : 'isolated';
+                        void api
+                          .setVMNetworkIsolation(selectedVM.id, nextMode)
+                          .then(() =>
+                            toast.success(
+                              nextMode === 'isolated'
+                                ? 'Sandbox isolated on its own network'
+                                : 'Sandbox can communicate with account sandboxes',
+                            ),
+                          )
+                          .catch((err) => toast.error(errorMessage(err)));
+                      }}
+                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9] shrink-0"
+                    >
+                      {(selectedVM.network_isolation || 'account') === 'isolated'
+                        ? 'Allow Account'
+                        : 'Isolate'}
                     </button>
                   </div>
                 </div>

@@ -1,3 +1,5 @@
+export type NetworkIsolationMode = 'account' | 'isolated';
+
 export interface SandboxCreateOptions {
   template?: string;
   tier?: '1vcpu' | '2vcpu' | '4vcpu' | string;
@@ -9,6 +11,8 @@ export interface SandboxCreateOptions {
   host?: string;
   timeout?: number;
   sshPassword?: string;
+  networkIsolation?: NetworkIsolationMode;
+  isolated?: boolean;
 }
 
 export interface ExecutionResult {
