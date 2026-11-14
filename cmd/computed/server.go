@@ -53,6 +53,7 @@ type Server struct {
 	fcVersion    string
 	ingressProxy *network.IngressProxy
 	dns          *dnsRuntime
+	guiHandler   http.Handler
 
 	// DNS/ingress caches (daemon-owned, response only).
 	userIndexMu     sync.RWMutex
@@ -637,7 +638,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/jobs/", s.wrapAuth(s.handleJobActions))
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
 	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
-	s.mux.HandleFunc("/", s.handleDeploymentsIndex)
+	s.mux.HandleFunc("/", s.handleRoot)
 
 	// Volumes
 	s.mux.HandleFunc("/api/v1/volumes", s.wrapAuth(s.handleVolumes))
@@ -676,7 +677,19 @@ func (s *Server) routes() {
 }
 
 func (s *Server) SetGUIHandler(h http.Handler) {
-	s.mux.Handle("/", h)
+	s.guiHandler = h
+}
+
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/" || r.URL.Path == "/deployments" {
+		s.handleDeploymentsIndex(w, r)
+		return
+	}
+	if s.guiHandler != nil {
+		s.guiHandler.ServeHTTP(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // ResolveTarget resolves target microVM details for the unified ingress reverse proxy.

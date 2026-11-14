@@ -153,19 +153,38 @@ fi
 
 # Step 1: Build locally (if requested/enabled)
 if [ "${BUILD_LOCAL}" = true ]; then
-    # Automatically build web UI if requested or if web/src has newer edits than embedded assets
+    # Automatically build web UI if requested or if web sources changed more recently than embedded assets
     AUTO_BUILD_UI=false
     if [ "${BUILD_UI}" = true ]; then
         AUTO_BUILD_UI=true
     elif [ ! -f "${REPO_ROOT}/internal/gui/assets/index.html" ] || [ ! -f "${REPO_ROOT}/internal/gui/assets/app.js" ]; then
         AUTO_BUILD_UI=true
-    elif [ -d "${REPO_ROOT}/web/src" ] && [ -n "$(find "${REPO_ROOT}/web/src" -newer "${REPO_ROOT}/internal/gui/assets/app.js" 2>/dev/null)" ]; then
-        AUTO_BUILD_UI=true
+    elif [ -d "${REPO_ROOT}/web/src" ]; then
+        if git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            if [ -n "$(git -C "${REPO_ROOT}" status --porcelain -- web/src web/index.html web/package.json web/vite.config.ts 2>/dev/null)" ]; then
+                AUTO_BUILD_UI=true
+            else
+                WEB_COMMIT="$(git -C "${REPO_ROOT}" log -n 1 --format=%H -- web/src web/index.html web/package.json web/vite.config.ts 2>/dev/null || true)"
+                ASSETS_COMMIT="$(git -C "${REPO_ROOT}" log -n 1 --format=%H -- internal/gui/assets 2>/dev/null || true)"
+                if [ -n "${WEB_COMMIT}" ] && { [ -z "${ASSETS_COMMIT}" ] || [ "$(git -C "${REPO_ROOT}" rev-list --count "${ASSETS_COMMIT}..${WEB_COMMIT}" 2>/dev/null || echo 1)" -gt 0 ]; }; then
+                    AUTO_BUILD_UI=true
+                fi
+            fi
+        elif [ -n "$(find "${REPO_ROOT}/web/src" -newer "${REPO_ROOT}/internal/gui/assets/app.js" 2>/dev/null)" ]; then
+            AUTO_BUILD_UI=true
+        fi
     fi
 
     if [ "${AUTO_BUILD_UI}" = true ]; then
         printf "${BLUE}==>${NC} ${BOLD}Building Web UI frontend (web/src -> internal/gui/assets)...${NC}\n"
-        (cd "${REPO_ROOT}/web" && (npm run build || bun run build))
+        if command -v npm >/dev/null 2>&1; then
+            (cd "${REPO_ROOT}/web" && { [ -x node_modules/.bin/tsc ] || npm ci --silent; } && npm run build)
+        elif command -v bun >/dev/null 2>&1; then
+            (cd "${REPO_ROOT}/web" && { [ -d node_modules ] || bun install --frozen-lockfile; } && bun run build)
+        else
+            printf "${RED}Error: neither npm nor bun is installed to build the Web UI.${NC}\n" >&2
+            exit 1
+        fi
     fi
 
     VERSION="${VERSION:-2.0.0}"
@@ -201,6 +220,8 @@ if [ "${RESTART_ONLY}" = false ]; then
             --exclude='node_modules' \
             --exclude='.cache' \
             --exclude='data/' \
+            --exclude='preview-data/' \
+            --exclude='bin/preview/' \
             --exclude='coverage.out' \
             --exclude='benchmark-results.json' \
             --exclude='tmp/' \

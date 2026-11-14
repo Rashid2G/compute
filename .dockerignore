@@ -2,6 +2,7 @@
 .agents
 .github
 data
+preview-data
 images
 vms
 snapshots

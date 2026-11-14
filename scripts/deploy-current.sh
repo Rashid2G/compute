@@ -54,10 +54,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------------------
-# Derive the sandbox name from the current branch / worktree / PR
+# Derive the sandbox name from override, positional arg (stop/status), branch, or PR
 # ---------------------------------------------------------------------------
 if [[ -n "${NAME_OVERRIDE}" ]]; then
     SANDBOX_NAME="${NAME_OVERRIDE}"
+elif [[ ( "${MODE}" == "stop" || "${MODE}" == "status" ) && ${#POSITIONAL[@]} -gt 0 ]]; then
+    ARG_NAME="${POSITIONAL[0]}"
+    if [[ "${ARG_NAME}" =~ ^[0-9]+$ ]]; then
+        SANDBOX_NAME="pr-${ARG_NAME}"
+    else
+        SANDBOX_NAME="${ARG_NAME}"
+    fi
 else
     BRANCH="$(git -C "${REPO_ROOT}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
     if [[ "${BRANCH}" == "detached" ]]; then
@@ -67,13 +74,13 @@ else
     fi
     SANDBOX_NAME="${BRANCH}"
     # Prefer the PR number when one exists for this branch.
-    PR_NUM="$(gh pr view --json number -q .number 2>/dev/null || true)"
+    PR_NUM="$(cd "${REPO_ROOT}" && gh pr view --json number -q .number 2>/dev/null || true)"
     if [[ "${PR_NUM}" =~ ^[0-9]+$ ]]; then
         SANDBOX_NAME="pr-${PR_NUM}"
     fi
-    # Sanitize into a sandbox-safe DNS label: lowercase, [a-z0-9-], max 63.
-    SANDBOX_NAME="$(echo "${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-63)"
 fi
+# Sanitize into a sandbox-safe DNS label: lowercase, [a-z0-9-], max 63.
+SANDBOX_NAME="$(echo "${SANDBOX_NAME}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-63)"
 
 if [[ -z "${SANDBOX_NAME}" ]]; then
     err "Could not derive a sandbox name (detached HEAD with no worktree name?). Use --name <name>."
