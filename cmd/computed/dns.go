@@ -14,7 +14,6 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/dns"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	storedb "github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 )
 
 // dnsRuntime tracks the DNS responder lifecycle and state for /api/v1/dns/status.
@@ -120,35 +119,9 @@ func (s *Server) dnsSandboxIPs(ctx context.Context, sandbox, username string) ([
 	return nil, false
 }
 
-// sandboxAddresses returns the addresses a sandbox name resolves to, with the
-// Service gateway VIP first when one is allocated. The VIP is reachable from
-// every tailnet device through the Service host; the guest IP requires routing
-// but works for on-net clients.
+// sandboxAddresses returns the addresses a sandbox name resolves to.
 func (s *Server) sandboxAddresses(v *db.VM) []net.IP {
-	var out []net.IP
-	seen := make(map[string]bool)
-	add := func(ip net.IP) {
-		if ip == nil {
-			return
-		}
-		key := ip.String()
-		if !seen[key] {
-			seen[key] = true
-			out = append(out, ip)
-		}
-	}
-
-	if s != nil && s.gateway != nil {
-		for _, vip := range s.gateway.VIPs(v.ID) {
-			if ip := net.ParseIP(vip); ip != nil && ip.To4() != nil {
-				add(ip)
-			}
-		}
-	}
-	for _, ip := range sandboxAddresses(v) {
-		add(ip)
-	}
-	return out
+	return sandboxAddresses(v)
 }
 
 // sandboxLabelForVM returns the DNS label used for a VM inside its owner's
@@ -161,19 +134,9 @@ func sandboxLabelForVM(v *db.VM) string {
 	return dns.SanitizeLabel(v.Name, dns.MaxLabelLength)
 }
 
-// sandboxAddresses returns the addresses a sandbox name resolves to. The
-// tailnet address comes first: it is reachable from every tailnet device
-// without subnet routes, while the guest IP requires routing (tailnet subnet
-// route or LAN route) but works for on-net clients. Unroutable first
-// addresses fail fast with "network unreachable", letting OpenSSH fall
-// through to the next address.
+// sandboxAddresses returns the addresses a sandbox name resolves to.
 func sandboxAddresses(v *db.VM) []net.IP {
 	var out []net.IP
-	if v.TailnetIP != "" {
-		if ip := net.ParseIP(v.TailnetIP); ip != nil && ip.To4() != nil {
-			out = append(out, ip)
-		}
-	}
 	if v.IPAddress != "" && v.IPAddress != "dhcp" {
 		if ip := net.ParseIP(v.IPAddress); ip != nil && ip.To4() != nil {
 			out = append(out, ip)
@@ -308,13 +271,6 @@ func (s *Server) dnsHostAddresses() ([]net.IP, bool) {
 }
 
 func detectHostAddress() (net.IP, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if st, err := tailscale.DetectLocal(ctx); err == nil && st != nil && st.Running && st.TailnetIP != "" {
-		if ip := net.ParseIP(st.TailnetIP); ip != nil {
-			return ip, "tailscale"
-		}
-	}
 	// Primary outbound address: dial a public address and inspect the local side.
 	c, err := net.DialTimeout("udp", "8.8.8.8:53", 2*time.Second)
 	if err == nil {
@@ -371,24 +327,6 @@ func (s *Server) decorateVMHostnames(vms []*db.VM) {
 		for _, v := range vms {
 			if v != nil {
 				v.Hostname = s.vmHostname(v)
-			}
-		}
-	}
-	if s != nil && s.gateway != nil {
-		ctx := context.Background()
-		for _, v := range vms {
-			if v == nil {
-				continue
-			}
-			if v.TailnetIP == "" {
-				if vips := s.gateway.VIPs(v.ID); len(vips) > 0 {
-					v.TailnetIP = vips[0]
-				}
-			}
-			if v.TailnetDNS == "" {
-				if dns := s.gatewayServiceDNS(ctx, v); dns != "" {
-					v.TailnetDNS = dns
-				}
 			}
 		}
 	}

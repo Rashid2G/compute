@@ -16,7 +16,6 @@ import type {
   NetworkConfig,
   NetworkInspectResult,
   PortForwardRecord,
-  TailscaleStatus,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -31,7 +30,7 @@ export function NetworkPage({
   networkConfig,
   onRefresh,
 }: NetworkPageProps) {
-  const [subTab, setSubTab] = useState<'leases' | 'port-forwarding' | 'tailnet'>('leases');
+  const [subTab, setSubTab] = useState<'leases' | 'port-forwarding'>('leases');
   const [pruning, setPruning] = useState(false);
 
   const [inspectResult, setInspectResult] =
@@ -39,8 +38,6 @@ export function NetworkPage({
   const [inspectingId, setInspectingId] = useState<string | null>(null);
 
   const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
-  const [tailnet, setTailnet] = useState<TailscaleStatus | null>(null);
-  const [tailnetLoading, setTailnetLoading] = useState(false);
   const [addPfOpen, setAddPfOpen] = useState(false);
   const [pfHostPort, setPfHostPort] = useState(18081);
   const [pfGuestPort, setPfGuestPort] = useState(8080);
@@ -59,23 +56,6 @@ export function NetworkPage({
   useEffect(() => {
     void loadPortForwards();
   }, [loadPortForwards]);
-
-  const loadTailnet = useCallback(async () => {
-    setTailnetLoading(true);
-    try {
-      setTailnet(await api.tailscaleStatus());
-    } catch {
-      setTailnet(null);
-    } finally {
-      setTailnetLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (subTab === 'tailnet' && !tailnet) {
-      void loadTailnet();
-    }
-  }, [subTab, tailnet, loadTailnet]);
 
   async function handlePrune() {
     setPruning(true);
@@ -240,18 +220,6 @@ export function NetworkPage({
             )}
           >
             DNAT Port Forwarding ({portForwards.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setSubTab('tailnet')}
-            className={cn(
-              'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
-              subTab === 'tailnet'
-                ? 'border-[#263fa9] text-foreground font-medium'
-                : 'border-transparent text-muted-foreground hover:text-foreground',
-            )}
-          >
-            Tailnet
           </button>
         </div>
 
@@ -565,252 +533,7 @@ export function NetworkPage({
           </div>
         </div>
       )}
-
-      {subTab === 'tailnet' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="text-[12px] text-muted-foreground">
-              Tailscale integration status, sandbox tailnet identities, and
-              published Services.
-            </div>
-            <button
-              type="button"
-              onClick={() => void loadTailnet()}
-              disabled={tailnetLoading}
-              className="flex h-8 items-center gap-1.5 border border-border px-3 text-[12px] text-foreground hover:bg-muted/40 disabled:opacity-50"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              {tailnetLoading ? 'Refreshing…' : 'Refresh'}
-            </button>
-          </div>
-
-          {!tailnet ? (
-            <div className="border border-border bg-background p-10 text-center text-[12.5px] text-muted-foreground">
-              {tailnetLoading
-                ? 'Loading tailnet status…'
-                : 'Tailnet status unavailable.'}
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-1 border border-border bg-background divide-y sm:grid-cols-4 sm:divide-y-0 sm:divide-x divide-border font-mono text-xs">
-                <div className="p-3.5 space-y-1">
-                  <div className="text-muted-foreground text-[10px] uppercase">
-                    Integration
-                  </div>
-                  <div
-                    className={cn(
-                      'text-[13px] font-medium',
-                      tailnet.enabled ? 'text-success' : 'text-muted-foreground',
-                    )}
-                  >
-                    {tailnet.enabled ? 'Enabled' : 'Disabled'}
-                  </div>
-                  <div className="text-muted-foreground text-[11px]">
-                    API key:{' '}
-                    {tailnet.api_key_configured ? 'configured' : 'missing'}
-                  </div>
-                </div>
-                <div className="p-3.5 space-y-1">
-                  <div className="text-muted-foreground text-[10px] uppercase">
-                    Tailnet
-                  </div>
-                  <div className="text-[13px] font-medium text-foreground">
-                    {tailnet.tailnet || '-'}
-                  </div>
-                  <div className="text-muted-foreground text-[11px]">
-                    {tailnet.host?.tailnet_name || 'no local client'}
-                  </div>
-                </div>
-                <div className="p-3.5 space-y-1">
-                  <div className="text-muted-foreground text-[10px] uppercase">
-                    Tags
-                  </div>
-                  <div className="text-[12px] text-foreground">
-                    {tailnet.sandbox_tag}
-                  </div>
-                  <div className="text-muted-foreground text-[11px]">
-                    master: {tailnet.node_tag}
-                  </div>
-                </div>
-                <div className="p-3.5 space-y-1">
-                  <div className="text-muted-foreground text-[10px] uppercase">
-                    Default sandboxes
-                  </div>
-                  <div className="text-[13px] font-medium text-foreground">
-                    {tailnet.default_sandboxes ? 'Tailnet addressing' : 'Opt-in'}
-                  </div>
-                  <div className="text-muted-foreground text-[11px]">
-                    {tailnet.host?.tailnet_ip || 'no host 100.x address'}
-                  </div>
-                </div>
-              </div>
-
-              {tailnet.service_gateway && (
-                <div className="border border-border bg-background p-3.5 font-mono text-xs space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[10px] uppercase text-muted-foreground font-semibold">
-                      Tailscale Service Gateway (Single-Host Mode)
-                    </div>
-                    <span className="text-[11px] text-success">Active</span>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11.5px]">
-                    <div>
-                      <span className="text-muted-foreground">Target address: </span>
-                      <span className="text-foreground">{tailnet.service_gateway.target_address || 'auto'}</span>
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Active services: </span>
-                      <span className="text-foreground">{tailnet.service_gateway.services}</span>
-                    </div>
-                    <div>
-                      <span className="text-muted-foreground">Host tag: </span>
-                      <span className="text-foreground">{tailnet.host_tag || '-'}</span>
-                    </div>
-                  </div>
-                  {tailnet.service_gateway.last_error && (
-                    <div className="text-[11px] text-destructive">
-                      Error: {tailnet.service_gateway.last_error}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {tailnet.gateway_services && tailnet.gateway_services.length > 0 && (
-                <div className="border border-border bg-background overflow-x-auto">
-                  <div className="border-b border-border bg-muted/30 px-3 py-2 text-[11.5px] text-muted-foreground">
-                    Sandbox Services ({tailnet.gateway_services.length})
-                  </div>
-                  <table className="w-full border-collapse text-left text-[12px]">
-                    <thead>
-                      <tr className="border-b border-border text-[11.5px] text-muted-foreground">
-                        <th className="py-2.5 px-3 font-normal">Sandbox</th>
-                        <th className="py-2.5 px-3 font-normal">Service</th>
-                        <th className="py-2.5 px-3 font-normal">VIPs</th>
-                        <th className="py-2.5 px-3 font-normal">Exposed Ports</th>
-                        <th className="py-2.5 px-3 font-normal">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border font-mono text-[11.5px]">
-                      {tailnet.gateway_services.map((svc) => (
-                        <tr key={svc.service} className="hover:bg-muted/30">
-                          <td className="py-2.5 px-3 font-sans text-foreground">{svc.sandbox}</td>
-                          <td className="py-2.5 px-3 text-foreground">{svc.service}</td>
-                          <td className="py-2.5 px-3 text-foreground">{(svc.vips || []).join(', ') || '-'}</td>
-                          <td className="py-2.5 px-3 text-muted-foreground">{(svc.ports || []).join(', ') || '-'}</td>
-                          <td className="py-2.5 px-3 text-muted-foreground">
-                            <span className={cn(svc.status === 'active' ? 'text-success' : 'text-muted-foreground')}>
-                              {svc.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              <div className="border border-border bg-background overflow-x-auto">
-                <table className="w-full border-collapse text-left text-[12px]">
-                  <thead>
-                    <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
-                      <th className="py-2.5 px-3 font-normal">Sandbox</th>
-                      <th className="py-2.5 px-3 font-normal">Tailnet IP</th>
-                      <th className="py-2.5 px-3 font-normal">MagicDNS name</th>
-                      <th className="py-2.5 px-3 font-normal">Device ID</th>
-                    </tr>
-                  </thead>
-                  {!tailnet.sandboxes || tailnet.sandboxes.length === 0 ? (
-                    <tbody>
-                      <tr>
-                        <td
-                          colSpan={4}
-                          className="py-10 text-center text-muted-foreground"
-                        >
-                          No Compute-owned tailnet devices. Start a sandbox with
-                          tailnet addressing enabled.
-                        </td>
-                      </tr>
-                    </tbody>
-                  ) : (
-                    <tbody className="divide-y divide-border font-mono text-[11.5px]">
-                      {tailnet.sandboxes.map((sandbox) => (
-                        <tr key={sandbox.id} className="hover:bg-muted/30">
-                          <td className="py-2.5 px-3 font-sans text-foreground">
-                            {sandbox.name || sandbox.id}
-                          </td>
-                          <td className="py-2.5 px-3 text-foreground">
-                            {sandbox.tailnet_ip || '-'}
-                          </td>
-                          <td className="py-2.5 px-3 text-muted-foreground">
-                            {sandbox.tailnet_dns || '-'}
-                          </td>
-                          <td className="py-2.5 px-3 text-muted-foreground">
-                            {sandbox.tailscale_device_id || '-'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  )}
-                </table>
-              </div>
-
-              <div className="border border-border bg-background overflow-x-auto">
-                <div className="border-b border-border bg-muted/30 px-3 py-2 text-[11.5px] text-muted-foreground">
-                  Published Services ({tailnet.services?.length ?? 0})
-                </div>
-                <table className="w-full border-collapse text-left text-[12px]">
-                  <thead>
-                    <tr className="border-b border-border text-[11.5px] text-muted-foreground">
-                      <th className="py-2.5 px-3 font-normal">Service</th>
-                      <th className="py-2.5 px-3 font-normal">Description</th>
-                      <th className="py-2.5 px-3 font-normal">Tags</th>
-                    </tr>
-                  </thead>
-                  {!tailnet.services || tailnet.services.length === 0 ? (
-                    <tbody>
-                      <tr>
-                        <td
-                          colSpan={3}
-                          className="py-8 text-center text-muted-foreground"
-                        >
-                          No Tailscale Services defined.
-                        </td>
-                      </tr>
-                    </tbody>
-                  ) : (
-                    <tbody className="divide-y divide-border font-mono text-[11.5px]">
-                      {tailnet.services.map((service) => (
-                        <tr key={service.name} className="hover:bg-muted/30">
-                          <td className="py-2.5 px-3 text-foreground">
-                            {service.name}
-                          </td>
-                          <td className="py-2.5 px-3 text-muted-foreground">
-                            {service.description || '-'}
-                          </td>
-                          <td className="py-2.5 px-3 text-muted-foreground">
-                            {(service.tags || []).join(', ') || '-'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  )}
-                </table>
-              </div>
-
-              {tailnet.recommended_policy && (
-                <div className="border border-border bg-background p-4 space-y-2">
-                  <div className="text-[12.5px] font-medium text-foreground">
-                    Recommended ACL additions
-                  </div>
-                  <pre className="max-h-52 overflow-auto border border-border bg-muted/20 p-3 font-mono text-[11px] text-muted-foreground whitespace-pre-wrap">
-                    {tailnet.recommended_policy}
-                  </pre>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 }
+

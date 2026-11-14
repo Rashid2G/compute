@@ -1,9 +1,7 @@
 import type { VM } from './types';
 
 export type SandboxSSHHostKind =
-  | 'tailnet_dns'
   | 'hostname'
-  | 'tailnet_ip'
   | 'ip_address'
   | 'public_ip'
   | 'none';
@@ -13,10 +11,7 @@ export type SandboxURLKind = 'hostname' | 'port' | 'legacy_port';
 export interface SandboxAccess {
   sandbox: string;
   hostname?: string;
-  tailnetDns?: string;
   zone?: string;
-  /** The zone belongs to Tailscale's MagicDNS namespace (*.ts.net). */
-  zoneIsMagicDNS: boolean;
 
   ssh?: string;
   sshHost?: string;
@@ -48,15 +43,6 @@ function normalizeHostname(hostname?: string): string {
 }
 
 /**
- * MagicDNS answers every *.ts.net query itself, so the daemon's authoritative
- * records for a sandbox zone under ts.net never reach tailnet clients.
- */
-export function isMagicDNSZone(zone?: string): boolean {
-  const normalized = (zone ?? '').trim().toLowerCase().replace(/\.$/, '');
-  return normalized === 'ts.net' || normalized.endsWith('.ts.net');
-}
-
-/**
  * Split the API hostname shape "<sandbox>.<tenant>.<zone>". A two-label name is
  * treated as "<sandbox>.<zone>" for legacy single-label deployments.
  */
@@ -83,8 +69,7 @@ export function splitSandboxHostname(hostname?: string): {
 
 /**
  * Derive the SSH and HTTP access model for a sandbox from API data only:
- * tailnet_dns, hostname, tailnet_ip, ip_address and public_ip. Mirrors
- * cmd/compute/sandboxurl.go; keep both in sync.
+ * hostname, ip_address and public_ip. Mirrors cmd/compute/sandboxurl.go.
  */
 export function sandboxAccess(
   vm: VM | null | undefined,
@@ -94,7 +79,6 @@ export function sandboxAccess(
   const port = options.port ?? 0;
   const access: SandboxAccess = {
     sandbox: '',
-    zoneIsMagicDNS: false,
     sshHostKind: 'none',
     sshResolvable: false,
     urlResolvable: false,
@@ -108,58 +92,39 @@ export function sandboxAccess(
 
   access.sandbox = (vm.name ?? '').trim() || (vm.id ?? '').trim();
   access.hostname = normalizeHostname(vm.hostname);
-  access.tailnetDns = normalizeHostname(vm.tailnet_dns);
 
   const parsed = splitSandboxHostname(access.hostname);
   access.zone = parsed?.zone ?? '';
-  access.zoneIsMagicDNS = isMagicDNSZone(access.zone);
-  const zoneDelegated = Boolean(parsed && access.zone && !access.zoneIsMagicDNS);
+  const zoneDelegated = Boolean(parsed && access.zone);
 
-  const tailnetIp = (vm.tailnet_ip ?? '').trim();
   const guestIp = (vm.ip_address ?? '').trim();
   const publicIp = (vm.public_ip ?? '').trim();
 
-  // SSH precedence: tailnet DNS → hostname → tailnet IP → guest IP → public IP.
-  if (access.tailnetDns) {
-    access.sshHost = access.tailnetDns;
-    access.sshHostKind = 'tailnet_dns';
-    access.sshResolvable = true;
-  } else if (access.hostname) {
+  // SSH precedence: hostname → guest IP → public IP.
+  if (access.hostname) {
     access.sshHost = access.hostname;
     access.sshHostKind = 'hostname';
     access.sshResolvable = zoneDelegated;
-    access.sshNote = access.zoneIsMagicDNS
-      ? `${access.hostname} is under ${access.zone}, which MagicDNS answers itself; it does not resolve from tailnet clients until the zone is delegated to this daemon.`
-      : `${access.hostname} requires ${access.zone} to be delegated to this daemon's DNS responder.`;
-  } else if (tailnetIp) {
-    access.sshHost = tailnetIp;
-    access.sshHostKind = 'tailnet_ip';
-    access.sshResolvable = true;
-    access.sshNote = 'No DNS name yet; using the sandbox tailnet IP.';
-  } else if (guestIp) {
-    access.sshHost = guestIp;
-    access.sshHostKind = 'ip_address';
-    access.sshResolvable = true;
-    access.sshNote =
-      'No DNS name yet; using the sandbox guest IP, which needs routing or a subnet route.';
+    access.sshNote = `${access.hostname} requires ${access.zone} to be delegated to this daemon's DNS responder.`;
   } else if (publicIp) {
     access.sshHost = publicIp;
     access.sshHostKind = 'public_ip';
     access.sshResolvable = true;
     access.sshNote = 'No DNS name yet; using the public IP.';
+  } else if (guestIp) {
+    access.sshHost = guestIp;
+    access.sshHostKind = 'ip_address';
+    access.sshResolvable = true;
+    access.sshNote = 'No DNS name yet; using the sandbox guest IP.';
   } else {
     access.sshNote = 'No address is assigned to this sandbox yet.';
   }
   if (access.sshHost) access.ssh = `ssh ${user}@${access.sshHost}`;
 
-  // HTTP ingress: only publish a URL when the sandbox zone is expected to
-  // resolve. ts.net names are owned by MagicDNS, so they stay hidden.
+  // HTTP ingress.
   if (!access.hostname) {
     access.urlNote =
       'No sandbox DNS name is configured. Enable the daemon DNS responder with a base domain to publish an HTTP URL.';
-  } else if (access.zoneIsMagicDNS) {
-    access.urlHost = access.hostname;
-    access.urlNote = `Sandbox HTTP names under ${access.zone} are intercepted by MagicDNS and do not resolve from tailnet clients. HTTP ingress stays hidden until the zone is delegated to this daemon (see issue #16 for the domain decision).`;
   } else if (!parsed) {
     access.urlNote = `Could not derive a zone from the sandbox hostname "${access.hostname}".`;
   } else {

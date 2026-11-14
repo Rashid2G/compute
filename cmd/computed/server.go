@@ -25,7 +25,6 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
 	"github.com/Rashid2G/on-demand-vms/internal/doctor"
-	servicegateway "github.com/Rashid2G/on-demand-vms/internal/gateway"
 	"github.com/Rashid2G/on-demand-vms/internal/jobs"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
@@ -54,8 +53,6 @@ type Server struct {
 	fcVersion    string
 	ingressProxy *network.IngressProxy
 	dns          *dnsRuntime
-	gateway      *servicegateway.Manager
-	gatewayKick  chan struct{}
 
 	// DNS/ingress caches (daemon-owned, response only).
 	userIndexMu     sync.RWMutex
@@ -270,7 +267,6 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		fcVersion:   fcVersion,
 		eventSubs:   make(map[chan *db.AuditEvent]struct{}),
 		vmListCache: make(map[string]vmListEntry),
-		gatewayKick: make(chan struct{}, 1),
 	}
 
 	var domains []string
@@ -512,7 +508,6 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 		}
 		if deleteRecords {
-			s.vmMgr.UnpublishTailscaleService(ctx, pf.VMID, pf.GuestPort)
 			_ = st.DeletePortForward(ctx, pf.ID)
 			continue
 		}
@@ -619,10 +614,6 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
 	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
-	s.mux.HandleFunc("/api/v1/tailscale/status", s.wrapAuth(s.handleTailscaleStatus))
-	s.mux.HandleFunc("/api/v1/tailscale/policy", s.wrapAuth(s.handleTailscalePolicy))
-	s.mux.HandleFunc("/api/v1/tailscale/cleanup", s.wrapAuth(s.handleTailscaleCleanup))
-	s.mux.HandleFunc("/api/v1/tailscale/enroll", s.wrapAuth(s.handleTailscaleEnroll))
 	s.mux.HandleFunc("/api/v1/network", s.wrapAuth(s.handleNetworkInfo))
 	s.mux.HandleFunc("/api/v1/network/allocations", s.wrapAuth(s.handleNetworkAllocations))
 	s.mux.HandleFunc("/api/v1/network/inspect/", s.wrapAuth(s.handleNetworkInspect))
@@ -1110,7 +1101,6 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			"vcpus":     created.VCPUs,
 			"memory_mb": created.MemoryMB,
 		})
-		s.kickTailscaleGateway()
 		s.encodeVM(w, created)
 
 	default:
@@ -1161,7 +1151,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.removePortForwardsForVM(ctx, v, true)
-			s.kickTailscaleGateway()
 			var delErr error
 			if _, isAdmin := s.currentOwnerID(r); isAdmin {
 				delErr = s.vmMgr.DeleteVM(ctx, vmID)
@@ -1269,7 +1258,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyEnvironment(ctx, v)
 			s.applyPortForwardsForVM(ctx, v)
 		}
-		s.kickTailscaleGateway()
 		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
 		s.encodeVM(w, v)
 
@@ -1298,7 +1286,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyEnvironment(ctx, v)
 			s.applyPortForwardsForVM(ctx, v)
 		}
-		s.kickTailscaleGateway()
 		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
 		s.encodeVM(w, v)
 
@@ -1316,7 +1303,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if v != nil {
 			s.removePortForwardsForVM(ctx, v, false)
 		}
-		s.kickTailscaleGateway()
 		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
 		s.encodeVM(w, v)
 
@@ -3292,7 +3278,6 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 		fallbackVCPUs, fallbackMemMB, fallbackDiskMB = getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
 	}
 	for _, n := range nodes {
-		var capTailscaleIP string
 		if n.TotalVCPUs == 0 && n.CapabilitiesJSON != "" {
 			var cap struct {
 				VCPUs        int    `json:"vcpus"`
@@ -3300,7 +3285,6 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				MemoryMB     int    `json:"memory_mb"`
 				DiskMB       int    `json:"disk_mb"`
 				Architecture string `json:"architecture"`
-				TailscaleIP  string `json:"tailscale_ip"`
 			}
 			if err := json.Unmarshal([]byte(n.CapabilitiesJSON), &cap); err == nil {
 				if cap.VCPUs > 0 {
@@ -3317,7 +3301,6 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				if n.Arch == "" && cap.Architecture != "" {
 					n.Arch = cap.Architecture
 				}
-				capTailscaleIP = cap.TailscaleIP
 			}
 		}
 		if n.TotalVCPUs == 0 && fallbackVCPUs > 0 {
@@ -3339,15 +3322,19 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 			n.FCVersion = s.fcVersion
 		}
 		if n.UnderlayIP == "" {
-			// Prefer the node's real tailnet address from its capabilities
-			// before falling back to loopback.
-			if capTailscaleIP != "" {
-				n.UnderlayIP = capTailscaleIP
-			} else {
-				n.UnderlayIP = "127.0.0.1"
-			}
+			n.UnderlayIP = "127.0.0.1"
 		}
 	}
+}
+
+// workerUnderlayIP extracts the node's network address from its capability map.
+func workerUnderlayIP(caps map[string]interface{}) string {
+	if caps != nil {
+		if v, ok := caps["underlay_ip"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return "127.0.0.1"
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {

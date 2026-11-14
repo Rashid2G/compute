@@ -83,17 +83,6 @@ RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
 
 DOCKERFILE
 
-# Optionally bake the tailscale binary into the image so sandboxes can join
-# the operator's tailnet immediately (compute tailscale / --tailscale).
-# Without it, the daemon can still install tailscale at first boot when
-# tailscale.auto_install_guest is enabled.
-if [ "${TAILSCALE:-0}" = "1" ]; then
-    cat << 'TAILSCALE_DOCKERFILE' >> "${BUILD_DIR}/Dockerfile"
-RUN curl -fsSL https://tailscale.com/install.sh | sh \
-    && tailscale version > /etc/compute-tailscale-version
-TAILSCALE_DOCKERFILE
-fi
-
 docker build -t compute-ubuntu:24.04 "${BUILD_DIR}"
 
 echo "==> [Step 3/5] Exporting rootfs and configuring Firecracker init..."

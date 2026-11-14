@@ -23,10 +23,6 @@ export interface VM {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
-  tailscale_enabled?: boolean;
-  tailnet_ip?: string;
-  tailnet_dns?: string;
-  tailscale_device_id?: string;
   mac_address: string;
   tap_device: string;
   rootfs_path: string;
@@ -95,7 +91,6 @@ export interface CreateVMRequest {
   public_ip_enabled?: boolean;
   dedicated_ip?: boolean;
   protected?: boolean;
-  tailscale?: boolean;
   ssh_key_id?: string;
   ssh_public_key?: string;
   ssh_password?: string;
@@ -470,68 +465,6 @@ export interface PortForwardRecord {
   public_url: string;
   status: 'active' | 'inactive' | string;
   created_at: string;
-}
-
-export interface TailscaleHostStatus {
-  installed: boolean;
-  running: boolean;
-  hostname: string;
-  dns_name: string;
-  tailnet_ip: string;
-  tailnet_name: string;
-  tags: string[] | null;
-  version: string;
-}
-
-export interface TailscaleSandboxRecord {
-  id: string;
-  name: string;
-  owner_id?: string;
-  status: string;
-  tailnet_ip?: string;
-  tailnet_dns?: string;
-  tailscale_device_id?: string;
-}
-
-export interface TailscaleServiceRecord {
-  name: string;
-  description?: string;
-  tags?: string[];
-}
-
-export interface ServiceGatewayStatus {
-  enabled: boolean;
-  target_address: string;
-  last_sync?: string;
-  last_error?: string;
-  services: number;
-}
-
-export interface GatewayServiceRecord {
-  vm_id: string;
-  sandbox: string;
-  service: string;
-  vips?: string[];
-  ports?: number[];
-  status: string;
-  last_error?: string;
-}
-
-export interface TailscaleStatus {
-  enabled: boolean;
-  api_key_configured: boolean;
-  tailnet?: string;
-  node_tag?: string;
-  sandbox_tag?: string;
-  host_tag?: string;
-  default_sandboxes: boolean;
-  host?: TailscaleHostStatus;
-  service_gateway?: ServiceGatewayStatus;
-  gateway_services?: GatewayServiceRecord[];
-  worker_control_plane_url?: string;
-  recommended_policy?: string;
-  sandboxes?: TailscaleSandboxRecord[];
-  services?: TailscaleServiceRecord[];
 }
 
 export interface AuthUser {
