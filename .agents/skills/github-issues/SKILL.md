@@ -24,7 +24,7 @@ Do **not** file issues for work you are completing right now in the same task/PR
 ```bash
 gh issue create \
   --title "fix: <short imperative summary>" \
-  --body-file /tmp/opencode/issue.md \
+  --body-file /tmp/issue.md \
   --label bug \
   --assignee @me
 ```
@@ -53,10 +53,12 @@ Redact secrets, tokens, private keys, and env values.
 
 ## Linking work to issues
 - Branch name includes the issue: `fix/42-queue-starvation`.
-- PR body references it: `Closes #42` (only if the PR fully resolves it) or `Refs #42`.
-- **If the PR only partially satisfies the issue, leave a comment on the issue** describing what was done and what remains, and keep it open. See skill `using-skills` for the mandatory checklist.
-- Multiple issues: `Closes #12, #34`.
-- When only partially done, comment progress on the issue and keep it open.
+- PR body references it: `Closes #42` (only if the PR fully resolves it; `Closes #12, #34` for multiple) or `Refs #42`.
+- **If the PR only partially satisfies the issue, leave a comment on the issue** describing what was done and what remains, and keep the issue open:
+  ```bash
+  gh issue comment <n> --body "Partial progress in #<pr>: <what changed>. Remaining: <gaps>. Kept open."
+  ```
+- Never claim an issue is fixed unless the PR demonstrably meets its acceptance criteria.
 
 ## Triage and lifecycle
 - Labels: `bug`, `enhancement`, `docs`, `chore`, `security`, `good first issue`, `blocked`.
