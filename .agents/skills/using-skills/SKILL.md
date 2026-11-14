@@ -16,6 +16,7 @@ description: >
   - `dev-workflow` — worktrees, `dev` branch, PR-to-`dev`, approval-gated `main`.
   - `github-issues` — filing, linking, triage, resuming issues.
   - `deployment` — deploy to `compute-lab`, health checks, remote logs.
+  - `preview-deploy` — MANDATORY PR preview deployments on `compute-lab` (`make deploy-current`, preview URLs, teardown).
   - `leader-evaluator-refinement` — multi-agent adversarial implementation/review.
   - `system-context-learning` — autonomous context learning, leaving operational context for other agents, safe skill updates.
   - `using-skills` — this file.
