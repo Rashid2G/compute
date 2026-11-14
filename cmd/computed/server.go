@@ -681,7 +681,7 @@ func (s *Server) SetGUIHandler(h http.Handler) {
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" || r.URL.Path == "/deployments" {
+	if (r.URL.Path == "/" || r.URL.Path == "/deployments") && deploymentsIndexEnabled() {
 		s.handleDeploymentsIndex(w, r)
 		return
 	}
