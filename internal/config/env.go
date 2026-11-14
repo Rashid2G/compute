@@ -119,46 +119,7 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.csvInto("COMPUTE_DNS_EXTRA_BASE_DOMAINS", &cfg.DNS.ExtraBaseDomains)
 	env.csvInto("COMPUTE_DNS_HOST_ADDRESSES", &cfg.DNS.HostAddresses)
 
-	// Tailscale.
-	env.boolInto("COMPUTE_TAILSCALE_ENABLED", &cfg.Tailscale.Enabled)
-	env.strInto("COMPUTE_TAILSCALE_API_KEY", &cfg.Tailscale.APIKey)
-	env.strInto("COMPUTE_TAILSCALE_TAILNET", &cfg.Tailscale.Tailnet)
-	env.strInto("COMPUTE_TAILSCALE_NODE_TAG", &cfg.Tailscale.NodeTag)
-	env.strInto("COMPUTE_TAILSCALE_SANDBOX_TAG", &cfg.Tailscale.SandboxTag)
-	env.strInto("COMPUTE_TAILSCALE_HOSTNAME_PREFIX", &cfg.Tailscale.HostnamePrefix)
-	env.intInto("COMPUTE_TAILSCALE_KEY_EXPIRY_SECONDS", &cfg.Tailscale.KeyExpirySeconds)
-	env.boolInto("COMPUTE_TAILSCALE_DEFAULT_SANDBOXES", &cfg.Tailscale.DefaultSandboxes)
-	env.boolInto("COMPUTE_TAILSCALE_LEGACY_PER_SANDBOX_DEVICES", &cfg.Tailscale.LegacyPerSandboxDevices)
-	env.strInto("COMPUTE_TAILSCALE_SERVICE_GATEWAY_TARGET_ADDRESS", gatewayTarget(cfg))
-
-	if gateway := env.boolValue("COMPUTE_TAILSCALE_SERVICE_GATEWAY_ENABLED"); gateway != nil {
-		if cfg.Tailscale.ServiceGateway == nil {
-			cfg.Tailscale.ServiceGateway = &ServiceGatewayConfig{}
-		}
-		cfg.Tailscale.ServiceGateway.Enabled = *gateway
-	}
-	if v := env.str("COMPUTE_TAILSCALE_SERVICE_GATEWAY_HOST_TAG"); v != "" {
-		if cfg.Tailscale.ServiceGateway == nil {
-			cfg.Tailscale.ServiceGateway = &ServiceGatewayConfig{}
-		}
-		cfg.Tailscale.ServiceGateway.HostTag = v
-	}
-	if v := env.str("COMPUTE_TAILSCALE_SERVICE_GATEWAY_SERVICE_TAG"); v != "" {
-		if cfg.Tailscale.ServiceGateway == nil {
-			cfg.Tailscale.ServiceGateway = &ServiceGatewayConfig{}
-		}
-		cfg.Tailscale.ServiceGateway.ServiceTag = v
-	}
-
 	return env.err()
-}
-
-// gatewayTarget returns a stable address for the optional gateway target.
-func gatewayTarget(cfg *GlobalConfig) *string {
-	if cfg.Tailscale.ServiceGateway == nil {
-		cfg.Tailscale.ServiceGateway = &ServiceGatewayConfig{}
-	}
-	return &cfg.Tailscale.ServiceGateway.TargetAddress
 }
 
 type envReader struct {

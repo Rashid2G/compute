@@ -241,9 +241,6 @@ if [[ "${NEED_DAEMON}" -eq 1 ]]; then
   },
   "jobs": {
     "local_execution": false
-  },
-  "tailscale": {
-    "enabled": false
   }
 }
 JSON

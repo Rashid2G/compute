@@ -176,20 +176,3 @@ func TestDataDirCompatibilityRoot(t *testing.T) {
 		t.Fatalf("explicit images dir lost: %q", cfg.Images.ImagesDir)
 	}
 }
-
-func TestEnvTailscaleServiceGateway(t *testing.T) {
-	clearEnv(t)
-	cfg := DefaultConfig()
-	t.Setenv("COMPUTE_TAILSCALE_ENABLED", "true")
-	t.Setenv("COMPUTE_TAILSCALE_SERVICE_GATEWAY_ENABLED", "true")
-	t.Setenv("COMPUTE_TAILSCALE_SERVICE_GATEWAY_TARGET_ADDRESS", "10.1.2.3")
-	if err := ApplyEnvOverrides(&cfg); err != nil {
-		t.Fatal(err)
-	}
-	if !cfg.Tailscale.ServiceGatewayEnabled() {
-		t.Fatal("service gateway should be enabled")
-	}
-	if got := cfg.Tailscale.GatewayTargetAddress(); got != "10.1.2.3" {
-		t.Fatalf("target = %q", got)
-	}
-}

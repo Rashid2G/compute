@@ -195,8 +195,6 @@ export function InstancesPage({
         vm.internal_id,
         vm.ip_address,
         vm.hostname,
-        vm.tailnet_dns,
-        vm.tailnet_ip,
         access.url,
         access.sshHost,
       ]

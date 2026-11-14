@@ -156,7 +156,6 @@ Enable a profile with `--profile <name>`; profiles are additive.
 | --- | --- | --- |
 | `gui` | `compute-gui` | Separate GUI container on `COMPUTE_GUI_PORT` (default 8080). The daemon already serves the embedded UI. |
 | `worker` | `compute-worker` | Experimental multi-host worker. Requires `COMPUTE_WORKER_TOKEN` and a shared image directory. |
-| `tailscale` | `compute-tailscale` | Host tailscaled for tailnet Service exposure. Most hosts should use their existing tailscaled instead. |
 | `dev` | Reserved for local development overrides. |
 
 ```bash
@@ -255,7 +254,7 @@ If you only need the control-plane state (no VM disks), back up
 ## Uninstall
 
 ```bash
-docker compose --profile gui --profile worker --profile tailscale down
+docker compose --profile gui --profile worker down
 # remove containers, network state and volumes created by this project
 docker compose down -v
 # optionally remove the host data directory (irreversible)

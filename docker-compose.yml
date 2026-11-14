@@ -79,10 +79,6 @@ services:
       COMPUTE_DNS_ENABLED: ${COMPUTE_DNS_ENABLED:-false}
       COMPUTE_DNS_BASE_DOMAIN: ${COMPUTE_DOMAIN:-}
       COMPUTE_EDGE_LISTEN: ${COMPUTE_EDGE_LISTEN:-}
-      COMPUTE_TAILSCALE_ENABLED: ${COMPUTE_TAILSCALE_ENABLED:-false}
-      COMPUTE_TAILSCALE_API_KEY: ${COMPUTE_TAILSCALE_API_KEY:-}
-      COMPUTE_TAILSCALE_TAILNET: ${COMPUTE_TAILSCALE_TAILNET:--}
-      COMPUTE_TAILSCALE_SERVICE_GATEWAY_ENABLED: ${COMPUTE_TAILSCALE_SERVICE_GATEWAY_ENABLED:-false}
       # Defensive marker: the daemon warns if it detects a private container
       # network namespace while this is unset.
       COMPUTE_HOST_NETWORK: "1"
@@ -90,9 +86,6 @@ services:
       - *data-volume
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - /dev/kvm:/dev/kvm
-      # Shared with the optional tailscale profile container. Without that
-      # profile the socket is simply absent and Tailscale integration stays off.
-      - tailscale-run:/var/run/tailscale
     devices:
       - /dev/kvm:/dev/kvm
     healthcheck:
@@ -174,29 +167,6 @@ services:
       retries: 3
       start_period: 10s
 
-  # Optional host tailscaled for tailnet Service exposure. Most deployments
-  # already run tailscaled on the host; in that case set the daemon's socket
-  # path/config instead of enabling this profile.
-  compute-tailscale:
-    image: tailscale/tailscale:${COMPUTE_TAILSCALE_IMAGE:-stable}
-    profiles: ["tailscale"]
-    restart: unless-stopped
-    network_mode: host
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    logging: *default-logging
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-      - tailscale-run:/var/run/tailscale
-    environment:
-      TS_AUTHKEY: ${COMPUTE_TAILSCALE_AUTHKEY:-}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "false"
-      TS_HOSTNAME: ${COMPUTE_TAILSCALE_HOSTNAME:-compute}
-
   # Local development helper: builds the daemon image with the working tree and
   # prints its version. The default install pulls/builds the pinned image via
   # COMPUTE_VERSION; the dev profile is for exercising local changes.
@@ -210,5 +180,3 @@ services:
 
 volumes:
   worker-data:
-  tailscale-state:
-  tailscale-run:
