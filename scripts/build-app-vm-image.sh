@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-app-vm-image.sh — Build a Firecracker-compatible Debian rootfs that
+# build-app-vm-image.sh — Build a Firecracker-compatible Ubuntu 24.04 rootfs that
 # runs the full Compute application (daemon + Web GUI + CLI) on boot.
 #
 # Usage: sudo ./scripts/build-app-vm-image.sh [output.ext4] [size_mb]
@@ -12,8 +12,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_IMG="${1:-${REPO_ROOT}/data/images/app-server.ext4}"
 SIZE_MB="${2:-3072}"
-SUITE="${DEBOOTSTRAP_SUITE:-trixie}"
-MIRROR="${DEBOOTSTRAP_MIRROR:-http://deb.debian.org/debian}"
+SUITE="${UBUNTU_SUITE:-noble}"
+MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
 MNT="$(mktemp -d /tmp/compute-appvm-mnt-XXXXXX)"
 BIN_SRC="${REPO_ROOT}/bin"
 
@@ -40,6 +41,8 @@ for b in "${BIN_SRC}/compute" "${BIN_SRC}/computed" "${BIN_SRC}/compute-worker";
     fi
 done
 
+[[ -f "${KEYRING}" ]] || { echo "missing keyring ${KEYRING}" >&2; exit 1; }
+
 log "Creating ${SIZE_MB}MB ext4 image at ${OUT_IMG}"
 mkdir -p "$(dirname "${OUT_IMG}")"
 rm -f "${OUT_IMG}"
@@ -49,8 +52,8 @@ mkfs.ext4 -F -q -L compute-app "${OUT_IMG}"
 log "Mounting image"
 mount -o loop "${OUT_IMG}" "${MNT}"
 
-log "Bootstrapping Debian ${SUITE} (minbase)"
-debootstrap --variant=minbase --arch=amd64 "${SUITE}" "${MNT}" "${MIRROR}" >/tmp/debootstrap-appvm.log 2>&1
+log "Bootstrapping Ubuntu ${SUITE} (minbase)"
+debootstrap --variant=minbase --arch=amd64 --keyring="${KEYRING}" "${SUITE}" "${MNT}" "${MIRROR}" >/tmp/debootstrap-appvm.log 2>&1
 mount -t proc proc "${MNT}/proc"
 mount -t sysfs sysfs "${MNT}/sys"
 mount --bind /dev "${MNT}/dev"
@@ -58,16 +61,16 @@ mount --bind /dev/pts "${MNT}/dev/pts"
 
 log "Configuring apt and installing runtime packages"
 cat >"${MNT}/etc/apt/sources.list" <<EOF
-deb ${MIRROR} ${SUITE} main
-deb ${MIRROR} ${SUITE}-updates main
-deb ${MIRROR}-security ${SUITE}-security main
+deb ${MIRROR} ${SUITE} main universe
+deb ${MIRROR} ${SUITE}-updates main universe
+deb ${MIRROR} ${SUITE}-security main universe
 EOF
 
 chroot "${MNT}" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server iproute2 procps curl ca-certificates jq less nano util-linux iputils-ping tzdata logrotate netbase && rm -rf /var/lib/apt/lists/*' >>/tmp/debootstrap-appvm.log 2>&1
 
 log "Creating users and SSH configuration"
 chroot "${MNT}" /bin/bash -c '
-    (userdel -r debian 2>/dev/null || true)
+    (userdel -r ubuntu 2>/dev/null || true)
     if ! id compute >/dev/null 2>&1; then
         useradd -m -s /bin/bash -u 1000 compute
     fi
@@ -110,20 +113,20 @@ cat >"${MNT}/etc/compute/daemon.json" <<'JSON'
     "vcpus": 1,
     "memory_mb": 512,
     "disk_size_mb": 4096,
-    "image": "debian-13"
+    "image": "ubuntu-24"
   },
   "images": {
     "images_dir": "/var/lib/compute/images",
     "vms_dir": "/var/lib/compute/vms",
     "default_kernel": "vmlinux",
-    "default_rootfs": "debian-13.ext4",
+    "default_rootfs": "ubuntu-24.04.ext4",
     "ssh_key_path": "/var/lib/compute/images/ssh/id_ed25519",
     "available": [
       {
-        "name": "debian-13",
+        "name": "ubuntu-24",
         "kernel": "vmlinux",
-        "rootfs": "debian-13.ext4",
-        "description": "Debian 13 (trixie) with SSH and Compute tooling"
+        "rootfs": "ubuntu-24.04.ext4",
+        "description": "Ubuntu 24.04 LTS (Noble Numbat) with SSH and Compute tooling"
       }
     ]
   },
