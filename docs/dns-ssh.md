@@ -6,21 +6,19 @@ Every sandbox can be given a stable, routable hostname of the form
 <sandbox>.<username>.<base-domain>
 ```
 
-For example, with the base domain `compute-lab.tailb1be99.ts.net`, a sandbox
+For example, with the base domain `sandboxes.example.com`, a sandbox
 named `myvm` owned by user `alice` is reachable at:
 
 ```
-ssh compute@myvm.alice.compute-lab.tailb1be99.ts.net
+ssh compute@myvm.alice.sandboxes.example.com
 ```
 
-> **Note:** the `compute-lab.tailb1be99.ts.net` example above is the current
-> lab config, but it is **not resolvable from tailnet clients**: MagicDNS owns
-> `*.ts.net` and answers it authoritatively. See the delegation section below
-> and `docs/tailscale.md`. A custom domain is required for the per-user
-> subdomain scheme.
+> **Note:** `*.ts.net` domains are **not resolvable as delegated zones from tailnet clients**:
+> MagicDNS owns `*.ts.net` and answers it authoritatively. See the delegation section below
+> and `docs/domain-options.md`. Use a custom/private zone (e.g. `sbx.internal` or `sandboxes.example.com`)
+> for the per-user subdomain scheme.
 
-When the Tailscale Service gateway is enabled
-(`docs/tailscale-service-gateway.md`), each sandbox name is answered with the
+When the Tailscale Service gateway is enabled, each sandbox name is answered with the
 sandbox Service's VIP first and the guest IP second. Tailnet clients reach the
 VIP through the Service host without any subnet route; LAN clients fall back
 to the guest IP.
@@ -47,9 +45,9 @@ IP) keep working unchanged.
 {
   "dns": {
     "enabled": true,
-    "listen": ":53",                                   // UDP + TCP
-    "base_domain": "compute-lab.tailb1be99.ts.net",    // falls back to network.base_domain
-    "extra_base_domains": []                           // optional additional zones
+    "listen": ":53",                              // UDP + TCP
+    "base_domain": "sandboxes.example.com",       // falls back to network.base_domain
+    "extra_base_domains": []                      // optional additional zones
   },
   "server": {
     "edge_listen": ":80"   // default ":80" while DNS is enabled; "-" disables
@@ -96,7 +94,7 @@ for a tested comparison of zone choices):
   Split DNS works for arbitrary zones, but **not for subdomains of the
   tailnet's own `ts.net` zone**: MagicDNS answers those authoritatively
   (`NXDOMAIN` for names it does not know), so a
-  `compute-lab.<tailnet>.ts.net` base domain cannot be delegated this way.
+  `<host>.<tailnet>.ts.net` base domain cannot be delegated this way.
   Use a custom/private zone for per-user subdomains, or per-sandbox MagicDNS
   device names (`<sandbox>-<username>.<tailnet>.ts.net`).
 - **Any DNS provider**: create an `NS` record for the base domain pointing at

@@ -52,6 +52,8 @@ type Manager struct {
 	keyMgr         *KeyManager
 	sessionMgr     *SessionManager
 	adminBootstrap string // optional static admin bearer secret
+	adminUsername  string
+	adminEmail     string
 	externalAuth   ExternalAuthenticator
 	usageProvider  UsageProvider
 }
@@ -64,7 +66,57 @@ func NewManager(queries *db.Queries, masterKey *pki.MasterKey, sessionTTL time.D
 		keyMgr:         NewKeyManager(queries, masterKey),
 		sessionMgr:     NewSessionManager(queries, sessionTTL),
 		adminBootstrap: adminSecret,
+		adminUsername:  "admin",
+		adminEmail:     "admin@compute.local",
 	}
+}
+
+// SetAdminIdentity sets the configured bootstrap administrator username and email.
+func (m *Manager) SetAdminIdentity(username, email string) {
+	u := strings.TrimSpace(strings.ToLower(username))
+	if u != "" {
+		m.adminUsername = u
+	}
+	e := strings.TrimSpace(email)
+	if e != "" {
+		m.adminEmail = e
+	}
+}
+
+// AdminIdentity returns the configured administrator username and email.
+func (m *Manager) AdminIdentity() (string, string) {
+	u := m.adminUsername
+	if u == "" {
+		u = "admin"
+	}
+	e := m.adminEmail
+	if e == "" {
+		e = "admin@compute.local"
+	}
+	return u, e
+}
+
+func (m *Manager) resolveSeededAdminUser(ctx context.Context) *db.User {
+	if m.queries == nil {
+		return nil
+	}
+	uname, uemail := m.AdminIdentity()
+	for _, candidate := range []string{uname, uemail, "admin"} {
+		if candidate == "" {
+			continue
+		}
+		if u, err := m.queries.GetUserByEmailOrUsername(ctx, candidate); err == nil && u != nil {
+			if u.Role == "admin" && (u.Status == "" || u.Status == "active") {
+				return u
+			}
+		}
+	}
+	if u, err := m.queries.GetUserByID(ctx, "usr_system_admin"); err == nil && u != nil {
+		if u.Role == "admin" && (u.Status == "" || u.Status == "active") {
+			return u
+		}
+	}
+	return nil
 }
 
 // KeyManager returns the underlying API key manager.
@@ -89,6 +141,13 @@ func (m *Manager) SetUsageProvider(fn UsageProvider) {
 
 // Signup registers a new user, hashes password with Argon2id, and provisions their default organization.
 func (m *Manager) Signup(ctx context.Context, email, username, displayName, password, role string) (*db.User, error) {
+	if len(password) < 8 {
+		return nil, errors.New("password must be at least 8 characters")
+	}
+	return m.createUserWithOrg(ctx, email, username, displayName, password, role)
+}
+
+func (m *Manager) createUserWithOrg(ctx context.Context, email, username, displayName, password, role string) (*db.User, error) {
 	email = strings.TrimSpace(email)
 	username = strings.TrimSpace(strings.ToLower(username))
 	if email == "" || username == "" || password == "" {
@@ -131,26 +190,122 @@ func (m *Manager) Signup(ctx context.Context, email, username, displayName, pass
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
-	// Create user's personal organization
-	orgID := "org_" + strings.TrimPrefix(userID, "usr_")
-	org := &db.Organization{
-		ID:        orgID,
-		Name:      fmt.Sprintf("%s's Workspace", username),
-		Slug:      username,
-		Status:    "active",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	_ = m.queries.CreateOrganization(ctx, org)
+	m.ensurePersonalOrg(ctx, userID, username, now)
 
+	return user, nil
+}
+
+func (m *Manager) ensurePersonalOrg(ctx context.Context, userID, username string, now int64) {
+	orgID := personalOrgIDFor(userID)
+	expectedName := fmt.Sprintf("%s's Workspace", username)
+	if existingOrg, err := m.queries.GetOrganizationByID(ctx, orgID); errors.Is(err, db.ErrNotFound) {
+		org := &db.Organization{
+			ID:        orgID,
+			Name:      expectedName,
+			Slug:      username,
+			Status:    "active",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		_ = m.queries.CreateOrganization(ctx, org)
+	} else if err == nil && existingOrg != nil && (existingOrg.Slug != username || existingOrg.Name != expectedName) {
+		_ = m.queries.UpdateOrganizationIdentity(ctx, orgID, expectedName, username)
+	}
 	_ = m.queries.AddOrganizationMember(ctx, &db.OrganizationMember{
 		OrganizationID: orgID,
 		UserID:         userID,
 		Role:           "owner",
 		CreatedAt:      now,
 	})
+}
 
-	return user, nil
+// EnsureAdmin ensures the configured administrator account exists, is active with
+// role "admin", has any lockout cleared, and (when password is non-empty) has
+// its password synced to the configured value.
+func (m *Manager) EnsureAdmin(ctx context.Context, email, username, displayName, password string) (*db.User, error) {
+	if m.queries == nil {
+		return nil, errors.New("auth store unavailable")
+	}
+	username = strings.TrimSpace(strings.ToLower(username))
+	if username == "" {
+		username = "admin"
+	}
+	email = strings.TrimSpace(email)
+	if email == "" {
+		email = "admin@compute.local"
+	}
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		displayName = "Administrator"
+	}
+	if !dns.ValidLabel(username) {
+		return nil, fmt.Errorf("invalid admin username: must be lowercase letters, digits, and dashes (a DNS label, max %d chars)", dns.MaxLabelLength)
+	}
+
+	m.SetAdminIdentity(username, email)
+
+	var existing *db.User
+	for _, candidate := range []string{username, email} {
+		if u, err := m.queries.GetUserByEmailOrUsername(ctx, candidate); err == nil && u != nil {
+			existing = u
+			break
+		}
+	}
+	if existing == nil {
+		if u, err := m.queries.GetUserByID(ctx, "usr_system_admin"); err == nil && u != nil {
+			existing = u
+		}
+	}
+	if existing == nil {
+		if users, err := m.queries.ListUsers(ctx); err == nil {
+			var admins []*db.User
+			for _, u := range users {
+				if u != nil && u.Role == "admin" {
+					admins = append(admins, u)
+					if u.Username == "admin" || strings.EqualFold(u.Email, "admin@compute.local") {
+						existing = u
+						break
+					}
+				}
+			}
+			if existing == nil && len(admins) == 1 {
+				existing = admins[0]
+			}
+		}
+	}
+
+	if existing == nil {
+		if password == "" {
+			return nil, errors.New("admin password is required to bootstrap admin account")
+		}
+		return m.createUserWithOrg(ctx, email, username, displayName, password, "admin")
+	}
+
+	passwordHash := ""
+	if password != "" {
+		if VerifyPassword(password, existing.PasswordHash) != nil {
+			h, err := HashPassword(password)
+			if err != nil {
+				return nil, fmt.Errorf("failed to hash admin password: %w", err)
+			}
+			passwordHash = h
+		}
+	}
+
+	if err := m.queries.UpdateUserAdminBootstrap(ctx, existing.ID, email, username, displayName, passwordHash, "admin", "active"); err != nil {
+		return nil, fmt.Errorf("failed to update admin user: %w", err)
+	}
+	if passwordHash != "" || !strings.EqualFold(existing.Username, username) || !strings.EqualFold(existing.Email, email) {
+		_ = m.queries.DeleteUserSessions(ctx, existing.ID)
+	}
+
+	m.ensurePersonalOrg(ctx, existing.ID, username, db.NowMillis())
+
+	updated, err := m.queries.GetUserByID(ctx, existing.ID)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // Login verifies credentials with Argon2id and account lockout protection, then issues a session token.
@@ -270,10 +425,14 @@ func (m *Manager) AuthenticateRequest(r *http.Request) (*AuthContext, error) {
 	// Admin Bootstrap Secret Check (header credentials only)
 	if m.adminBootstrap != "" && headerToken != "" {
 		if subtle.ConstantTimeCompare([]byte(headerToken), []byte(m.adminBootstrap)) == 1 {
+			if adminUser := m.resolveSeededAdminUser(r.Context()); adminUser != nil {
+				return m.authContextForUser(r, adminUser, nil, nil, "admin_secret", clientIP), nil
+			}
+			uname, uemail := m.AdminIdentity()
 			adminUser := &db.User{
 				ID:          "usr_system_admin",
-				Email:       "admin@compute.local",
-				Username:    "admin",
+				Email:       uemail,
+				Username:    uname,
 				DisplayName: "System Administrator",
 				Role:        "admin",
 				Status:      "active",
@@ -289,16 +448,9 @@ func (m *Manager) AuthenticateRequest(r *http.Request) (*AuthContext, error) {
 		}
 	}
 
-	// API Key Authentication (format: mfk_... or cmp_...)
+	// API Key Authentication (format: cmp_..., cmp_live_..., or legacy mfk_...)
 	if strings.HasPrefix(token, "mfk_") || strings.HasPrefix(token, "cmp_") {
-		// Normalize the user-facing cmp_live_ prefix back to the platform key format.
-		lookupToken := token
-		if strings.HasPrefix(token, "cmp_live_") {
-			lookupToken = "mfk_" + strings.TrimPrefix(token, "cmp_live_")
-		} else if strings.HasPrefix(token, "cmp_") {
-			lookupToken = "mfk_" + strings.TrimPrefix(token, "cmp_")
-		}
-		if user, keyRecord, err := m.keyMgr.AuthenticateToken(r.Context(), lookupToken, clientIP); err == nil {
+		if user, keyRecord, err := m.keyMgr.AuthenticateToken(r.Context(), token, clientIP); err == nil {
 			return m.authContextForUser(r, user, keyRecord, nil, "api_key", clientIP), nil
 		}
 		// Not a platform key: could be a scoped access key such as cmp_live_...
@@ -352,7 +504,7 @@ func (m *Manager) UserByUsername(ctx context.Context, identifier string) (*db.Us
 	}
 	user, err := m.queries.GetUserByEmailOrUsername(ctx, identifier)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, db.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("lookup user %q: %w", identifier, err)
@@ -367,7 +519,7 @@ func (m *Manager) UserByID(ctx context.Context, id string) (*db.User, error) {
 	}
 	user, err := m.queries.GetUserByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, db.ErrNotFound) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("lookup user %q: %w", id, err)
@@ -381,6 +533,35 @@ func (m *Manager) Users(ctx context.Context) ([]*db.User, error) {
 		return nil, fmt.Errorf("auth store unavailable")
 	}
 	return m.queries.ListUsers(ctx)
+}
+
+// ErrProtectedAdmin is returned when attempting to delete the primary bootstrap administrator.
+var ErrProtectedAdmin = errors.New("cannot delete primary bootstrap administrator")
+
+// DeleteUser removes a user account along with its sessions, API keys, and org memberships.
+func (m *Manager) DeleteUser(ctx context.Context, id string) error {
+	if m.queries == nil {
+		return errors.New("auth store unavailable")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("user id is required")
+	}
+	if id == "usr_system_admin" {
+		return ErrProtectedAdmin
+	}
+	user, err := m.UserByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return db.ErrNotFound
+	}
+	configuredAdminUsername, _ := m.AdminIdentity()
+	if user.Username == configuredAdminUsername {
+		return ErrProtectedAdmin
+	}
+	return m.queries.DeleteUser(ctx, user.ID)
 }
 
 // resolveOrgID returns the organization a request may act within. A caller may

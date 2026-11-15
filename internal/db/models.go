@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -92,6 +93,7 @@ type VM struct {
 	PID                int      `json:"pid,omitempty"`
 	SocketPath         string   `json:"socket_path,omitempty"`
 	Protected          bool     `json:"protected"`
+	Description        string   `json:"description,omitempty"`
 	// Hostname is transient and response-only: the DNS-safe fully qualified
 	// sandbox name "<sandbox>.<username>.<base-domain>" populated by the API
 	// layer when DNS naming is configured. It is never persisted.
@@ -340,18 +342,42 @@ type AgentProfile struct {
 
 // EnvironmentProfile represents reusable environment configurations
 type EnvironmentProfile struct {
-	Name               string    `json:"name"`
-	IsDefault          bool      `json:"is_default"`
-	SafeForThirdParty  bool      `json:"safe_for_third_parties"`
-	GitHubReposEnabled bool      `json:"github_repos_enabled"`
-	GitHubRepos        []string  `json:"github_repos"`
-	SecretsEnabled     bool      `json:"secrets_enabled"`
-	Secrets            string    `json:"secrets"`
-	BoatCredsEnabled   bool      `json:"boat_credentials_enabled"`
-	AgentCredsEnabled  bool      `json:"agent_credentials_enabled"`
-	CredentialProfile  string    `json:"credential_profile"`
-	Version            int       `json:"version"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	Name                string    `json:"name"`
+	IsDefault           bool      `json:"is_default"`
+	SafeForThirdParty   bool      `json:"safe_for_third_parties"`
+	GitHubReposEnabled  bool      `json:"github_repos_enabled"`
+	GitHubRepos         []string  `json:"github_repos"`
+	SecretsEnabled      bool      `json:"secrets_enabled"`
+	Secrets             string    `json:"secrets"`
+	ComputeCredsEnabled bool      `json:"compute_credentials_enabled"`
+	BoatCredsEnabled    bool      `json:"boat_credentials_enabled,omitempty"`
+	AgentCredsEnabled   bool      `json:"agent_credentials_enabled"`
+	CredentialProfile   string    `json:"credential_profile"`
+	Version             int       `json:"version"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// UnmarshalJSON accepts both compute_credentials_enabled and legacy boat_credentials_enabled.
+func (e *EnvironmentProfile) UnmarshalJSON(data []byte) error {
+	type Alias EnvironmentProfile
+	aux := struct {
+		*Alias
+		HasComputeCreds *bool `json:"compute_credentials_enabled"`
+		HasBoatCreds    *bool `json:"boat_credentials_enabled"`
+	}{
+		Alias: (*Alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.HasComputeCreds != nil {
+		e.ComputeCredsEnabled = *aux.HasComputeCreds
+		e.BoatCredsEnabled = *aux.HasComputeCreds
+	} else if aux.HasBoatCreds != nil {
+		e.ComputeCredsEnabled = *aux.HasBoatCreds
+		e.BoatCredsEnabled = *aux.HasBoatCreds
+	}
+	return nil
 }
 
 // PortForward represents a port forwarding mapping

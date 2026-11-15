@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 
 import { CommandPalette } from '@/components/command-palette';
@@ -17,6 +18,7 @@ import { PAGES, resolvePageId, type PageId } from '@/lib/navigation';
 import type { AuthUser, CreateVMRequest, VM } from '@/lib/types';
 import { AccessPage } from '@/pages/access';
 import { ApiPage } from '@/pages/api';
+import { AuthPage } from '@/pages/auth';
 import { ConsolePage } from '@/pages/console';
 import { DashboardPage } from '@/pages/dashboard';
 import { EventsPage } from '@/pages/events';
@@ -30,6 +32,7 @@ import { StoragePage } from '@/pages/storage';
 import { WorkersPage } from '@/pages/workers';
 
 type Theme = 'light' | 'dark';
+type RoutePage = PageId | 'terminal' | 'login' | 'signup';
 
 function initialTheme(): Theme {
   const stored = window.localStorage.getItem('compute-theme');
@@ -37,8 +40,15 @@ function initialTheme(): Theme {
   return 'dark';
 }
 
-function parseRoute(): { page: PageId | 'terminal'; vmId: string | null } {
+function parseRoute(): { page: RoutePage; vmId: string | null } {
   const rawHash = window.location.hash.replace(/^#\/?/, '');
+  const clean = rawHash.split('?')[0].toLowerCase();
+  if (clean === 'login') {
+    return { page: 'login', vmId: null };
+  }
+  if (clean === 'signup') {
+    return { page: 'signup', vmId: null };
+  }
   if (rawHash.startsWith('terminal/')) {
     const rawId = rawHash.slice('terminal/'.length).split('?')[0];
     return { page: 'terminal', vmId: decodeURIComponent(rawId) };
@@ -51,7 +61,10 @@ function parseRoute(): { page: PageId | 'terminal'; vmId: string | null } {
 
 function pageFromHash(): PageId {
   const r = parseRoute();
-  return r.page === 'terminal' ? 'instances' : r.page;
+  if (r.page === 'terminal' || r.page === 'login' || r.page === 'signup') {
+    return 'instances';
+  }
+  return r.page;
 }
 
 export default function App() {
@@ -67,38 +80,76 @@ export default function App() {
   const [deleteTarget, setDeleteTarget] = useState<VM | null>(null);
   const [consoleVMID, setConsoleVMID] = useState<string | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
-  const [authUser, setAuthUser] = useState<AuthUser | null>(() => api.getAuthUser());
 
-  const cluster = useCluster();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(true);
+  const [signupEnabled, setSignupEnabled] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+  const isAuthenticated = authChecked && (!authEnabled || authUser !== null);
+  const cluster = useCluster({ enabled: isAuthenticated });
   const currentPage = PAGES.find((item) => item.id === page) ?? PAGES[0];
 
   useEffect(() => {
     return onUnauthorized(() => {
-      setLoginOpen(true);
+      if (!authEnabled) return;
+      api.clearAuth();
+      setAuthUser(null);
+      if (window.location.hash !== '#/login' && window.location.hash !== '#/signup') {
+        window.location.hash = '#/login';
+      }
     });
-  }, []);
+  }, [authEnabled]);
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
+      let resolvedAuthEnabled = true;
+      try {
+        const status = await api.authStatus();
+        if (cancelled) return;
+        resolvedAuthEnabled = status.auth_enabled;
+        setAuthEnabled(status.auth_enabled);
+        setSignupEnabled(status.signup_enabled);
+      } catch {
+        // Older mock servers or endpoints without /auth/status fall back to authEnabled=true
+      }
+
+      if (!resolvedAuthEnabled) {
+        if (!cancelled) {
+          setAuthChecked(true);
+        }
+        return;
+      }
+
       try {
         const me = await api.me();
-        setAuthUser(me.user);
+        if (!cancelled) {
+          setAuthUser(me.user);
+        }
       } catch {
-        const ok = await api.ensureAuth();
-        if (ok) {
-          setAuthUser(api.getAuthUser());
+        if (!cancelled) {
+          api.clearAuth();
+          setAuthUser(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthChecked(true);
         }
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const handleLogout = useCallback(async () => {
     await api.logout();
     setAuthUser(null);
-    setLoginOpen(true);
+    window.location.hash = '#/login';
     toast.info('Signed out');
-    await cluster.refresh(true);
-  }, [cluster]);
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -109,14 +160,18 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (authChecked && authEnabled && authUser === null) {
+      document.title = route.page === 'signup' ? 'Compute — Create Account' : 'Compute — Sign In';
+      return;
+    }
     document.title = `Compute — ${currentPage.label}`;
-  }, [currentPage.label]);
+  }, [authChecked, authEnabled, authUser, currentPage.label, route.page]);
 
   useEffect(() => {
     function onHashChange() {
       const nextRoute = parseRoute();
       setRoute(nextRoute);
-      if (nextRoute.page !== 'terminal') {
+      if (nextRoute.page !== 'terminal' && nextRoute.page !== 'login' && nextRoute.page !== 'signup') {
         setPage(nextRoute.page);
       }
     }
@@ -125,7 +180,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!authChecked) return;
+    if (authEnabled && authUser === null) {
+      if (route.page !== 'login' && route.page !== 'signup') {
+        window.location.hash = '#/login';
+      }
+    } else if (route.page === 'login' || route.page === 'signup') {
+      window.location.hash = '#/instances';
+      setPage('instances');
+    }
+  }, [authChecked, authEnabled, authUser, route.page]);
+
+  useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (!isAuthenticated) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommandOpen((prev) => !prev);
@@ -133,7 +201,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [isAuthenticated]);
 
   const navigate = useCallback((next: PageId) => {
     setPage(next);
@@ -457,7 +525,7 @@ export default function App() {
           />
         );
       case 'access':
-        return <AccessPage />;
+        return <AccessPage currentUser={authUser} />;
       case 'events':
         return (
           <EventsPage
@@ -485,6 +553,60 @@ export default function App() {
         return null;
     }
   })();
+
+  if (!authChecked) {
+    return (
+      <TooltipProvider delayDuration={250}>
+        <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center gap-3">
+          <div className="flex items-center gap-2">
+            <svg
+              viewBox="0 0 32 32"
+              className="h-6 w-6 text-foreground"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <polygon points="16,4 27,10.5 27,21.5 16,28 5,21.5 5,10.5" />
+              <polyline points="5,10.5 16,17 27,10.5" />
+              <line x1="16" y1="17" x2="16" y2="28" />
+            </svg>
+            <span className="font-display text-xl font-medium tracking-tight">
+              Compute
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>Verifying session…</span>
+          </div>
+        </div>
+        <Toaster position="bottom-right" richColors />
+      </TooltipProvider>
+    );
+  }
+
+  if (authEnabled && authUser === null) {
+    return (
+      <TooltipProvider delayDuration={250}>
+        <AuthPage
+          mode={route.page === 'signup' ? 'signup' : 'login'}
+          signupEnabled={signupEnabled}
+          theme={theme}
+          onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+          onModeChange={(nextMode) => {
+            window.location.hash = `#/${nextMode}`;
+          }}
+          onAuthenticated={(user) => {
+            setAuthUser(user);
+            setMobileNavOpen(false);
+            window.location.hash = '#/instances';
+            setPage('instances');
+          }}
+        />
+        <Toaster position="bottom-right" richColors />
+      </TooltipProvider>
+    );
+  }
 
   if (route.page === 'terminal' && route.vmId) {
     return (

@@ -83,6 +83,7 @@ func newMultiTenantServer(t *testing.T) *multiTenantEnv {
 	cfg.ConfigPath = "config/daemon.json"
 	cfg.Jobs.LocalExecution = false
 	cfg.Server.AuthEnabled = true
+	cfg.Server.SignupEnabled = true
 	cfg.Server.AuthDBPath = filepath.Join(root, "db", "auth.db")
 	cfg.Server.AdminSecret = multiTenantAdminSecret
 
@@ -1137,7 +1138,7 @@ func TestMultiTenant_SecretsNotLeakedToNonAdmins(t *testing.T) {
 		t.Fatalf("non-admin websocket snapshot leaked %d workers", len(snapshot.Workers))
 	}
 
-	// Admins still receive the real configuration.
+	// Admins still receive operational config paths, while secrets remain redacted.
 	resp, body = mtRequest(t, ts, http.MethodGet, "/api/v1/config", multiTenantAdminSecret, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("admin config failed: %d", resp.StatusCode)
@@ -1145,8 +1146,14 @@ func TestMultiTenant_SecretsNotLeakedToNonAdmins(t *testing.T) {
 	var adminPayload map[string]interface{}
 	_ = json.Unmarshal(body, &adminPayload)
 	adminServer, _ := adminPayload["server"].(map[string]interface{})
-	if secret, _ := adminServer["admin_secret"].(string); secret != multiTenantAdminSecret {
-		t.Fatalf("admin did not receive admin secret (got %q)", secret)
+	if dbPath, _ := adminServer["db_path"].(string); dbPath == "" {
+		t.Fatalf("admin did not receive operational server.db_path")
+	}
+	if secret, _ := adminServer["admin_secret"].(string); secret != "" {
+		t.Fatalf("admin /api/v1/config leaked admin_secret (got %q)", secret)
+	}
+	if pw, _ := adminServer["admin_password"].(string); pw != "" {
+		t.Fatalf("admin /api/v1/config leaked admin_password (got %q)", pw)
 	}
 }
 

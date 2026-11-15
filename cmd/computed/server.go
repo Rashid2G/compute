@@ -187,9 +187,10 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 				Name:               "base",
 				IsDefault:          true,
 				Version:            1,
-				SecretsEnabled:     true,
-				BoatCredsEnabled:   true,
-				AgentCredsEnabled:  true,
+				SecretsEnabled:      true,
+				ComputeCredsEnabled: true,
+				BoatCredsEnabled:    true,
+				AgentCredsEnabled:   true,
 				CredentialProfile:  "Owner's default",
 				GitHubReposEnabled: false,
 				GitHubRepos:        []string{},
@@ -226,28 +227,62 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 				}
 				authMgr = auth.NewManager(queries, mk, 7*24*time.Hour, adminSecret)
 
-				// Seed default admin if no users exist
+				adminUsername := strings.TrimSpace(strings.ToLower(cfg.Server.AdminUsername))
+				if adminUsername == "" {
+					adminUsername = strings.TrimSpace(strings.ToLower(os.Getenv("COMPUTE_ADMIN_USERNAME")))
+				}
+				if adminUsername == "" {
+					adminUsername = "admin"
+				}
+				adminEmail := strings.TrimSpace(cfg.Server.AdminEmail)
+				if adminEmail == "" {
+					adminEmail = strings.TrimSpace(os.Getenv("COMPUTE_ADMIN_EMAIL"))
+				}
+				if adminEmail == "" {
+					adminEmail = "admin@compute.local"
+				}
+				authMgr.SetAdminIdentity(adminUsername, adminEmail)
+
+				// Bootstrap or sync configured admin account on startup
 				ctx := context.Background()
+				adminPW := cfg.Server.AdminPassword
+				if adminPW == "" {
+					adminPW = os.Getenv("COMPUTE_ADMIN_PASSWORD")
+				}
 				users, _ := queries.ListUsers(ctx)
-				if len(users) == 0 {
-					adminPW := cfg.Server.AdminPassword
-					if adminPW == "" {
-						adminPW = os.Getenv("COMPUTE_ADMIN_PASSWORD")
+				hasAdmin := false
+				adminRoleCount := 0
+				for _, u := range users {
+					if u == nil {
+						continue
 					}
-					if adminPW == "" {
-						pwBytes := make([]byte, 32)
-						if _, err := rand.Read(pwBytes); err != nil {
-							panic("failed to generate secure random admin password: " + err.Error())
-						}
-						adminPW = hex.EncodeToString(pwBytes)
-						credPath := filepath.Join(masterDir, "admin-password")
-						if err := os.WriteFile(credPath, []byte(adminPW+"\n"), 0600); err != nil {
-							log.Printf("[computed] Warning: no admin password configured and the one-time credential file could not be written: %v", err)
-						} else {
-							log.Printf("[computed] SECURITY NOTICE: no admin password configured; a one-time credential was written to %s (mode 0600). Set COMPUTE_ADMIN_PASSWORD to manage it explicitly.", credPath)
-						}
+					if u.Role == "admin" {
+						adminRoleCount++
 					}
-					_, _ = authMgr.Signup(ctx, "admin@compute.local", "admin", "Administrator", adminPW, "admin")
+					if u.Username == adminUsername || strings.EqualFold(u.Email, adminEmail) || u.ID == "usr_system_admin" ||
+						(u.Role == "admin" && (u.Username == "admin" || strings.EqualFold(u.Email, "admin@compute.local"))) {
+						hasAdmin = true
+						break
+					}
+				}
+				if !hasAdmin && adminRoleCount == 1 {
+					hasAdmin = true
+				}
+				if !hasAdmin && adminPW == "" {
+					pwBytes := make([]byte, 32)
+					if _, err := rand.Read(pwBytes); err != nil {
+						panic("failed to generate secure random admin password: " + err.Error())
+					}
+					adminPW = hex.EncodeToString(pwBytes)
+					credPath := filepath.Join(masterDir, "admin-password")
+					if err := os.WriteFile(credPath, []byte(adminPW+"\n"), 0600); err != nil {
+						log.Printf("[computed] Warning: no admin password configured and the one-time credential file could not be written: %v", err)
+					} else {
+						log.Printf("[computed] SECURITY NOTICE: no admin password configured; a one-time credential was written to %s (mode 0600). Set COMPUTE_ADMIN_PASSWORD to manage it explicitly.", credPath)
+					}
+				}
+				if _, err := authMgr.EnsureAdmin(ctx, adminEmail, adminUsername, "Administrator", adminPW); err != nil {
+					log.Printf("[computed] Warning: failed to bootstrap admin account (%v)", err)
 				}
 			} else {
 				log.Printf("[computed] Warning: failed to initialize auth store (%v)", err)
@@ -397,6 +432,9 @@ func getActor(r *http.Request) string {
 
 func (s *Server) SetAuthManager(mgr *auth.Manager) {
 	s.authMgr = mgr
+	if mgr != nil {
+		mgr.SetAdminIdentity(s.cfg.Server.AdminUsername, s.cfg.Server.AdminEmail)
+	}
 	s.configureAuthIntegrations()
 }
 
@@ -598,12 +636,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
 
 	// Auth & Identity
+	s.mux.HandleFunc("/api/v1/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("/api/v1/auth/signup", s.handleAuthSignup)
 	s.mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("/api/v1/auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("/api/v1/auth/me", s.wrapAuth(s.handleAuthMe))
 	s.mux.HandleFunc("/api/v1/auth/keys", s.wrapAuth(s.handleAuthKeys))
 	s.mux.HandleFunc("/api/v1/auth/keys/", s.wrapAuth(s.handleAuthKeyActions))
+	s.mux.HandleFunc("/api/v1/users", s.wrapAuth(s.handleUsers))
+	s.mux.HandleFunc("/api/v1/users/", s.wrapAuth(s.handleUserActions))
 	s.mux.HandleFunc("/api/v1/orgs", s.wrapAuth(s.handleOrgs))
 	s.mux.HandleFunc("/api/v1/orgs/", s.wrapAuth(s.handleOrgActions))
 	s.mux.HandleFunc("/api/v1/limits", s.wrapAuth(s.handleLimits))
@@ -1258,6 +1299,22 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if req.AutoStart {
+			if err := s.enforceRunQuota(ctx, r, cloned); err != nil {
+				httpError(w, err.Error(), http.StatusTooManyRequests)
+				return
+			}
+			if runErr := s.vmMgr.RunVM(ctx, cloned.ID); runErr != nil {
+				log.Printf("[computed] clone %s auto_start skipped/failed: %v", cloned.ID, runErr)
+			} else if started, getErr := s.vmMgr.GetVM(ctx, cloned.ID); getErr == nil && started != nil {
+				cloned = started
+				if cloned.Status == db.StatusRunning {
+					s.mountAttachedVolumes(ctx, cloned)
+					s.applyEnvironment(ctx, cloned)
+					s.applyPortForwardsForVM(ctx, cloned)
+				}
+			}
 		}
 		s.recordEvent("sandbox.cloned", getActor(r), cloned.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": cloned.ID})
 		w.WriteHeader(http.StatusCreated)
