@@ -389,7 +389,7 @@ func GenerateHTMLReport(filePath string, report BenchmarkReport) error {
             borderRadius: 6
           },
           {
-            label: 'MicroVM (Alpine/Firecracker)',
+            label: 'MicroVM (Ubuntu/Firecracker)',
             data: vmComp,
             backgroundColor: 'rgba(59, 130, 246, 0.85)',
             borderRadius: 6
