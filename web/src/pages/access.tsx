@@ -17,7 +17,6 @@ import { api, errorMessage } from '@/lib/api';
 import { formatRelativeTime } from '@/lib/format';
 import type {
   AccessAPIKeyRecord,
-  AgentProfileRecord,
   AuthStatusResponse,
   AuthUser,
   SSHKey,
@@ -28,20 +27,22 @@ import { cn } from '@/lib/utils';
 type AccessTab =
   | 'api-keys'
   | 'ssh-keys'
-  | 'agents'
   | 'worker-tokens'
   | 'users';
 
 interface AccessPageProps {
   currentUser?: AuthUser | null;
+  embedded?: boolean;
 }
 
-export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {}) {
+export function AccessPage({
+  currentUser: currentUserProp,
+  embedded = false,
+}: AccessPageProps = {}) {
   const [tab, setTab] = useState<AccessTab>('api-keys');
 
   const [apiKeys, setApiKeys] = useState<AccessAPIKeyRecord[]>([]);
   const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
-  const [agentProfiles, setAgentProfiles] = useState<AgentProfileRecord[]>([]);
   const [workerTokens, setWorkerTokens] = useState<WorkerTokenRecord[]>([]);
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
@@ -77,16 +78,6 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
   const [sshName, setSshName] = useState('');
   const [sshPub, setSshPub] = useState('');
 
-  // Add Agent Profile state
-  const [addAgentOpen, setAddAgentOpen] = useState(false);
-  const [agentName, setAgentName] = useState('');
-  const [agentProvider, setAgentProvider] = useState('Anthropic Claude');
-  const [agentUpstream, setAgentUpstream] = useState(
-    'https://api.anthropic.com/v1',
-  );
-  const [agentHeader, setAgentHeader] = useState('x-api-key');
-  const [agentSecretRef, setAgentSecretRef] = useState('ANTHROPIC_API_KEY');
-
   // Create Worker Token state
   const [tokenPool, setTokenPool] = useState('default');
   const [createdWorkerToken, setCreatedWorkerToken] = useState<string | null>(
@@ -104,16 +95,14 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [akRes, skRes, apRes, wtRes, authRes] = await Promise.allSettled([
+      const [akRes, skRes, wtRes, authRes] = await Promise.allSettled([
         api.listAPIKeys(),
         api.listKeys(),
-        api.listAgentProfiles(),
         api.listWorkerTokens(),
         api.authStatus(),
       ]);
       if (akRes.status === 'fulfilled') setApiKeys(akRes.value || []);
       if (skRes.status === 'fulfilled') setSshKeys(skRes.value || []);
-      if (apRes.status === 'fulfilled') setAgentProfiles(apRes.value || []);
       if (wtRes.status === 'fulfilled') setWorkerTokens(wtRes.value || []);
 
       const statusVal = authRes.status === 'fulfilled' ? authRes.value : null;
@@ -211,36 +200,6 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
       });
   }
 
-  function handleCreateAgentProfile(e: React.FormEvent) {
-    e.preventDefault();
-    const profileName = agentName.trim();
-    if (!profileName) return;
-    const payload = {
-      name: profileName,
-      provider: agentProvider,
-      upstream_url: agentUpstream,
-      inject_header: agentHeader,
-      secret_ref: agentSecretRef,
-    };
-    setAgentName('');
-    setAddAgentOpen(false);
-
-    const toastID = toast.loading(
-      `Creating agent proxy profile "${profileName}"…`,
-    );
-    void api
-      .createAgentProfile(payload)
-      .then(async () => {
-        toast.success('Created agent credential proxy profile', {
-          id: toastID,
-        });
-        await loadAll();
-      })
-      .catch((err) => {
-        toast.error(errorMessage(err), { id: toastID });
-      });
-  }
-
   async function handleCreateWorkerToken() {
     try {
       const created = await api.createWorkerToken({
@@ -294,15 +253,27 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
     <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-            Access &amp; Identity
-          </h1>
-          <p className="text-[12px] text-muted-foreground">
-            Scoped programmatic API keys, guest SSH public keys, zero-trust
-            agent proxy profiles, worker tokens, and user accounts.
-          </p>
-        </div>
+        {!embedded ? (
+          <div>
+            <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+              Access &amp; Identity
+            </h1>
+            <p className="text-[12px] text-muted-foreground">
+              Scoped programmatic API keys, guest SSH public keys, worker tokens,
+              and user accounts.
+            </p>
+          </div>
+        ) : (
+          <div>
+            <h2 className="text-[14px] font-medium text-foreground">
+              Access, Keys &amp; User Accounts
+            </h2>
+            <p className="text-[12px] text-muted-foreground">
+              Scoped programmatic API keys, guest SSH public keys, worker tokens,
+              and user accounts.
+            </p>
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <button
@@ -331,16 +302,6 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
             >
               <Plus className="h-3.5 w-3.5" />
               <span>Add SSH Key</span>
-            </button>
-          )}
-          {tab === 'agents' && (
-            <button
-              type="button"
-              onClick={() => setAddAgentOpen((v) => !v)}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>New Proxy Profile</span>
             </button>
           )}
           {tab === 'worker-tokens' && (
@@ -401,21 +362,6 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
           )}
         >
           SSH Public Keys ({sshKeys.length})
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={tab === 'agents'}
-          data-testid="access-tab-agents"
-          onClick={() => setTab('agents')}
-          className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
-            tab === 'agents'
-              ? 'border-[#263fa9] text-foreground font-medium'
-              : 'border-transparent text-muted-foreground hover:text-foreground',
-          )}
-        >
-          Agents &amp; Proxying ({agentProfiles.length})
         </button>
         <button
           type="button"
@@ -754,142 +700,7 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
         </div>
       )}
 
-      {/* TAB 3: Agents & Proxying */}
-      {tab === 'agents' && (
-        <div className="space-y-4">
-          {addAgentOpen && (
-            <form
-              onSubmit={handleCreateAgentProfile}
-              className="border border-border bg-muted/15 p-4 space-y-3"
-            >
-              <div className="text-[13px] font-medium text-foreground">
-                Create Zero-Trust Agent Credential Proxy Profile
-              </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
-                    Profile Name
-                  </label>
-                  <input
-                    type="text"
-                    value={agentName}
-                    onChange={(e) => setAgentName(e.target.value)}
-                    placeholder="claude-code-proxy"
-                    required
-                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
-                    Provider
-                  </label>
-                  <input
-                    type="text"
-                    value={agentProvider}
-                    onChange={(e) => setAgentProvider(e.target.value)}
-                    className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
-                    Upstream URL
-                  </label>
-                  <input
-                    type="text"
-                    value={agentUpstream}
-                    onChange={(e) => setAgentUpstream(e.target.value)}
-                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-                  />
-                </div>
-              </div>
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setAddAgentOpen(false)}
-                  className="h-8 border border-border px-3 text-[12px] text-muted-foreground"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
-                >
-                  Save Profile
-                </button>
-              </div>
-            </form>
-          )}
-
-          <div className="border border-border bg-background overflow-x-auto">
-            <table className="w-full border-collapse text-left text-[12px]">
-              <thead>
-                <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
-                  <th className="py-2.5 px-3 font-normal">Profile</th>
-                  <th className="py-2.5 px-3 font-normal">Provider</th>
-                  <th className="py-2.5 px-3 font-normal">Upstream Target</th>
-                  <th className="py-2.5 px-3 font-normal">Injected Header</th>
-                  <th className="py-2.5 px-3 text-right font-normal">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              {agentProfiles.length === 0 ? (
-                <tbody>
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="py-16 text-center text-muted-foreground"
-                    >
-                      <Shield className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
-                      <div className="text-[12.5px]">
-                        No agent credential proxy profiles created yet.
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              ) : (
-                <tbody className="divide-y divide-border font-mono text-[11.5px]">
-                  {agentProfiles.map((ap) => (
-                    <tr key={ap.id} className="hover:bg-muted/30">
-                      <td className="py-2.5 px-3 font-sans font-medium text-foreground">
-                        {ap.name}
-                      </td>
-                      <td className="py-2.5 px-3 text-muted-foreground">
-                        {ap.provider}
-                      </td>
-                      <td className="py-2.5 px-3 text-foreground">
-                        {ap.upstream_url}
-                      </td>
-                      <td className="py-2.5 px-3 text-muted-foreground">
-                        {ap.inject_header} ({ap.secret_ref})
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void api
-                              .deleteAgentProfile(ap.id)
-                              .then(() => {
-                                toast.success('Deleted proxy profile');
-                                void loadAll();
-                              })
-                              .catch((err) => toast.error(errorMessage(err)));
-                          }}
-                          className="border border-border px-2 py-0.5 text-[11px] text-destructive hover:border-destructive"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              )}
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* TAB 4: Worker Enrollment Tokens */}
+      {/* TAB 3: Worker Enrollment Tokens */}
       {tab === 'worker-tokens' && (
         <div className="space-y-4">
           <div className="flex items-center gap-3">
@@ -1171,7 +982,7 @@ export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {
                               <div className="font-medium text-foreground">
                                 {u.username}
                                 {u.id === effectiveUser?.id && (
-                                  <span className="ml-1.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.2 font-mono text-[9.5px] text-[#5e7ff5] uppercase">
+                                  <span className="ml-1.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.5 font-mono text-[9.5px] text-[#5e7ff5] uppercase">
                                     you
                                   </span>
                                 )}

@@ -242,12 +242,35 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	if j.QueuedAt.IsZero() {
 		j.QueuedAt = now
 	}
+	if j.Source == "" {
+		j.Source = "cli"
+	}
 	j.UpdatedAt = now
-	_, e := s.db.ExecContext(ctx, `INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,result_json=excluded.result_json,started_at=excluded.started_at,finished_at=excluded.finished_at,updated_at=excluded.updated_at`, j.ID, j.OwnerID, j.PoolID, j.Type, j.State, j.Priority, j.SpecJSON, j.ResultJSON, j.QueuedAt, j.StartedAt, j.FinishedAt, j.DeadlineAt, j.CreatedAt, j.UpdatedAt)
+	_, e := s.db.ExecContext(ctx, `INSERT INTO jobs (
+		id,owner_id,pool_id,type,state,priority,spec_json,result_json,
+		repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,
+		queued_at,started_at,finished_at,deadline_at,created_at,updated_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+		state=excluded.state,
+		result_json=excluded.result_json,
+		repo_id=excluded.repo_id,
+		repo_url=excluded.repo_url,
+		repo_name=excluded.repo_name,
+		branch=excluded.branch,
+		commit_sha=excluded.commit_sha,
+		source=excluded.source,
+		vm_id=excluded.vm_id,
+		worker_id=excluded.worker_id,
+		started_at=excluded.started_at,
+		finished_at=excluded.finished_at,
+		updated_at=excluded.updated_at`,
+		j.ID, j.OwnerID, j.PoolID, j.Type, j.State, j.Priority, j.SpecJSON, j.ResultJSON,
+		j.RepoID, j.RepoURL, j.RepoName, j.Branch, j.CommitSHA, j.Source, j.VMID, j.WorkerID,
+		j.QueuedAt, j.StartedAt, j.FinishedAt, j.DeadlineAt, j.CreatedAt, j.UpdatedAt)
 	return e
 }
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]*Job, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
+	rows, e := s.db.QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
 	if e != nil {
 		return nil, e
 	}
@@ -255,7 +278,7 @@ func (s *Store) ListQueuedJobs(ctx context.Context) ([]*Job, error) {
 	out := []*Job{}
 	for rows.Next() {
 		j := new(Job)
-		if e = rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); e != nil {
+		if e = rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, j)
@@ -348,7 +371,23 @@ func (s *Store) initSchema() error {
 	CREATE TABLE IF NOT EXISTS worker_pools(id TEXT PRIMARY KEY,name TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',policy_json TEXT NOT NULL DEFAULT '{}',created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_tokens(token TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',expires_at TIMESTAMP NOT NULL,used_at TIMESTAMP,created_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,pool_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',status TEXT NOT NULL,underlay_ip TEXT NOT NULL DEFAULT '',arch TEXT NOT NULL DEFAULT '',total_vcpus INTEGER NOT NULL DEFAULT 0,total_mem_mb INTEGER NOT NULL DEFAULT 0,total_disk_mb INTEGER NOT NULL DEFAULT 0,labels_json TEXT NOT NULL DEFAULT '{}',capabilities_json TEXT NOT NULL DEFAULT '{}',agent_version TEXT NOT NULL DEFAULT '',fc_version TEXT NOT NULL DEFAULT '',last_heartbeat TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
-	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',repo_id TEXT NOT NULL DEFAULT '',repo_url TEXT NOT NULL DEFAULT '',repo_name TEXT NOT NULL DEFAULT '',branch TEXT NOT NULL DEFAULT '',commit_sha TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'cli',vm_id TEXT NOT NULL DEFAULT '',worker_id TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS github_connections (
+		id TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT 'default',
+		name TEXT NOT NULL,
+		repo_url TEXT NOT NULL,
+		default_branch TEXT NOT NULL DEFAULT 'main',
+		github_token TEXT NOT NULL DEFAULT '',
+		webhook_secret TEXT NOT NULL DEFAULT '',
+		default_command TEXT NOT NULL DEFAULT '',
+		vcpus INTEGER NOT NULL DEFAULT 2,
+		memory_mb INTEGER NOT NULL DEFAULT 2048,
+		timeout_sec INTEGER NOT NULL DEFAULT 600,
+		status TEXT NOT NULL DEFAULT 'connected',
+		last_triggered_at TIMESTAMP,
+		created_at TIMESTAMP NOT NULL
+	);
 	CREATE TABLE IF NOT EXISTS job_attempts(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,worker_id TEXT NOT NULL,state TEXT NOT NULL,created_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_leases(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,attempt_id TEXT NOT NULL,worker_id TEXT NOT NULL,expires_at TIMESTAMP NOT NULL,state TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS job_logs(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,attempt_id TEXT NOT NULL,stream TEXT NOT NULL,seq INTEGER NOT NULL,data TEXT NOT NULL,created_at TIMESTAMP NOT NULL);
@@ -480,6 +519,14 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN all_sandboxes INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN repo_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN repo_url TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN repo_name TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN branch TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN commit_sha TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'cli'")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN vm_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, network_isolation, and protected columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "network_isolation", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
@@ -517,6 +564,8 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name);
 	CREATE INDEX IF NOT EXISTS idx_templates_owner ON templates(owner_id);
 	CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(state,priority,queued_at);
+	CREATE INDEX IF NOT EXISTS idx_github_connections_owner ON github_connections(owner_id);
+	CREATE INDEX IF NOT EXISTS idx_github_connections_repo_url ON github_connections(repo_url);
 	CREATE INDEX IF NOT EXISTS idx_workers_pool_status ON worker_nodes(pool_id,status);
 	CREATE INDEX IF NOT EXISTS idx_job_logs_job_seq ON job_logs(job_id,seq);
 	CREATE INDEX IF NOT EXISTS idx_volumes_status ON volumes(status);
@@ -1551,8 +1600,8 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	j := new(Job)
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
-		&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt,
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
+		&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1567,7 +1616,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	const selectCols = `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs`
+	const selectCols = `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs`
 	var (
 		rows *sql.Rows
 		err  error
@@ -1586,12 +1635,22 @@ func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
 	var out []*Job
 	for rows.Next() {
 		j := new(Job)
-		if err := rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// UpdateJobExecution updates the ephemeral sandbox VM ID and worker ID assigned to a job.
+func (s *Store) UpdateJobExecution(ctx context.Context, id, vmID, workerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET vm_id = CASE WHEN ? != '' THEN ? ELSE vm_id END, worker_id = CASE WHEN ? != '' THEN ? ELSE worker_id END, updated_at = ? WHERE id = ?`,
+		vmID, vmID, workerID, workerID, now, id)
+	return err
 }
 
 // UpdateJobState updates state, result, and completion times
@@ -2147,86 +2206,6 @@ func (s *Store) DeleteAccessAPIKey(ctx context.Context, id string) error {
 	return err
 }
 
-// SaveAgentProfile persists an agent proxy configuration
-func (s *Store) SaveAgentProfile(ctx context.Context, p *AgentProfile) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC()
-	if p.ID == "" {
-		p.ID = "prof_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
-	}
-	if p.CreatedAt.IsZero() {
-		p.CreatedAt = now
-	}
-	p.UpdatedAt = now
-	if p.Status == "" {
-		p.Status = "active"
-	}
-	query := `INSERT INTO agent_profiles (
-		id, name, provider, upstream_url, inject_header, secret_ref, sandboxes_linked, status, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		name = excluded.name,
-		provider = excluded.provider,
-		upstream_url = excluded.upstream_url,
-		inject_header = excluded.inject_header,
-		secret_ref = excluded.secret_ref,
-		sandboxes_linked = excluded.sandboxes_linked,
-		status = excluded.status,
-		updated_at = excluded.updated_at`
-	_, err := s.db.ExecContext(ctx, query,
-		p.ID, p.Name, p.Provider, p.UpstreamURL, p.InjectHeader, p.SecretRef, p.SandboxesLinked, p.Status, p.CreatedAt, p.UpdatedAt,
-	)
-	return err
-}
-
-// GetAgentProfile retrieves an agent profile by ID
-func (s *Store) GetAgentProfile(ctx context.Context, id string) (*AgentProfile, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	p := new(AgentProfile)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, provider, upstream_url, inject_header, secret_ref, sandboxes_linked, status, created_at, updated_at FROM agent_profiles WHERE id = ? LIMIT 1`, id).Scan(
-		&p.ID, &p.Name, &p.Provider, &p.UpstreamURL, &p.InjectHeader, &p.SecretRef, &p.SandboxesLinked, &p.Status, &p.CreatedAt, &p.UpdatedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return p, nil
-}
-
-// ListAgentProfiles lists all agent profiles
-func (s *Store) ListAgentProfiles(ctx context.Context) ([]*AgentProfile, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, provider, upstream_url, inject_header, secret_ref, sandboxes_linked, status, created_at, updated_at FROM agent_profiles ORDER BY created_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*AgentProfile
-	for rows.Next() {
-		p := new(AgentProfile)
-		if err := rows.Scan(
-			&p.ID, &p.Name, &p.Provider, &p.UpstreamURL, &p.InjectHeader, &p.SecretRef, &p.SandboxesLinked, &p.Status, &p.CreatedAt, &p.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
-// DeleteAgentProfile deletes an agent profile by ID
-func (s *Store) DeleteAgentProfile(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `DELETE FROM agent_profiles WHERE id = ?`, id)
-	return err
-}
-
 // SaveEnvironment persists an environment profile
 func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) error {
 	s.mu.Lock()
@@ -2463,5 +2442,156 @@ func (s *Store) DeletePortForward(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM port_forwards WHERE id = ?`, id)
+	return err
+}
+
+// ===== GitHub Connections (CI Repositories) =====
+
+// SaveGitHubConnection inserts or updates a connected GitHub repository.
+func (s *Store) SaveGitHubConnection(ctx context.Context, c *GitHubConnection) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c.ID == "" {
+		c.ID = "gh_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	}
+	if c.OwnerID == "" {
+		c.OwnerID = "default"
+	}
+	if c.DefaultBranch == "" {
+		c.DefaultBranch = "main"
+	}
+	if c.VCPUs <= 0 {
+		c.VCPUs = 2
+	}
+	if c.MemoryMB <= 0 {
+		c.MemoryMB = 2048
+	}
+	if c.TimeoutSec <= 0 {
+		c.TimeoutSec = 600
+	}
+	if c.Status == "" {
+		c.Status = "connected"
+	}
+	if c.CreatedAt.IsZero() {
+		c.CreatedAt = time.Now().UTC()
+	}
+	query := `INSERT INTO github_connections (
+		id, owner_id, name, repo_url, default_branch, github_token, webhook_secret,
+		default_command, vcpus, memory_mb, timeout_sec, status, last_triggered_at, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name = excluded.name,
+		repo_url = excluded.repo_url,
+		default_branch = excluded.default_branch,
+		github_token = CASE WHEN excluded.github_token != '' THEN excluded.github_token ELSE github_connections.github_token END,
+		webhook_secret = CASE WHEN excluded.webhook_secret != '' THEN excluded.webhook_secret ELSE github_connections.webhook_secret END,
+		default_command = excluded.default_command,
+		vcpus = excluded.vcpus,
+		memory_mb = excluded.memory_mb,
+		timeout_sec = excluded.timeout_sec,
+		status = excluded.status,
+		last_triggered_at = COALESCE(excluded.last_triggered_at, github_connections.last_triggered_at)`
+	_, err := s.db.ExecContext(ctx, query,
+		c.ID, c.OwnerID, c.Name, c.RepoURL, c.DefaultBranch, c.GitHubToken, c.WebhookSecret,
+		c.DefaultCommand, c.VCPUs, c.MemoryMB, c.TimeoutSec, c.Status, c.LastTriggeredAt, c.CreatedAt,
+	)
+	if err == nil {
+		c.PopulateMask()
+	}
+	return err
+}
+
+// GetGitHubConnection retrieves a GitHub connection by ID.
+func (s *Store) GetGitHubConnection(ctx context.Context, id string) (*GitHubConnection, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	c := new(GitHubConnection)
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, name, repo_url, default_branch, github_token, webhook_secret, default_command, vcpus, memory_mb, timeout_sec, status, last_triggered_at, created_at FROM github_connections WHERE id = ? LIMIT 1`, id).Scan(
+		&c.ID, &c.OwnerID, &c.Name, &c.RepoURL, &c.DefaultBranch, &c.GitHubToken, &c.WebhookSecret,
+		&c.DefaultCommand, &c.VCPUs, &c.MemoryMB, &c.TimeoutSec, &c.Status, &c.LastTriggeredAt, &c.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.PopulateMask()
+	return c, nil
+}
+
+// ListGitHubConnections returns connected GitHub repositories, optionally filtered by ownerID.
+func (s *Store) ListGitHubConnections(ctx context.Context, ownerID string) ([]*GitHubConnection, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	const selectCols = `SELECT id, owner_id, name, repo_url, default_branch, github_token, webhook_secret, default_command, vcpus, memory_mb, timeout_sec, status, last_triggered_at, created_at FROM github_connections`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if ownerID == "" {
+		rows, err = s.db.QueryContext(ctx, selectCols+` ORDER BY created_at DESC`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*GitHubConnection{}
+	for rows.Next() {
+		c := new(GitHubConnection)
+		if err := rows.Scan(
+			&c.ID, &c.OwnerID, &c.Name, &c.RepoURL, &c.DefaultBranch, &c.GitHubToken, &c.WebhookSecret,
+			&c.DefaultCommand, &c.VCPUs, &c.MemoryMB, &c.TimeoutSec, &c.Status, &c.LastTriggeredAt, &c.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		c.PopulateMask()
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// FindGitHubConnectionsByRepo finds connected repositories matching either repoURL or fullName.
+func (s *Store) FindGitHubConnectionsByRepo(ctx context.Context, repoURL, fullName string) ([]*GitHubConnection, error) {
+	all, err := s.ListGitHubConnections(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	norm := func(u string) string {
+		u = strings.TrimSpace(strings.ToLower(u))
+		u = strings.TrimSuffix(u, ".git")
+		u = strings.TrimSuffix(u, "/")
+		return u
+	}
+	wantURL := norm(repoURL)
+	wantName := norm(fullName)
+	var matched []*GitHubConnection
+	for _, c := range all {
+		if c == nil {
+			continue
+		}
+		if (wantURL != "" && norm(c.RepoURL) == wantURL) ||
+			(wantName != "" && (norm(c.Name) == wantName || strings.HasSuffix(norm(c.RepoURL), "/"+wantName))) {
+			matched = append(matched, c)
+		}
+	}
+	return matched, nil
+}
+
+// UpdateGitHubConnectionTriggered updates last_triggered_at on a GitHub connection.
+func (s *Store) UpdateGitHubConnectionTriggered(ctx context.Context, id string, ts time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE github_connections SET last_triggered_at = ? WHERE id = ?`, ts.UTC(), id)
+	return err
+}
+
+// DeleteGitHubConnection deletes a connected GitHub repository by ID.
+func (s *Store) DeleteGitHubConnection(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM github_connections WHERE id = ?`, id)
 	return err
 }

@@ -39,7 +39,8 @@ export function CreateSnapshotDialog({
     setSnapName(`${prefix}-snap-${shortTimestamp()}`);
     setNameTouched(false);
     setDescription('');
-  }, [open, vm, vms]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, vm?.id]);
 
   if (!open) return null;
 

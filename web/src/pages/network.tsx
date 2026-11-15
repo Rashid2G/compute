@@ -23,12 +23,14 @@ interface NetworkPageProps {
   allocations: NetworkAllocation[];
   networkConfig: NetworkConfig | null;
   onRefresh: () => void;
+  embedded?: boolean;
 }
 
 export function NetworkPage({
   allocations,
   networkConfig,
   onRefresh,
+  embedded = false,
 }: NetworkPageProps) {
   const [subTab, setSubTab] = useState<'leases' | 'port-forwarding'>('leases');
   const [pruning, setPruning] = useState(false);
@@ -122,15 +124,27 @@ export function NetworkPage({
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-            Network &amp; NAT
-          </h1>
-          <p className="text-[12px] text-muted-foreground">
-            Linux bridge topology ({networkConfig?.bridge_name || 'fcbr0'}), TAP
-            interface leases, and DNAT port-forwarding rules.
-          </p>
-        </div>
+        {!embedded ? (
+          <div>
+            <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+              Network &amp; NAT
+            </h1>
+            <p className="text-[12px] text-muted-foreground">
+              Linux bridge topology ({networkConfig?.bridge_name || 'fcbr0'}), TAP
+              interface leases, and DNAT port-forwarding rules.
+            </p>
+          </div>
+        ) : (
+          <div>
+            <h2 className="text-[14px] font-medium text-foreground">
+              Bridge Topology, DNS &amp; NAT Port Forwarding
+            </h2>
+            <p className="text-[12px] text-muted-foreground">
+              Linux bridge topology ({networkConfig?.bridge_name || 'fcbr0'}), TAP
+              interface leases, and DNAT port-forwarding rules.
+            </p>
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <button

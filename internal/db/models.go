@@ -216,6 +216,14 @@ type Job struct {
 	Priority   int        `json:"priority"`
 	SpecJSON   string     `json:"spec_json"`
 	ResultJSON string     `json:"result_json"`
+	RepoID     string     `json:"repo_id,omitempty"`
+	RepoURL    string     `json:"repo_url,omitempty"`
+	RepoName   string     `json:"repo_name,omitempty"`
+	Branch     string     `json:"branch,omitempty"`
+	CommitSHA  string     `json:"commit_sha,omitempty"`
+	Source     string     `json:"source,omitempty"`
+	VMID       string     `json:"vm_id,omitempty"`
+	WorkerID   string     `json:"worker_id,omitempty"`
 	QueuedAt   time.Time  `json:"queued_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
@@ -223,6 +231,51 @@ type Job struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
+
+// GitHubConnection represents a connected GitHub account/repository persisted
+// in SQLite for launching ephemeral CI/CD jobs.
+type GitHubConnection struct {
+	ID                  string     `json:"id"`
+	OwnerID             string     `json:"owner_id"`
+	Name                string     `json:"name"`
+	RepoURL             string     `json:"repo_url"`
+	DefaultBranch       string     `json:"default_branch"`
+	GitHubToken         string     `json:"-"`
+	TokenMasked         string     `json:"token_masked,omitempty"`
+	HasToken            bool       `json:"has_token"`
+	WebhookSecret       string     `json:"-"`
+	WebhookSecretMasked string     `json:"webhook_secret_masked,omitempty"`
+	HasWebhookSecret    bool       `json:"has_webhook_secret"`
+	DefaultCommand      string     `json:"default_command"`
+	VCPUs               int        `json:"vcpus"`
+	MemoryMB            int        `json:"memory_mb"`
+	TimeoutSec          int        `json:"timeout_sec"`
+	Status              string     `json:"status"`
+	LastTriggeredAt     *time.Time `json:"last_triggered_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+}
+
+func maskSecretString(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+	if len(s) <= 8 {
+		return "****", true
+	}
+	return s[:4] + "..." + s[len(s)-4:], true
+}
+
+// PopulateMask populates HasToken/TokenMasked and HasWebhookSecret/WebhookSecretMasked
+// without exposing raw secrets in JSON responses.
+func (c *GitHubConnection) PopulateMask() {
+	if c == nil {
+		return
+	}
+	c.TokenMasked, c.HasToken = maskSecretString(c.GitHubToken)
+	c.WebhookSecretMasked, c.HasWebhookSecret = maskSecretString(c.WebhookSecret)
+}
+
 type JobAttempt struct {
 	ID        string    `json:"id"`
 	JobID     string    `json:"job_id"`
@@ -324,20 +377,6 @@ type AccessAPIKey struct {
 	ExpiresAt string    `json:"expires_at"`
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
-}
-
-// AgentProfile represents an AI agent upstream LLM proxy configuration
-type AgentProfile struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	Provider        string    `json:"provider"`
-	UpstreamURL     string    `json:"upstream_url"`
-	InjectHeader    string    `json:"inject_header"`
-	SecretRef       string    `json:"secret_ref"`
-	SandboxesLinked int       `json:"sandboxes_linked"`
-	Status          string    `json:"status"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // EnvironmentProfile represents reusable environment configurations

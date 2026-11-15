@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils';
 interface EventsPageProps {
   events?: AuditEventRecord[];
   onRefresh?: () => void;
+  embedded?: boolean;
 }
 
 const AVAILABLE_EVENT_TYPES = [
@@ -41,7 +42,11 @@ const AVAILABLE_EVENT_TYPES = [
   'volume.attached',
 ];
 
-export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
+export function EventsPage({
+  events: propEvents,
+  onRefresh,
+  embedded = false,
+}: EventsPageProps) {
   const [webhooks, setWebhooks] = useState<WebhookEndpointRecord[]>([]);
   const [otel, setOtel] = useState<OTelConfigRecord>({
     enabled: true,
@@ -209,15 +214,27 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
     <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-            Webhooks &amp; OTel
-          </h1>
-          <p className="text-[12px] text-muted-foreground">
-            HMAC-SHA256 webhook subscriptions, OpenTelemetry OTLP exporter, and
-            live control-plane audit event stream.
-          </p>
-        </div>
+        {!embedded ? (
+          <div>
+            <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+              Webhooks &amp; OTel
+            </h1>
+            <p className="text-[12px] text-muted-foreground">
+              HMAC-SHA256 webhook subscriptions, OpenTelemetry OTLP exporter, and
+              live control-plane audit event stream.
+            </p>
+          </div>
+        ) : (
+          <div>
+            <h2 className="text-[14px] font-medium text-foreground">
+              Webhooks, OpenTelemetry &amp; Audit Stream
+            </h2>
+            <p className="text-[12px] text-muted-foreground">
+              HMAC-SHA256 webhook subscriptions, OpenTelemetry OTLP exporter, and
+              live control-plane audit event stream.
+            </p>
+          </div>
+        )}
 
         <div className="flex items-center gap-2">
           <button
@@ -446,7 +463,7 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
                             {(wh.events || []).map((ev) => (
                               <span
                                 key={ev}
-                                className="border border-border bg-muted/30 px-1.5 py-0.2 text-[10px]"
+                                className="border border-border bg-muted/30 px-1.5 py-0.5 text-[10px]"
                               >
                                 {ev}
                               </span>
