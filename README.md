@@ -22,7 +22,7 @@ Launch sub-second microVMs, **replicate (clone)** fleets with custom resource ov
 
 ## Quickstart (Docker Compose)
 
-Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 24+ (rootful), and Compose v2.20+.
+Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 24+ (rootful), Compose v2.20+, and 4 GB RAM recommended (sandboxes default to 2 GB). Install Docker Engine and the Compose plugin first if `docker compose version` fails: <https://docs.docker.com/engine/install/>.
 
 1. **Preflight & host preparation**:
 
@@ -38,9 +38,12 @@ Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 
    chmod 600 .env
    ```
 
-   Edit `.env` to set strong administrator credentials and keep public signup disabled by default:
+   The template binds the API to `127.0.0.1` and starts with local-only default
+   credentials. Before exposing the API on `0.0.0.0`, set strong administrator
+   credentials and keep public signup disabled:
 
    ```dotenv
+   COMPUTE_BIND_ADDRESS=0.0.0.0
    COMPUTE_AUTH_ENABLED=true
    COMPUTE_SIGNUP_ENABLED=false
    COMPUTE_ADMIN_USERNAME=admin
@@ -49,11 +52,18 @@ Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 
    COMPUTE_ADMIN_SECRET=replace-with-a-strong-secret
    ```
 
-3. **Build rootfs/kernel images** (if not using a prebuilt manifest):
+3. **Build the kernel and rootfs images** (if not using a prebuilt manifest):
 
    ```bash
-   sudo ./scripts/build-rootfs.sh ./data/images 1024
+   make build-images
+   # equivalent to:
+   # sudo ./scripts/build-kernel.sh ./data/images
+   # sudo ./scripts/build-rootfs.sh ./data/images 1024
    ```
+
+   `build-kernel.sh` installs a pinned, checksummed Firecracker CI `vmlinux`
+   for the host architecture; `build-rootfs.sh` builds the Ubuntu 24.04 ext4
+   rootfs. Both commands are idempotent.
 
 4. **Start the stack**:
 
@@ -68,7 +78,8 @@ Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 
    curl -fsS http://127.0.0.1:18080/api/v1/ready
    ```
 
-   Open the Web Dashboard at `http://127.0.0.1:18080/` (or `:8080` when the `gui` profile is active).
+   Open the Web Dashboard at `http://127.0.0.1:18080/`. The optional `gui`
+   profile adds a second listener on `:8080`; it is disabled by default.
 
 ---
 

@@ -28,6 +28,7 @@ API_PORT="${COMPUTE_API_PORT:-18080}"
 DNS_ENABLED="${COMPUTE_DNS_ENABLED:-false}"
 EDGE_LISTEN="${COMPUTE_EDGE_LISTEN:-}"
 GUI_PORT="${COMPUTE_GUI_PORT:-8080}"
+IMAGES_MODE="${COMPUTE_IMAGES_MODE:-build}"
 
 version_ge() {
     # version_ge HAVE REQUIRED
@@ -154,6 +155,29 @@ if command -v sysctl >/dev/null 2>&1; then
         say_ok "net.ipv4.ip_forward=1"
     else
         say_warn "net.ipv4.ip_forward is not enabled: scripts/host-prepare.sh sets it"
+    fi
+fi
+
+section "Image build tools"
+# These are host-side tools used by scripts/build-kernel.sh and
+# scripts/build-rootfs.sh (the default COMPUTE_IMAGES_MODE=build path).
+have_cmd() {
+    command -v "$1" >/dev/null 2>&1 || [ -x "/sbin/$1" ] || [ -x "/usr/sbin/$1" ]
+}
+missing_build_tools=""
+for cmd in curl sha256sum ssh-keygen mkfs.ext4 mount truncate tar; do
+    if have_cmd "${cmd}"; then
+        say_ok "${cmd} available"
+    else
+        missing_build_tools="${missing_build_tools} ${cmd}"
+    fi
+done
+if [ -n "${missing_build_tools}" ]; then
+    # The download/prebuilt modes do not need these host tools.
+    if [ "${IMAGES_MODE}" = "build" ]; then
+        say_fail "missing image build tools:${missing_build_tools} (install curl, coreutils, openssh-client, e2fsprogs, util-linux, tar; or use COMPUTE_IMAGES_MODE=prebuilt with prebuilt images)"
+    else
+        say_warn "missing image build tools:${missing_build_tools} (only needed for COMPUTE_IMAGES_MODE=build)"
     fi
 fi
 

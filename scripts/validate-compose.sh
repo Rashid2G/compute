@@ -117,7 +117,7 @@ else
 fi
 
 printf '\n==> Shell syntax\n'
-for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/validate-compose.sh; do
+for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/validate-compose.sh; do
     if [ -f "${script}" ] && bash -n "${script}"; then
         say_ok "bash -n ${script}"
     fi

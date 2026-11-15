@@ -94,8 +94,10 @@ Ed25519 SSH key when missing, and records `.installed.json` for idempotency.
 Downloads are written to `*.part` and atomically renamed only after the
 checksum matches.
 
-Artifacts are not published yet. Until a release manifest exists, build images
-with `scripts/build-rootfs.sh` and use `build`/`prebuilt`.
+Artifacts are not published yet. Until a release manifest exists, install the
+pinned kernel with `scripts/build-kernel.sh`, build the rootfs with
+`scripts/build-rootfs.sh` (or run `make build-images`), and use
+`build`/`prebuilt`.
 
 ## DNS
 

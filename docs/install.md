@@ -16,6 +16,7 @@ a separate GUI container, and Tailscale integration are opt-in profiles.
 | Kernel | cgroup v2 unified hierarchy; KVM enabled (`/dev/kvm` read/write) |
 | Docker | Docker Engine 24+ (rootful) with the Compose v2 plugin (2.20+) |
 | Disk | 10 GB free minimum; base images plus VM disks need considerably more |
+| Memory | 4 GB recommended; sandboxes default to 2 GB RAM and are queued when host memory is insufficient |
 | Network | Host networking; the daemon creates the `mft3br0` bridge, TAP devices and NAT rules |
 | Privileges | The daemon container is `privileged` with `cgroup: host` and `/dev/kvm` |
 
@@ -37,7 +38,8 @@ From the repository checkout:
 
 The script is read-only and checks the OS/architecture, Docker and Compose
 versions, rootful Docker, `/dev/kvm`, cgroup v2, kernel modules and sysctls,
-port availability, and disk space. It prints a fix for every failure.
+the host tools needed for `make build-images`, port availability, and disk
+space. It prints a fix for every failure.
 
 Apply the host settings it recommends (idempotent, does not touch your default
 network interface):
@@ -53,9 +55,9 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-The template defaults admin credentials to `"admin"` so the system runs
-immediately upon copying. For production deployments, override with a strong
-password:
+The template defaults admin credentials to `"admin"` so the stack starts
+immediately once images are built (and stays bound to loopback). For
+production deployments, override with a strong password:
 
 ```dotenv
 COMPUTE_ADMIN_PASSWORD=replace-with-a-long-random-password
@@ -86,11 +88,19 @@ before the daemon starts. Select a mode with `COMPUTE_IMAGES_MODE`:
 To build images locally when no release manifest exists:
 
 ```bash
-sudo ./scripts/build-rootfs.sh ./data/images
+# Kernel: downloads the pinned, checksummed Firecracker CI vmlinux.
+sudo ./scripts/build-kernel.sh ./data/images
+
+# Root filesystem: builds an Ubuntu 24.04 ext4 image.
+sudo ./scripts/build-rootfs.sh ./data/images 1024
 ```
 
-Then keep `COMPUTE_IMAGES_MODE=build` (or `prebuilt`) and start Compose. The
-bootstrap is idempotent and safe to run on every `docker compose up`.
+Or run both through `make build-images`. Both scripts are idempotent. On an
+air-gapped host, supply your own uncompressed ELF kernel with
+`COMPUTE_KERNEL_SRC=/path/to/vmlinux` (or set `COMPUTE_KERNEL_URL` together
+with `COMPUTE_KERNEL_SHA256`). Then keep `COMPUTE_IMAGES_MODE=build` (or
+`prebuilt`) and start Compose. The bootstrap is idempotent and safe to run on
+every `docker compose up`.
 
 > **Current limitation:** no signed image manifest is published from this
 > repository yet. A completely fresh host cannot bootstrap images from the
@@ -143,6 +153,11 @@ export COMPUTE_DAEMON=127.0.0.1:18080
 ./bin/compute sandbox create --name demo --image ubuntu-24
 ./bin/compute sandbox ssh demo -- uname -a
 ./bin/compute sandbox delete demo
+
+If the host has less than ~2.5 GB of available memory, the default 2 GB
+sandbox is placed in the admission queue instead of booting. `compute sandbox
+info` now prints the queue reason; create a smaller sandbox with
+`--memory 1024` or free host memory and run `compute sandbox start demo`.
 ```
 
 The host should show `mft3br0` and, while a sandbox runs, `mftap-*` devices.
@@ -206,12 +221,16 @@ mount the certificate files into the container to serve HTTPS directly.
 
 ## Upgrade
 
+Source installs build the image locally:
+
 ```bash
 git pull
-# bump COMPUTE_VERSION in .env to the new release tag
-docker compose pull
+docker compose build
 docker compose up -d
 ```
+
+If you use published images, bump `COMPUTE_VERSION` in `.env` to the new
+release tag, then run `docker compose pull` before `docker compose up -d`.
 
 The data volume (`COMPUTE_HOST_DATA_DIR`, default `./data`) and database are
 preserved. A Docker restart replaces the container's PID namespace, so the
@@ -268,7 +287,8 @@ The host prep changes (`sysctl net.ipv4.ip_forward=1`, loaded modules, the
 
 | Symptom | Fix |
 | --- | --- |
-| `compute-init` fails with `COMPUTE_IMAGE_MANIFEST_URL is not set` | No release manifest is published yet. Build images with `scripts/build-rootfs.sh` and keep `COMPUTE_IMAGES_MODE=build`, or set a manifest URL. |
+| `compute-init` fails with `COMPUTE_IMAGE_MANIFEST_URL is not set` | No release manifest is published yet. Build images with `make build-images` and keep `COMPUTE_IMAGES_MODE=build`, or set a manifest URL. |
+| `compute-init` fails with `kernel is missing at .../vmlinux` | Install the kernel with `sudo ./scripts/build-kernel.sh ./data/images`, then re-run `docker compose up -d`. |
 | Readiness fails with `kernel`/`rootfs` | Check `COMPUTE_HOST_DATA_DIR/images`, re-run `docker compose up compute-init`, and confirm the image files are valid ELF/ext4. |
 | Readiness fails with `kvm` | Enable virtualization/nested KVM on the host and ensure `/dev/kvm` is passed through (`chmod 666 /dev/kvm` on the host if needed). |
 | `host_network` readiness failure | `computed` must keep `network_mode: host` and set `COMPUTE_HOST_NETWORK=1`; bridge-mode networking hides the bridge/TAPs from the host. `docker run` users need the same flag. |
