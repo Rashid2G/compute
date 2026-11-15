@@ -24,7 +24,7 @@ export function CloneVMDialog({
   const [replicaCount, setReplicaCount] = useState(1);
   const [vcpus, setVcpus] = useState(2);
   const [memoryMb, setMemoryMb] = useState(2048);
-  const [diskGb, setDiskGb] = useState(50);
+  const [diskGb, setDiskGb] = useState(20);
   const [networkIsolation, setNetworkIsolation] =
     useState<NetworkIsolationMode>('account');
   const [description, setDescription] = useState('');
@@ -36,7 +36,7 @@ export function CloneVMDialog({
     setReplicaCount(1);
     setVcpus(vm.vcpus || 2);
     setMemoryMb(vm.memory_mb || 2048);
-    setDiskGb(Math.max(1, Math.round((vm.disk_mb || 51200) / 1024)));
+    setDiskGb(Math.max(1, Math.round((vm.disk_mb || 20480) / 1024)));
     setNetworkIsolation(vm.network_isolation || 'account');
     setDescription(vm.description || '');
     setAutoStart(false);
@@ -47,7 +47,7 @@ export function CloneVMDialog({
   const sourceVM = vm;
   const sourceDiskGb = Math.max(
     1,
-    Math.round((sourceVM.disk_mb || 51200) / 1024),
+    Math.round((sourceVM.disk_mb || 20480) / 1024),
   );
 
   function handleSubmit(e: React.FormEvent) {

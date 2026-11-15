@@ -20,7 +20,7 @@ func DetectCapabilities() map[string]interface{} {
 		s := bufio.NewScanner(f)
 		for s.Scan() {
 			p := strings.Fields(s.Text())
-			if len(p) > 1 && p[0] == "MemAvailable:" {
+			if len(p) > 1 && p[0] == "MemTotal:" {
 				n, _ := strconv.ParseUint(p[1], 10, 64)
 				mem = n / 1024
 				break

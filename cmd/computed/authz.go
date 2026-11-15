@@ -168,7 +168,11 @@ func (s *Server) resolveAccessibleVM(ctx context.Context, r *http.Request, idOrN
 		return nil, nil
 	}
 	if _, isAdmin := s.currentOwnerID(r); isAdmin || !s.authEnabled() {
-		return s.vmMgr.GetVM(ctx, idOrName)
+		v, err := s.vmMgr.GetVM(ctx, idOrName)
+		if err != nil || isJobVM(v) {
+			return nil, err
+		}
+		return v, nil
 	}
 	for _, ownerID := range s.ownerIDsFor(r) {
 		if ownerID == "" {
@@ -178,7 +182,7 @@ func (s *Server) resolveAccessibleVM(ctx context.Context, r *http.Request, idOrN
 		if err != nil {
 			return nil, err
 		}
-		if v != nil && s.canAccessOwner(r, v.OwnerID) {
+		if v != nil && !isJobVM(v) && s.canAccessOwner(r, v.OwnerID) {
 			return v, nil
 		}
 	}
@@ -194,7 +198,11 @@ func (s *Server) resolveAccessibleVolume(ctx context.Context, r *http.Request, i
 		return nil, nil
 	}
 	if _, isAdmin := s.currentOwnerID(r); isAdmin || !s.authEnabled() {
-		return s.vmMgr.GetStore().GetVolume(ctx, idOrName)
+		vol, err := s.vmMgr.GetStore().GetVolume(ctx, idOrName)
+		if err != nil || isJobVolume(vol) {
+			return nil, err
+		}
+		return vol, nil
 	}
 	for _, ownerID := range s.ownerIDsFor(r) {
 		if ownerID == "" {
@@ -204,7 +212,7 @@ func (s *Server) resolveAccessibleVolume(ctx context.Context, r *http.Request, i
 		if err != nil {
 			return nil, err
 		}
-		if vol != nil && s.canAccessOwner(r, vol.OwnerID) {
+		if vol != nil && !isJobVolume(vol) && s.canAccessOwner(r, vol.OwnerID) {
 			return vol, nil
 		}
 	}
@@ -426,26 +434,72 @@ func (s *Server) listJobsForOwners(ctx context.Context, ownerIDs []string) []*db
 	return out
 }
 
-// listAccessibleVMs lists every VM the caller can see.
+// isJobVM reports whether v is an ephemeral CI job sandbox VM that must never
+// appear in user/admin sandbox or volume listings.
+func isJobVM(v *db.VM) bool {
+	return v != nil && (v.OwnerID == "jobs" || strings.HasPrefix(strings.ToLower(v.Name), "job-"))
+}
+
+func isJobVolume(vol *db.Volume) bool {
+	return vol != nil && (vol.OwnerID == "jobs" || strings.HasPrefix(strings.ToLower(vol.Name), "job-") || strings.HasPrefix(strings.ToLower(vol.AttachedVM), "job-"))
+}
+
+func filterNonJobVMs(vms []*db.VM) []*db.VM {
+	if len(vms) == 0 {
+		return vms
+	}
+	out := make([]*db.VM, 0, len(vms))
+	for _, v := range vms {
+		if v == nil || isJobVM(v) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+func filterNonJobVolumes(vols []*db.Volume) []*db.Volume {
+	if len(vols) == 0 {
+		return vols
+	}
+	out := make([]*db.Volume, 0, len(vols))
+	for _, vol := range vols {
+		if vol == nil || isJobVolume(vol) {
+			continue
+		}
+		out = append(out, vol)
+	}
+	return out
+}
+
+// listAccessibleVMs lists every non-job VM the caller can see.
 func (s *Server) listAccessibleVMs(ctx context.Context, r *http.Request) ([]*db.VM, error) {
 	_, isAdmin := s.currentOwnerID(r)
 	if isAdmin {
-		return s.vmMgr.ListVMs(ctx)
+		vms, err := s.vmMgr.ListVMs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return filterNonJobVMs(vms), nil
 	}
 	if s.ownerIDsFor(r) == nil {
 		return []*db.VM{}, nil
 	}
-	return s.listVMsForOwners(ctx, s.ownerIDsFor(r)), nil
+	return filterNonJobVMs(s.listVMsForOwners(ctx, s.ownerIDsFor(r))), nil
 }
 
-// listAccessibleVolumes lists every volume the caller can see.
+// listAccessibleVolumes lists every non-job volume the caller can see.
 func (s *Server) listAccessibleVolumes(ctx context.Context, r *http.Request) ([]*db.Volume, error) {
 	_, isAdmin := s.currentOwnerID(r)
 	store := s.vmMgr.GetStore()
 	if isAdmin {
-		return store.ListVolumes(ctx)
+		vols, err := store.ListVolumes(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return filterNonJobVolumes(vols), nil
 	}
-	return s.listVolumesForOwners(ctx, s.ownerIDsFor(r)), nil
+	return filterNonJobVolumes(s.listVolumesForOwners(ctx, s.ownerIDsFor(r))), nil
 }
 
 // listAccessibleJobs lists every job the caller can see.
@@ -915,13 +969,13 @@ func (s *Server) scopePermits(authCtx *auth.AuthContext, action, resource string
 	}
 
 	adminResources := map[string]bool{
-		"webhooks":       true,
-		"workers":        true,
-		"worker-tokens":  true,
-		"pools":          true,
-		"agent-profiles": true,
-		"environments":   true,
-		"users":          true,
+		"admin":         true,
+		"webhooks":      true,
+		"workers":       true,
+		"worker-tokens": true,
+		"pools":         true,
+		"environments":  true,
+		"users":         true,
 	}
 
 	// If this is an admin-only resource, only admin keys can access it.

@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
-  Disc,
   Eye,
   EyeOff,
   GitBranch,
@@ -15,7 +14,6 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   Star,
   Trash2,
   X,
@@ -25,8 +23,8 @@ import { toast } from 'sonner';
 import { CreateSnapshotDialog } from '@/components/create-snapshot-dialog';
 import { api, errorMessage } from '@/lib/api';
 import { formatMemory, formatRelativeTime } from '@/lib/format';
+import type { PageId } from '@/lib/navigation';
 import type {
-  CustomImage,
   EnvironmentProfileRecord,
   Template,
   VM,
@@ -37,16 +35,18 @@ interface ImagesTemplatesPageProps {
   vms: VM[];
   mode?: 'environment' | 'snapshots';
   onLaunchVM: () => void;
-  onNavigate?: (page: 'api' | 'instances' | 'images' | 'environment') => void;
+  onNavigate?: (page: PageId) => void;
   onRefreshCluster?: () => void;
+  embedded?: boolean;
 }
 
 export function ImagesTemplatesPage({
   vms,
   mode = 'environment',
-  onLaunchVM,
+  onLaunchVM: _onLaunchVM,
   onNavigate,
   onRefreshCluster,
+  embedded = false,
 }: ImagesTemplatesPageProps) {
   // Environment state backed by /api/v1/environments
   const [profiles, setProfiles] = useState<EnvironmentProfileRecord[]>([]);
@@ -58,7 +58,6 @@ export function ImagesTemplatesPage({
   const [secretsChecked, setSecretsChecked] = useState(true);
   const [secretsText, setSecretsText] = useState('');
   const [computeCredsChecked, setComputeCredsChecked] = useState(true);
-  const [agentsCredsChecked, setAgentsCredsChecked] = useState(true);
   const [credentialProfile, setCredentialProfile] = useState("Owner's default");
   const [version, setVersion] = useState(1);
 
@@ -67,13 +66,9 @@ export function ImagesTemplatesPage({
   const [revealSecrets, setRevealSecrets] = useState(false);
   const [savingEnv, setSavingEnv] = useState(false);
 
-  // Snapshots & Custom Images state backed by /api/v1/templates and /api/v1/images
+  // Snapshots & Templates state backed by /api/v1/templates
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [images, setImages] = useState<CustomImage[]>([]);
   const [loadingAssets, setLoadingAssets] = useState(false);
-  const [snapshotSubTab, setSnapshotSubTab] = useState<'templates' | 'images'>(
-    'templates',
-  );
 
   // Create Snapshot modal state
   const [createSnapOpen, setCreateSnapOpen] = useState(false);
@@ -82,11 +77,6 @@ export function ImagesTemplatesPage({
   const [launchModalTpl, setLaunchModalTpl] = useState<Template | null>(null);
   const [launchName, setLaunchName] = useState('');
   const [launchAutoStart, setLaunchAutoStart] = useState(true);
-
-  // Build Custom Rootfs Image modal/form state
-  const [buildImgOpen, setBuildImgOpen] = useState(false);
-  const [imgName, setImgName] = useState('');
-  const [imgPackages, setImgPackages] = useState('curl, git, jq, htop');
 
   const applyProfile = useCallback((p: EnvironmentProfileRecord) => {
     setSelectedProfileName(p.name);
@@ -98,7 +88,6 @@ export function ImagesTemplatesPage({
     setComputeCredsChecked(
       Boolean(p.compute_credentials_enabled ?? p.boat_credentials_enabled),
     );
-    setAgentsCredsChecked(Boolean(p.agent_credentials_enabled));
     setCredentialProfile(p.credential_profile || "Owner's default");
     setVersion(p.version || 1);
   }, []);
@@ -117,15 +106,13 @@ export function ImagesTemplatesPage({
     }
   }, [applyProfile, selectedProfileName]);
 
-  const loadSnapshotsAndImages = useCallback(async () => {
+  const loadSnapshots = useCallback(async () => {
     setLoadingAssets(true);
     try {
-      const [tplRes, imgRes] = await Promise.allSettled([
-        api.listTemplates(),
-        api.listImages(),
-      ]);
-      if (tplRes.status === 'fulfilled') setTemplates(tplRes.value || []);
-      if (imgRes.status === 'fulfilled') setImages(imgRes.value || []);
+      const res = await api.listTemplates();
+      setTemplates(res || []);
+    } catch {
+      // ignore transient error
     } finally {
       setLoadingAssets(false);
     }
@@ -133,8 +120,8 @@ export function ImagesTemplatesPage({
 
   useEffect(() => {
     void loadEnvironments();
-    void loadSnapshotsAndImages();
-  }, [loadEnvironments, loadSnapshotsAndImages]);
+    void loadSnapshots();
+  }, [loadEnvironments, loadSnapshots]);
 
   async function handleSaveEnvironment() {
     setSavingEnv(true);
@@ -148,7 +135,6 @@ export function ImagesTemplatesPage({
         secrets_enabled: secretsChecked,
         secrets: secretsText,
         compute_credentials_enabled: computeCredsChecked,
-        agent_credentials_enabled: agentsCredsChecked,
         credential_profile: credentialProfile,
       });
       applyProfile(saved);
@@ -174,7 +160,6 @@ export function ImagesTemplatesPage({
         secrets_enabled: false,
         secrets: '',
         compute_credentials_enabled: false,
-        agent_credentials_enabled: false,
         credential_profile: "Owner's default",
       });
       await loadEnvironments();
@@ -231,38 +216,8 @@ export function ImagesTemplatesPage({
       });
   }
 
-  function handleBuildImage(e: React.FormEvent) {
-    e.preventDefault();
-    const name = imgName.trim();
-    if (!name) return;
-    const pkgs = imgPackages
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const payload = {
-      name,
-      base_image: 'ubuntu-24.04',
-      packages: pkgs,
-    };
-    setBuildImgOpen(false);
-    setImgName('');
-
-    const toastID = toast.loading(`Starting custom rootfs build "${name}"…`);
-    void api
-      .buildImage(payload)
-      .then(async () => {
-        toast.success(`Started building custom rootfs "${name}"`, {
-          id: toastID,
-        });
-        await loadSnapshotsAndImages();
-      })
-      .catch((err) => {
-        toast.error(errorMessage(err), { id: toastID });
-      });
-  }
-
   // ============================================================================
-  // MODE 1: Exact Environment Page matching dashboard-03-environment.png 1:1
+  // MODE 1: Environment Page
   // ============================================================================
   if (mode === 'environment') {
     const secretLinesCount = secretsText
@@ -271,23 +226,27 @@ export function ImagesTemplatesPage({
 
     return (
       <div className="space-y-6">
-        {/* Top Row: Environment title on left, Save button on right (matching dashboard-03) */}
+        {/* Top Row: Environment title on left, Save button on right */}
         <div className="flex items-start justify-between">
-          <div className="space-y-1">
-            <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-              Environment
-            </h1>
-            <p className="text-[12px] text-muted-foreground">
-              What every new sandbox in it starts with.{' '}
-              <button
-                type="button"
-                onClick={() => onNavigate?.('api')}
-                className="underline underline-offset-2 text-muted-foreground hover:text-foreground"
-              >
-                Learn more
-              </button>
-            </p>
-          </div>
+          {!embedded ? (
+            <div className="space-y-1">
+              <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
+                Environment
+              </h1>
+              <p className="text-[12px] text-muted-foreground">
+                What every new sandbox in it starts with.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-0.5">
+              <h2 className="text-[14px] font-medium text-foreground">
+                Environment Profiles
+              </h2>
+              <p className="text-[12px] text-muted-foreground">
+                What every new sandbox in it starts with.
+              </p>
+            </div>
+          )}
 
           <button
             type="button"
@@ -420,7 +379,7 @@ export function ImagesTemplatesPage({
                     {githubRepos.slice(0, 2).map((repo) => (
                       <span
                         key={repo}
-                        className="ml-1 border border-border bg-muted/40 px-1.5 py-0.2 font-mono text-[10px] font-normal text-muted-foreground"
+                        className="ml-1 border border-border bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] font-normal text-muted-foreground"
                       >
                         {repo}
                       </span>
@@ -585,63 +544,9 @@ export function ImagesTemplatesPage({
             </div>
           </div>
 
-          {/* 5. Agents credentials */}
-          <div className="space-y-2.5">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex items-start gap-3.5">
-                <SquareCheckbox
-                  checked={agentsCredsChecked}
-                  onChange={setAgentsCredsChecked}
-                  label="Agents credentials"
-                />
-                <div className="space-y-0.5">
-                  <div className="flex items-center gap-2 text-[12.5px] font-medium text-foreground">
-                    <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span>Agents credentials</span>
-                  </div>
-                  <p className="text-[11.5px] text-muted-foreground leading-relaxed">
-                    The provider keys (Claude, Codex, ...) you set on the Agents
-                    tab.
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => onNavigate?.('api')}
-                className="flex shrink-0 items-center gap-1.5 text-[12px] text-foreground/90 hover:text-foreground transition-colors"
-              >
-                <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
-                <span>Go to Agents</span>
-              </button>
-            </div>
-
-            <div className="ml-7 flex items-center gap-2.5 pt-0.5">
-              <span className="text-[11.5px] text-muted-foreground">
-                Credential profile
-              </span>
-              <div className="relative">
-                <select
-                  aria-label="Credential profile"
-                  value={credentialProfile}
-                  onChange={(e) => setCredentialProfile(e.target.value)}
-                  className="h-8 appearance-none border border-border bg-background pl-3 pr-8 text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
-                >
-                  <option value="Owner's default">Owner&apos;s default</option>
-                  <option value="Anthropic + OpenAI Proxy">
-                    Anthropic + OpenAI Proxy
-                  </option>
-                  <option value="Zero-Trust Ephemeral">
-                    Zero-Trust Ephemeral
-                  </option>
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
-              </div>
-            </div>
-          </div>
         </div>
 
-        {/* Versions Footer Section matching dashboard-03-environment.png 1:1 */}
+        {/* Versions Footer Section */}
         <div className="space-y-2.5 pt-3">
           <div className="space-y-0.5">
             <h2 className="text-[12.5px] font-medium text-foreground">
@@ -675,325 +580,147 @@ export function ImagesTemplatesPage({
   }
 
   // ============================================================================
-  // MODE 2: Snapshots & Custom Rootfs Images (100% Live Daemon Data)
+  // MODE 2: Snapshots & Templates (100% Live Daemon Data)
   // ============================================================================
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-            Snapshots
+            Snapshots &amp; Templates
           </h1>
           <p className="text-[12px] text-muted-foreground">
-            Instant Firecracker memory/disk snapshots and custom ext4 rootfs
-            images stored on the compute daemon.
+            Instant Firecracker memory and disk snapshots for launching Ubuntu
+            24.04 LTS sandboxes in milliseconds.
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => void loadSnapshotsAndImages()}
+            onClick={() => void loadSnapshots()}
             className="flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-[12px] text-muted-foreground hover:text-foreground"
           >
             <RefreshCw className="h-3.5 w-3.5" />
             <span>Refresh</span>
           </button>
-          {snapshotSubTab === 'templates' ? (
-            <button
-              type="button"
-              onClick={() => setCreateSnapOpen(true)}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
-            >
-              <Camera className="h-3.5 w-3.5" />
-              <span>Create Snapshot</span>
-            </button>
+          <button
+            type="button"
+            onClick={() => setCreateSnapOpen(true)}
+            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+          >
+            <Camera className="h-3.5 w-3.5" />
+            <span>Create Snapshot</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="border border-border bg-background">
+        <div className="flex items-center justify-between border-b border-border bg-muted/20 px-3 py-2 text-[11.5px] font-medium text-foreground">
+          <span>Saved Snapshots &amp; Templates ({templates.length})</span>
+          <span className="font-mono text-[10.5px] text-muted-foreground">
+            Base OS: Ubuntu 24.04 LTS
+          </span>
+        </div>
+        <table className="w-full border-collapse text-left text-[12px]">
+          <thead>
+            <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
+              <th className="py-2.5 px-3 font-normal">Template Name</th>
+              <th className="py-2.5 px-3 font-normal">Source Sandbox</th>
+              <th className="py-2.5 px-3 font-normal">Compute Spec</th>
+              <th className="py-2.5 px-3 font-normal">Disk Path</th>
+              <th className="py-2.5 px-3 font-normal">Created</th>
+              <th className="py-2.5 px-3 text-right font-normal">Actions</th>
+            </tr>
+          </thead>
+          {templates.length === 0 ? (
+            <tbody>
+              <tr>
+                <td
+                  colSpan={6}
+                  className="py-16 text-center text-muted-foreground"
+                >
+                  <Database className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
+                  <div className="text-[12.5px]">
+                    {loadingAssets
+                      ? 'Loading snapshot templates…'
+                      : 'No snapshot templates saved yet.'}
+                  </div>
+                  <p className="text-[11.5px] text-muted-foreground/80 mt-1">
+                    Snapshot any sandbox or click &ldquo;Create Snapshot&rdquo;
+                    to clone sandboxes in milliseconds.
+                  </p>
+                </td>
+              </tr>
+            </tbody>
           ) : (
-            <button
-              type="button"
-              onClick={() => setBuildImgOpen((v) => !v)}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Build Rootfs Image</span>
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Sub-navigation between Snapshot Templates and Custom Rootfs Images */}
-      <div className="flex items-center border-b border-border">
-        <button
-          type="button"
-          onClick={() => setSnapshotSubTab('templates')}
-          className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
-            snapshotSubTab === 'templates'
-              ? 'border-[#263fa9] text-foreground font-medium'
-              : 'border-transparent text-muted-foreground hover:text-foreground',
-          )}
-        >
-          Snapshot Templates ({templates.length})
-        </button>
-        <button
-          type="button"
-          onClick={() => setSnapshotSubTab('images')}
-          className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
-            snapshotSubTab === 'images'
-              ? 'border-[#263fa9] text-foreground font-medium'
-              : 'border-transparent text-muted-foreground hover:text-foreground',
-          )}
-        >
-          Custom Rootfs Images ({images.length})
-        </button>
-      </div>
-
-      {buildImgOpen && snapshotSubTab === 'images' && (
-        <form
-          onSubmit={handleBuildImage}
-          className="border border-border bg-muted/15 p-4 space-y-3"
-        >
-          <div className="text-[13px] font-medium text-foreground">
-            Build Custom Rootfs Image
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Image Name
-              </label>
-              <input
-                type="text"
-                value={imgName}
-                onChange={(e) => setImgName(e.target.value)}
-                placeholder="custom-dev-rootfs"
-                required
-                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Base Distribution
-              </label>
-              <div
-                aria-label="Base distribution"
-                className="flex h-8 w-full items-center border border-border bg-muted/30 px-2.5 font-mono text-[12px] text-muted-foreground"
-              >
-                ubuntu 24.04
-              </div>
-            </div>
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Pre-installed Packages (comma-separated)
-              </label>
-              <input
-                type="text"
-                value={imgPackages}
-                onChange={(e) => setImgPackages(e.target.value)}
-                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-              />
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setBuildImgOpen(false)}
-              className="h-8 border border-border px-3 text-[12px] text-muted-foreground"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white disabled:opacity-50"
-            >
-              Start Build
-            </button>
-          </div>
-        </form>
-      )}
-
-      {snapshotSubTab === 'templates' ? (
-        <div className="border border-border bg-background">
-          <table className="w-full border-collapse text-left text-[12px]">
-            <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
-                <th className="py-2.5 px-3 font-normal">Template Name</th>
-                <th className="py-2.5 px-3 font-normal">Source Sandbox</th>
-                <th className="py-2.5 px-3 font-normal">Compute Spec</th>
-                <th className="py-2.5 px-3 font-normal">Disk Path</th>
-                <th className="py-2.5 px-3 font-normal">Created</th>
-                <th className="py-2.5 px-3 text-right font-normal">Actions</th>
-              </tr>
-            </thead>
-            {templates.length === 0 ? (
-              <tbody>
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="py-16 text-center text-muted-foreground"
-                  >
-                    <Database className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
-                    <div className="text-[12.5px]">
-                      {loadingAssets
-                        ? 'Loading snapshot templates…'
-                        : 'No snapshot templates saved yet.'}
+            <tbody className="divide-y divide-border">
+              {templates.map((tpl) => (
+                <tr key={tpl.id} className="hover:bg-muted/30">
+                  <td className="py-2.5 px-3">
+                    <div className="font-medium text-foreground">
+                      {tpl.name}
                     </div>
-                    <p className="text-[11.5px] text-muted-foreground/80 mt-1">
-                      Snapshot any sandbox or click &ldquo;Create Snapshot&rdquo;
-                      to clone sandboxes in milliseconds.
-                    </p>
+                    {tpl.description && (
+                      <div className="text-[11px] text-muted-foreground">
+                        {tpl.description}
+                      </div>
+                    )}
                   </td>
-                </tr>
-              </tbody>
-            ) : (
-              <tbody className="divide-y divide-border">
-                {templates.map((tpl) => (
-                  <tr key={tpl.id} className="hover:bg-muted/30">
-                    <td className="py-2.5 px-3">
-                      <div className="font-medium text-foreground">
-                        {tpl.name}
-                      </div>
-                      {tpl.description && (
-                        <div className="text-[11px] text-muted-foreground">
-                          {tpl.description}
-                        </div>
-                      )}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
-                      {tpl.source_vm_id || '—'}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-foreground">
-                      {tpl.vcpus} vCPU · {formatMemory(tpl.memory_mb)}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground truncate max-w-xs">
-                      {tpl.disk_path}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
-                      {formatRelativeTime(tpl.created_at)}
-                    </td>
-                    <td className="py-2.5 px-3 text-right">
-                      <div className="inline-flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => openLaunchModal(tpl)}
-                          className="flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
-                        >
-                          <Play className="h-3 w-3 fill-current" />
-                          <span>Launch</span>
-                        </button>
-                        <button
-                          type="button"
-                          aria-label={`Delete template ${tpl.name}`}
-                          title={`Delete template ${tpl.name}`}
-                          onClick={() => {
-                            void api
-                              .deleteTemplate(tpl.id)
-                              .then(() => {
-                                toast.success(`Deleted template ${tpl.name}`);
-                                void loadSnapshotsAndImages();
-                              })
-                              .catch((err) => toast.error(errorMessage(err)));
-                          }}
-                          className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            )}
-          </table>
-        </div>
-      ) : (
-        <div className="border border-border bg-background">
-          <table className="w-full border-collapse text-left text-[12px]">
-            <thead>
-              <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
-                <th className="py-2.5 px-3 font-normal">Image Name</th>
-                <th className="py-2.5 px-3 font-normal">Base OS</th>
-                <th className="py-2.5 px-3 font-normal">Packages</th>
-                <th className="py-2.5 px-3 font-normal">Size</th>
-                <th className="py-2.5 px-3 font-normal">Status</th>
-                <th className="py-2.5 px-3 text-right font-normal">Actions</th>
-              </tr>
-            </thead>
-            {images.length === 0 ? (
-              <tbody>
-                <tr>
-                  <td
-                    colSpan={6}
-                    className="py-16 text-center text-muted-foreground"
-                  >
-                    <Disc className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
-                    <div className="text-[12.5px]">
-                      No custom rootfs images built yet.
+                  <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
+                    {tpl.source_vm_id || '—'}
+                  </td>
+                  <td className="py-2.5 px-3 font-mono text-[11px] text-foreground">
+                    {tpl.vcpus} vCPU · {formatMemory(tpl.memory_mb)}
+                  </td>
+                  <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground truncate max-w-xs">
+                    {tpl.disk_path}
+                  </td>
+                  <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
+                    {formatRelativeTime(tpl.created_at)}
+                  </td>
+                  <td className="py-2.5 px-3 text-right">
+                    <div className="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => openLaunchModal(tpl)}
+                        className="flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
+                      >
+                        <Play className="h-3 w-3 fill-current" />
+                        <span>Launch</span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`Delete template ${tpl.name}`}
+                        title={`Delete template ${tpl.name}`}
+                        onClick={() => {
+                          void api
+                            .deleteTemplate(tpl.id)
+                            .then(() => {
+                              toast.success(`Deleted template ${tpl.name}`);
+                              void loadSnapshots();
+                            })
+                            .catch((err) => toast.error(errorMessage(err)));
+                        }}
+                        className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
                     </div>
                   </td>
                 </tr>
-              </tbody>
-            ) : (
-              <tbody className="divide-y divide-border">
-                {images.map((img) => (
-                  <tr key={img.id} className="hover:bg-muted/30">
-                    <td className="py-2.5 px-3 font-mono font-medium text-foreground">
-                      {img.name}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
-                      {img.base_image}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-muted-foreground">
-                      {(img.packages || []).join(', ') || 'base'}
-                    </td>
-                    <td className="py-2.5 px-3 font-mono text-[11px] text-foreground">
-                      {img.size_mb ?? img.disk_size_mb ?? 0} MB
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <span className="border border-border px-2 py-0.5 font-mono text-[10.5px] uppercase">
-                        {img.status}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3 text-right">
-                      <div className="inline-flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={onLaunchVM}
-                          className="border border-border px-2.5 py-1 text-[11px] text-foreground hover:border-[#263fa9]"
-                        >
-                          Use in Sandbox
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void api
-                              .deleteImage(img.id)
-                              .then(() => {
-                                toast.success(`Deleted image ${img.name}`);
-                                void loadSnapshotsAndImages();
-                              })
-                              .catch((err) => toast.error(errorMessage(err)));
-                          }}
-                          className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-destructive"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            )}
-          </table>
-        </div>
-      )}
+              ))}
+            </tbody>
+          )}
+        </table>
+      </div>
 
       <CreateSnapshotDialog
         vm={null}
         vms={vms}
         open={createSnapOpen}
         onOpenChange={setCreateSnapOpen}
-        onCreated={() => void loadSnapshotsAndImages()}
+        onCreated={() => void loadSnapshots()}
       />
 
       {launchModalTpl && (

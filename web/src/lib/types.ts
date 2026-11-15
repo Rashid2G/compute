@@ -18,6 +18,7 @@ export interface HealthResult {
 export interface VM {
   id: string;
   internal_id?: string;
+  owner_id?: string;
   name: string;
   description?: string;
   status: VMStatus;
@@ -120,20 +121,6 @@ export interface CloneVMOptions {
   network_isolated?: boolean;
   auto_start?: boolean;
   protected?: boolean;
-}
-
-export interface ExecRequest {
-  command: string;
-  user?: string;
-  timeout?: number;
-  timeout_seconds?: number;
-}
-
-export interface ExecResponse {
-  stdout: string;
-  stderr: string;
-  exit_code: number;
-  duration_ms: number;
 }
 
 export interface FileEntry {
@@ -363,10 +350,18 @@ export interface JobRecord {
   owner_id: string;
   pool_id: string;
   type: string;
-  state: 'queued' | 'running' | 'completed' | 'failed' | 'canceled' | string;
+  state: 'queued' | 'assigned' | 'running' | 'succeeded' | 'completed' | 'failed' | 'canceled' | 'lost' | string;
   priority: number;
   spec_json: string;
   result_json: string;
+  repo_id?: string;
+  repo_url?: string;
+  repo_name?: string;
+  branch?: string;
+  commit_sha?: string;
+  source?: 'github' | 'manual' | 'cli' | string;
+  vm_id?: string;
+  worker_id?: string;
   queued_at: string;
   started_at?: string | null;
   finished_at?: string | null;
@@ -383,6 +378,229 @@ export interface JobLogRecord {
   seq: number;
   data: string;
   created_at: string;
+}
+
+export interface GitHubConnectionRecord {
+  id: string;
+  owner_id: string;
+  name: string;
+  repo_url: string;
+  default_branch: string;
+  token_masked?: string;
+  has_token: boolean;
+  webhook_secret?: string;
+  webhook_secret_masked?: string;
+  has_webhook_secret: boolean;
+  default_command: string;
+  image_id?: string;
+  vcpus: number;
+  memory_mb: number;
+  timeout_sec?: number;
+  timeout_seconds?: number;
+  status?: string;
+  auto_trigger?: boolean;
+  last_triggered_at?: string | null;
+  last_delivery_at?: string | null;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface CreateCIRepoRequest {
+  name?: string;
+  repo_url: string;
+  default_branch?: string;
+  github_token?: string;
+  webhook_secret?: string;
+  default_command?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  timeout_sec?: number;
+}
+
+export interface UpdateCIRepoRequest {
+  name?: string;
+  repo_url?: string;
+  default_branch?: string;
+  github_token?: string;
+  webhook_secret?: string;
+  default_command?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  timeout_sec?: number;
+  status?: string;
+}
+
+export interface TriggerCIRepoRequest {
+  branch?: string;
+  commit_sha?: string;
+  command?: string;
+  source?: string;
+  image_id?: string;
+  pool_id?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  timeout_sec?: number;
+  env?: Record<string, string>;
+}
+
+export interface AdminCPUMetrics {
+  cores: number;
+  model?: string;
+  usage_percent: number;
+  user_percent: number;
+  system_percent: number;
+  iowait_percent: number;
+  idle_percent: number;
+  load_1m: number;
+  load_5m: number;
+  load_15m: number;
+}
+
+export interface AdminMemoryMetrics {
+  total_mb: number;
+  used_mb: number;
+  available_mb: number;
+  free_mb: number;
+  cached_mb: number;
+  buffers_mb: number;
+  used_percent: number;
+  swap_total_mb: number;
+  swap_used_mb: number;
+}
+
+export interface AdminDiskMount {
+  label: string;
+  path: string;
+  total_gb: number;
+  used_gb: number;
+  available_gb: number;
+  used_percent: number;
+}
+
+export interface AdminDiskSpaceMetrics {
+  path: string;
+  total_gb: number;
+  used_gb: number;
+  free_gb: number;
+  available_gb: number;
+  used_percent: number;
+  mounts?: AdminDiskMount[];
+}
+
+export interface AdminDiskDeviceIO {
+  device: string;
+  read_ops: number;
+  write_ops: number;
+  read_bytes: number;
+  write_bytes: number;
+  read_mb: number;
+  write_mb: number;
+  io_in_progress: number;
+}
+
+export interface AdminDiskIOMetrics {
+  read_ops: number;
+  write_ops: number;
+  read_bytes: number;
+  write_bytes: number;
+  read_mb: number;
+  write_mb: number;
+  read_mb_per_sec: number;
+  write_mb_per_sec: number;
+  read_iops: number;
+  write_iops: number;
+  io_in_progress: number;
+  devices?: AdminDiskDeviceIO[];
+}
+
+export interface AdminNetworkMetrics {
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_packets: number;
+  tx_packets: number;
+  rx_mb: number;
+  tx_mb: number;
+  rx_mb_per_sec: number;
+  tx_mb_per_sec: number;
+  interfaces?: string[];
+}
+
+export interface AdminSystemMetrics {
+  hostname: string;
+  os: string;
+  arch: string;
+  kernel_version?: string;
+  uptime_seconds: number;
+  kvm_available: boolean;
+}
+
+export interface AdminSandboxAllocations {
+  total: number;
+  running: number;
+  stopped: number;
+  vcpus_allocated: number;
+  running_vcpus: number;
+  memory_mb_allocated: number;
+  running_memory_mb: number;
+  disk_mb_allocated: number;
+  disk_gb_allocated: number;
+}
+
+export interface AdminJobAllocations {
+  total: number;
+  queued: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  vcpus_allocated: number;
+  memory_mb_allocated: number;
+  disk_mb_allocated: number;
+  disk_gb_allocated: number;
+}
+
+export interface AdminVolumeAllocations {
+  total: number;
+  attached: number;
+  available: number;
+  disk_mb_allocated: number;
+  disk_gb_allocated: number;
+}
+
+export interface AdminWorkerAllocations {
+  total: number;
+  ready: number;
+  offline: number;
+}
+
+export interface AdminPlatformAllocations {
+  sandboxes: AdminSandboxAllocations;
+  ci_jobs: AdminJobAllocations;
+  volumes: AdminVolumeAllocations;
+  workers: AdminWorkerAllocations;
+  limits: ResourceLimits;
+  allocated_vcpus: number;
+  running_vcpus: number;
+  job_vcpus: number;
+  max_total_vcpus: number;
+  allocated_memory_mb: number;
+  running_memory_mb: number;
+  job_memory_mb: number;
+  max_total_memory_mb: number;
+  allocated_vm_disk_gb: number;
+  allocated_volume_disk_gb: number;
+  max_total_disk_gb: number;
+}
+
+export interface AdminResourcesResponse {
+  timestamp: string;
+  cpu: AdminCPUMetrics;
+  memory: AdminMemoryMetrics;
+  disk: AdminDiskSpaceMetrics;
+  disk_io: AdminDiskIOMetrics;
+  network: AdminNetworkMetrics;
+  system: AdminSystemMetrics;
+  allocations: AdminPlatformAllocations;
+  capacity_warnings: string[];
 }
 
 export interface VolumeRecord {
@@ -455,19 +673,6 @@ export interface AccessAPIKeyRecord {
   created_at: string;
 }
 
-export interface AgentProfileRecord {
-  id: string;
-  name: string;
-  provider: string;
-  upstream_url: string;
-  inject_header: string;
-  secret_ref: string;
-  sandboxes_linked: number;
-  status: 'active' | 'disabled' | string;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface EnvironmentProfileRecord {
   name: string;
   is_default: boolean;
@@ -478,7 +683,6 @@ export interface EnvironmentProfileRecord {
   secrets: string;
   compute_credentials_enabled?: boolean;
   boat_credentials_enabled?: boolean;
-  agent_credentials_enabled: boolean;
   credential_profile: string;
   version: number;
   updated_at: string;

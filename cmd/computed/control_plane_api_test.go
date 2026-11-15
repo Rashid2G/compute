@@ -465,60 +465,6 @@ func TestControlPlane_AccessAPIKeys(t *testing.T) {
 	}
 }
 
-func TestControlPlane_AgentProfiles(t *testing.T) {
-	server := newTestServer(t)
-
-	// 1. Create agent profile
-	body, _ := json.Marshal(map[string]string{
-		"name":          "Anthropic Proxy",
-		"provider":      "Anthropic",
-		"upstream_url":  "https://api.anthropic.com/v1",
-		"inject_header": "x-api-key: secret",
-		"secret_ref":    "sec_anthropic_prod",
-	})
-	resp, err := http.Post(server.URL+"/api/v1/agent-profiles", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST /agent-profiles failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	var prof db.AgentProfile
-	_ = json.NewDecoder(resp.Body).Decode(&prof)
-	if prof.Name != "Anthropic Proxy" || prof.Status != "active" {
-		t.Fatalf("unexpected profile: %+v", prof)
-	}
-
-	// 2. Patch agent profile
-	newURL := "https://api.anthropic.com/v2"
-	patchBody, _ := json.Marshal(map[string]string{
-		"upstream_url": newURL,
-	})
-	reqPatch, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/agent-profiles/"+prof.ID, bytes.NewReader(patchBody))
-	respPatch, err := http.DefaultClient.Do(reqPatch)
-	if err != nil {
-		t.Fatalf("PATCH failed: %v", err)
-	}
-	defer respPatch.Body.Close()
-	var patched db.AgentProfile
-	_ = json.NewDecoder(respPatch.Body).Decode(&patched)
-	if patched.UpstreamURL != newURL {
-		t.Fatalf("expected updated upstream_url %q, got %q", newURL, patched.UpstreamURL)
-	}
-
-	// 3. Delete agent profile
-	reqDel, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/agent-profiles/"+prof.ID, nil)
-	respDel, err := http.DefaultClient.Do(reqDel)
-	if err != nil {
-		t.Fatalf("DELETE failed: %v", err)
-	}
-	defer respDel.Body.Close()
-	if respDel.StatusCode != http.StatusOK {
-		t.Fatalf("DELETE status: %d", respDel.StatusCode)
-	}
-}
-
 func TestControlPlane_Environments(t *testing.T) {
 	server := newTestServer(t)
 

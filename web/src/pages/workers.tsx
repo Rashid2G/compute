@@ -19,8 +19,10 @@ import { toast } from 'sonner';
 import { api, errorMessage } from '@/lib/api';
 import { formatMemory, formatRelativeTime } from '@/lib/format';
 import type {
+  DaemonConfig,
   StatsResult,
   VM,
+  VolumeRecord,
   WorkerNodeRecord,
   WorkerPoolRecord,
   WorkerTokenRecord,
@@ -31,6 +33,8 @@ interface WorkersPageProps {
   workers?: WorkerNodeRecord[];
   stats?: StatsResult | null;
   vms?: VM[];
+  volumes?: VolumeRecord[];
+  config?: DaemonConfig | null;
   onRefresh?: () => void;
 }
 
@@ -38,6 +42,8 @@ export function WorkersPage({
   workers: propWorkers,
   stats,
   vms = [],
+  volumes = [],
+  config = null,
   onRefresh,
 }: WorkersPageProps) {
   const [workers, setWorkers] = useState<WorkerNodeRecord[]>(propWorkers || []);
@@ -688,6 +694,120 @@ export function WorkersPage({
             </tbody>
           )}
         </table>
+      </div>
+
+      {/* Quotas & Resource Limits (moved from Organization & Quotas) */}
+      <div className="space-y-3 pt-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-[15px] font-medium text-foreground">
+              Quotas &amp; Resource Limits
+            </h2>
+            <p className="text-[12px] text-muted-foreground">
+              Cluster and tenant resource allocation, storage usage, and
+              control-plane guardrails.
+            </p>
+          </div>
+          <span className="border border-border bg-muted/30 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+            Default VM: {config?.defaults?.vcpus ?? 2} vCPU ·{' '}
+            {formatMemory(config?.defaults?.memory_mb ?? 2048)}
+          </span>
+        </div>
+
+        {(() => {
+          const runningVMs =
+            stats?.running_vms ??
+            vms.filter((v) => v.status === 'running').length;
+          const totalVMs = stats?.total_vms ?? vms.length;
+          const snapshottedCount =
+            stats?.snapshotted_vms ??
+            vms.filter((v) => v.status === 'paused').length;
+          const volumeGB = volumes.reduce(
+            (acc, v) => acc + (v.size_gb || 0),
+            0,
+          );
+          const allocatedVcpus = vms.reduce(
+            (acc, v) => acc + (v.vcpus || 0),
+            0,
+          );
+          const allocatedRamMB = vms.reduce(
+            (acc, v) => acc + (v.memory_mb || 0),
+            0,
+          );
+          const allocatedDiskGB = Math.round(
+            vms.reduce((acc, v) => acc + (v.disk_mb || 20480), 0) / 1024,
+          );
+          const runningVcpus =
+            stats?.running_vcpus ??
+            vms
+              .filter((v) => v.status === 'running')
+              .reduce((acc, v) => acc + (v.vcpus || 0), 0);
+          const limits = config?.resources ?? stats?.resource_limits;
+
+          return (
+            <div className="grid grid-cols-1 md:grid-cols-3 border border-border bg-background divide-y md:divide-y-0 md:divide-x divide-border">
+              <div className="p-4 space-y-1">
+                <div className="text-xs text-muted-foreground">
+                  Allocated Compute &amp; Memory
+                </div>
+                <div className="font-display text-xl font-medium text-foreground tabular">
+                  {allocatedVcpus} vCPU · {formatMemory(allocatedRamMB)}
+                </div>
+                <div className="font-mono text-[11px] text-muted-foreground">
+                  {runningVMs} running ({runningVcpus} vCPU active) / {totalVMs}{' '}
+                  total sandboxes
+                </div>
+              </div>
+
+              <div className="p-4 space-y-1">
+                <div className="text-xs text-muted-foreground">
+                  Provisioned Storage &amp; Saved State
+                </div>
+                <div className="font-display text-xl font-medium text-foreground tabular">
+                  {allocatedDiskGB + volumeGB} GB
+                </div>
+                <div className="font-mono text-[11px] text-muted-foreground">
+                  {allocatedDiskGB} GB sandbox disks · {volumeGB} GB volumes (
+                  {volumes.length}) · {snapshottedCount}{' '}
+                  {snapshottedCount === 1 ? 'paused state' : 'paused states'}
+                </div>
+              </div>
+
+              <div className="p-4 space-y-1">
+                <div className="text-xs text-muted-foreground">
+                  Host Resource Guardrails
+                </div>
+                <div className="font-display text-xl font-medium text-foreground tabular">
+                  {limits?.max_total_vcpus && limits.max_total_vcpus > 0
+                    ? `${limits.max_total_vcpus} vCPU`
+                    : 'Unlimited vCPU'}
+                </div>
+                <div className="font-mono text-[11px] text-success">
+                  Max RAM:{' '}
+                  {limits?.max_total_memory_mb &&
+                  limits.max_total_memory_mb > 0
+                    ? formatMemory(limits.max_total_memory_mb)
+                    : 'Unlimited'}{' '}
+                  · Max VMs:{' '}
+                  {limits?.max_running_vms && limits.max_running_vms > 0
+                    ? limits.max_running_vms
+                    : 'Unlimited'}
+                </div>
+                <div className="font-mono text-[10.5px] text-muted-foreground">
+                  Max Disk:{' '}
+                  {limits?.max_total_disk_mb && limits.max_total_disk_mb > 0
+                    ? `${Math.round(limits.max_total_disk_mb / 1024)} GB`
+                    : 'Unlimited'}{' '}
+                  · Min Free Disk:{' '}
+                  {limits?.min_free_disk_space_mb &&
+                  limits.min_free_disk_space_mb > 0
+                    ? `${Math.round(limits.min_free_disk_space_mb / 1024)} GB`
+                    : 'Default'}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
