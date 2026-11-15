@@ -1,25 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity,
   Camera,
   Check,
   ChevronDown,
   Copy,
   Cpu,
-  FolderOpen,
+  ExternalLink,
+  Globe,
   HardDrive,
   HelpCircle,
   MoreHorizontal,
   Pause,
   Play,
+  Plus,
   RefreshCw,
   RotateCcw,
-  Search,
+  Scaling,
   Server,
   Shield,
   Square,
   Terminal,
   Trash2,
+  Unplug,
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -45,21 +47,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { SSHTerminal, type SSHTerminalHandle } from '@/components/ssh-terminal';
 import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
+import { formatMemory, formatRelativeTime } from '@/lib/format';
 import { primarySandboxAddress, sandboxAccess } from '@/lib/sandbox-access';
-import {
-  formatMemory,
-  formatRelativeTime,
-  formatTimestamp,
-} from '@/lib/format';
+import { openSSHTerminalWindow } from '@/lib/terminal';
 import type {
   AuditEventRecord,
-  FileEntry,
-  NetworkInspectResult,
-  ProcessInfo,
-  Template,
+  PortForwardRecord,
   VM,
+  VolumeRecord,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -68,7 +66,6 @@ interface InstancesPageProps {
   events?: AuditEventRecord[];
   isLoading: boolean;
   onNew: () => void;
-  onQuickCreate?: () => void;
   onRun: (vm: VM) => void;
   onStop: (vm: VM) => void;
   onSnapshot: (vm: VM) => void;
@@ -76,18 +73,17 @@ interface InstancesPageProps {
   onDelete: (vm: VM) => void;
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
-  onConsole: (vm: VM) => void;
+  onConsole?: (vm: VM) => void;
   onRefresh?: () => void | Promise<void>;
 }
 
-type DeepDiveTab =
-  | 'overview'
-  | 'exec'
-  | 'files'
-  | 'processes'
-  | 'network'
-  | 'snapshots'
-  | 'events';
+const DEFAULT_DISK_MB = 20480; // 20 GB
+
+function isVisibleSandbox(vm: VM): boolean {
+  if (vm.owner_id === 'jobs') return false;
+  if (vm.name?.startsWith('job-')) return false;
+  return true;
+}
 
 function deriveTierType(vcpus: number): 'small' | 'default' | 'large' | 'xlarge' {
   if (vcpus <= 2) return 'small';
@@ -106,11 +102,9 @@ function deriveTierLabel(vcpus: number, memoryMb: number): string {
 }
 
 export function InstancesPage({
-  vms,
-  events = [],
+  vms: rawVMs,
   isLoading,
   onNew,
-  onQuickCreate,
   onRun,
   onStop,
   onSnapshot,
@@ -118,9 +112,10 @@ export function InstancesPage({
   onDelete,
   onBulkDelete,
   onInspect,
-  onConsole,
   onRefresh,
 }: InstancesPageProps) {
+  const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
+
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<string>('all');
   const [snapshotFilter, setSnapshotFilter] = useState<string>('all');
@@ -130,46 +125,41 @@ export function InstancesPage({
   const [unprotectOpen, setUnprotectOpen] = useState(false);
   const [unprotectTargets, setUnprotectTargets] = useState<VM[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [splitMenuOpen, setSplitMenuOpen] = useState(false);
   const [cloneTarget, setCloneTarget] = useState<VM | null>(null);
   const [snapshotTarget, setSnapshotTarget] = useState<VM | null>(null);
-  // Critical-action confirmation: list of VMs pending a stop confirmation.
   const [stopConfirmTargets, setStopConfirmTargets] = useState<VM[] | null>(null);
+
+  // Selected sandbox detail view state
+  const [selectedVMId, setSelectedVMId] = useState<string | null>(null);
+  const [terminalUser, setTerminalUser] = useState<'compute' | 'root'>('compute');
+  const terminalRef = useRef<SSHTerminalHandle | null>(null);
+  const [restartingId, setRestartingId] = useState<string | null>(null);
+
+  // Resize modal state (provisions resized clone via POST /api/v1/vms/{id}/clone)
+  const [resizeTarget, setResizeTarget] = useState<VM | null>(null);
+  const [resizeName, setResizeName] = useState('');
+  const [resizeVcpus, setResizeVcpus] = useState(2);
+  const [resizeMemoryMb, setResizeMemoryMb] = useState(2048);
+  const [resizeDiskGb, setResizeDiskGb] = useState(20);
+  const [resizeAutoStart, setResizeAutoStart] = useState(true);
+
+  // Detail cards state: Volumes & Port Forwards
+  const [volumes, setVolumes] = useState<VolumeRecord[]>([]);
+  const [volumesLoading, setVolumesLoading] = useState(false);
+  const [attachVolumeId, setAttachVolumeId] = useState('');
+
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
+  const [forwardsLoading, setForwardsLoading] = useState(false);
+  const [addForwardOpen, setAddForwardOpen] = useState(false);
+  const [fwHostPort, setFwHostPort] = useState('8080');
+  const [fwGuestPort, setFwGuestPort] = useState('8080');
+  const [fwProtocol, setFwProtocol] = useState<'TCP' | 'HTTP/HTTPS'>('TCP');
+  const [fwSubdomain, setFwSubdomain] = useState('');
 
   const selectedVMs = useMemo(
     () => vms.filter((v) => selectedIds.includes(v.id)),
     [vms, selectedIds],
   );
-
-  const [selectedVMId, setSelectedVMId] = useState<string | null>(null);
-  const [deepDiveTab, setDeepDiveTab] = useState<DeepDiveTab>('overview');
-
-  // Real Exec state
-  const [execCommand, setExecCommand] = useState('uname -a && free -m && df -h /');
-  const [execRunning, setExecRunning] = useState(false);
-  const [execOutput, setExecOutput] = useState<string>('');
-  const [execMeta, setExecMeta] = useState<{
-    exitCode: number;
-    durationMs: number;
-  } | null>(null);
-
-  // Real Filesystem state
-  const [currentDir, setCurrentDir] = useState('/home/compute');
-  const [files, setFiles] = useState<FileEntry[]>([]);
-  const [filesDir, setFilesDir] = useState('/home/compute');
-  const [filesLoading, setFilesLoading] = useState(false);
-
-  // Real Processes state
-  const [processes, setProcesses] = useState<ProcessInfo[]>([]);
-  const [processesLoading, setProcessesLoading] = useState(false);
-
-  // Real Network inspect state
-  const [netInspect, setNetInspect] = useState<NetworkInspectResult | null>(null);
-  const [netInspectLoading, setNetInspectLoading] = useState(false);
-
-  // Sandbox snapshots (templates) state
-  const [vmTemplates, setVmTemplates] = useState<Template[]>([]);
-  const [vmTemplatesLoading, setVmTemplatesLoading] = useState(false);
 
   const selectedVM = useMemo(
     () => vms.find((v) => v.id === selectedVMId) ?? null,
@@ -236,40 +226,156 @@ export function InstancesPage({
     setTimeout(() => setCopiedId(null), 1500);
   };
 
-  // Open the SSH terminal in a dedicated popup browser window. The window
-  // loads the standalone terminal route and connects straight to the daemon
-  // over its own WebSocket, independent of the main dashboard tab.
-  function openSSHTerminal(vm: VM) {
-    const base = `${window.location.origin}${window.location.pathname}`;
-    const url = `${base}#/terminal/${encodeURIComponent(vm.id)}`;
-    const width = Math.min(1100, Math.max(560, window.screen.width - 120));
-    const height = Math.min(760, Math.max(400, window.screen.height - 120));
-    const left = Math.max(0, Math.round((window.screen.width - width) / 2));
-    const top = Math.max(0, Math.round((window.screen.height - height) / 2));
-    window.open(
-      url,
-      `ssh-terminal-${vm.id}`,
-      `popup,width=${width},height=${height},left=${left},top=${top}`,
-    );
+  const loadSandboxConnectivity = useCallback(async () => {
+    setVolumesLoading(true);
+    setForwardsLoading(true);
+    const [volsRes, pfsRes] = await Promise.allSettled([
+      api.listVolumes(),
+      api.listPortForwards(),
+    ]);
+    if (volsRes.status === 'fulfilled') {
+      setVolumes(volsRes.value || []);
+    }
+    if (pfsRes.status === 'fulfilled') {
+      setPortForwards(pfsRes.value || []);
+    }
+    setVolumesLoading(false);
+    setForwardsLoading(false);
+  }, []);
+
+  const selectedVMKey = selectedVM?.id ?? null;
+
+  useEffect(() => {
+    if (!selectedVMKey) return;
+    setAddForwardOpen(false);
+    setAttachVolumeId('');
+    void loadSandboxConnectivity();
+  }, [selectedVMKey, loadSandboxConnectivity]);
+
+  function openResizeModal(vm: VM) {
+    setResizeTarget(vm);
+    setResizeName(`${vm.name}-resized`);
+    setResizeVcpus(vm.vcpus || 2);
+    setResizeMemoryMb(vm.memory_mb || 2048);
+    setResizeDiskGb(Math.max(1, Math.round((vm.disk_mb || DEFAULT_DISK_MB) / 1024)));
+    setResizeAutoStart(vm.status === 'running');
   }
 
-  function handleSpawnFromSnapshot(tpl: Template) {
-    const suffix = Math.random().toString(36).slice(2, 6);
-    const spawnName = `${tpl.name}-${suffix}`;
-    const toastID = toast.loading(`Spawning sandbox ${spawnName} from ${tpl.name}…`);
-    void api
-      .restoreSnapshot(tpl.id, spawnName, {
-        vcpus: tpl.vcpus,
-        memory_mb: tpl.memory_mb,
-        auto_start: true,
-      })
-      .then(() => {
-        toast.success(`Spawned sandbox ${spawnName}`, { id: toastID });
-        onRefresh?.();
-      })
-      .catch((err) => {
-        toast.error(`Spawn failed: ${errorMessage(err)}`, { id: toastID });
+  async function handleResizeSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!resizeTarget) return;
+    const src = resizeTarget;
+    const nextName =
+      resizeName
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '') || `${src.name}-resized`;
+    setResizeTarget(null);
+
+    const toastID = toast.loading(`Provisioning resized sandbox ${nextName}…`);
+    try {
+      const created = await api.cloneVM(src.id, {
+        name: nextName,
+        vcpus: resizeVcpus,
+        memory_mb: resizeMemoryMb,
+        disk_gb: resizeDiskGb,
+        auto_start: resizeAutoStart,
       });
+      toast.success(`Created resized sandbox ${created.name}`, { id: toastID });
+      setSelectedVMId(created.id);
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Resize failed: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
+  async function handleRestartVM(vm: VM) {
+    const vmName = vm.name || vm.id;
+    setRestartingId(vm.id);
+    const toastID = toast.loading(`Restarting ${vmName}…`);
+    try {
+      await api.stopVM(vm.id);
+      await api.runVM(vm.id);
+      toast.success(`${vmName} restarted`, { id: toastID });
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Could not restart ${vmName}: ${errorMessage(err)}`, {
+        id: toastID,
+      });
+      await onRefresh?.();
+    } finally {
+      setRestartingId(null);
+    }
+  }
+
+  async function handleAttachVolume(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedVM || !attachVolumeId) return;
+    const vol = volumes.find((v) => v.id === attachVolumeId);
+    const toastID = toast.loading(`Attaching ${vol?.name || attachVolumeId}…`);
+    try {
+      await api.attachVolume(attachVolumeId, selectedVM.id);
+      toast.success(`Attached ${vol?.name || attachVolumeId} to ${selectedVM.name}`, {
+        id: toastID,
+      });
+      setAttachVolumeId('');
+      await loadSandboxConnectivity();
+    } catch (err) {
+      toast.error(`Attach failed: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
+  async function handleDetachVolume(vol: VolumeRecord) {
+    const toastID = toast.loading(`Detaching ${vol.name}…`);
+    try {
+      await api.detachVolume(vol.id);
+      toast.success(`Detached ${vol.name}`, { id: toastID });
+      await loadSandboxConnectivity();
+    } catch (err) {
+      toast.error(`Detach failed: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
+  async function handleAddPortForward(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedVM) return;
+    const hostPort = Number(fwHostPort);
+    const guestPort = Number(fwGuestPort);
+    if (!hostPort || !guestPort) {
+      toast.error('Host and guest ports are required');
+      return;
+    }
+    const toastID = toast.loading(`Adding port forward :${hostPort} → :${guestPort}…`);
+    try {
+      await api.createPortForward({
+        host_port: hostPort,
+        guest_port: guestPort,
+        vm_id: selectedVM.id,
+        vm_name: selectedVM.name,
+        protocol: fwProtocol,
+        subdomain: fwSubdomain.trim() || undefined,
+      });
+      toast.success(`Forwarding :${hostPort} → ${selectedVM.name}:${guestPort}`, {
+        id: toastID,
+      });
+      setAddForwardOpen(false);
+      setFwSubdomain('');
+      await loadSandboxConnectivity();
+    } catch (err) {
+      toast.error(`Failed to add forward: ${errorMessage(err)}`, { id: toastID });
+    }
+  }
+
+  async function handleDeletePortForward(pf: PortForwardRecord) {
+    const toastID = toast.loading(`Removing port forward :${pf.host_port}…`);
+    try {
+      await api.deletePortForward(pf.id);
+      toast.success(`Removed port forward :${pf.host_port}`, { id: toastID });
+      await loadSandboxConnectivity();
+    } catch (err) {
+      toast.error(`Failed to remove forward: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   function confirmStop() {
@@ -279,115 +385,7 @@ export function InstancesPage({
     setSelectedIds((prev) =>
       prev.filter((id) => !targets.some((vm) => vm.id === id)),
     );
-    void Promise.allSettled(
-      targets.map((vm) => Promise.resolve(onStop(vm))),
-    );
-  }
-
-  // Load tab-specific real telemetry when the selected sandbox or tab changes.
-  // Depend on stable primitives (vm id, status) rather than the selectedVM
-  // object: the sandbox list is polled every few seconds, which recreates the
-  // object identity and would otherwise re-trigger these fetches and flash the
-  // loading placeholder over already-rendered content.
-  const selectedVMKey = selectedVM?.id ?? null;
-  const selectedVMStatus = selectedVM?.status ?? null;
-
-  const fetchFiles = useCallback((vmId: string, dir: string) => {
-    setFilesLoading(true);
-    return api
-      .listVMFiles(vmId, dir)
-      .then((res) => {
-        setFiles(res || []);
-        setFilesDir(dir);
-      })
-      .catch(() => setFiles([]))
-      .finally(() => setFilesLoading(false));
-  }, []);
-
-  const fetchProcesses = useCallback((vmId: string) => {
-    setProcessesLoading(true);
-    return api
-      .listVMProcesses(vmId)
-      .then((res) => setProcesses(res || []))
-      .catch(() => setProcesses([]))
-      .finally(() => setProcessesLoading(false));
-  }, []);
-
-  const fetchNetInspect = useCallback((vmId: string) => {
-    setNetInspectLoading(true);
-    return api
-      .inspectNetwork(vmId)
-      .then((res) => setNetInspect(res))
-      .catch(() => setNetInspect(null))
-      .finally(() => setNetInspectLoading(false));
-  }, []);
-
-  const fetchTemplates = useCallback(() => {
-    setVmTemplatesLoading(true);
-    return api
-      .listTemplates()
-      .then((res) => setVmTemplates(res || []))
-      .catch(() => setVmTemplates([]))
-      .finally(() => setVmTemplatesLoading(false));
-  }, []);
-
-  const prevVMIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (!selectedVMKey) return;
-    if (deepDiveTab === 'snapshots') {
-      void fetchTemplates();
-    }
-  }, [selectedVMKey, deepDiveTab, fetchTemplates]);
-
-  useEffect(() => {
-    if (!selectedVMKey || selectedVMStatus !== 'running') return;
-    // Switching to a different sandbox: drop data fetched for the previous
-    // sandbox so nothing from it renders under the new one.
-    if (prevVMIdRef.current !== selectedVMKey) {
-      prevVMIdRef.current = selectedVMKey;
-      setFiles([]);
-      setFilesDir(currentDir);
-      setProcesses([]);
-      setNetInspect(null);
-    }
-    if (deepDiveTab === 'files') {
-      // Navigating to a different directory: drop the stale listing so the
-      // old path's entries never render under the new path.
-      setFiles((prevFiles) => (filesDir === currentDir ? prevFiles : []));
-      void fetchFiles(selectedVMKey, currentDir);
-    } else if (deepDiveTab === 'processes') {
-      void fetchProcesses(selectedVMKey);
-    } else if (deepDiveTab === 'network') {
-      void fetchNetInspect(selectedVMKey);
-    }
-  }, [
-    selectedVMKey,
-    selectedVMStatus,
-    deepDiveTab,
-    currentDir,
-    fetchFiles,
-    fetchProcesses,
-    fetchNetInspect,
-  ]);
-
-  async function handleRunExec() {
-    if (!selectedVM || !execCommand.trim()) return;
-    setExecRunning(true);
-    try {
-      const res = await api.execVM(selectedVM.id, {
-        command: execCommand.trim(),
-        timeout: 30,
-      });
-      const combined = [res.stdout, res.stderr].filter(Boolean).join('\n');
-      setExecOutput(combined || '(command exited with no output)');
-      setExecMeta({ exitCode: res.exit_code, durationMs: res.duration_ms });
-    } catch (err) {
-      setExecOutput(`Error executing command: ${errorMessage(err)}`);
-      setExecMeta({ exitCode: 1, durationMs: 0 });
-    } finally {
-      setExecRunning(false);
-    }
+    void Promise.allSettled(targets.map((vm) => Promise.resolve(onStop(vm))));
   }
 
   async function handleBatchStart() {
@@ -432,13 +430,15 @@ export function InstancesPage({
       await Promise.all(
         selectedIds.map(async (id) => {
           const source = vms.find((v) => v.id === id);
-          const cloneName = source ? `${source.name}-clone` : `sbx-clone-${id.slice(0, 6)}`;
+          const cloneName = source
+            ? `${source.name}-clone`
+            : `sbx-clone-${id.slice(0, 6)}`;
           await api.cloneVM(id, {
             name: cloneName,
-            vcpus: source?.vcpus || 1,
+            vcpus: source?.vcpus || 2,
             memory_mb: source?.memory_mb,
           });
-        })
+        }),
       );
       toast.success(`Successfully cloned ${selectedIds.length} sandbox(es)`, {
         id: toastID,
@@ -481,18 +481,21 @@ export function InstancesPage({
       if (targets.length === 1) {
         toast.success(`Sandbox ${targets[0].name} protection disabled`, { id: toastID });
       } else {
-        toast.success(`Protection disabled for ${targets.length} sandboxes`, { id: toastID });
+        toast.success(`Protection disabled for ${targets.length} sandboxes`, {
+          id: toastID,
+        });
       }
       onRefresh?.();
     } catch (err) {
-      toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
+      toast.error(`Failed to update protection: ${errorMessage(err)}`, {
+        id: toastID,
+      });
       throw err;
     }
   }
 
   async function toggleProtection(targetVM: VM) {
     if (targetVM.protected) {
-      // Removing a safety guard is deliberate: always require typed confirmation.
       requestUnprotect([targetVM]);
       return;
     }
@@ -500,17 +503,23 @@ export function InstancesPage({
     const toastID = toast.loading('Enabling protection…');
     try {
       await api.protectVM(targetVM.id);
-      toast.success(`Sandbox ${targetVM.name} is now deletion protected`, { id: toastID });
+      toast.success(`Sandbox ${targetVM.name} is now deletion protected`, {
+        id: toastID,
+      });
       onRefresh?.();
     } catch (err) {
-      toast.error(`Failed to update protection: ${errorMessage(err)}`, { id: toastID });
+      toast.error(`Failed to update protection: ${errorMessage(err)}`, {
+        id: toastID,
+      });
     }
   }
 
   async function executeBulkDelete(ids: string[]) {
     const protectedIds = ids.filter((id) => vms.find((v) => v.id === id)?.protected);
     if (protectedIds.length > 0) {
-      toast.error(`Cannot delete ${protectedIds.length} protected sandbox(es). Unprotect them first.`);
+      toast.error(
+        `Cannot delete ${protectedIds.length} protected sandbox(es). Unprotect them first.`,
+      );
       ids = ids.filter((id) => !vms.find((v) => v.id === id)?.protected);
       if (ids.length === 0) {
         setSelectedIds([]);
@@ -532,71 +541,47 @@ export function InstancesPage({
     }
   }
 
+  // Volumes & Port Forwards filtered for selected sandbox
+  const attachedVolumes = useMemo(() => {
+    if (!selectedVM) return [];
+    return volumes.filter(
+      (vol) =>
+        !vol.id.startsWith('vol_root_') &&
+        (vol.attached_vm === selectedVM.name || vol.attached_vm === selectedVM.id),
+    );
+  }, [volumes, selectedVM]);
+
+  const availableVolumes = useMemo(
+    () =>
+      volumes.filter(
+        (vol) => !vol.id.startsWith('vol_root_') && vol.status === 'available',
+      ),
+    [volumes],
+  );
+
+  const vmPortForwards = useMemo(() => {
+    if (!selectedVM) return [];
+    return portForwards.filter(
+      (pf) => pf.vm_id === selectedVM.id || pf.vm_name === selectedVM.name,
+    );
+  }, [portForwards, selectedVM]);
+
   return (
     <div className="space-y-4">
-      {/* Top Page Title & Split Cobalt Action Button */}
+      {/* Top Page Title & Single [ ▷ New ] Button */}
       <div className="flex items-center justify-between">
         <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
           Sandboxes
         </h1>
 
-        <div className="relative flex items-center">
-          {/* Split Cobalt [ ▷ New | ⌄ ] Button */}
-          <div className="inline-flex items-stretch">
-            <button
-              type="button"
-              onClick={onNew}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180] transition-colors"
-            >
-              <Play className="h-3 w-3" />
-              <span>New</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setSplitMenuOpen((prev) => !prev)}
-              aria-label="More creation options"
-              className="flex h-8 w-7 items-center justify-center border-l border-[#fefefe]/20 bg-[#263fa9] text-[#fefefe] hover:bg-[#1e3180] transition-colors"
-            >
-              <ChevronDown className="h-3.5 w-3.5" />
-            </button>
-          </div>
-
-          {splitMenuOpen && (
-            <div
-              onMouseLeave={() => setSplitMenuOpen(false)}
-              className="absolute right-0 top-9 z-50 w-48 border border-border bg-background py-1 text-[12px]"
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  setSplitMenuOpen(false);
-                  onNew();
-                }}
-                className="flex w-full items-center justify-between px-3 py-1.5 text-left text-foreground hover:bg-muted/60"
-              >
-                <span>Advanced create…</span>
-                <span className="font-mono text-[10px] text-muted-foreground">
-                  Modal
-                </span>
-              </button>
-              {onQuickCreate && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSplitMenuOpen(false);
-                    onQuickCreate();
-                  }}
-                  className="flex w-full items-center justify-between px-3 py-1.5 text-left text-foreground hover:bg-muted/60"
-                >
-                  <span>Quick default sandbox</span>
-                  <span className="font-mono text-[10px] text-muted-foreground">
-                    4 vCPU
-                  </span>
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={onNew}
+          className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors cursor-pointer"
+        >
+          <Play className="h-3 w-3" />
+          <span>New</span>
+        </button>
       </div>
 
       {/* Filter Bar */}
@@ -607,17 +592,16 @@ export function InstancesPage({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search name, URL, hostname, id"
-            className="h-8 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            className="h-8 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
         </div>
 
-        {/* State dropdown */}
         <div className="relative">
           <select
             aria-label="Filter by state"
             value={stateFilter}
             onChange={(e) => setStateFilter(e.target.value)}
-            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">State</option>
             <option value="running">Running</option>
@@ -629,13 +613,12 @@ export function InstancesPage({
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         </div>
 
-        {/* Snapshot dropdown */}
         <div className="relative">
           <select
             aria-label="Filter by snapshot"
             value={snapshotFilter}
             onChange={(e) => setSnapshotFilter(e.target.value)}
-            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">Snapshot</option>
             <option value="has-snapshot">Has snapshot</option>
@@ -644,13 +627,12 @@ export function InstancesPage({
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         </div>
 
-        {/* Type dropdown */}
         <div className="relative">
           <select
             aria-label="Filter by tier type"
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
-            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">Type</option>
             <option value="small">small (2 vCPU)</option>
@@ -662,9 +644,9 @@ export function InstancesPage({
         </div>
 
         {selectedIds.length > 0 && (
-          <div className="ml-auto flex flex-wrap items-center gap-1.5 border border-[#263fa9]/60 bg-[#0f1634]/50 px-2.5 py-1.5 shadow-sm">
+          <div className="ml-auto flex flex-wrap items-center gap-1.5 border border-primary/60 bg-selected/60 px-2.5 py-1.5 shadow-sm">
             <span className="mr-1 inline-flex items-center gap-1.5 font-mono text-[11px] text-foreground">
-              <span className="h-1.5 w-1.5 bg-[#5e7ff5]" />
+              <span className="h-1.5 w-1.5 bg-primary" />
               {selectedIds.length} selected
             </span>
             <span className="h-4 w-px bg-border" />
@@ -691,7 +673,7 @@ export function InstancesPage({
               type="button"
               onClick={() => void handleBatchSnapshot()}
               title="Pause & save state for selected running sandboxes"
-              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-primary hover:text-primary dark:hover:text-[var(--accent-bright)] transition-colors cursor-pointer"
             >
               <Pause className="h-3 w-3" />
               <span>Pause</span>
@@ -700,7 +682,7 @@ export function InstancesPage({
               type="button"
               onClick={() => void handleBatchClone()}
               title="Replicate all selected sandboxes"
-              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-primary hover:text-primary dark:hover:text-[var(--accent-bright)] transition-colors cursor-pointer"
             >
               <Copy className="h-3 w-3" />
               <span>Replicate</span>
@@ -710,7 +692,7 @@ export function InstancesPage({
                 type="button"
                 onClick={handleBatchUnprotect}
                 title="Remove deletion protection from selected sandboxes"
-                className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-[#5e7ff5] hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+                className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-primary dark:text-[var(--accent-bright)] hover:border-primary transition-colors cursor-pointer"
               >
                 <Shield className="h-3 w-3" />
                 <span>Unprotect</span>
@@ -752,7 +734,7 @@ export function InstancesPage({
                     aria-label="Select all sandboxes"
                     checked={allSelected}
                     onChange={toggleAll}
-                    className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+                    className="h-3.5 w-3.5 accent-primary cursor-pointer"
                   />
                 </th>
                 <th className="py-2 px-1 font-normal">Name / URL</th>
@@ -796,10 +778,9 @@ export function InstancesPage({
                 <tr>
                   <td colSpan={12} className="py-20 text-center">
                     <div className="mx-auto flex max-w-xs flex-col items-center justify-center space-y-3.5">
-                      {/* Cobalt Blue Dithered Dot-Matrix Isometric Compute Cube */}
                       <svg
                         viewBox="0 0 120 110"
-                        className="h-28 w-32 text-[#263fa9]"
+                        className="h-28 w-32 text-primary"
                         fill="currentColor"
                         shapeRendering="crispEdges"
                         aria-hidden="true"
@@ -813,27 +794,29 @@ export function InstancesPage({
                             height="4"
                             patternUnits="userSpaceOnUse"
                           >
-                            <rect x="0" y="0" width="2.2" height="2.2" fill="currentColor" opacity="0.7" />
+                            <rect
+                              x="0"
+                              y="0"
+                              width="2.2"
+                              height="2.2"
+                              fill="currentColor"
+                              opacity="0.7"
+                            />
                           </pattern>
                         </defs>
-                        {/* Top face */}
                         <polygon points="60,12 104,34 60,56 16,34" fill="url(#compute-dots)" />
-                        {/* Left face */}
                         <polygon points="16,38 58,59 58,98 16,77" fill="url(#compute-dots)" />
-                        {/* Right face */}
                         <polygon points="104,38 62,59 62,98 104,77" fill="url(#compute-dots)" />
                       </svg>
 
                       <p className="text-[12.5px] text-foreground/90">
-                        {isLoading
-                          ? 'Connecting to compute daemon…'
-                          : 'No sandboxes yet.'}
+                        {isLoading ? 'Connecting to compute daemon…' : 'No sandboxes yet.'}
                       </p>
 
                       <button
                         type="button"
                         onClick={onNew}
-                        className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180] transition-colors"
+                        className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                       >
                         <Play className="h-3 w-3" />
                         <span>New</span>
@@ -855,9 +838,12 @@ export function InstancesPage({
                   const primaryAddress = primarySandboxAddress(access);
                   const snapTag = vm.snapshot_path
                     ? vm.snapshot_path.split('/').pop() || 'snapshot'
-                    : 'base:v1';
+                    : 'ubuntu-24';
                   const tierLabel = deriveTierLabel(vm.vcpus, vm.memory_mb);
-                  const diskGb = Math.max(1, Math.round((vm.disk_mb || 51200) / 1024));
+                  const diskGb = Math.max(
+                    1,
+                    Math.round((vm.disk_mb || DEFAULT_DISK_MB) / 1024),
+                  );
                   const resourcesStr = `${vm.vcpus} vCPU · ${formatMemory(vm.memory_mb)} · ${diskGb} GB`;
                   const shortId = (vm.internal_id || vm.id).slice(0, 12);
 
@@ -867,9 +853,7 @@ export function InstancesPage({
                       onClick={() => setSelectedVMId(vm.id)}
                       className={cn(
                         'cursor-pointer transition-colors',
-                        isSelected
-                          ? 'bg-[#0f1634]/75'
-                          : 'hover:bg-muted/40',
+                        isSelected ? 'bg-selected/75' : 'hover:bg-muted/40',
                       )}
                     >
                       <td
@@ -881,18 +865,17 @@ export function InstancesPage({
                           aria-label={`Select ${vm.name}`}
                           checked={isChecked}
                           onChange={() => toggleRow(vm.id)}
-                          className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+                          className="h-3.5 w-3.5 accent-primary cursor-pointer"
                         />
                       </td>
 
-                      {/* Name / URL */}
                       <td className="py-2 px-1.5">
                         <div className="flex items-center gap-1.5 font-medium text-foreground">
                           <span>{vm.name}</span>
                           {vm.protected && (
                             <span
                               title="Deletion protected"
-                              className="inline-flex items-center gap-0.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.2 text-[9px] font-mono text-[#5e7ff5] uppercase"
+                              className="inline-flex items-center gap-0.5 border border-primary/40 bg-primary/10 px-1 py-0.5 text-[9px] font-mono text-primary dark:text-[var(--accent-bright)] uppercase"
                             >
                               <Shield className="h-2.5 w-2.5" />
                               prot
@@ -912,14 +895,16 @@ export function InstancesPage({
                             />
                           ) : null}
                           {access.sshHost && !access.sshResolvable ? (
-                            <span className="text-warning" aria-label="DNS delegation required">
+                            <span
+                              className="text-warning"
+                              aria-label="DNS delegation required"
+                            >
                               DNS
                             </span>
                           ) : null}
                         </div>
                       </td>
 
-                      {/* Sandbox ID */}
                       <td
                         className="py-2 px-1.5 font-mono text-[10.5px]"
                         onClick={(e) => e.stopPropagation()}
@@ -927,7 +912,7 @@ export function InstancesPage({
                         <button
                           type="button"
                           onClick={() => copyText(vm.internal_id || vm.id)}
-                          className="inline-flex items-center gap-1 border border-border bg-muted/40 px-1.5 py-0.5 text-foreground hover:border-[#263fa9] transition-colors"
+                          className="inline-flex items-center gap-1 border border-border bg-muted/40 px-1.5 py-0.5 text-foreground hover:border-primary transition-colors"
                           title={`Copy ${vm.internal_id || vm.id}`}
                         >
                           <span>{shortId}</span>
@@ -939,7 +924,6 @@ export function InstancesPage({
                         </button>
                       </td>
 
-                      {/* State */}
                       <td className="py-2 px-1.5">
                         <span
                           className={cn(
@@ -948,8 +932,7 @@ export function InstancesPage({
                               'border-success/40 bg-success/10 text-success',
                             vm.status === 'paused' &&
                               'border-warning/40 bg-warning/10 text-warning',
-                            (vm.status === 'stopped' ||
-                              vm.status === 'created') &&
+                            (vm.status === 'stopped' || vm.status === 'created') &&
                               'border-border bg-muted/40 text-muted-foreground',
                             vm.status === 'failed' &&
                               'border-destructive/40 bg-destructive/10 text-destructive',
@@ -960,8 +943,7 @@ export function InstancesPage({
                               'h-1.5 w-1.5',
                               vm.status === 'running' && 'bg-success',
                               vm.status === 'paused' && 'bg-warning',
-                              (vm.status === 'stopped' ||
-                                vm.status === 'created') &&
+                              (vm.status === 'stopped' || vm.status === 'created') &&
                                 'bg-muted-foreground',
                               vm.status === 'failed' && 'bg-destructive',
                             )}
@@ -970,17 +952,14 @@ export function InstancesPage({
                         </span>
                       </td>
 
-                      {/* Created */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-muted-foreground tabular">
                         {formatRelativeTime(vm.created_at)}
                       </td>
 
-                      {/* Type */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-foreground tabular">
                         {tierLabel}
                       </td>
 
-                      {/* Auto-stop */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-muted-foreground tabular">
                         {vm.status === 'running'
                           ? 'Manual'
@@ -989,24 +968,20 @@ export function InstancesPage({
                             : '—'}
                       </td>
 
-                      {/* Snapshot */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px]">
                         <span className="border border-border bg-muted/30 px-1 py-0.5 text-muted-foreground">
                           {snapTag}
                         </span>
                       </td>
 
-                      {/* Resources */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-foreground tabular">
                         {resourcesStr}
                       </td>
 
-                      {/* IP Address */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-muted-foreground tabular">
                         {vm.ip_address || '—'}
                       </td>
 
-                      {/* URL / SSH */}
                       <td
                         className="py-2 px-1.5"
                         onClick={(e) => e.stopPropagation()}
@@ -1036,7 +1011,6 @@ export function InstancesPage({
                         </div>
                       </td>
 
-                      {/* Actions: 1-click Start/Stop, Pause/Resume, Snapshot, Replicate + overflow menu */}
                       <td
                         className="py-2 pl-1.5 pr-2.5 text-right"
                         onClick={(e) => e.stopPropagation()}
@@ -1092,7 +1066,7 @@ export function InstancesPage({
                             onClick={() => setSnapshotTarget(vm)}
                             title="Create Snapshot"
                             aria-label={`Snapshot ${vm.name}`}
-                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors"
+                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-primary hover:text-foreground transition-colors"
                           >
                             <Camera className="h-2.5 w-2.5" />
                             <span>Snapshot</span>
@@ -1103,7 +1077,7 @@ export function InstancesPage({
                             onClick={() => setCloneTarget(vm)}
                             title="Replicate Sandbox"
                             aria-label={`Replicate ${vm.name}`}
-                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors"
+                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-primary hover:text-foreground transition-colors"
                           >
                             <Copy className="h-2.5 w-2.5" />
                             <span>Replicate</span>
@@ -1115,15 +1089,19 @@ export function InstancesPage({
                                 type="button"
                                 title="More actions"
                                 aria-label={`More actions for ${vm.name}`}
-                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors outline-none data-[state=open]:border-[#263fa9] data-[state=open]:text-foreground"
+                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-primary hover:text-foreground transition-colors outline-none data-[state=open]:border-primary data-[state=open]:text-foreground"
                               >
                                 <MoreHorizontal className="h-3 w-3" />
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-48">
-                              <DropdownMenuItem onSelect={() => openSSHTerminal(vm)}>
+                              <DropdownMenuItem
+                                onSelect={() =>
+                                  openSSHTerminalWindow(vm.id, vm.name, 'compute')
+                                }
+                              >
                                 <Terminal className="h-3.5 w-3.5" />
-                                SSH Terminal
+                                Pop Out Terminal
                               </DropdownMenuItem>
                               <DropdownMenuItem
                                 onSelect={() => access.ssh && copyText(access.ssh)}
@@ -1139,22 +1117,25 @@ export function InstancesPage({
                                 <Copy className="h-3.5 w-3.5" />
                                 Copy URL
                               </DropdownMenuItem>
-                              <DropdownMenuItem
-                                onSelect={() => onSnapshot(vm)}
-                                disabled={vm.status !== 'running'}
-                              >
-                                <Pause className="h-3.5 w-3.5" />
-                                Pause &amp; Save State
-                              </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => setSnapshotTarget(vm)}>
                                 <Camera className="h-3.5 w-3.5" />
-                                Create Snapshot
+                                Snapshot
                               </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => setCloneTarget(vm)}>
                                 <Copy className="h-3.5 w-3.5" />
-                                Replicate / Clone
+                                Clone
                               </DropdownMenuItem>
-                              <DropdownMenuItem onSelect={() => void toggleProtection(vm)}>
+                              <DropdownMenuItem onSelect={() => openResizeModal(vm)}>
+                                <Scaling className="h-3.5 w-3.5" />
+                                Resize
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => onInspect(vm)}>
+                                <Server className="h-3.5 w-3.5" />
+                                JSON Spec
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => void toggleProtection(vm)}
+                              >
                                 <Shield className="h-3.5 w-3.5" />
                                 {vm.protected ? 'Unprotect' : 'Protect'}
                               </DropdownMenuItem>
@@ -1180,15 +1161,16 @@ export function InstancesPage({
         </div>
       </div>
 
-      {/* Live Sandbox Deep-Dive Drawer when a row is selected */}
+      {/* Redesigned Calm Sandbox Detail View (Item #6 & #7) */}
       {selectedVM && (
-        <div className="border border-border bg-background">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/20 px-4 py-2.5">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="font-mono text-[11px] uppercase tracking-wider text-[color:var(--link)]">
-                SANDBOX INSPECTOR
-              </span>
-              <span className="font-display text-[14px] font-medium text-foreground">
+        <div
+          data-testid="sandbox-detail-panel"
+          className="border border-border bg-background"
+        >
+          {/* Clean Header */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-3">
+            <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+              <span className="font-display text-[15px] font-medium text-foreground">
                 {selectedVM.name}
               </span>
               <span
@@ -1209,34 +1191,77 @@ export function InstancesPage({
                   ? 'PAUSED (STATE SAVED)'
                   : selectedVM.status}
               </span>
-              <span className="font-mono text-[11px] text-muted-foreground">
-                ({selectedVM.id})
-              </span>
-              <span className="border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
-                IP: {selectedVM.ip_address || 'unassigned'} · TAP:{' '}
-                {selectedVM.tap_device || '—'}
-              </span>
+              {selectedVM.protected && (
+                <span className="inline-flex items-center gap-1 border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-primary dark:text-[var(--accent-bright)]">
+                  <Shield className="h-2.5 w-2.5" />
+                  Protected
+                </span>
+              )}
+
+              {selectedVM.ip_address && (
+                <button
+                  type="button"
+                  onClick={() => copyText(selectedVM.ip_address)}
+                  title="Copy IP address"
+                  className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
+                >
+                  <span>{selectedVM.ip_address}</span>
+                  {copiedId === selectedVM.ip_address ? (
+                    <Check className="h-3 w-3 text-success" />
+                  ) : (
+                    <Copy className="h-3 w-3 text-muted-foreground" />
+                  )}
+                </button>
+              )}
+
+              {selectedVM.ip_address && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyText(selectedAccess.ssh || `ssh compute@${selectedVM.ip_address}`)
+                  }
+                  title="Copy SSH command"
+                  className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-muted-foreground hover:text-foreground hover:border-primary transition-colors"
+                >
+                  <span>
+                    {selectedAccess.ssh || `ssh compute@${selectedVM.ip_address}`}
+                  </span>
+                  <Copy className="h-3 w-3" />
+                </button>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
-              {/* Lifecycle Toolbar */}
               {selectedVM.status === 'running' ? (
                 <>
                   <button
                     type="button"
-                    onClick={() => onSnapshot(selectedVM)}
-                    className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-warning hover:text-warning transition-colors"
-                  >
-                    <Pause className="h-3 w-3" />
-                    <span>Pause</span>
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => setStopConfirmTargets([selectedVM])}
-                    className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-warning hover:text-warning transition-colors"
+                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-warning hover:text-warning transition-colors"
                   >
                     <Square className="h-3 w-3" />
                     <span>Stop</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={restartingId === selectedVM.id}
+                    onClick={() => void handleRestartVM(selectedVM)}
+                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-primary transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    <span>
+                      {restartingId === selectedVM.id ? 'Restarting…' : 'Restart'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      openSSHTerminalWindow(selectedVM.id, selectedVM.name, terminalUser)
+                    }
+                    className="inline-flex h-7 items-center gap-1.5 bg-primary px-2.5 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    <span>Pop Out Terminal</span>
                   </button>
                 </>
               ) : selectedVM.status === 'paused' ? (
@@ -1244,7 +1269,7 @@ export function InstancesPage({
                   <button
                     type="button"
                     onClick={() => onResume(selectedVM)}
-                    className="flex h-7 items-center gap-1 border border-success/40 bg-success/10 px-2.5 text-[11px] font-medium text-success hover:bg-success/20 transition-colors"
+                    className="inline-flex h-7 items-center gap-1.5 border border-success/40 bg-success/10 px-2.5 text-[11.5px] font-medium text-success hover:bg-success/20 transition-colors"
                   >
                     <RotateCcw className="h-3 w-3" />
                     <span>Resume</span>
@@ -1252,7 +1277,7 @@ export function InstancesPage({
                   <button
                     type="button"
                     onClick={() => setStopConfirmTargets([selectedVM])}
-                    className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-warning hover:text-warning transition-colors"
+                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-warning hover:text-warning transition-colors"
                   >
                     <Square className="h-3 w-3" />
                     <span>Stop</span>
@@ -1262,626 +1287,444 @@ export function InstancesPage({
                 <button
                   type="button"
                   onClick={() => onRun(selectedVM)}
-                  className="flex h-7 items-center gap-1 border border-success/40 bg-success/10 px-2.5 text-[11px] font-medium text-success hover:bg-success/20 transition-colors"
+                  className="inline-flex h-7 items-center gap-1.5 bg-primary px-3 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                 >
                   <Play className="h-3 w-3" />
                   <span>Start</span>
                 </button>
               )}
 
-              <button
-                type="button"
-                onClick={() => setSnapshotTarget(selectedVM)}
-                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-[#263fa9] transition-colors"
-              >
-                <Camera className="h-3 w-3" />
-                <span>Snapshot</span>
-              </button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-primary transition-colors"
+                  >
+                    <span>More</span>
+                    <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem onSelect={() => setSnapshotTarget(selectedVM)}>
+                    <Camera className="h-3.5 w-3.5" />
+                    Snapshot
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setCloneTarget(selectedVM)}>
+                    <Copy className="h-3.5 w-3.5" />
+                    Clone
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openResizeModal(selectedVM)}>
+                    <Scaling className="h-3.5 w-3.5" />
+                    Resize
+                  </DropdownMenuItem>
+                  {selectedVM.status === 'running' && (
+                    <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
+                      <Pause className="h-3.5 w-3.5" />
+                      Pause &amp; Save State
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem
+                    onSelect={() => void toggleProtection(selectedVM)}
+                  >
+                    <Shield className="h-3.5 w-3.5" />
+                    {selectedVM.protected ? 'Unprotect' : 'Protect'}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => onInspect(selectedVM)}>
+                    <Server className="h-3.5 w-3.5" />
+                    JSON Spec
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={selectedVM.protected}
+                    onSelect={() => onDelete(selectedVM)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {selectedVM.protected ? 'Delete (protected)' : 'Delete'}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
 
-              <button
-                type="button"
-                onClick={() => setCloneTarget(selectedVM)}
-                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-[#263fa9] transition-colors"
-              >
-                <Copy className="h-3 w-3" />
-                <span>Replicate</span>
-              </button>
-
-              <span className="mx-0.5 h-4 w-px bg-border" />
-
-              <button
-                type="button"
-                onClick={() => onConsole(selectedVM)}
-                className="flex h-7 items-center gap-1.5 bg-[#263fa9] px-2.5 text-[11px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
-              >
-                <Terminal className="h-3 w-3" />
-                <span>Open Full Console</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onInspect(selectedVM)}
-                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:bg-muted/50"
-              >
-                <span>JSON Spec</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void toggleProtection(selectedVM)}
-                className={cn(
-                  'flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] transition-colors',
-                  selectedVM.protected
-                    ? 'border-[#5e7ff5]/50 text-[#5e7ff5] hover:bg-[#5e7ff5]/10'
-                    : 'text-foreground hover:bg-muted/50',
-                )}
-                title={selectedVM.protected ? 'Unprotect sandbox' : 'Protect sandbox against deletion'}
-              >
-                <Shield className="h-3 w-3" />
-                <span>{selectedVM.protected ? 'Protected' : 'Protect'}</span>
-              </button>
               <button
                 type="button"
                 onClick={() => setSelectedVMId(null)}
                 className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-foreground"
-                title="Close inspector"
+                title="Close detail panel"
+                aria-label="Close detail panel"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
 
-          {/* Inspector Tabs */}
-          <div className="flex overflow-x-auto border-b border-border bg-background px-4">
-            {(
-              [
-                { id: 'overview', label: 'Overview & Telemetry' },
-                { id: 'exec', label: 'Exec Runner' },
-                { id: 'files', label: 'Filesystem' },
-                { id: 'processes', label: 'Processes' },
-                { id: 'network', label: 'Network & Ports' },
-                { id: 'snapshots', label: 'Snapshots' },
-                { id: 'events', label: 'Audit Trail' },
-              ] as Array<{ id: DeepDiveTab; label: string }>
-            ).map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setDeepDiveTab(t.id)}
-                className={cn(
-                  'border-b-2 px-3 py-2 text-[12px] transition-colors whitespace-nowrap',
-                  deepDiveTab === t.id
-                    ? 'border-[#263fa9] text-foreground font-medium'
-                    : 'border-transparent text-muted-foreground hover:text-foreground',
+          {/* Embedded Pure Interactive SSH Terminal */}
+          <div className="border-b border-border">
+            {selectedVM.status === 'running' ? (
+              <div>
+                <div className="flex items-center justify-between border-b border-border bg-muted/15 px-4 py-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[11px] text-muted-foreground">
+                      Terminal User
+                    </span>
+                    <div className="inline-flex border border-border bg-background">
+                      {(['compute', 'root'] as const).map((u) => (
+                        <button
+                          key={u}
+                          type="button"
+                          onClick={() => setTerminalUser(u)}
+                          className={cn(
+                            'px-2 py-0.5 font-mono text-[11px] transition-colors',
+                            terminalUser === u
+                              ? 'bg-primary text-primary-foreground font-medium'
+                              : 'text-muted-foreground hover:text-foreground',
+                          )}
+                        >
+                          {u}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => terminalRef.current?.reconnect()}
+                      className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      <span>Reconnect</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        openSSHTerminalWindow(
+                          selectedVM.id,
+                          selectedVM.name,
+                          terminalUser,
+                        )
+                      }
+                      className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      <span>Pop Out</span>
+                    </button>
+                  </div>
+                </div>
+                <div className="h-[360px] w-full bg-[#0a0a0a]">
+                  <SSHTerminal
+                    ref={terminalRef}
+                    vmId={selectedVM.id}
+                    user={terminalUser}
+                    raw
+                    autoFocus={false}
+                    className="h-full w-full"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-3 bg-muted/10 px-4 py-12 text-center">
+                <Terminal className="h-6 w-6 text-muted-foreground" />
+                <div className="space-y-1">
+                  <p className="text-[13px] font-medium text-foreground">
+                    Sandbox is {selectedVM.status}
+                  </p>
+                  <p className="text-[11.5px] text-muted-foreground">
+                    {selectedVM.status === 'paused'
+                      ? 'Resume the saved state to open an interactive shell.'
+                      : 'Start the sandbox to open an interactive SSH terminal.'}
+                  </p>
+                </div>
+                {selectedVM.status === 'paused' ? (
+                  <button
+                    type="button"
+                    onClick={() => onResume(selectedVM)}
+                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Resume Sandbox</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => onRun(selectedVM)}
+                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+                  >
+                    <Play className="h-3.5 w-3.5" />
+                    <span>Start Sandbox</span>
+                  </button>
                 )}
-              >
-                {t.label}
-              </button>
-            ))}
+              </div>
+            )}
           </div>
 
-          <div className="p-4">
-            {deepDiveTab === 'overview' && (
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-                <div className="border border-border p-3 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>Compute Spec</span>
-                    <Cpu className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="font-mono text-[15px] font-medium text-foreground">
-                    {selectedVM.vcpus} vCPU · {formatMemory(selectedVM.memory_mb)}
-                  </div>
-                  <div className="font-mono text-[11px] text-muted-foreground">
-                    PID: {selectedVM.pid || 'not running'}
-                  </div>
-                </div>
-
-                <div className="border border-border p-3 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>Network Lease</span>
-                    <Activity className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="font-mono text-[15px] font-medium text-foreground">
-                    {selectedVM.ip_address || '—'}
-                  </div>
-                  <div className="font-mono text-[11px] text-muted-foreground">
-                    MAC: {selectedVM.mac_address} · {selectedVM.tap_device}
-                  </div>
-                </div>
-
-                <div className="border border-border p-3 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>Rootfs & Overlay</span>
-                    <HardDrive className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="truncate font-mono text-[12px] font-medium text-foreground">
-                    {selectedVM.rootfs_path}
-                  </div>
-                  <div className="truncate font-mono text-[11px] text-muted-foreground">
-                    Disk: {selectedVM.disk_path}
-                  </div>
-                </div>
-
-                <div className="border border-border p-3 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>Lifecycle</span>
-                    <Server className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="font-mono text-[12px] font-medium text-foreground">
-                    Created {formatTimestamp(selectedVM.created_at)}
-                  </div>
-                  <div className="font-mono text-[11px] text-muted-foreground">
-                    Status: {selectedVM.status}
-                  </div>
-                </div>
-
-                <div className="border border-border p-3 space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>Access</span>
-                    <Terminal className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="flex items-center gap-1 font-mono text-[12px] font-medium text-foreground">
-                    <span className="min-w-0 flex-1 truncate" title={selectedAccess.ssh}>
-                      {selectedAccess.ssh || 'No SSH target yet'}
-                    </span>
-                    {selectedAccess.ssh ? (
-                      <CopyButton
-                        value={selectedAccess.ssh}
-                        label="Copy SSH command"
-                        className="h-5 w-5 shrink-0"
-                      />
-                    ) : null}
-                  </div>
-                  <div className="flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
-                    {selectedAccess.url ? (
-                      <>
-                        <a
-                          href={selectedAccess.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="min-w-0 flex-1 truncate text-[color:var(--link)] hover:underline"
-                          title={selectedAccess.url}
-                        >
-                          {selectedAccess.url}
-                        </a>
-                        <CopyButton
-                          value={selectedAccess.url}
-                          label="Copy URL"
-                          className="h-5 w-5 shrink-0"
-                        />
-                      </>
-                    ) : (
-                      <span className="min-w-0 flex-1 truncate" title={selectedAccess.urlNote}>
-                        No HTTP URL — see JSON Spec for the reason
-                      </span>
-                    )}
-                  </div>
-                </div>
+          {/* Focused Resource & Connectivity Cards */}
+          <div className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-3">
+            {/* Card 1: Compute Specs */}
+            <div className="border border-border bg-background p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[12px] font-medium text-foreground">
+                  Compute Specs
+                </span>
+                <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
               </div>
-            )}
+              <div className="grid grid-cols-2 gap-y-2 font-mono text-[11.5px]">
+                <span className="text-muted-foreground">vCPUs</span>
+                <span className="text-right text-foreground">
+                  {selectedVM.vcpus} vCPU
+                </span>
+                <span className="text-muted-foreground">Memory</span>
+                <span className="text-right text-foreground">
+                  {formatMemory(selectedVM.memory_mb)}
+                </span>
+                <span className="text-muted-foreground">Disk</span>
+                <span className="text-right text-foreground">
+                  {Math.max(
+                    1,
+                    Math.round((selectedVM.disk_mb || DEFAULT_DISK_MB) / 1024),
+                  )}{' '}
+                  GB
+                </span>
+                <span className="text-muted-foreground">OS Image</span>
+                <span className="text-right text-foreground">Ubuntu 24.04 LTS</span>
+                <span className="text-muted-foreground">Created</span>
+                <span className="text-right text-muted-foreground">
+                  {formatRelativeTime(selectedVM.created_at)}
+                </span>
+              </div>
+            </div>
 
-            {deepDiveTab === 'exec' && (
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[12px] text-muted-foreground">
-                    $
-                  </span>
-                  <input
-                    type="text"
-                    value={execCommand}
-                    onChange={(e) => setExecCommand(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void handleRunExec();
-                    }}
-                    placeholder="Enter shell command to run inside microVM…"
-                    className="h-8 flex-1 border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    disabled={execRunning || selectedVM.status !== 'running'}
-                    onClick={() => void handleRunExec()}
-                    className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180] disabled:opacity-50"
-                  >
-                    {execRunning ? 'Running…' : 'Execute via SSH'}
-                  </button>
+            {/* Card 2: Attached Volumes */}
+            <div className="border border-border bg-background p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[12px] font-medium text-foreground">
+                  Attached Volumes ({attachedVolumes.length})
+                </span>
+                <HardDrive className="h-3.5 w-3.5 text-muted-foreground" />
+              </div>
+
+              {volumesLoading && attachedVolumes.length === 0 ? (
+                <div className="font-mono text-[11px] text-muted-foreground">
+                  Loading volumes…
                 </div>
-                {execMeta && (
-                  <div className="flex items-center gap-4 font-mono text-[11px] text-muted-foreground">
-                    <span>
-                      Exit Code:{' '}
-                      <strong
-                        className={
-                          execMeta.exitCode === 0
-                            ? 'text-success'
-                            : 'text-destructive'
-                        }
+              ) : attachedVolumes.length === 0 ? (
+                <div className="text-[11.5px] text-muted-foreground">
+                  No block volumes attached.
+                </div>
+              ) : (
+                <div className="divide-y divide-border border border-border">
+                  {attachedVolumes.map((vol) => (
+                    <div
+                      key={vol.id}
+                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 font-mono text-[11px]"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate font-medium text-foreground">
+                          {vol.name}
+                        </div>
+                        <div className="text-[10px] text-muted-foreground">
+                          {vol.size_gb} GB · {vol.filesystem} · {vol.mount_point || '/mnt'}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleDetachVolume(vol)}
+                        className="inline-flex h-6 shrink-0 items-center gap-1 border border-border px-2 text-[10.5px] text-muted-foreground hover:border-warning hover:text-warning"
                       >
-                        {execMeta.exitCode}
-                      </strong>
-                    </span>
-                    <span>Duration: {execMeta.durationMs} ms</span>
-                  </div>
-                )}
-                <pre className="max-h-56 overflow-auto border border-border bg-[#060606] p-3 font-mono text-[11.5px] leading-relaxed text-[#fefefe]">
-                  {execOutput ||
-                    (selectedVM.status === 'running'
-                      ? 'Click "Execute via SSH" to run command on live guest.'
-                      : 'Start the sandbox to execute commands.')}
-                </pre>
-              </div>
-            )}
+                        <Unplug className="h-3 w-3" />
+                        <span>Detach</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-            {deepDiveTab === 'files' && (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <FolderOpen className="h-4 w-4 text-muted-foreground" />
+              {availableVolumes.length > 0 && (
+                <form
+                  onSubmit={(e) => void handleAttachVolume(e)}
+                  className="flex items-center gap-1.5 pt-1"
+                >
+                  <select
+                    aria-label="Attach volume"
+                    value={attachVolumeId}
+                    onChange={(e) => setAttachVolumeId(e.target.value)}
+                    className="h-7 flex-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground focus:border-primary focus:outline-none"
+                  >
+                    <option value="">Select available volume…</option>
+                    {availableVolumes.map((vol) => (
+                      <option key={vol.id} value={vol.id}>
+                        {vol.name} ({vol.size_gb} GB)
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="submit"
+                    disabled={!attachVolumeId}
+                    className="h-7 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50"
+                  >
+                    Attach
+                  </button>
+                </form>
+              )}
+            </div>
+
+            {/* Card 3: Port Forwards & Public Ingress */}
+            <div className="border border-border bg-background p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="text-[12px] font-medium text-foreground">
+                    Port Forwards &amp; Ingress
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAddForwardOpen((v) => !v)}
+                  className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 text-[10.5px] text-foreground hover:border-primary"
+                >
+                  <Plus className="h-3 w-3" />
+                  <span>Add</span>
+                </button>
+              </div>
+
+              {selectedAccess.url && (
+                <div className="flex items-center justify-between gap-2 border border-border bg-muted/20 px-2.5 py-1.5 font-mono text-[11px]">
+                  <a
+                    href={selectedAccess.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="truncate text-[color:var(--link)] hover:underline"
+                  >
+                    {selectedAccess.url}
+                  </a>
+                  <CopyButton
+                    value={selectedAccess.url}
+                    label="Copy ingress URL"
+                    className="h-4 w-4 shrink-0"
+                  />
+                </div>
+              )}
+
+              {forwardsLoading && vmPortForwards.length === 0 ? (
+                <div className="font-mono text-[11px] text-muted-foreground">
+                  Loading port forwards…
+                </div>
+              ) : vmPortForwards.length === 0 ? (
+                <div className="text-[11.5px] text-muted-foreground">
+                  No custom port forwards configured.
+                </div>
+              ) : (
+                <div className="divide-y divide-border border border-border">
+                  {vmPortForwards.map((pf) => (
+                    <div
+                      key={pf.id}
+                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 font-mono text-[11px]"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-foreground">
+                          :{pf.host_port} → :{pf.guest_port}{' '}
+                          <span className="text-[10px] text-muted-foreground">
+                            ({pf.protocol})
+                          </span>
+                        </div>
+                        {pf.public_url && (
+                          <div className="truncate text-[10px] text-[color:var(--link)]">
+                            {pf.public_url}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeletePortForward(pf)}
+                        aria-label={`Remove forward ${pf.host_port}`}
+                        className="flex h-6 w-6 shrink-0 items-center justify-center border border-border text-muted-foreground hover:border-destructive hover:text-destructive"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {addForwardOpen && (
+                <form
+                  onSubmit={(e) => void handleAddPortForward(e)}
+                  className="space-y-2 border border-border bg-muted/15 p-2.5"
+                >
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <div>
+                      <label className="block text-[10px] text-muted-foreground mb-0.5">
+                        Host Port
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={fwHostPort}
+                        onChange={(e) => setFwHostPort(e.target.value)}
+                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-muted-foreground mb-0.5">
+                        Guest Port
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={fwGuestPort}
+                        onChange={(e) => setFwGuestPort(e.target.value)}
+                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-muted-foreground mb-0.5">
+                        Protocol
+                      </label>
+                      <select
+                        value={fwProtocol}
+                        onChange={(e) =>
+                          setFwProtocol(e.target.value as 'TCP' | 'HTTP/HTTPS')
+                        }
+                        className="h-7 w-full border border-border bg-background px-1.5 font-mono text-[11px]"
+                      >
+                        <option value="TCP">TCP</option>
+                        <option value="HTTP/HTTPS">HTTP</option>
+                      </select>
+                    </div>
+                  </div>
+                  {fwProtocol === 'HTTP/HTTPS' && (
                     <input
                       type="text"
-                      value={currentDir}
-                      onChange={(e) => setCurrentDir(e.target.value)}
-                      className="h-7 w-64 border border-border bg-background px-2 font-mono text-[12px] text-foreground"
+                      value={fwSubdomain}
+                      onChange={(e) => setFwSubdomain(e.target.value)}
+                      placeholder="Optional subdomain (e.g. app)"
+                      className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
                     />
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectedVM.status === 'running') {
-                        void fetchFiles(selectedVM.id, currentDir);
-                      }
-                    }}
-                    className="flex h-7 items-center gap-1 border border-border px-2.5 text-[11px] text-foreground hover:bg-muted/50"
-                  >
-                    <RefreshCw className="h-3 w-3" />
-                    <span>Refresh</span>
-                  </button>
-                </div>
-                {selectedVM.status !== 'running' ? (
-                  <p className="text-[12px] text-muted-foreground">
-                    Sandbox must be running to browse guest filesystem.
-                  </p>
-                ) : filesLoading && files.length === 0 ? (
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    Reading guest directory {currentDir}…
-                  </p>
-                ) : !filesLoading && files.length === 0 ? (
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    No files found in {currentDir}.
-                  </p>
-                ) : (
-                  <div className="max-h-48 overflow-y-auto border border-border divide-y divide-border font-mono text-[11.5px]">
-                    {files.map((f) => (
-                      <div
-                        key={f.path}
-                        onClick={() => {
-                          if (f.is_dir) setCurrentDir(f.path);
-                        }}
-                        className={cn(
-                          'flex items-center justify-between px-3 py-1.5',
-                          f.is_dir && 'cursor-pointer hover:bg-muted/40',
-                        )}
-                      >
-                        <span className="text-foreground">
-                          {f.is_dir ? `📁 ${f.name}/` : `📄 ${f.name}`}
-                        </span>
-                        <span className="text-muted-foreground">
-                          {f.is_dir ? 'DIR' : `${f.size} B`}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {deepDiveTab === 'processes' && (
-              <div className="space-y-2">
-                {selectedVM.status !== 'running' ? (
-                  <p className="text-[12px] text-muted-foreground">
-                    Sandbox must be running to inspect live guest processes.
-                  </p>
-                ) : processesLoading && processes.length === 0 ? (
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    Querying guest process table…
-                  </p>
-                ) : !processesLoading && processes.length === 0 ? (
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    No process entries returned.
-                  </p>
-                ) : (
-                  <div className="max-h-48 overflow-y-auto border border-border">
-                    <table className="w-full text-left font-mono text-[11px]">
-                      <thead>
-                        <tr className="border-b border-border bg-muted/30 text-muted-foreground">
-                          <th className="py-1.5 px-2.5">PID</th>
-                          <th className="py-1.5 px-2.5">USER</th>
-                          <th className="py-1.5 px-2.5">CPU%</th>
-                          <th className="py-1.5 px-2.5">MEM%</th>
-                          <th className="py-1.5 px-2.5">COMMAND</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-border">
-                        {processes.map((proc) => (
-                          <tr key={proc.pid}>
-                            <td className="py-1 px-2.5 text-foreground">
-                              {proc.pid}
-                            </td>
-                            <td className="py-1 px-2.5 text-muted-foreground">
-                              {proc.user}
-                            </td>
-                            <td className="py-1 px-2.5 text-foreground">
-                              {proc.cpu.toFixed(1)}%
-                            </td>
-                            <td className="py-1 px-2.5 text-foreground">
-                              {proc.memory.toFixed(1)}%
-                            </td>
-                            <td className="py-1 px-2.5 text-muted-foreground truncate max-w-md">
-                              {proc.command} {proc.args}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {deepDiveTab === 'network' && (
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4 font-mono text-[12px]">
-                <div className="border border-border p-3 space-y-1">
-                  <div className="text-[11px] text-muted-foreground">
-                    Internal Bridge IP
-                  </div>
-                  <div className="text-foreground font-medium">
-                    {selectedVM.ip_address || '—'}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    TAP Interface: {selectedVM.tap_device}
-                  </div>
-                </div>
-                <div className="border border-border p-3 space-y-1">
-                  <div className="text-[11px] text-muted-foreground">
-                    Reachability & Gateway
-                  </div>
-                  <div className="text-foreground font-medium">
-                    {netInspect
-                      ? `${netInspect.connectivity} (GW ${netInspect.gateway})`
-                      : netInspectLoading
-                        ? 'Probing…'
-                        : 'Bridge NAT Active'}
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">
-                    MAC: {selectedVM.mac_address}
-                  </div>
-                </div>
-                <div className="border border-border p-3 space-y-1">
-                  <div className="text-[11px] text-muted-foreground">
-                    Public Routable IP
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-foreground">
-                      {selectedVM.public_ip ||
-                        (selectedVM.public_ip_enabled
-                          ? 'NAT Egress Enabled'
-                          : 'Disabled')}
-                    </span>
+                  )}
+                  <div className="flex justify-end gap-1.5">
                     <button
                       type="button"
-                      onClick={() => {
-                        void api
-                          .setVMPublicIP(
-                            selectedVM.id,
-                            !selectedVM.public_ip_enabled,
-                          )
-                          .then(() =>
-                            toast.success('Updated public IP routing'),
-                          )
-                          .catch((err) => toast.error(errorMessage(err)));
-                      }}
-                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                      onClick={() => setAddForwardOpen(false)}
+                      className="h-6.5 border border-border px-2 text-[11px] text-muted-foreground"
                     >
-                      Toggle
+                      Cancel
                     </button>
-                  </div>
-                </div>
-                <div className="border border-border p-3 space-y-1">
-                  <div className="text-[11px] text-muted-foreground">
-                    Sandbox-to-Sandbox Network
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-foreground">
-                      {(selectedVM.network_isolation || 'account') === 'isolated'
-                        ? 'Isolated (own sandbox only)'
-                        : 'Account (all account sandboxes)'}
-                    </span>
                     <button
-                      type="button"
-                      onClick={() => {
-                        const nextMode =
-                          (selectedVM.network_isolation || 'account') === 'isolated'
-                            ? 'account'
-                            : 'isolated';
-                        void api
-                          .setVMNetworkIsolation(selectedVM.id, nextMode)
-                          .then(() =>
-                            toast.success(
-                              nextMode === 'isolated'
-                                ? 'Sandbox isolated on its own network'
-                                : 'Sandbox can communicate with account sandboxes',
-                            ),
-                          )
-                          .catch((err) => toast.error(errorMessage(err)));
-                      }}
-                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9] shrink-0"
+                      type="submit"
+                      className="h-6.5 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
                     >
-                      {(selectedVM.network_isolation || 'account') === 'isolated'
-                        ? 'Allow Account'
-                        : 'Isolate'}
+                      Add Forward
                     </button>
                   </div>
-                </div>
-              </div>
-            )}
-
-            {deepDiveTab === 'snapshots' && (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-4 border border-border p-3">
-                  <div className="space-y-1">
-                    <div className="text-[12.5px] font-medium text-foreground">
-                      Memory &amp; Disk State Snapshot
-                    </div>
-                    <div className="font-mono text-[11px] text-muted-foreground">
-                      {selectedVM.snapshot_path
-                        ? `Snapshot file: ${selectedVM.snapshot_path}`
-                        : 'No memory state checkpoint saved yet.'}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setSnapshotTarget(selectedVM)}
-                      className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
-                    >
-                      <Camera className="h-3.5 w-3.5" />
-                      <span>Create Snapshot</span>
-                    </button>
-                    {selectedVM.status === 'running' && (
-                      <button
-                        type="button"
-                        onClick={() => onSnapshot(selectedVM)}
-                        className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-warning hover:text-warning"
-                      >
-                        <Pause className="h-3.5 w-3.5" />
-                        <span>Pause &amp; Save State</span>
-                      </button>
-                    )}
-                    {selectedVM.status === 'paused' && (
-                      <button
-                        type="button"
-                        onClick={() => onResume(selectedVM)}
-                        className="inline-flex h-8 items-center gap-1.5 bg-success px-3 text-[12px] font-medium text-[#fefefe]"
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        <span>Resume MicroVM</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {(() => {
-                  const matchingSnapshots = vmTemplates.filter(
-                    (tpl) =>
-                      tpl.source_vm_id === selectedVM.id ||
-                      (selectedVM.internal_id &&
-                        tpl.source_vm_id === selectedVM.internal_id) ||
-                      tpl.source_vm_id === selectedVM.name,
-                  );
-
-                  if (vmTemplatesLoading && matchingSnapshots.length === 0) {
-                    return (
-                      <div className="border border-border p-3 font-mono text-[11.5px] text-muted-foreground">
-                        Loading saved snapshots for {selectedVM.name}…
-                      </div>
-                    );
-                  }
-
-                  if (matchingSnapshots.length === 0) {
-                    return (
-                      <div className="border border-border p-3 text-[12px] text-muted-foreground">
-                        No reusable snapshots created from {selectedVM.name} yet. Click
-                        &ldquo;Create Snapshot&rdquo; to capture a reusable template.
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div className="border border-border">
-                      <div className="border-b border-border bg-muted/20 px-3 py-2 text-[11px] font-medium text-muted-foreground">
-                        Saved Snapshots ({matchingSnapshots.length})
-                      </div>
-                      <div className="divide-y divide-border">
-                        {matchingSnapshots.map((tpl) => (
-                          <div
-                            key={tpl.id}
-                            className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-[12px]"
-                          >
-                            <div className="min-w-0">
-                              <div className="font-mono font-medium text-foreground">
-                                {tpl.name}
-                              </div>
-                              <div className="font-mono text-[10.5px] text-muted-foreground truncate">
-                                {tpl.vcpus} vCPU · {formatMemory(tpl.memory_mb)} · Created{' '}
-                                {formatRelativeTime(tpl.created_at)}
-                                {tpl.description ? ` · ${tpl.description}` : ''}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => handleSpawnFromSnapshot(tpl)}
-                                className="inline-flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
-                              >
-                                <Play className="h-3 w-3 fill-current" />
-                                <span>Spawn Sandbox</span>
-                              </button>
-                              <button
-                                type="button"
-                                aria-label={`Delete snapshot ${tpl.name}`}
-                                onClick={() => {
-                                  void api
-                                    .deleteTemplate(tpl.id)
-                                    .then(() => {
-                                      toast.success(`Deleted snapshot ${tpl.name}`);
-                                      void fetchTemplates();
-                                    })
-                                    .catch((err) => toast.error(errorMessage(err)));
-                                }}
-                                className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-destructive"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
-
-            {deepDiveTab === 'events' && (
-              <div className="max-h-48 overflow-y-auto border border-border divide-y divide-border font-mono text-[11px]">
-                {events.filter((e) => e.target.includes(selectedVM.name) || e.target.includes(selectedVM.id))
-                  .length === 0 ? (
-                  <div className="p-3 text-muted-foreground">
-                    Sandbox created at {formatTimestamp(selectedVM.created_at)}.
-                  </div>
-                ) : (
-                  events
-                    .filter(
-                      (e) =>
-                        e.target.includes(selectedVM.name) ||
-                        e.target.includes(selectedVM.id),
-                    )
-                    .map((ev) => (
-                      <div
-                        key={ev.id}
-                        className="flex items-center justify-between px-3 py-1.5"
-                      >
-                        <span className="text-foreground">{ev.event}</span>
-                        <span className="text-muted-foreground">
-                          {formatTimestamp(ev.timestamp)}
-                        </span>
-                      </div>
-                    ))
-                )}
-              </div>
-            )}
+                </form>
+              )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Critical action confirmation: stop one or many running sandboxes */}
+      {/* Stop confirmation dialog */}
       <AlertDialog
         open={stopConfirmTargets !== null}
         onOpenChange={(open) => !open && setStopConfirmTargets(null)}
@@ -1940,6 +1783,127 @@ export function InstancesPage({
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Resize Sandbox Modal (provisions resized clone) */}
+      {resizeTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setResizeTarget(null)}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => void handleResizeSubmit(e)}
+            className="w-full max-w-md border border-border bg-background p-5 space-y-4 text-foreground"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Scaling className="h-4 w-4 text-primary" />
+                <h2 className="text-[15px] font-medium">
+                  Resize {resizeTarget.name}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setResizeTarget(null)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="text-[11.5px] text-muted-foreground">
+              Provisions a resized sandbox from {resizeTarget.name}&apos;s disk state
+              with updated vCPU, memory, or disk capacity.
+            </p>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  New Sandbox Name
+                </label>
+                <input
+                  type="text"
+                  value={resizeName}
+                  onChange={(e) => setResizeName(e.target.value)}
+                  required
+                  className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px]"
+                />
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    vCPUs
+                  </label>
+                  <select
+                    value={resizeVcpus}
+                    onChange={(e) => setResizeVcpus(Number(e.target.value))}
+                    className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px]"
+                  >
+                    {[1, 2, 4, 8, 16].map((c) => (
+                      <option key={c} value={c}>
+                        {c} vCPU
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Memory
+                  </label>
+                  <select
+                    value={resizeMemoryMb}
+                    onChange={(e) => setResizeMemoryMb(Number(e.target.value))}
+                    className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px]"
+                  >
+                    {[512, 1024, 2048, 4096, 8192, 16384, 32768].map((m) => (
+                      <option key={m} value={m}>
+                        {formatMemory(m)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Disk (GB)
+                  </label>
+                  <input
+                    type="number"
+                    min={10}
+                    max={500}
+                    value={resizeDiskGb}
+                    onChange={(e) => setResizeDiskGb(Number(e.target.value) || 20)}
+                    className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px]"
+                  />
+                </div>
+              </div>
+              <label className="flex items-center gap-2 text-[12px] text-muted-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={resizeAutoStart}
+                  onChange={(e) => setResizeAutoStart(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                <span>Start resized sandbox immediately</span>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setResizeTarget(null)}
+                className="h-8 border border-border px-3 text-[12px] text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="h-8 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+              >
+                Provision Resized
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <BulkDeleteVMDialog
         vms={selectedVMs}
         open={bulkDeleteOpen}
@@ -1965,10 +1929,7 @@ export function InstancesPage({
         vm={snapshotTarget}
         open={snapshotTarget !== null}
         onOpenChange={(open) => !open && setSnapshotTarget(null)}
-        onCreated={() => {
-          void fetchTemplates();
-          onRefresh?.();
-        }}
+        onCreated={() => onRefresh?.()}
       />
     </div>
   );

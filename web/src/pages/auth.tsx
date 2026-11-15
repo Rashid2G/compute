@@ -201,7 +201,7 @@ export function AuthPage({
                   className={cn(
                     'h-10 text-xs font-medium transition-colors',
                     mode === 'login'
-                      ? 'bg-background text-foreground border-b-2 border-b-[#263fa9]'
+                      ? 'bg-background text-foreground border-b-2 border-b-primary'
                       : 'text-muted-foreground hover:text-foreground',
                   )}
                 >
@@ -213,7 +213,7 @@ export function AuthPage({
                   className={cn(
                     'h-10 text-xs font-medium border-l border-border transition-colors',
                     mode === 'signup'
-                      ? 'bg-background text-foreground border-b-2 border-b-[#263fa9]'
+                      ? 'bg-background text-foreground border-b-2 border-b-primary'
                       : 'text-muted-foreground hover:text-foreground',
                   )}
                 >

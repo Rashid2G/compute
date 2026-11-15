@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
+	"github.com/Rashid2G/compute/internal/store/db"
 	"os"
 	"path/filepath"
 	"sync"

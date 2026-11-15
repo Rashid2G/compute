@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
+	"github.com/Rashid2G/compute/internal/config"
 )
 
 // startEdge launches the optional HTTP edge listener (default :80 while the

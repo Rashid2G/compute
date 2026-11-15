@@ -734,29 +734,6 @@ func TestStore_NewEntities(t *testing.T) {
 		t.Fatalf("DeleteAccessAPIKey failed: %v", err)
 	}
 
-	// 7. AgentProfiles
-	prof := &AgentProfile{
-		ID:          "prof-1",
-		Name:        "Claude Proxy",
-		Provider:    "Anthropic",
-		UpstreamURL: "https://api.anthropic.com/v1",
-		Status:      "active",
-	}
-	if err := store.SaveAgentProfile(ctx, prof); err != nil {
-		t.Fatalf("SaveAgentProfile failed: %v", err)
-	}
-	pGot, err := store.GetAgentProfile(ctx, "prof-1")
-	if err != nil || pGot == nil || pGot.Name != "Claude Proxy" {
-		t.Fatalf("unexpected agent profile: %+v", pGot)
-	}
-	profs, _ := store.ListAgentProfiles(ctx)
-	if len(profs) != 1 {
-		t.Fatalf("expected 1 profile, got %d", len(profs))
-	}
-	if err := store.DeleteAgentProfile(ctx, "prof-1"); err != nil {
-		t.Fatalf("DeleteAgentProfile failed: %v", err)
-	}
-
 	// 8. Environments
 	env := &EnvironmentProfile{
 		Name:               "base",

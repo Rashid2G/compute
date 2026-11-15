@@ -1,36 +1,29 @@
-import { useState } from 'react';
 import {
-  BookOpen,
-  Braces,
-  Building2,
-  ChevronDown,
   Cpu,
   Database,
-  ExternalLink,
+  Gauge,
   HardDrive,
-  Headphones,
-  KeyRound,
-  LayoutDashboard,
   List,
-  Moon,
-  Network,
-  Radio,
-  Sliders,
-  Sun,
-  Terminal,
-  Zap,
   Lock,
   LogOut,
+  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Settings,
+  SlidersHorizontal,
+  Sun,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
 
-import type { PageId } from '@/lib/navigation';
+import type { PageId, SettingsTabId } from '@/lib/navigation';
 import type { AuthUser, StatsResult, WorkerNodeRecord } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
   page: PageId;
   onNavigate: (page: PageId) => void;
+  onNavigateSettingsTab?: (tab: SettingsTabId) => void;
   stats: StatsResult | null;
   workers?: WorkerNodeRecord[];
   daemonOnline: boolean;
@@ -39,44 +32,37 @@ interface SidebarProps {
   onSetTheme?: (theme: 'light' | 'dark') => void;
   onOpenCommandPalette?: () => void;
   user?: AuthUser | null;
+  authEnabled?: boolean;
   onOpenLogin?: () => void;
   onLogout?: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
-const ORG_CONTEXTS = [
-  {
-    id: 'personal',
-    label: 'Personal',
-    scopeText: 'Personal workspace',
-    quotaText: 'Local daemon limits',
-  },
-  {
-    id: 'default-cluster',
-    label: 'Default KVM Cluster',
-    scopeText: 'Default KVM Cluster',
-    quotaText: 'Cluster worker pools',
-  },
-];
+function getUserInitials(name: string): string {
+  const parts = name.trim().split(/[\s._-]+/).filter(Boolean);
+  if (parts.length === 0) return 'AD';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+}
 
 export function Sidebar({
   page,
   onNavigate,
+  onNavigateSettingsTab,
   stats,
-  workers = [],
-  daemonOnline,
   theme,
   onToggleTheme,
-  onSetTheme,
   user,
+  authEnabled = true,
   onOpenLogin,
   onLogout,
+  collapsed = false,
+  onToggleCollapse,
 }: SidebarProps) {
-  const [selectedOrgId, setSelectedOrgId] = useState('personal');
-  const currentOrg =
-    ORG_CONTEXTS.find((o) => o.id === selectedOrgId) ?? ORG_CONTEXTS[0];
-
   const totalVMs = stats?.total_vms ?? 0;
   const runningVMs = stats?.running_vms ?? 0;
+  const isAdmin = !authEnabled || user?.role === 'admin';
 
   const navItems: Array<{
     id: PageId;
@@ -98,149 +84,128 @@ export function Sidebar({
         stats && stats.snapshotted_vms > 0 ? stats.snapshotted_vms : undefined,
     },
     {
-      id: 'environment',
-      label: 'Environment',
-      icon: Sliders,
-    },
-    {
-      id: 'access',
-      label: 'API keys',
-      icon: KeyRound,
-    },
-    {
-      id: 'events',
-      label: 'Webhooks & OTel',
-      icon: Radio,
-    },
-    {
-      id: 'api',
-      label: 'Agents & Proxying',
-      icon: Braces,
-    },
-    {
-      id: 'jobs',
-      label: 'CI on Compute VMs',
-      icon: Zap,
-    },
-    {
-      id: 'overview',
-      label: 'Overview',
-      icon: LayoutDashboard,
-    },
-    {
-      id: 'workers',
-      label: 'Worker Nodes',
-      icon: Cpu,
-    },
-    {
       id: 'storage',
-      label: 'Persistent Volumes',
+      label: 'Volumes',
       icon: HardDrive,
     },
     {
-      id: 'network',
-      label: 'Network & NAT',
-      icon: Network,
+      id: 'jobs',
+      label: 'CI Jobs',
+      icon: Zap,
     },
     {
-      id: 'console',
-      label: 'Console & SSH',
-      icon: Terminal,
+      id: 'workers',
+      label: 'Workers',
+      icon: Cpu,
     },
+    ...(isAdmin
+      ? [
+          {
+            id: 'resources' as PageId,
+            label: 'Resources',
+            icon: Gauge,
+          },
+        ]
+      : []),
     {
       id: 'settings',
-      label: 'Organization',
-      icon: Building2,
+      label: 'Settings',
+      icon: Settings,
     },
   ];
 
-  const handleLight = () => {
-    if (onSetTheme) onSetTheme('light');
-    else if (theme !== 'light') onToggleTheme();
-  };
+  const displayName = user?.display_name || user?.username || 'Administrator';
+  const roleLabel = user?.role || 'admin';
+  const subtitle = user?.email ? user.email : roleLabel;
+  const initials = getUserInitials(displayName);
 
-  const handleDark = () => {
-    if (onSetTheme) onSetTheme('dark');
-    else if (theme !== 'dark') onToggleTheme();
+  const openQuickSettings = () => {
+    if (onNavigateSettingsTab) {
+      onNavigateSettingsTab('appearance');
+    } else {
+      onNavigate('settings');
+    }
   };
 
   return (
-    <div className="flex h-full flex-col justify-between bg-background text-foreground select-none px-3.5 py-4">
-      <div className="space-y-3.5 overflow-y-auto">
-        {/* Top Brand Header */}
-        <div className="flex items-center justify-between px-0.5">
-          <button
-            type="button"
-            onClick={() => onNavigate('instances')}
-            className="flex items-center gap-2 text-left focus:outline-none group"
-          >
-            {/* Compute geometric mark */}
-            <svg
-              viewBox="0 0 32 32"
-              className="h-6 w-6 shrink-0 text-foreground"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden="true"
+    <div
+      className={cn(
+        'flex h-full flex-col justify-between bg-background text-foreground select-none py-4',
+        collapsed ? 'px-2' : 'px-3.5',
+      )}
+    >
+      <div className="space-y-4 overflow-y-auto">
+        {/* Clean Brand Header & Collapse Toggle */}
+        <div
+          className={cn(
+            'flex items-center border-b border-border pb-3',
+            collapsed ? 'justify-center' : 'justify-between px-0.5',
+          )}
+        >
+          {!collapsed && (
+            <button
+              type="button"
+              onClick={() => onNavigate('instances')}
+              className="flex items-center gap-2 text-left focus:outline-none group"
             >
-              <polygon points="16,4 27,10.5 27,21.5 16,28 5,21.5 5,10.5" />
-              <polyline points="5,10.5 16,17 27,10.5" />
-              <line x1="16" y1="17" x2="16" y2="28" />
-            </svg>
-            <span className="font-display text-[21px] font-medium tracking-tight text-foreground leading-none">
-              Compute
-            </span>
-          </button>
-        </div>
+              <svg
+                viewBox="0 0 32 32"
+                className="h-6 w-6 shrink-0 text-foreground"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden="true"
+              >
+                <polygon points="16,4 27,10.5 27,21.5 16,28 5,21.5 5,10.5" />
+                <polyline points="5,10.5 16,17 27,10.5" />
+                <line x1="16" y1="17" x2="16" y2="28" />
+              </svg>
+              <span className="font-display text-[20px] font-medium tracking-tight text-foreground leading-none">
+                Compute
+              </span>
+            </button>
+          )}
 
-        {/* Organization / Cluster Selector */}
-        <div className="space-y-2 border-b border-border pb-3">
-          <div className="relative">
-            <select
-              aria-label="Organization Context"
-              value={selectedOrgId}
-              onChange={(e) => setSelectedOrgId(e.target.value)}
-              className="h-8 w-full appearance-none border border-border bg-background px-2.5 pr-7 text-[12px] font-normal text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+          {onToggleCollapse ? (
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className="flex h-7 w-7 items-center justify-center border border-transparent text-muted-foreground hover:border-border hover:bg-muted/50 hover:text-foreground transition-colors"
             >
-              {ORG_CONTEXTS.map((org) => (
-                <option
-                  key={org.id}
-                  value={org.id}
-                  className="bg-background text-foreground"
-                >
-                  {org.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          </div>
-
-          <div className="space-y-0.5 px-0.5 text-[11px] leading-[1.4] text-muted-foreground">
-            <p>
-              Sandboxes run on{' '}
-              <span className="text-foreground font-medium">
-                {currentOrg.scopeText}
-              </span>
-              .
-            </p>
-            <p>
-              Quotas scoped to{' '}
-              <span className="text-foreground font-medium">
-                {currentOrg.quotaText}
-              </span>
-              .{' '}
+              {collapsed ? (
+                <PanelLeftOpen className="h-4 w-4" />
+              ) : (
+                <PanelLeftClose className="h-4 w-4" />
+              )}
+            </button>
+          ) : (
+            collapsed && (
               <button
                 type="button"
-                onClick={() => onNavigate('settings')}
-                className="underline underline-offset-2 text-muted-foreground hover:text-foreground"
+                onClick={() => onNavigate('instances')}
+                title="Compute"
+                className="flex items-center justify-center focus:outline-none"
               >
-                Configure
+                <svg
+                  viewBox="0 0 32 32"
+                  className="h-6 w-6 shrink-0 text-foreground"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  aria-hidden="true"
+                >
+                  <polygon points="16,4 27,10.5 27,21.5 16,28 5,21.5 5,10.5" />
+                  <polyline points="5,10.5 16,17 27,10.5" />
+                  <line x1="16" y1="17" x2="16" y2="28" />
+                </svg>
               </button>
-            </p>
-          </div>
+            )
+          )}
         </div>
 
-        {/* Primary Navigation List */}
+        {/* Streamlined Core Navigation List */}
         <nav className="space-y-0.5" aria-label="Main Navigation">
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -250,26 +215,34 @@ export function Sidebar({
                 key={item.id}
                 type="button"
                 onClick={() => onNavigate(item.id)}
+                title={collapsed ? item.label : undefined}
+                aria-label={item.label}
                 className={cn(
-                  'flex h-7 w-full items-center justify-between px-2 text-[12.5px] font-normal transition-colors',
+                  'flex h-8 w-full items-center text-[13px] font-normal transition-colors',
+                  collapsed ? 'justify-center px-1' : 'justify-between px-2.5',
                   active
                     ? 'compute-selected text-foreground font-medium'
                     : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
                 )}
               >
-                <span className="flex items-center gap-2.5 truncate">
+                <span
+                  className={cn(
+                    'flex items-center truncate',
+                    collapsed ? 'justify-center' : 'gap-2.5',
+                  )}
+                >
                   <Icon
                     className={cn(
-                      'h-3.5 w-3.5 shrink-0',
+                      'h-4 w-4 shrink-0',
                       active ? 'text-foreground' : 'text-[var(--icon-quiet)]',
                     )}
                   />
-                  <span className="truncate">{item.label}</span>
+                  {!collapsed && <span className="truncate">{item.label}</span>}
                 </span>
-                {item.count !== undefined && (
+                {!collapsed && item.count !== undefined && (
                   <span
                     className={cn(
-                      'font-mono text-[10.5px] tabular',
+                      'font-mono text-[11px] tabular',
                       active ? 'text-foreground/90' : 'text-muted-foreground',
                     )}
                   >
@@ -279,97 +252,139 @@ export function Sidebar({
               </button>
             );
           })}
-
-          <div className="space-y-0.5">
-            <button
-              type="button"
-              onClick={() => onNavigate('api')}
-              className="flex h-7 w-full items-center justify-between px-2 text-[12.5px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-            >
-              <span className="flex items-center gap-2.5">
-                <BookOpen className="h-3.5 w-3.5 text-[var(--icon-quiet)]" />
-                <span>Docs</span>
-              </span>
-              <ExternalLink className="h-3 w-3 text-muted-foreground/60" />
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('events')}
-              className="flex h-7 w-full items-center justify-between px-2 text-[12.5px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors"
-            >
-              <span className="flex items-center gap-2.5">
-                <Headphones className="h-3.5 w-3.5 text-[var(--icon-quiet)]" />
-                <span>Support</span>
-              </span>
-              <ExternalLink className="h-3 w-3 text-muted-foreground/60" />
-            </button>
-          </div>
         </nav>
       </div>
 
-      {/* User Session & Authentication Status */}
-      <div className="pt-2 border-t border-border mt-2">
-        {user ? (
-          <div className="flex items-center justify-between px-2 py-1.5 text-xs text-foreground bg-muted/40 border border-border">
-            <span className="flex items-center gap-2 truncate">
-              <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
-              <span className="truncate font-medium">{user.display_name || user.username}</span>
-            </span>
-            {onLogout && (
+      {/* Cohesive Footer User Box */}
+      <div className="pt-3 border-t border-border mt-3">
+        {user || !authEnabled ? (
+          collapsed ? (
+            <div className="flex flex-col items-center gap-1.5">
+              <div
+                title={`${displayName} (${roleLabel}${user?.email ? ` · ${user.email}` : ''})`}
+                className="flex h-8 w-8 items-center justify-center border border-border bg-muted/40 font-mono text-[11px] font-medium text-foreground"
+              >
+                {initials}
+              </div>
               <button
                 type="button"
-                onClick={onLogout}
-                title="Sign out"
-                className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                onClick={onToggleTheme}
+                title={
+                  theme === 'dark'
+                    ? 'Switch to Light mode'
+                    : 'Switch to Dark mode'
+                }
+                aria-label="Toggle theme"
+                className="flex h-7 w-7 items-center justify-center border border-border bg-background text-muted-foreground hover:text-foreground transition-colors"
               >
-                <LogOut className="h-3.5 w-3.5" />
+                {theme === 'dark' ? (
+                  <Sun className="h-3.5 w-3.5" />
+                ) : (
+                  <Moon className="h-3.5 w-3.5" />
+                )}
               </button>
-            )}
-          </div>
+              <button
+                type="button"
+                onClick={openQuickSettings}
+                title="Appearance & Settings"
+                aria-label="Open Settings"
+                className="flex h-7 w-7 items-center justify-center border border-border bg-background text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <SlidersHorizontal className="h-3.5 w-3.5" />
+              </button>
+              {user && onLogout && (
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  title="Sign out"
+                  aria-label="Sign out"
+                  className="flex h-7 w-7 items-center justify-center border border-border bg-background text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="border border-border bg-muted/30 p-2.5 space-y-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center border border-border bg-background font-mono text-[11px] font-medium text-foreground">
+                  {initials}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="truncate text-[12.5px] font-medium text-foreground">
+                      {displayName}
+                    </span>
+                    <span className="shrink-0 border border-border bg-background px-1 py-0.5 font-mono text-[9.5px] uppercase text-muted-foreground">
+                      {roleLabel}
+                    </span>
+                  </div>
+                  <div className="truncate font-mono text-[10.5px] text-muted-foreground">
+                    {subtitle}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-1 border-t border-border pt-2">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={onToggleTheme}
+                    title={
+                      theme === 'dark'
+                        ? 'Switch to Light mode'
+                        : 'Switch to Dark mode'
+                    }
+                    aria-label="Toggle theme"
+                    className="flex h-7 w-7 items-center justify-center border border-border bg-background text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {theme === 'dark' ? (
+                      <Sun className="h-3.5 w-3.5" />
+                    ) : (
+                      <Moon className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openQuickSettings}
+                    title="Appearance & Settings"
+                    aria-label="Open Settings"
+                    className="flex h-7 w-7 items-center justify-center border border-border bg-background text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <SlidersHorizontal className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                {user && onLogout && (
+                  <button
+                    type="button"
+                    onClick={onLogout}
+                    title="Sign out"
+                    aria-label="Sign out"
+                    className="flex h-7 items-center gap-1 border border-border bg-background px-2 text-[11px] text-muted-foreground hover:text-destructive transition-colors"
+                  >
+                    <LogOut className="h-3 w-3" />
+                    <span>Sign out</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )
         ) : (
           onOpenLogin && (
-            <button
-              type="button"
-              onClick={onOpenLogin}
-              className="flex h-8 w-full items-center justify-center gap-2 border border-border bg-background px-2 text-xs font-medium text-foreground hover:bg-muted transition-colors"
-            >
-              <Lock className="h-3.5 w-3.5 text-muted-foreground" />
-              <span>Sign in</span>
-            </button>
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={onOpenLogin}
+                title="Sign in"
+                className="flex h-8 w-full items-center justify-center gap-2 border border-border bg-background px-2 text-xs font-medium text-foreground hover:bg-muted transition-colors"
+              >
+                <Lock className="h-3.5 w-3.5 text-muted-foreground" />
+                {!collapsed && <span>Sign in</span>}
+              </button>
+            </div>
           )
         )}
-      </div>
-
-      {/* Bottom Segmented [ ☼ Light | ☾ Dark ] Switcher */}
-      <div className="pt-3">
-        <div className="grid grid-cols-2 border border-border bg-background h-8">
-          <button
-            type="button"
-            onClick={handleLight}
-            className={cn(
-              'flex items-center justify-center gap-1.5 text-[12px] transition-colors',
-              theme === 'light'
-                ? 'bg-[#f1f3f9] text-[#263fa9] font-medium'
-                : 'text-muted-foreground hover:text-foreground',
-            )}
-          >
-            <Sun className="h-3.5 w-3.5" />
-            <span>Light</span>
-          </button>
-          <button
-            type="button"
-            onClick={handleDark}
-            className={cn(
-              'flex items-center justify-center gap-1.5 text-[12px] transition-colors border-l border-border',
-              theme === 'dark'
-                ? 'bg-[#0f1634] text-[#fefefe] font-medium'
-                : 'text-muted-foreground hover:text-foreground',
-            )}
-          >
-            <Moon className="h-3.5 w-3.5" />
-            <span>Dark</span>
-          </button>
-        </div>
       </div>
     </div>
   );

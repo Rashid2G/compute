@@ -22,9 +22,9 @@ export default {
           DEFAULT: 'var(--foreground)',
           muted: 'var(--foreground-muted)',
         },
-        ocean: '#263fa9',
-        wash: '#fefefe',
-        deep: '#060606',
+        ember: '#d94e1f',
+        wash: '#fafaf9',
+        deep: '#0a0a0b',
         selected: {
           DEFAULT: 'var(--selected)',
           foreground: 'var(--selected-foreground)',
@@ -32,6 +32,7 @@ export default {
         primary: {
           DEFAULT: 'var(--primary)',
           foreground: 'var(--primary-foreground)',
+          hover: 'var(--primary-hover)',
         },
         secondary: {
           DEFAULT: 'var(--secondary)',

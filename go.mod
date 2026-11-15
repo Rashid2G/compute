@@ -1,4 +1,4 @@
-module github.com/Rashid2G/on-demand-vms
+module github.com/Rashid2G/compute
 
 go 1.26.0
 

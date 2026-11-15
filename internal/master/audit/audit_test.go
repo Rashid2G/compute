@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/master/pki"
 )
 
 func TestAuditLogger_HashChainAndVerification(t *testing.T) {

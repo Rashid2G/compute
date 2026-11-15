@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/network"
+	"github.com/Rashid2G/compute/internal/vm"
 )
 
 func TestDaemonClient(t *testing.T) {

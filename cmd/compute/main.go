@@ -24,11 +24,11 @@ import (
 	"github.com/coder/websocket"
 	"golang.org/x/term"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/gui"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
-	"github.com/Rashid2G/on-demand-vms/pkg/version"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/gui"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/api"
+	"github.com/Rashid2G/compute/pkg/version"
 )
 
 const defaultDaemonAddr = "127.0.0.1:18080"
@@ -1184,6 +1184,7 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 			Type:     "command",
 			PoolID:   *pool,
 			Priority: 10,
+			Source:   "cli",
 			Spec:     spec,
 		})
 		if err != nil {

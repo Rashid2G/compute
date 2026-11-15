@@ -37,20 +37,31 @@ fi
 say_ok "${ENV_FILE} present"
 
 printf '\n==> Compose interpolation\n'
-TEMP_ENV=0
-if [ ! -f .env ]; then
-    # Compose requires the service env_file to exist. Use the example values for
-    # validation exactly as a fresh install would after `cp .env.example .env`.
-    cp "${ENV_FILE}" .env
-    TEMP_ENV=1
-    trap 'if [ "${TEMP_ENV}" = "1" ]; then rm -f .env; fi' EXIT
-fi
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    # First verify out-of-the-box `docker compose up` with no .env file when none exists,
+    # or explicitly with /dev/null as env-file if a developer .env exists locally.
+    EMPTY_ENV="$(mktemp)"
+    trap 'rm -f "${EMPTY_ENV}"' EXIT
+    if docker compose --env-file "${EMPTY_ENV}" -f "${COMPOSE_FILE}" config --quiet; then
+        say_ok "docker compose config succeeded with zero .env overrides"
+    else
+        say_fail "docker compose config failed without .env"
+    fi
     if docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config --quiet; then
         say_ok "docker compose config succeeded with ${ENV_FILE}"
     else
         say_fail "docker compose config failed with ${ENV_FILE}"
     fi
+    # Empty COMPUTE_ADMIN_PASSWORD= (e.g. with COMPUTE_ADMIN_SECRET) must stay
+    # empty instead of falling back to "admin".
+    ADMIN_SECRET_ENV="$(mktemp)"
+    printf 'COMPUTE_ADMIN_PASSWORD=\nCOMPUTE_ADMIN_SECRET=test-secret\n' > "${ADMIN_SECRET_ENV}"
+    if docker compose --env-file "${ADMIN_SECRET_ENV}" -f "${COMPOSE_FILE}" config | grep -Eq 'COMPUTE_ADMIN_PASSWORD:[[:space:]]*""$'; then
+        say_ok "explicitly empty COMPUTE_ADMIN_PASSWORD= is preserved"
+    else
+        say_fail "explicitly empty COMPUTE_ADMIN_PASSWORD= was overwritten with a default"
+    fi
+    rm -f "${ADMIN_SECRET_ENV}"
     # The worker profile needs an enrollment token at runtime; make sure the
     # profile can at least be rendered when the token is provided.
     if COMPUTE_WORKER_TOKEN=test-token docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" --profile worker config --quiet; then
@@ -65,6 +76,7 @@ fi
 printf '\n==> Structural checks\n'
 if python3 -c 'import yaml' >/dev/null 2>&1; then
     if python3 - "${COMPOSE_FILE}" <<'PY'
+import re
 import sys
 import yaml
 
@@ -77,15 +89,27 @@ services = doc.get("services") or {}
 for name in ("compute-init", "computed"):
     if name not in services:
         problems.append(f"missing service {name}")
+for name, svc in services.items():
+    if isinstance(svc, dict) and svc.get("env_file"):
+        problems.append(f"{name} must not require env_file (.env should remain optional)")
 for name in ("computed", "compute-worker"):
     svc = services.get(name) or {}
     if svc.get("network_mode") != "host":
         problems.append(f"{name} must use network_mode: host")
-if (services.get("computed") or {}).get("privileged") is not True:
-    problems.append("computed must be privileged")
+for name in ("compute-init", "computed"):
+    if (services.get(name) or {}).get("privileged") is not True:
+        problems.append(f"{name} must be privileged")
 init = services.get("compute-init") or {}
 if not init.get("command"):
     problems.append("compute-init must override command to init --images")
+computed_env = (services.get("computed") or {}).get("environment") or {}
+if computed_env.get("COMPUTE_ADMIN_PASSWORD") != "${COMPUTE_ADMIN_PASSWORD-admin}":
+    problems.append("computed COMPUTE_ADMIN_PASSWORD must use ${COMPUTE_ADMIN_PASSWORD-admin}")
+with open("internal/config/env.go", encoding="utf-8") as env_fh:
+    env_vars = set(re.findall(r'"(COMPUTE_[A-Z0-9_]+)"', env_fh.read()))
+missing_env = sorted(v for v in env_vars if v not in computed_env)
+if missing_env:
+    problems.append(f"computed environment missing internal/config/env.go vars: {', '.join(missing_env)}")
 dep = (services.get("computed") or {}).get("depends_on") or {}
 if (dep.get("compute-init") or {}).get("condition") != "service_completed_successfully":
     problems.append("computed must wait for compute-init completion")
@@ -117,7 +141,7 @@ else
 fi
 
 printf '\n==> Shell syntax\n'
-for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/validate-compose.sh; do
+for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/build-rootfs-chroot.sh scripts/validate-compose.sh; do
     if [ -f "${script}" ] && bash -n "${script}"; then
         say_ok "bash -n ${script}"
     fi

@@ -22,64 +22,65 @@ Launch sub-second microVMs, **replicate (clone)** fleets with custom resource ov
 
 ## Quickstart (Docker Compose)
 
-Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 24+ (rootful), Compose v2.20+, and 4 GB RAM recommended (sandboxes default to 2 GB). Install Docker Engine and the Compose plugin first if `docker compose version` fails: <https://docs.docker.com/engine/install/>.
+**Host dependencies** (the daemon container bundles Firecracker, Jailer, and image-building tools, so **you do NOT need `firecracker` installed on the host**):
 
-1. **Preflight & host preparation**:
+- Linux (`x86_64` or `arm64`) with `/dev/kvm` and cgroup v2
+- Rootful Docker Engine 24+ and Docker Compose v2.20+ (<https://docs.docker.com/engine/install/>)
+- Standard kernel networking support (`tun`, `bridge`, `br_netfilter`; `vhost_net` optional)
+- Outbound HTTPS on first run (to install the pinned Firecracker kernel and build the Ubuntu 24.04 rootfs automatically inside `compute-init`)
 
-   ```bash
-   ./scripts/preflight.sh
-   sudo ./scripts/host-prepare.sh
-   ```
-
-2. **Configure `.env`**:
-
-   ```bash
-   cp .env.example .env
-   chmod 600 .env
-   ```
-
-   The template binds the API to `127.0.0.1` and starts with local-only default
-   credentials. Before exposing the API on `0.0.0.0`, set strong administrator
-   credentials and keep public signup disabled:
-
-   ```dotenv
-   COMPUTE_BIND_ADDRESS=0.0.0.0
-   COMPUTE_AUTH_ENABLED=true
-   COMPUTE_SIGNUP_ENABLED=false
-   COMPUTE_ADMIN_USERNAME=admin
-   COMPUTE_ADMIN_EMAIL=admin@compute.local
-   COMPUTE_ADMIN_PASSWORD=replace-with-a-strong-password
-   COMPUTE_ADMIN_SECRET=replace-with-a-strong-secret
-   ```
-
-3. **Build the kernel and rootfs images** (if not using a prebuilt manifest):
-
-   ```bash
-   make build-images
-   # equivalent to:
-   # sudo ./scripts/build-kernel.sh ./data/images
-   # sudo ./scripts/build-rootfs.sh ./data/images 1024
-   ```
-
-   `build-kernel.sh` installs a pinned, checksummed Firecracker CI `vmlinux`
-   for the host architecture; `build-rootfs.sh` builds the Ubuntu 24.04 ext4
-   rootfs. Both commands are idempotent.
-
-4. **Start the stack**:
+1. **Start the stack** (no `.env` or manual image build required):
 
    ```bash
    docker compose up -d
    ```
 
-5. **Verify health & readiness**:
+   On first startup, `compute-init` automatically downloads and SHA-256-verifies the Firecracker Linux kernel (`vmlinux`), builds the Ubuntu 24.04 ext4 rootfs (`ubuntu-24.04.ext4`) inside the container, and generates the internal Ed25519 SSH key under `./data/images`. Subsequent restarts reuse those artifacts and boot in seconds.
+
+2. **Verify health & readiness**:
 
    ```bash
    curl -fsS http://127.0.0.1:18080/api/v1/health
    curl -fsS http://127.0.0.1:18080/api/v1/ready
    ```
 
-   Open the Web Dashboard at `http://127.0.0.1:18080/`. The optional `gui`
-   profile adds a second listener on `:8080`; it is disabled by default.
+   Open the Web Dashboard at `http://127.0.0.1:18080/` and sign in with the default loopback credentials (`admin` / `admin`). The optional `gui` profile adds a second listener on `:8080`; it is disabled by default.
+
+3. **Optional: host check & `.env` customization**
+
+   To audit host readiness ahead of time or customize ports, bind address, DNS, or credentials:
+
+   ```bash
+   ./scripts/preflight.sh
+   cp .env.example .env && chmod 600 .env
+   ```
+
+   > **Security note**: Before setting `COMPUTE_BIND_ADDRESS=0.0.0.0` (or any non-loopback address), set a strong `COMPUTE_ADMIN_PASSWORD` / `COMPUTE_ADMIN_SECRET` in `.env` and keep `COMPUTE_SIGNUP_ENABLED=false`. See [docs/install.md](docs/install.md) for production hardening.
+
+---
+
+## Pre-Built Binaries (GitHub Releases)
+
+Pre-compiled, standalone release binaries for Linux (`amd64` and `arm64`) with SHA-256 checksums are published with every tagged release on [GitHub Releases](https://github.com/Rashid2G/compute/releases).
+
+### Direct Download Links
+
+| Component | Architecture | Latest Download URL |
+| :--- | :--- | :--- |
+| **`compute` CLI** | `linux/amd64` | [`compute_1.0.0_linux_amd64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz) |
+| **`compute` CLI** | `linux/arm64` | [`compute_1.0.0_linux_arm64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_arm64.tar.gz) |
+| **`computed` Daemon** | `linux/amd64` | [`computed_1.0.0_linux_amd64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_amd64.tar.gz) |
+| **`computed` Daemon** | `linux/arm64` | [`computed_1.0.0_linux_arm64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_arm64.tar.gz) |
+| **Full Suite** | `linux/amd64` | [`compute-suite_1.0.0_linux_amd64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz) |
+| **Full Suite** | `linux/arm64` | [`compute-suite_1.0.0_linux_arm64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_arm64.tar.gz) |
+
+### Quick CLI Install
+
+```bash
+# Download and install compute CLI to /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+compute --version
+```
 
 ---
 

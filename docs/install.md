@@ -1,128 +1,120 @@
 # Install Compute on a fresh Linux host
 
 This is the supported installer path: a Linux host with Docker and `/dev/kvm`
-runs the control plane (`computed`) and its embedded web UI from Docker
-Compose, configured entirely through `.env`.
+runs the control plane (`computed`) and its embedded web UI directly with
+`docker compose up -d`. **No `.env` file, no host `firecracker` binary, and no
+manual image build commands are required.**
 
 The default install runs **only the daemon** on the host. Sandboxes are
-Firecracker microVMs created and supervised by that daemon. Multi-host workers,
-a separate GUI container, and Tailscale integration are opt-in profiles.
+Firecracker microVMs created and supervised by that daemon (the Firecracker and
+Jailer binaries are bundled inside the container image). Multi-host workers and
+a separate GUI container are opt-in profiles.
 
-## Requirements
+## Host Dependencies
 
-| Requirement | Details |
+| Dependency | Details |
 | --- | --- |
-| OS | Linux, x86_64 or arm64 |
-| Kernel | cgroup v2 unified hierarchy; KVM enabled (`/dev/kvm` read/write) |
-| Docker | Docker Engine 24+ (rootful) with the Compose v2 plugin (2.20+) |
-| Disk | 10 GB free minimum; base images plus VM disks need considerably more |
-| Memory | 4 GB recommended; sandboxes default to 2 GB RAM and are queued when host memory is insufficient |
-| Network | Host networking; the daemon creates the `mft3br0` bridge, TAP devices and NAT rules |
-| Privileges | The daemon container is `privileged` with `cgroup: host` and `/dev/kvm` |
+| OS | Linux, `x86_64` or `arm64` |
+| Virtualization | KVM enabled (`/dev/kvm` present; nested virtualization enabled on VM hosts) |
+| Kernel | cgroup v2 unified hierarchy (`/sys/fs/cgroup/cgroup.controllers`); `tun`, `bridge`, and `br_netfilter` modules (`vhost_net` optional) |
+| Docker | Docker Engine 24+ (**rootful**) with the Compose v2 plugin (2.20+) |
+| Firecracker | **Not required on host** — bundled inside the daemon/worker container image |
+| Disk | 10 GB free minimum; base images plus VM disks need additional sparse/disk headroom |
+| Memory | 4 GB recommended; sandboxes default to 2 GB RAM and queue when host memory is insufficient |
+| Privileges | `compute-init` and `computed` run `privileged` with `network_mode: host` and `cgroup: host` |
 
-Nested virtualization (a VM host such as Proxmox, VMware, or a cloud instance)
-must have nested KVM enabled. Check with:
+Verify KVM support on your host (especially inside a cloud VM, Proxmox, or VMware guest):
 
 ```bash
 ls -l /dev/kvm
 grep -E 'vmx|svm' /proc/cpuinfo
 ```
 
-## 1. Preflight
+## 1. Quickstart (`docker compose up -d`)
 
-From the repository checkout:
+From a fresh clone:
+
+```bash
+docker compose up -d
+```
+
+What happens automatically:
+
+1. Compose builds the container image from `Dockerfile.daemon` (includes `computed`, `compute`, `firecracker`, `jailer`, and rootfs tools).
+2. `compute-init` runs once (`COMPUTE_IMAGES_MODE=auto`):
+   - generates the internal SSH key at `./data/images/ssh/id_ed25519`
+   - downloads and SHA-256-verifies the pinned Firecracker CI kernel (`./data/images/vmlinux`)
+   - builds the Ubuntu 24.04 ext4 root filesystem (`./data/images/ubuntu-24.04.ext4`)
+3. `computed` starts on `127.0.0.1:18080`, configures the `mft3br0` bridge, NAT/forwarding rules, and `net.ipv4.ip_forward=1`, and mounts the embedded Web Dashboard.
+
+Watch progress during the initial bootstrap:
+
+```bash
+docker compose logs -f compute-init computed
+```
+
+## 2. Optional Preflight & Configuration (`.env`)
+
+If a pre-check is desired before starting (for instance on a custom kernel):
 
 ```bash
 ./scripts/preflight.sh
-```
-
-The script is read-only and checks the OS/architecture, Docker and Compose
-versions, rootful Docker, `/dev/kvm`, cgroup v2, kernel modules and sysctls,
-the host tools needed for `make build-images`, port availability, and disk
-space. It prints a fix for every failure.
-
-Apply the host settings it recommends (idempotent, does not touch your default
-network interface):
-
-```bash
+# Optional if kernel modules need loading ahead of time:
 sudo ./scripts/host-prepare.sh
 ```
 
-## 2. Configure
+Out of the box, no `.env` file is needed. The daemon binds to loopback
+(`127.0.0.1:18080`) with default administrator credentials (`admin` / `admin`).
+To customize settings or expose the API beyond loopback, create `.env`:
 
 ```bash
 cp .env.example .env
 chmod 600 .env
 ```
 
-The template defaults admin credentials to `"admin"` so the stack starts
-immediately once images are built (and stays bound to loopback). For
-production deployments, override with a strong password:
+For production or non-loopback deployments (`COMPUTE_BIND_ADDRESS=0.0.0.0`),
+always override the default credentials with strong random values
+(`openssl rand -base64 32`) — the daemon refuses to start with password
+`admin` on a non-loopback address:
 
 ```dotenv
+COMPUTE_BIND_ADDRESS=0.0.0.0
 COMPUTE_ADMIN_PASSWORD=replace-with-a-long-random-password
-# or a bootstrap secret instead of a password:
+# or a bootstrap secret instead of a password (leave COMPUTE_ADMIN_PASSWORD= empty):
+# COMPUTE_ADMIN_PASSWORD=
 # COMPUTE_ADMIN_SECRET=...
 ```
 
-Generate a production password with `openssl rand -base64 32`. `.env` is
-git-ignored; never commit it.
+`.env` is git-ignored; never commit it. See [configuration.md](configuration.md)
+for every variable.
 
-The API binds `127.0.0.1:18080` by default. Set
-`COMPUTE_BIND_ADDRESS=0.0.0.0` (or a specific host address) to expose it, and
-keep authentication enabled. See [configuration.md](configuration.md) for every
-variable.
-
-### Base images
+### Base images & offline/custom options
 
 `compute-init` bootstraps the kernel, root filesystem, and internal SSH key
 before the daemon starts. Select a mode with `COMPUTE_IMAGES_MODE`:
 
 | Mode | Behavior |
 | --- | --- |
+| `auto` (default) | If `COMPUTE_IMAGE_MANIFEST_URL` is set, behaves like `download`; otherwise installs the pinned Firecracker CI `vmlinux`, builds `ubuntu-24.04.ext4` via chroot inside `compute-init`, and creates the internal SSH key. Existing valid files are reused. |
 | `download` | Fetches the checksummed manifest at `COMPUTE_IMAGE_MANIFEST_URL`, verifies SHA-256, and installs the artifacts. |
 | `prebuilt` | Validates kernel/rootfs files already present under `COMPUTE_HOST_DATA_DIR/images`. |
-| `build` | Same as `prebuilt`, with messages pointing at the build scripts. This is the current default until release artifacts are published. |
+| `build` | Same as `prebuilt`, with remediation messages pointing at the manual build scripts. |
 | `none` | Skips validation; readiness reports the missing files. |
 
-To build images locally when no release manifest exists:
+Optional host-side scripts remain available if you prefer building images on the host (`make build-images`):
 
 ```bash
-# Kernel: downloads the pinned, checksummed Firecracker CI vmlinux.
 sudo ./scripts/build-kernel.sh ./data/images
-
-# Root filesystem: builds an Ubuntu 24.04 ext4 image.
-sudo ./scripts/build-rootfs.sh ./data/images 1024
+sudo ./scripts/build-rootfs.sh ./data/images 2048
 ```
 
-Or run both through `make build-images`. Both scripts are idempotent. On an
-air-gapped host, supply your own uncompressed ELF kernel with
-`COMPUTE_KERNEL_SRC=/path/to/vmlinux` (or set `COMPUTE_KERNEL_URL` together
-with `COMPUTE_KERNEL_SHA256`). Then keep `COMPUTE_IMAGES_MODE=build` (or
-`prebuilt`) and start Compose. The bootstrap is idempotent and safe to run on
+On an air-gapped host, supply a local uncompressed ELF kernel with
+`COMPUTE_KERNEL_SRC=/path/to/vmlinux` (or `COMPUTE_KERNEL_URL` +
+`COMPUTE_KERNEL_SHA256`), or pre-populate `./data/images/` and set
+`COMPUTE_IMAGES_MODE=prebuilt`. The bootstrap is idempotent and safe to run on
 every `docker compose up`.
 
-> **Current limitation:** no signed image manifest is published from this
-> repository yet. A completely fresh host cannot bootstrap images from the
-> network; `COMPUTE_IMAGES_MODE=download` needs a manifest URL you publish
-> yourself (for example a GitHub Release with checksums). The default
-> `.env.example` therefore uses `build` and expects images under
-> `COMPUTE_HOST_DATA_DIR/images`.
-
-## 3. Start
-
-```bash
-docker compose up -d
-```
-
-`compute-init` runs once (`service_completed_successfully`), then `computed`
-starts. Watch the logs:
-
-```bash
-docker compose logs -f compute-init computed
-```
-
-## 4. Verify
+## 3. Verify
 
 ```bash
 curl -fsS http://127.0.0.1:18080/api/v1/health
@@ -143,7 +135,7 @@ docker compose exec computed /usr/local/bin/compute doctor
 
 Open the embedded GUI at <http://127.0.0.1:18080/>.
 
-## 5. First sandbox
+## 4. First sandbox
 
 Point the CLI at the daemon and log in:
 
@@ -219,6 +211,37 @@ Leave `COMPUTE_TLS_CERT_FILE`/`COMPUTE_TLS_KEY_FILE` empty and terminate TLS in
 a reverse proxy (Caddy, nginx, Traefik) or Tailscale, or set both paths and
 mount the certificate files into the container to serve HTTPS directly.
 
+## Standalone Pre-Built Binaries
+
+If you prefer to run the `compute` CLI or `computed` daemon directly without building from source or running inside Docker, download standalone pre-compiled binaries from [GitHub Releases](https://github.com/Rashid2G/compute/releases).
+
+Every release publishes static Linux binaries for both `x86_64` (`amd64`) and `aarch64` (`arm64`), along with a cryptographic `checksums.txt` file.
+
+### Direct Download Links
+
+| Component | Linux `amd64` (`x86_64`) | Linux `arm64` (`aarch64`) |
+| :--- | :--- | :--- |
+| **`compute` CLI** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_arm64.tar.gz) |
+| **`computed` Daemon** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_arm64.tar.gz) |
+| **`compute-worker`** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_1.0.0_linux_arm64.tar.gz) |
+| **Complete Suite** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_arm64.tar.gz) |
+
+### Install the `compute` CLI
+
+```bash
+# Download and unpack CLI to /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+compute --version
+```
+
+### Verifying Checksums
+
+```bash
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz
+sha256sum --check --ignore-missing checksums.txt
+```
+
 ## Upgrade
 
 Source installs build the image locally:
@@ -287,12 +310,11 @@ The host prep changes (`sysctl net.ipv4.ip_forward=1`, loaded modules, the
 
 | Symptom | Fix |
 | --- | --- |
-| `compute-init` fails with `COMPUTE_IMAGE_MANIFEST_URL is not set` | No release manifest is published yet. Build images with `make build-images` and keep `COMPUTE_IMAGES_MODE=build`, or set a manifest URL. |
-| `compute-init` fails with `kernel is missing at .../vmlinux` | Install the kernel with `sudo ./scripts/build-kernel.sh ./data/images`, then re-run `docker compose up -d`. |
+| `compute-init` fails in `auto` mode | Ensure outbound HTTPS is reachable from `compute-init` (or set `COMPUTE_KERNEL_SRC` / `COMPUTE_IMAGE_MANIFEST_URL` / `COMPUTE_IMAGES_MODE=prebuilt`), then re-run `docker compose up -d`. |
+| `compute-init` fails with `kernel is missing at .../vmlinux` | Use the default `COMPUTE_IMAGES_MODE=auto` so `compute-init` installs it automatically, or run `sudo ./scripts/build-kernel.sh ./data/images`. |
 | Readiness fails with `kernel`/`rootfs` | Check `COMPUTE_HOST_DATA_DIR/images`, re-run `docker compose up compute-init`, and confirm the image files are valid ELF/ext4. |
 | Readiness fails with `kvm` | Enable virtualization/nested KVM on the host and ensure `/dev/kvm` is passed through (`chmod 666 /dev/kvm` on the host if needed). |
 | `host_network` readiness failure | `computed` must keep `network_mode: host` and set `COMPUTE_HOST_NETWORK=1`; bridge-mode networking hides the bridge/TAPs from the host. `docker run` users need the same flag. |
 | `bridge` readiness failure | The daemon creates `mft3br0`; check `docker compose logs computed` for NET_ADMIN or permission errors, and run `scripts/host-prepare.sh`. |
-| Port 18080/80/53 already in use | Change `COMPUTE_API_PORT`, or stop the conflicting service (systemd-resolved for 53). |
-| `docker compose` complains about `COMPUTE_VERSION` | Set `COMPUTE_VERSION` in `.env`; it is intentionally required to pin upgrades. |
-| Login fails right after install | Set `COMPUTE_ADMIN_PASSWORD` in `.env` and restart `computed`; authentication never falls back to a predictable password. |
+| Port 18080/80/53 already in use | Change `COMPUTE_API_PORT` in `.env`, or stop the conflicting service (systemd-resolved for 53). |
+| Login fails right after install | Default loopback credentials are `admin` / `admin`; override `COMPUTE_ADMIN_PASSWORD` in `.env` and restart `computed` when needed. |

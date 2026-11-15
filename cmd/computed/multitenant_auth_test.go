@@ -21,16 +21,16 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/network"
+	"github.com/Rashid2G/compute/internal/storage"
+	"github.com/Rashid2G/compute/internal/store"
+	storeDB "github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/api"
 	"github.com/coder/websocket"
 	"golang.org/x/crypto/ssh"
 )
@@ -1304,7 +1304,7 @@ func TestMultiTenant_PlatformEndpointsAdminOnly(t *testing.T) {
 		"/api/v1/webhooks",
 		"/api/v1/environments",
 		"/api/v1/otel",
-		"/api/v1/agent-profiles",
+		"/api/v1/admin/resources",
 	} {
 		resp, body := mtRequest(t, ts, http.MethodGet, path, aliceKey, nil)
 		if resp.StatusCode != http.StatusForbidden {
@@ -1317,7 +1317,7 @@ func TestMultiTenant_PlatformEndpointsAdminOnly(t *testing.T) {
 		"/api/v1/webhooks",
 		"/api/v1/environments",
 		"/api/v1/otel",
-		"/api/v1/agent-profiles",
+		"/api/v1/admin/resources",
 	} {
 		resp, body := mtRequest(t, ts, http.MethodGet, path, multiTenantAdminSecret, nil)
 		if resp.StatusCode != http.StatusOK {

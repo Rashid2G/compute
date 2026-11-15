@@ -3,21 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Compute v1.0.0 Documentation — Self-Hosted Firecracker MicroVM Sandbox Platform</title>
-  <meta name="description" content="Official documentation for Compute v1.0.0: self-hosted Firecracker microVM sandboxes, 1-click replication/cloning, live memory pause/resume, snapshots/templates, distributed jobs, CLI, and REST API." />
+  <title>Compute v1.0.0 — Operator Manual &amp; Reference</title>
+  <meta name="description" content="Operator manual and API reference for Compute v1.0.0: Firecracker microVM sandboxes, host bridge networking, snapshots, replication, distributed jobs, CLI, REST API, and SDKs." />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-left">
       <button id="mobile-menu-btn" class="icon-btn mobile-menu-btn" type="button" aria-label="Toggle navigation">
-        <span>Menu</span>
+        <span>Index</span>
       </button>
       <a href="#overview" class="brand">
         <span class="brand-mark">C</span>
-        <span>Compute Documentation</span>
+        <span>Compute Manual</span>
       </a>
-      <span class="version-badge">v1.0.0</span>
+      <span class="version-tag">v1.0.0</span>
     </div>
     <div class="topbar-right">
       <div class="search-box">
@@ -25,273 +25,380 @@
           id="doc-search"
           class="search-input"
           type="search"
-          placeholder="Search docs..."
-          aria-label="Search documentation"
+          placeholder="Filter sections..."
+          aria-label="Filter documentation"
         />
         <span class="search-shortcut">/</span>
       </div>
       <button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle color theme">
         <span id="theme-label">Light</span>
       </button>
-      <a href="https://github.com/Rashid2G/on-demand-vms" class="icon-btn" target="_blank" rel="noopener noreferrer">
+      <a href="https://github.com/Rashid2G/compute" class="icon-btn" target="_blank" rel="noopener noreferrer">
         <span>GitHub</span>
       </a>
     </div>
   </header>
 
   <div class="layout">
-    <aside id="doc-sidebar" class="sidebar" aria-label="Documentation Navigation">
+    <aside id="doc-sidebar" class="sidebar" aria-label="Documentation Index">
       <div class="nav-group">
-        <div class="nav-group-title">Getting Started</div>
+        <div class="nav-group-title">System</div>
         <ul class="nav-list">
-          <li><a class="nav-link active" href="#overview">Overview &amp; Architecture</a></li>
-          <li><a class="nav-link" href="#quickstart">Self-Hosting Quickstart</a></li>
-          <li><a class="nav-link" href="#auth-env">Authentication &amp; .env Setup</a></li>
+          <li><a class="nav-link active" href="#overview"><span class="nav-num">01</span>Architecture</a></li>
+          <li><a class="nav-link" href="#quickstart"><span class="nav-num">02</span>Host Setup &amp; Boot</a></li>
+          <li><a class="nav-link" href="#auth-env"><span class="nav-num">03</span>Auth &amp; Configuration</a></li>
         </ul>
       </div>
 
       <div class="nav-group">
-        <div class="nav-group-title">Sandbox Lifecycle</div>
+        <div class="nav-group-title">MicroVM Lifecycle</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#sandboxes">Creating &amp; Managing Sandboxes</a></li>
-          <li><a class="nav-link" href="#replicating">Replicating (Cloning) Sandboxes</a></li>
-          <li><a class="nav-link" href="#pausing">Pausing &amp; Resuming State</a></li>
-          <li><a class="nav-link" href="#snapshots">Snapshots &amp; Templates</a></li>
+          <li><a class="nav-link" href="#sandboxes"><span class="nav-num">04</span>Sandboxes &amp; Exec</a></li>
+          <li><a class="nav-link" href="#replicating"><span class="nav-num">05</span>Replication (Clone)</a></li>
+          <li><a class="nav-link" href="#pausing"><span class="nav-num">06</span>Pause &amp; Resume State</a></li>
+          <li><a class="nav-link" href="#snapshots"><span class="nav-num">07</span>Snapshots &amp; Templates</a></li>
         </ul>
       </div>
 
       <div class="nav-group">
-        <div class="nav-group-title">Platform &amp; Networking</div>
+        <div class="nav-group-title">Cluster &amp; Network</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#distributed-jobs">Distributed Jobs &amp; Workers</a></li>
-          <li><a class="nav-link" href="#networking-dns-ssh">Networking, DNS &amp; SSH</a></li>
+          <li><a class="nav-link" href="#distributed-jobs"><span class="nav-num">08</span>Workers &amp; Jobs</a></li>
+          <li><a class="nav-link" href="#networking-dns-ssh"><span class="nav-num">09</span>Bridge, DNS &amp; SSH</a></li>
         </ul>
       </div>
 
       <div class="nav-group">
-        <div class="nav-group-title">Interfaces &amp; APIs</div>
+        <div class="nav-group-title">Interfaces</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#cli-reference">CLI Reference (compute)</a></li>
-          <li><a class="nav-link" href="#rest-api">REST API Reference</a></li>
-          <li><a class="nav-link" href="#sdks">Python &amp; TypeScript SDKs</a></li>
+          <li><a class="nav-link" href="#cli-reference"><span class="nav-num">10</span>CLI Reference</a></li>
+          <li><a class="nav-link" href="#rest-api"><span class="nav-num">11</span>REST API</a></li>
+          <li><a class="nav-link" href="#sdks"><span class="nav-num">12</span>TypeScript &amp; Python SDKs</a></li>
         </ul>
       </div>
 
       <div id="search-empty" class="search-empty">
-        No documentation sections matched your search query.
+        No matching manual sections.
       </div>
     </aside>
 
     <main class="content">
-      <div class="hero">
-        <div class="eyebrow">Compute v1.0.0 · Open-Source Release</div>
+      <header class="manual-header">
+        <div class="manual-meta">COMPUTE(7) &middot; OPERATOR &amp; API MANUAL &middot; LINUX / KVM</div>
         <h1>Self-Hosted Firecracker MicroVM Sandboxes</h1>
-        <p>
-          Host your own lightning-fast microVM cloud on any Linux machine with <code>/dev/kvm</code>.
-          Spin up hardware-isolated sandboxes in milliseconds, and effortlessly <strong>replicate</strong>,
-          <strong>pause/resume</strong>, and <strong>snapshot</strong> environments from the Web Dashboard, CLI, or REST API.
+        <p class="manual-lead">
+          Compute runs hardware-isolated Firecracker microVMs and ephemeral job workers on Linux hosts with
+          <code>/dev/kvm</code>. Every sandbox boots an uncompressed Linux kernel (<code>vmlinux</code>) and dedicated
+          ext4 root filesystem attached to host bridge <code>mft3br0</code>, managed through <code>computed</code>,
+          the <code>compute</code> CLI, HTTP/WebSocket APIs, and an embedded web console.
         </p>
-        <div class="hero-actions">
-          <a class="btn-primary" href="#quickstart">Quickstart with Docker Compose</a>
-          <a class="btn-secondary" href="#replicating">Explore Replicate / Pause / Snapshot</a>
-          <a class="btn-secondary" href="#rest-api">REST API Reference</a>
-        </div>
-      </div>
-
-      <!-- 1. Overview & Architecture -->
-      <section id="overview" class="doc-section" data-keywords="overview architecture firecracker microvm computed compute-worker cli kvm">
-        <h2>Overview &amp; Architecture</h2>
-        <p>
-          <strong>Compute</strong> is an open-source, self-hosted platform for orchestrating hardware-isolated
-          <strong>Firecracker microVM sandboxes</strong> and ephemeral <strong>distributed jobs</strong> on your own Linux machines,
-          home labs, or private bare-metal servers. Unlike container-only runners that share the host kernel, every Compute
-          sandbox boots a dedicated Linux kernel and root filesystem inside KVM while maintaining sub-second startup times.
-        </p>
-
-        <div class="card-grid">
-          <div class="card">
-            <div class="card-title"><span>computed</span><span class="version-badge">Control Plane</span></div>
-            <p>Central daemon serving the REST/WebSocket API, embedded React Web Dashboard, authentication/RBAC, microVM manager, and HTTP/DNS edge routing.</p>
-          </div>
-          <div class="card">
-            <div class="card-title"><span>compute</span><span class="version-badge">CLI &amp; TUI</span></div>
-            <p>Single-binary developer CLI for creating sandboxes, SSH/exec streaming, 1-click cloning, state saving, template management, and distributed job runs.</p>
-          </div>
-          <div class="card">
-            <div class="card-title"><span>compute-worker</span><span class="version-badge">Worker Agent</span></div>
-            <p>Autonomous host agent that dials outbound to <code>computed</code> over WebSocket/mTLS with zero inbound ports required on remote worker hosts.</p>
-          </div>
+        <div class="manual-actions">
+          <a class="btn-primary" href="#quickstart">Install &amp; Boot</a>
+          <a class="btn-secondary" href="#cli-reference">CLI Commands</a>
+          <a class="btn-secondary" href="#rest-api">REST Endpoints</a>
         </div>
 
-        <div class="callout success">
-          <strong>Built for Self-Hosters</strong>
-          Compute tracks real physical host utilization (allocated vCPUs, memory, disk, and saved states) rather than artificial cloud billing meters, giving you complete visibility and control over your hardware.
+        <div class="spec-matrix" role="list" aria-label="Platform Specifications">
+          <div class="spec-cell" role="listitem">
+            <div class="spec-label">Hypervisor</div>
+            <div class="spec-val">Firecracker + KVM</div>
+          </div>
+          <div class="spec-cell" role="listitem">
+            <div class="spec-label">Default Bridge</div>
+            <div class="spec-val">mft3br0 &middot; 172.16.0.0/16</div>
+          </div>
+          <div class="spec-cell" role="listitem">
+            <div class="spec-label">Control Plane</div>
+            <div class="spec-val">127.0.0.1:18080 &middot; SQLite</div>
+          </div>
+          <div class="spec-cell" role="listitem">
+            <div class="spec-label">Authentication</div>
+            <div class="spec-val">Session + cmp_ Bearer</div>
+          </div>
+        </div>
+      </header>
+
+      <!-- 01. Architecture -->
+      <section id="overview" class="doc-section" data-keywords="overview architecture firecracker microvm computed compute-worker cli kvm topology">
+        <div class="section-head">
+          <span class="section-id">01</span>
+          <h2>Architecture &amp; Binaries</h2>
+        </div>
+        <p>
+          The system consists of three Go binaries with no external orchestrator, etcd cluster, or cloud control plane required.
+          Control-plane state lives in a single SQLite database (<code>compute.db</code>) alongside ext4 disk images and snapshots
+          under <code>COMPUTE_DATA_DIR</code> (default <code>/var/lib/compute</code> inside containers, <code>./data</code> on the host).
+        </p>
+
+        <figure class="figure-frame">
+          <div class="figure-bar">
+            <span>Figure 1 &mdash; Control Plane, Host Network &amp; MicroVM Data Path</span>
+            <span>HOST NETNS + /dev/kvm</span>
+          </div>
+          <svg class="topology-svg" viewBox="0 0 820 230" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Diagram showing CLI and browser connecting to computed, bridged via mft3br0 to Firecracker microVMs and remote compute-worker">
+            <rect x="12" y="20" width="160" height="72" fill="none" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="24" y="42" fill="var(--fg)" font-family="monospace" font-size="11" font-weight="600">Clients</text>
+            <text x="24" y="60" fill="var(--fg-muted)" font-family="monospace" font-size="10">compute CLI / Browser</text>
+            <text x="24" y="75" fill="var(--fg-muted)" font-family="monospace" font-size="10">TS &amp; Python SDKs</text>
+
+            <line x1="172" y1="56" x2="220" y2="56" stroke="var(--accent-bright)" stroke-width="1.4"/>
+            <polygon points="220,56 213,52 213,60" fill="var(--accent-bright)"/>
+            <text x="176" y="47" fill="var(--fg-muted)" font-family="monospace" font-size="9">HTTP/WS</text>
+
+            <rect x="220" y="14" width="215" height="114" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4"/>
+            <text x="234" y="36" fill="var(--accent-bright)" font-family="monospace" font-size="11" font-weight="600">computed</text>
+            <text x="310" y="36" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">:18080</text>
+            <text x="234" y="55" fill="var(--fg-muted)" font-family="monospace" font-size="10">- REST API + Embedded UI</text>
+            <text x="234" y="71" fill="var(--fg-muted)" font-family="monospace" font-size="10">- Auth / RBAC + compute.db</text>
+            <text x="234" y="87" fill="var(--fg-muted)" font-family="monospace" font-size="10">- DNS (:53) + Edge (:80)</text>
+            <text x="234" y="103" fill="var(--fg-muted)" font-family="monospace" font-size="10">- cgroup v2 + Disk Manager</text>
+
+            <line x1="435" y1="62" x2="488" y2="62" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <polygon points="488,62 481,58 481,66" fill="var(--border-strong)"/>
+            <text x="441" y="53" fill="var(--fg-muted)" font-family="monospace" font-size="9">TAP/NAT</text>
+
+            <rect x="488" y="14" width="318" height="114" fill="none" stroke="var(--border-strong)" stroke-width="1.2" stroke-dasharray="4 3"/>
+            <text x="500" y="34" fill="var(--fg)" font-family="monospace" font-size="10.5" font-weight="600">Linux Bridge mft3br0 (172.16.0.1/16)</text>
+
+            <rect x="502" y="48" width="136" height="68" fill="var(--bg-2)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="512" y="67" fill="var(--fg)" font-family="monospace" font-size="10.5" font-weight="600">MicroVM #1</text>
+            <text x="512" y="83" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">mftap-0 &middot; 172.16.0.2</text>
+            <text x="512" y="98" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">vmlinux + ext4</text>
+
+            <rect x="652" y="48" width="140" height="68" fill="var(--bg-2)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="662" y="67" fill="var(--fg)" font-family="monospace" font-size="10.5" font-weight="600">MicroVM #2</text>
+            <text x="662" y="83" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">mftap-1 &middot; 172.16.0.3</text>
+            <text x="662" y="98" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">vm.snap + vm.mem</text>
+
+            <line x1="327" y1="128" x2="327" y2="162" stroke="var(--accent-bright)" stroke-width="1.2" stroke-dasharray="3 3"/>
+            <polygon points="327,128 323,135 331,135" fill="var(--accent-bright)"/>
+            <text x="336" y="150" fill="var(--fg-muted)" font-family="monospace" font-size="9">Outbound WS/mTLS</text>
+
+            <rect x="220" y="162" width="586" height="54" fill="var(--bg-2)" stroke="var(--border-strong)" stroke-width="1.2"/>
+            <text x="234" y="184" fill="var(--fg)" font-family="monospace" font-size="10.5" font-weight="600">compute-worker (optional remote host pool)</text>
+            <text x="234" y="201" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">Zero inbound firewall ports &middot; executes queued jobs inside remote KVM microVMs &middot; streams logs back to computed</text>
+          </svg>
+        </figure>
+
+        <div class="component-grid">
+          <div class="component-cell">
+            <div class="component-head">
+              <span class="component-name">computed</span>
+              <span class="component-role">Control Plane</span>
+            </div>
+            <p>Manages users, scoped API keys, microVM lifecycle, snapshots, TAP interfaces, iptables NAT, DNS/HTTP ingress, and embedded web UI assets.</p>
+          </div>
+          <div class="component-cell">
+            <div class="component-head">
+              <span class="component-name">compute</span>
+              <span class="component-role">CLI &amp; UI</span>
+            </div>
+            <p>Client CLI for sandboxes, SSH, streaming exec, <code>scp</code> file transfers, templates, distributed jobs, and standalone <code>compute gui</code> mode.</p>
+          </div>
+          <div class="component-cell">
+            <div class="component-head">
+              <span class="component-name">compute-worker</span>
+              <span class="component-role">Worker Agent</span>
+            </div>
+            <p>Outward-dialing host agent enrolled via single-use, name-pinned tokens (<code>compute worker token create</code>) for remote job pools.</p>
+          </div>
+        </div>
+
+        <div class="note-box">
+          <div class="note-label">Capacity Accounting</div>
+          Compute enforces physical capacity and admission limits (<code>COMPUTE_MAX_RUNNING_VMS</code>, <code>COMPUTE_MAX_TOTAL_VCPUS</code>,
+          <code>COMPUTE_MAX_TOTAL_MEMORY_MB</code>, <code>COMPUTE_MIN_FREE_DISK_MB=512</code>). When host free memory cannot satisfy a boot request,
+          sandboxes enter the admission queue rather than overcommitting the kernel.
         </div>
       </section>
 
-      <!-- 2. Self-Hosting Quickstart -->
-      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs">
-        <h2>Self-Hosting Quickstart</h2>
+      <!-- 02. Quickstart -->
+      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs kernel build auto">
+        <div class="section-head">
+          <span class="section-id">02</span>
+          <h2>Host Setup &amp; Boot</h2>
+        </div>
         <p>
-          Compute runs on any Linux host (<code>x86_64</code> or <code>arm64</code>) with hardware virtualization (<code>/dev/kvm</code>),
-          cgroup v2, and Docker Engine 24+ (or directly on bare metal via <code>systemd</code>).
+          Requires Linux (<code>x86_64</code> or <code>arm64</code>), read/write <code>/dev/kvm</code>, unified cgroup v2 hierarchy,
+          and at least 10 GB of free disk space. Firecracker and Jailer are bundled inside the daemon container; the container runs
+          <code>privileged</code> in the host network namespace to manage <code>mft3br0</code> and guest TAP interfaces.
         </p>
 
-        <h3>1. Verify Host Readiness &amp; Prepare Kernel Modules</h3>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>./scripts/preflight.sh
-sudo ./scripts/host-prepare.sh</code></pre>
+        <div class="tab-group" data-tabs>
+          <div class="tab-bar" role="tablist" aria-label="Installation method">
+            <button class="tab-btn active" type="button" role="tab" aria-selected="true" data-tab-target="compose">Docker Compose (Supported)</button>
+            <button class="tab-btn" type="button" role="tab" aria-selected="false" data-tab-target="binaries">Standalone Binaries (GitHub Releases)</button>
+            <button class="tab-btn" type="button" role="tab" aria-selected="false" data-tab-target="source">Build from Source (systemd / CLI)</button>
+          </div>
+
+          <div class="tab-panel active" data-tab-panel="compose">
+            <div class="code-block">
+              <div class="code-header"><span>1. start with zero-config auto-bootstrap (loopback only, admin / admin)</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>docker compose up -d
+curl -fsS http://127.0.0.1:18080/api/v1/ready | python3 -m json.tool</code></pre>
+            </div>
+            <div class="code-block">
+              <div class="code-header"><span>2. optional preflight, .env customization, and host image builds</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>./scripts/preflight.sh
+sudo ./scripts/host-prepare.sh
+cp .env.example .env &amp;&amp; chmod 600 .env
+# Optional: build kernel + rootfs on the host instead of in compute-init
+make build-images          # runs scripts/build-kernel.sh + scripts/build-rootfs.sh</code></pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="binaries">
+            <div class="code-block">
+              <div class="code-header"><span>1. download and install pre-built compute CLI (Linux x86_64 / arm64)</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+compute --version</code></pre>
+            </div>
+            <div class="code-block">
+              <div class="code-header"><span>2. download complete suite or verify SHA-256 checksums</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code># Download full suite (compute, computed, compute-worker, compute-bench)
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
+sha256sum --check --ignore-missing checksums.txt</code></pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="source">
+            <div class="code-block">
+              <div class="code-header"><span>build web bundle + Go binaries (Go 1.24+, Node 20+)</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>cd web &amp;&amp; npm ci &amp;&amp; cd ..
+make build-ui              # outputs into internal/gui/assets/
+make build                 # outputs compute, computed, compute-worker, compute-bench in ./bin/
+make build-images
+COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
+            </div>
+          </div>
         </div>
 
-        <h3>2. Configure Environment (<code>.env</code>)</h3>
-        <p>Copy <code>.env.example</code> to <code>.env</code> and configure your administrator credentials:</p>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>cp .env.example .env
-chmod 600 .env</code></pre>
-        </div>
-
-        <h3>3. Install Kernel &amp; Build Rootfs Artifacts</h3>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>sudo ./scripts/build-kernel.sh ./data/images
-sudo ./scripts/build-rootfs.sh ./data/images 1024</code></pre>
-        </div>
         <p>
-          <code>build-kernel.sh</code> downloads the pinned, checksummed Firecracker
-          <code>vmlinux</code> for your architecture. Both steps are idempotent, or run
-          <code>make build-images</code> to do both at once.
-        </p>
-
-        <h3>4. Launch with Docker Compose</h3>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>docker compose up -d
-curl -fsS http://127.0.0.1:18080/api/v1/health</code></pre>
-        </div>
-        <p>
-          Open <code>http://127.0.0.1:18080/</code> in your browser to sign in to the Compute Web Dashboard.
+          <code>/api/v1/health</code> checks process liveness; <code>/api/v1/ready</code> inspects KVM, Firecracker binary,
+          base kernel/rootfs, internal Ed25519 SSH key, SQLite DB, cgroup v2, and <code>mft3br0</code> bridge usability (also exposed via <code>compute doctor</code>).
         </p>
       </section>
 
-      <!-- 3. Authentication & .env Setup -->
-      <section id="auth-env" class="doc-section" data-keywords="auth authentication login signup env admin bootstrap password secret users cmp_">
-        <h2>Authentication &amp; <code>.env</code> Configuration</h2>
+      <!-- 03. Authentication & Configuration -->
+      <section id="auth-env" class="doc-section" data-keywords="auth authentication login signup env admin bootstrap password secret users cmp_ config daemon.json">
+        <div class="section-head">
+          <span class="section-id">03</span>
+          <h2>Authentication &amp; Configuration Precedence</h2>
+        </div>
         <p>
-          Compute enforces session and bearer-token authentication out of the box (<code>COMPUTE_AUTH_ENABLED=true</code>).
-          By default, <strong>public self-signup is disabled</strong> (<code>COMPUTE_SIGNUP_ENABLED=false</code>) and the administrator
-          account is bootstrapped directly from your <code>.env</code> file on daemon startup.
+          Configuration resolves across four layers (lowest to highest priority):
+          <code>internal/config.DefaultConfig</code> &rarr; optional JSON file (<code>--config</code> or <code>/etc/compute/daemon.json</code>) &rarr;
+          <code>COMPUTE_*</code> environment variables &rarr; CLI flags.
         </p>
 
-        <div class="callout warning">
-          <strong>Default Security Posture</strong>
-          Unauthenticated visitors to the Web Dashboard are gated at <code>#/login</code>. When <code>COMPUTE_SIGNUP_ENABLED=false</code>,
-          the public registration tab and <code>POST /api/v1/auth/signup</code> endpoint reject anonymous signups with <code>403 signup_disabled</code>.
-          Only authenticated administrators can provision additional users via the <strong>Access &rarr; Users</strong> tab or <code>POST /api/v1/users</code>.
+        <div class="note-box warn">
+          <div class="note-label">Security Defaults</div>
+          Authentication is enabled by default (<code>COMPUTE_AUTH_ENABLED=true</code>) and public signup is closed
+          (<code>COMPUTE_SIGNUP_ENABLED=false</code>). The daemon refuses to start if both <code>COMPUTE_ADMIN_PASSWORD</code>
+          and <code>COMPUTE_ADMIN_SECRET</code> are empty. Replace the default <code>.env.example</code> password before binding
+          beyond loopback (<code>COMPUTE_BIND_ADDRESS=0.0.0.0</code>).
         </div>
 
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Environment Variable</th>
+                <th>Variable</th>
                 <th>Default</th>
-                <th>Description</th>
+                <th>Behavior</th>
               </tr>
             </thead>
             <tbody>
               <tr>
+                <td><code>COMPUTE_LISTEN</code></td>
+                <td><code>127.0.0.1:18080</code></td>
+                <td>Full listen address; overrides <code>COMPUTE_BIND_ADDRESS</code> and <code>COMPUTE_API_PORT</code>.</td>
+              </tr>
+              <tr>
                 <td><code>COMPUTE_AUTH_ENABLED</code></td>
                 <td><code>true</code></td>
-                <td>Enables authentication across REST API, WebSocket, and Web Dashboard endpoints.</td>
+                <td>Enforces session cookie (<code>compute_session</code>) or <code>Authorization: Bearer cmp_...</code> on API/WS/UI routes.</td>
               </tr>
               <tr>
                 <td><code>COMPUTE_SIGNUP_ENABLED</code></td>
                 <td><code>false</code></td>
-                <td>Controls whether anonymous users can self-register at <code>#/signup</code> / <code>POST /api/v1/auth/signup</code>.</td>
+                <td>When <code>false</code>, <code>POST /api/v1/auth/signup</code> returns <code>403 signup_disabled</code> and registration is hidden in the UI.</td>
               </tr>
               <tr>
                 <td><code>COMPUTE_ADMIN_USERNAME</code></td>
                 <td><code>admin</code></td>
-                <td>Username for the bootstrap administrator account seeded and synced on daemon startup.</td>
-              </tr>
-              <tr>
-                <td><code>COMPUTE_ADMIN_EMAIL</code></td>
-                <td><code>admin@compute.local</code></td>
-                <td>Email address for the bootstrap administrator account.</td>
+                <td>Bootstrap admin username synced at startup (companion: <code>COMPUTE_ADMIN_EMAIL=admin@compute.local</code>).</td>
               </tr>
               <tr>
                 <td><code>COMPUTE_ADMIN_PASSWORD</code></td>
-                <td><em>(required in .env)</em></td>
-                <td>Password synced to the bootstrap administrator account on startup (clears lockouts and rotates credentials in place).</td>
+                <td><code>admin</code> <em>(in .env.example)</em></td>
+                <td>Admin password synced on boot; rotate with <code>openssl rand -base64 32</code> for non-loopback binds.</td>
               </tr>
               <tr>
                 <td><code>COMPUTE_ADMIN_SECRET</code></td>
-                <td><em>(optional)</em></td>
-                <td>Static root bearer secret for automation; resolves to the bootstrap admin identity.</td>
+                <td>&mdash;</td>
+                <td>Optional static bearer token resolving directly to the bootstrap admin identity.</td>
               </tr>
               <tr>
-                <td><code>COMPUTE_BIND_ADDRESS</code></td>
-                <td><code>127.0.0.1</code></td>
-                <td>IP address the control plane listens on. Set <code>0.0.0.0</code> only after replacing the default admin credentials or behind a trusted reverse proxy.</td>
+                <td><code>COMPUTE_DATA_DIR</code></td>
+                <td><code>/var/lib/compute</code></td>
+                <td>Root directory for SQLite DB (<code>data/compute.db</code>), base images (<code>images/</code>), and VM disks (<code>vms/</code>).</td>
               </tr>
               <tr>
-                <td><code>COMPUTE_API_PORT</code></td>
-                <td><code>18080</code></td>
-                <td>TCP port for the control-plane API and embedded Web Dashboard.</td>
+                <td><code>COMPUTE_TLS_CERT_FILE</code></td>
+                <td>&mdash;</td>
+                <td>Optional PEM certificate (must be paired with <code>COMPUTE_TLS_KEY_FILE</code>) for native HTTPS.</td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- 4. Creating & Managing Sandboxes -->
-      <section id="sandboxes" class="doc-section" data-keywords="sandbox create start stop ssh exec console web preview vcpus memory">
-        <h2>Creating &amp; Managing Sandboxes</h2>
+      <!-- 04. Sandboxes -->
+      <section id="sandboxes" class="doc-section" data-keywords="sandbox create start stop ssh exec console web preview vcpus memory disk scp files process">
+        <div class="section-head">
+          <span class="section-id">04</span>
+          <h2>Creating &amp; Operating Sandboxes</h2>
+        </div>
         <p>
-          Sandboxes are persistent Firecracker microVMs with dedicated ext4 root disks, private virtual NICs (TAP devices),
-          and optional SSH/HTTP ingress routing. You can launch sandboxes from the Web Dashboard (<strong>New Sandbox</strong>)
-          or via the <code>compute</code> CLI:
+          Each sandbox allocates an ext4 root volume copied from a base image (default <code>ubuntu-24</code>, 50 GiB sparse),
+          a MAC/IP lease on <code>mft3br0</code>, a dedicated TAP interface (<code>mftap-*</code>), and an interactive SSH/exec target.
         </p>
 
         <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Create and start a 2 vCPU / 2 GB RAM sandbox
-compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk-gb 20 --image ubuntu-24 --start
+          <div class="code-header"><span>sandbox lifecycle, streaming exec, file copy, and preview discovery</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Provision and start a 2 vCPU / 2048 MiB sandbox
+compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk 20480 --image ubuntu-24 --start
 
-# Run interactive SSH or stream a command
+# Interactive shell or streamed command execution
 compute sandbox ssh dev-api
-compute sandbox exec dev-api -- docker ps
+compute sandbox exec dev-api -- uname -a
 
-# Upload local project files into the sandbox
-compute scp -r ./my-service dev-api:/root/my-service</code></pre>
+# Copy local directory tree into guest /workspace and print port-3000 HTTP preview URL
+compute scp -r ./my-service dev-api:/workspace/
+compute url --port 3000 dev-api</code></pre>
         </div>
       </section>
 
-      <!-- 5. Replicating (Cloning) Sandboxes -->
-      <section id="replicating" class="doc-section" data-keywords="replicate clone sandbox copy fleet replicas vcpus memory network isolation auto_start">
-        <h2>Replicating (Cloning) Sandboxes</h2>
+      <!-- 05. Replicating -->
+      <section id="replicating" class="doc-section" data-keywords="replicate clone sandbox copy fleet replicas vcpus memory disk network isolation auto_start">
+        <div class="section-head">
+          <span class="section-id">05</span>
+          <h2>Replicating (Cloning) Sandboxes</h2>
+        </div>
         <p>
-          Compute makes replicating sandboxes effortless. Cloning copies the source sandbox's root filesystem and metadata into
-          one or more independent sandboxes with optional spec overrides.
+          Cloning duplicates a sandbox's disk image and metadata into independent microVMs with optional CPU, memory,
+          disk size, and network isolation overrides.
         </p>
-
-        <h3>Web Dashboard: 1-Click Single &amp; Multi-Replica Cloning</h3>
         <ul>
-          <li>Click the <strong>Replicate</strong> (copy) button on any sandbox row or inside the Sandbox Inspector toolbar.</li>
-          <li>Set a <strong>Base Name</strong> and choose <strong>Replica Count (1–5)</strong> to spin up a single clone or a numbered fleet (e.g. <code>worker-pool-1</code> .. <code>worker-pool-5</code>).</li>
-          <li>Optionally override <strong>vCPUs</strong> (<code>1, 2, 4, 8, 16</code>), <strong>Memory (MB)</strong>, <strong>Disk (GB)</strong>, <strong>Network Isolation</strong> (<code>account</code> vs <code>isolated</code>), and <strong>Start immediately after cloning</strong>.</li>
+          <li><strong>Web UI</strong>: Use <em>Replicate</em> on any sandbox row or Inspector toolbar to create 1&ndash;5 numbered replicas (<code>&lt;base&gt;-1 .. &lt;base&gt;-N</code>) with per-tier overrides and optional auto-start.</li>
+          <li><strong>API / CLI</strong>: Invoke <code>POST /api/v1/vms/{id}/clone</code> (or <code>compute sandbox clone</code> if built into your CLI build; see REST API below).</li>
         </ul>
 
-        <h3>REST API &amp; CLI Replication</h3>
         <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Clone via CLI
-compute sandbox clone dev-api --name dev-api-staging
-
-# Clone via REST API with resource & isolation overrides and auto-start
-curl -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/clone \
+          <div class="code-header"><span>clone with resource &amp; isolation overrides via REST API</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code>curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/clone \
   -H "Authorization: Bearer $COMPUTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -305,135 +412,156 @@ curl -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/clone \
         </div>
       </section>
 
-      <!-- 6. Pausing & Resuming State -->
+      <!-- 06. Pausing -->
       <section id="pausing" class="doc-section" data-keywords="pause resume save-state freeze memory cpu snapshot firecracker state saved">
-        <h2>Pausing &amp; Resuming Sandbox State</h2>
+        <div class="section-head">
+          <span class="section-id">06</span>
+          <h2>Pausing &amp; Resuming Memory State</h2>
+        </div>
         <p>
-          Instead of shutting down a sandbox and losing in-memory processes, Compute lets you <strong>pause (save state)</strong>
-          any running Firecracker microVM. Pausing serializes the guest's exact CPU registers, device state, and physical memory
-          to disk (`vm.snap` + `vm.mem`) and releases host CPU/RAM capacity.
+          <code>save-state</code> checkpoints a running Firecracker microVM via the Firecracker snapshot API, writing exact vCPU registers,
+          virtio device state, and guest RAM pages (<code>vm.snap</code> + <code>vm.mem</code>) to disk before stopping the VMM process.
+          Host CPU and RAM capacity return to the scheduler while the sandbox state changes to <code>paused</code> (<code>PAUSED (STATE SAVED)</code> in the Web UI).
         </p>
 
-        <ul>
-          <li><strong>Web Dashboard</strong>: Click the <strong>Pause</strong> button on any running sandbox row or in the Inspector Drawer. The sandbox transitions to <code>PAUSED (STATE SAVED)</code>. Click <strong>Resume</strong> to restore execution in milliseconds.</li>
-          <li><strong>CLI &amp; API</strong>: Use <code>compute sandbox save-state &lt;name&gt;</code> and <code>compute sandbox resume &lt;name&gt;</code>.</li>
-        </ul>
-
         <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Freeze microVM memory + CPU state to disk
-compute sandbox save-state dev-api
-
-# Resume exactly where the sandbox left off
+          <div class="code-header"><span>serialize live guest state to disk and resume</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code>compute sandbox save-state dev-api
 compute sandbox resume dev-api</code></pre>
         </div>
       </section>
 
-      <!-- 7. Snapshots & Templates -->
+      <!-- 07. Snapshots & Templates -->
       <section id="snapshots" class="doc-section" data-keywords="snapshot template image golden restore launch spawn">
-        <h2>Snapshots &amp; Reusable Templates</h2>
+        <div class="section-head">
+          <span class="section-id">07</span>
+          <h2>Snapshots &amp; Reusable Templates</h2>
+        </div>
         <p>
-          Snapshots capture a point-in-time copy of a sandbox's disk image as a reusable template so you can pre-install compilers,
-          models, or dependencies once and launch clean sandboxes from that checkpoint on demand.
+          Disk templates freeze a sandbox's ext4 root filesystem as a named template so subsequent sandboxes boot with compilers,
+          toolchains, or dependencies already installed on disk.
         </p>
 
-        <ul>
-          <li><strong>From Any Sandbox Row or Inspector</strong>: Click the <strong>Snapshot</strong> camera icon, give the snapshot a name and description, and save.</li>
-          <li><strong>From the Snapshots &amp; Templates Page (<code>#/snapshots</code>)</strong>: Click <strong>Create Snapshot</strong> to pick any source sandbox, or click <strong>Launch</strong> on any existing snapshot to spawn a new sandbox with customizable vCPUs, RAM, and auto-start.</li>
-        </ul>
-
         <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Capture a reusable snapshot template from a sandbox
+          <div class="code-header"><span>create a reusable disk template and launch a sandbox from it</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Snapshot sandbox disk into a named template
 compute template create rust-toolchain --vm dev-api --desc "Rust 1.85 + cargo cache"
 
-# Launch a new sandbox from the snapshot template
+# Provision and start a new sandbox from that template
 compute template launch rust-toolchain --name build-runner-01 --tier 4vcpu</code></pre>
         </div>
       </section>
 
-      <!-- 8. Distributed Jobs & Workers -->
-      <section id="distributed-jobs" class="doc-section" data-keywords="distributed jobs worker compute-worker pool ci build test">
-        <h2>Distributed Jobs &amp; Workers</h2>
+      <!-- 08. Distributed Jobs & Workers -->
+      <section id="distributed-jobs" class="doc-section" data-keywords="distributed jobs worker compute-worker pool ci build test token">
+        <div class="section-head">
+          <span class="section-id">08</span>
+          <h2>Distributed Jobs &amp; Workers</h2>
+        </div>
         <p>
-          In addition to interactive sandboxes, Compute provides ephemeral <strong>Jobs</strong> (<code>compute job run</code>)
-          that pack a local directory, stream it to an enrolled worker (or local control-plane runner), execute a command inside a
-          fresh microVM, stream stdout/stderr back in real time, and destroy the VM upon completion.
+          <code>compute job run</code> archives a local directory, streams it to an enrolled <code>compute-worker</code> (or falls back to
+          a local microVM when <code>jobs.local_execution</code> is true), executes the command inside a fresh microVM, streams
+          <code>stdout</code>/<code>stderr</code>, and destroys the VM on exit.
         </p>
 
         <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Run an isolated build/test job with local file synchronization
+          <div class="code-header"><span>dispatch ephemeral job &amp; mint name-pinned worker enrollment token</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Sync local workspace and run tests inside an ephemeral Ubuntu 24 microVM
 compute job run --image ubuntu-24 --files ./ --cwd /workspace -- go test ./...
 
-# Create an enrollment token for a remote compute-worker host
-compute worker token create --name gpu-node-01</code></pre>
+# Create an enrollment token pinned to worker name "gpu-node-01" in pool "default"
+compute worker token create --name gpu-node-01 --pool default</code></pre>
         </div>
       </section>
 
-      <!-- 9. Networking, DNS & SSH -->
-      <section id="networking-dns-ssh" class="doc-section" data-keywords="network bridge nat dns ssh port forward preview ingress iptables">
-        <h2>Networking, DNS &amp; SSH</h2>
+      <!-- 09. Networking, DNS & SSH -->
+      <section id="networking-dns-ssh" class="doc-section" data-keywords="network bridge mft3br0 mftap nat dns ssh port forward preview ingress iptables tailscale">
+        <div class="section-head">
+          <span class="section-id">09</span>
+          <h2>Networking, DNS &amp; SSH Routing</h2>
+        </div>
         <p>
-          Compute configures a host bridge (default <code>fcbr0</code> / <code>172.16.0.0/24</code>) with per-sandbox TAP interfaces,
-          anti-spoofing rules, and two selectable isolation modes:
+          By default (<code>COMPUTE_NETWORK_MODE=nat</code>), <code>computed</code> creates Linux bridge <code>mft3br0</code>
+          (<code>172.16.0.1/16</code>, subnet <code>172.16.0.0/16</code>), attaches per-sandbox TAP interfaces (<code>mftap-*</code>),
+          and configures masquerade/forwarding rules without modifying the host's default route.
         </p>
-        <ul>
-          <li><code>account</code> (default): Sandboxes owned by the same user/organization can communicate across the virtual bridge.</li>
-          <li><code>isolated</code>: Strict per-sandbox <code>iptables</code> rules block lateral east-west traffic to other sandboxes.</li>
-        </ul>
-        <p>
-          See <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a> for wildcard DNS and HTTPS edge proxy setup.
-        </p>
-      </section>
 
-      <!-- 10. CLI Reference -->
-      <section id="cli-reference" class="doc-section" data-keywords="cli reference commands flags compute sandbox template job auth keys">
-        <h2>CLI Reference (<code>compute</code>)</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Command</th>
-                <th>Description</th>
+                <th>Mode / Mechanism</th>
+                <th>Behavior</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><code>compute auth login / status / whoami</code></td>
-                <td>Authenticate CLI against <code>computed</code> and inspect active credentials.</td>
+                <td><code>network_isolation=account</code></td>
+                <td>Default. Sandboxes belonging to the same account can reach one another across <code>mft3br0</code>.</td>
               </tr>
               <tr>
-                <td><code>compute auth keys create / list / revoke</code></td>
-                <td>Manage <code>cmp_...</code> API keys for CLI, CI, and SDK access.</td>
+                <td><code>network_isolation=isolated</code></td>
+                <td>Installs per-TAP <code>iptables</code> isolation dropping east-west traffic to sibling sandboxes while retaining gateway egress.</td>
               </tr>
               <tr>
-                <td><code>compute sandbox create / list / inspect</code></td>
-                <td>Provision and inspect Firecracker microVM sandboxes.</td>
+                <td>DNS Responder (<code>:53</code>)</td>
+                <td>When <code>COMPUTE_DNS_ENABLED=true</code> and <code>COMPUTE_DOMAIN</code> is set, resolves <code>&lt;sandbox&gt;.&lt;user&gt;.&lt;zone&gt;</code> (tailnet IP first, guest IP fallback) plus apex/<code>api</code>/<code>gui</code>/<code>www</code>.</td>
               </tr>
               <tr>
-                <td><code>compute sandbox start / stop / delete</code></td>
-                <td>Control sandbox power state and remove sandboxes.</td>
+                <td>HTTP Edge (<code>:80</code>) &amp; Port Forwards</td>
+                <td>Routes wildcard hostnames and <code>/preview/&lt;vm&gt;/&lt;port&gt;/</code> HTTP/WebSocket traffic directly into guest ports. See <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 10. CLI Reference -->
+      <section id="cli-reference" class="doc-section" data-keywords="cli reference commands flags compute sandbox template job auth keys worker pool scp url">
+        <div class="section-head">
+          <span class="section-id">10</span>
+          <h2>CLI Reference (<code>compute</code>)</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Command Group</th>
+                <th>Subcommands &amp; Key Flags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>compute auth</code></td>
+                <td><code>login --username &lt;user&gt;</code>, <code>whoami</code>, <code>keys create|list|revoke</code> for scoped <code>cmp_</code> tokens.</td>
               </tr>
               <tr>
-                <td><code>compute sandbox clone &lt;id&gt; --name &lt;new&gt;</code></td>
-                <td>Replicate an existing sandbox disk and configuration.</td>
+                <td><code>compute sandbox</code></td>
+                <td><code>list</code>, <code>create --name --tier|--vcpus --memory --disk --image --template --isolated --protected --start</code>, <code>start</code>, <code>stop</code>, <code>delete</code>, <code>info</code>.</td>
               </tr>
               <tr>
-                <td><code>compute sandbox save-state / resume &lt;id&gt;</code></td>
-                <td>Pause a running sandbox to disk and resume its saved memory/CPU state.</td>
+                <td><code>compute sandbox save-state|resume</code></td>
+                <td>Checkpoints live Firecracker memory/CPU state to disk (<code>save-state</code>) and restores execution (<code>resume</code>).</td>
               </tr>
               <tr>
-                <td><code>compute sandbox ssh / exec &lt;id&gt;</code></td>
-                <td>Open an interactive terminal or stream a remote command inside a sandbox.</td>
+                <td><code>compute sandbox ssh|exec|file|cp|process</code></td>
+                <td><code>ssh [user@]&lt;target&gt;</code>, <code>exec [--no-stream|--json|--timeout] [user@]&lt;target&gt; -- &lt;cmd...&gt;</code>, <code>file read|write|list|mkdir|remove</code>, <code>process list|start|kill</code>.</td>
               </tr>
               <tr>
-                <td><code>compute template create / list / launch / delete</code></td>
-                <td>Create snapshots from sandboxes and launch new sandboxes from templates.</td>
+                <td><code>compute scp</code> / <code>compute url</code></td>
+                <td><code>scp [-r] &lt;src&gt; &lt;dst&gt;</code> using <code>&lt;sandbox&gt;:&lt;path&gt;</code>; <code>url [--port &lt;n&gt;] [--json] &lt;sandbox&gt;</code>.</td>
               </tr>
               <tr>
-                <td><code>compute job run / list / logs / cancel</code></td>
-                <td>Submit and monitor ephemeral distributed compute jobs.</td>
+                <td><code>compute template</code></td>
+                <td><code>list</code>, <code>create &lt;name&gt; --vm &lt;sandbox&gt; [--desc]</code>, <code>launch &lt;name&gt; [--name] [--tier] [--isolated]</code>, <code>inspect</code>, <code>delete</code>.</td>
+              </tr>
+              <tr>
+                <td><code>compute image</code></td>
+                <td><code>list</code>, <code>build --name &lt;name&gt; [--base] [--packages a,b] [--size]</code>, <code>inspect</code>, <code>delete</code>.</td>
+              </tr>
+              <tr>
+                <td><code>compute job</code> / <code>worker</code> / <code>pool</code></td>
+                <td><code>job run [--image --pool --vcpus --mem --files --cwd] -- &lt;cmd&gt;</code>, <code>worker token create [--name --pool]</code>, <code>worker cordon|drain|delete</code>, <code>pool create|list|delete</code>.</td>
               </tr>
             </tbody>
           </table>
@@ -441,11 +569,14 @@ compute worker token create --name gpu-node-01</code></pre>
       </section>
 
       <!-- 11. REST API Reference -->
-      <section id="rest-api" class="doc-section" data-keywords="rest api endpoints http json vms clone save-state resume templates users auth">
-        <h2>REST API Reference</h2>
+      <section id="rest-api" class="doc-section" data-keywords="rest api endpoints http json vms sandboxes clone save-state resume templates users auth jobs workers">
+        <div class="section-head">
+          <span class="section-id">11</span>
+          <h2>REST API Reference (<code>/api/v1</code>)</h2>
+        </div>
         <p>
-          All control-plane endpoints are served under <code>/api/v1</code> and accept either an <code>HttpOnly</code> session cookie
-          (<code>compute_session</code>) or an <code>Authorization: Bearer cmp_...</code> header.
+          Control-plane routes serve JSON under <code>/api/v1</code>. Authenticate using the <code>compute_session</code> HttpOnly cookie
+          or <code>Authorization: Bearer cmp_...</code>. Both <code>/api/v1/vms/*</code> and <code>/api/v1/sandboxes/*</code> address sandboxes.
         </p>
 
         <div class="table-wrap">
@@ -453,65 +584,60 @@ compute worker token create --name gpu-node-01</code></pre>
             <thead>
               <tr>
                 <th>Method</th>
-                <th>Endpoint</th>
-                <th>Description</th>
+                <th>Path</th>
+                <th>Behavior</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td><span class="method-badge method-get">GET</span></td>
-                <td><code>/api/v1/auth/status</code></td>
-                <td>Public endpoint returning <code>auth_enabled</code>, <code>signup_enabled</code>, and <code>admin_username</code>.</td>
+                <td><code>/api/v1/health</code> &middot; <code>/api/v1/ready</code></td>
+                <td>Public liveness probe (<code>health</code>) and full KVM/Firecracker/image/bridge readiness report (<code>ready</code>).</td>
               </tr>
               <tr>
-                <td><span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/auth/login</code></td>
-                <td>Authenticate with username/email and password; sets session cookie and returns bearer token.</td>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span></td>
+                <td><code>/api/v1/auth/status</code> &middot; <code>/api/v1/auth/login</code></td>
+                <td>Query auth/signup policy; exchange credentials for session cookie and bearer token.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
                 <td><code>/api/v1/auth/signup</code></td>
-                <td>Self-register a user account (returns <code>403 signup_disabled</code> when closed unless called by an admin).</td>
+                <td>Self-register when <code>COMPUTE_SIGNUP_ENABLED=true</code>; otherwise returns <code>403 signup_disabled</code>.</td>
               </tr>
               <tr>
-                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/users</code></td>
-                <td>Admin-only: list all users or provision a new user (<code>username</code>, <code>email</code>, <code>password</code>, <code>role</code>).</td>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
+                <td><code>/api/v1/users</code> &middot; <code>/api/v1/users/{id}</code></td>
+                <td>Admin-only user listing, provisioning, and deletion (protects bootstrap admin and caller).</td>
               </tr>
               <tr>
-                <td><span class="method-badge method-delete">DELETE</span></td>
-                <td><code>/api/v1/users/{id}</code></td>
-                <td>Admin-only: delete a user by ID or username and revoke their sessions/keys (guards self &amp; bootstrap admin).</td>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
+                <td><code>/api/v1/vms</code> &middot; <code>/api/v1/vms/{id}</code></td>
+                <td>List, create, inspect, patch, or delete microVM sandboxes.</td>
               </tr>
               <tr>
-                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/vms</code></td>
-                <td>List sandboxes or create a new Firecracker microVM sandbox.</td>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code>/api/v1/vms/{id}/run</code> &middot; <code>/stop</code> &middot; <code>/exec</code></td>
+                <td>Boot microVM, stop microVM, or execute shell command synchronously via SSH.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
                 <td><code>/api/v1/vms/{id}/clone</code></td>
-                <td>Replicate a sandbox with optional overrides (<code>name</code>, <code>vcpus</code>, <code>memory_mb</code>, <code>disk_gb</code>, <code>network_isolated</code>, <code>auto_start</code>).</td>
+                <td>Clone sandbox disk with overrides (<code>name</code>, <code>vcpus</code>, <code>memory_mb</code>, <code>disk_gb</code>, <code>network_isolated</code>, <code>auto_start</code>).</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/vms/{id}/save-state</code></td>
-                <td>Pause a running sandbox and serialize its Firecracker CPU/memory state to disk.</td>
+                <td><code>/api/v1/vms/{id}/save-state</code> &middot; <code>/resume</code></td>
+                <td>Serialize running Firecracker vCPU/memory state to disk or resume from saved state.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/vms/{id}/resume</code></td>
-                <td>Resume a paused sandbox from its saved memory/CPU state.</td>
+                <td><code>/api/v1/templates</code> &middot; <code>/api/v1/templates/{id}/launch</code></td>
+                <td>Capture reusable disk template from <code>vm_id</code> and spawn new sandboxes from a template.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/templates</code></td>
-                <td>List snapshots/templates or capture a new snapshot from <code>vm_id</code>.</td>
-              </tr>
-              <tr>
-                <td><span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/templates/{id}/launch</code></td>
-                <td>Launch a new sandbox from a snapshot template with optional spec overrides and <code>auto_start</code>.</td>
+                <td><code>/api/v1/jobs</code> &middot; <code>/api/v1/workers</code></td>
+                <td>Submit/stream distributed jobs and manage enrolled worker nodes &amp; enrollment tokens.</td>
               </tr>
             </tbody>
           </table>
@@ -519,37 +645,72 @@ compute worker token create --name gpu-node-01</code></pre>
       </section>
 
       <!-- 12. SDKs -->
-      <section id="sdks" class="doc-section" data-keywords="sdk python typescript javascript client programmatic">
-        <h2>Python &amp; TypeScript SDKs</h2>
+      <section id="sdks" class="doc-section" data-keywords="sdk python typescript javascript client programmatic commands files process">
+        <div class="section-head">
+          <span class="section-id">12</span>
+          <h2>TypeScript &amp; Python SDKs</h2>
+        </div>
         <p>
-          Official client libraries are included in <code>sdk/python</code> and <code>sdk/typescript</code> for programmatic
-          sandbox orchestration, AI agent tool execution, and CI pipelines.
+          First-party SDKs in <code>sdk/typescript</code> and <code>sdk/python</code> wrap sandbox creation,
+          <code>commands.run</code>, <code>files</code> (<code>read</code>/<code>write</code>/<code>list</code>/<code>mkdir</code>/<code>remove</code>),
+          <code>process</code> management, and cleanup context managers.
         </p>
 
-        <div class="code-block">
-          <div class="code-header"><span>typescript</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>import { Sandbox } from "@compute-dev/sdk";
+        <div class="tab-group" data-tabs>
+          <div class="tab-bar" role="tablist" aria-label="SDK Language">
+            <button class="tab-btn active" type="button" role="tab" aria-selected="true" data-tab-target="ts">TypeScript</button>
+            <button class="tab-btn" type="button" role="tab" aria-selected="false" data-tab-target="py">Python</button>
+          </div>
+
+          <div class="tab-panel active" data-tab-panel="ts">
+            <div class="code-block">
+              <div class="code-header"><span>sdk/typescript &mdash; create, write file, run command, kill</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>import { Sandbox } from "@compute-dev/sdk";
 
 const sbx = await Sandbox.create({
-  apiUrl: "http://127.0.0.1:18080",
+  host: "http://127.0.0.1:18080",
   apiKey: process.env.COMPUTE_API_KEY,
   name: "agent-runner",
   vcpus: 2,
   memoryMb: 2048,
 });
 
-const res = await sbx.exec(["uname", "-a"]);
-console.log(res.stdout);</code></pre>
+await sbx.files.write("/workspace/hello.txt", "hello microvm\n");
+const res = await sbx.commands.run("cat /workspace/hello.txt && uname -r");
+console.log(res.stdout, res.exitCode, res.durationMs);
+await sbx.kill();</code></pre>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab-panel="py">
+            <div class="code-block">
+              <div class="code-header"><span>sdk/python &mdash; context-managed sandbox lifecycle</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>import os
+from compute import Sandbox
+
+with Sandbox.create(
+    host="http://127.0.0.1:18080",
+    api_key=os.environ.get("COMPUTE_API_KEY"),
+    name="py-runner",
+    vcpus=2,
+    memory_mb=2048,
+) as sbx:
+    sbx.files.write("/workspace/script.py", "print(6 * 7)\n")
+    res = sbx.commands.run("python3 /workspace/script.py")
+    print(res.stdout.strip())</code></pre>
+            </div>
+          </div>
         </div>
       </section>
 
       <footer class="doc-footer">
-        <span>Compute v1.0.0 — Open-Source Self-Hosted MicroVM Platform (MIT License)</span>
-        <span>
-          <a href="configuration.md">Configuration Reference</a> ·
-          <a href="install.md">Install Guide</a> ·
-          <a href="dns-ssh.md">DNS &amp; SSH</a>
-        </span>
+        <span>Compute v1.0.0 &middot; MIT License</span>
+        <div class="doc-footer-links">
+          <a href="install.md">install.md</a>
+          <a href="configuration.md">configuration.md</a>
+          <a href="dns-ssh.md">dns-ssh.md</a>
+          <a href="domain-options.md">domain-options.md</a>
+        </div>
       </footer>
     </main>
   </div>

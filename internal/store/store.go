@@ -14,7 +14,7 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 
-	"github.com/Rashid2G/on-demand-vms/internal/store/migrations"
+	"github.com/Rashid2G/compute/internal/store/migrations"
 )
 
 // Store provides access to SQLite with a dedicated single-writer pool and multi-connection reader pool.

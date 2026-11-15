@@ -33,7 +33,7 @@ function createMockServer() {
       status: 'running',
       vcpus: 2,
       memory_mb: 1024,
-      disk_mb: 51200,
+      disk_mb: 20480,
       ip_address: '172.16.0.10',
       public_ip: '172.16.0.10',
       public_ip_enabled: true,
@@ -48,8 +48,47 @@ function createMockServer() {
       updated_at: new Date().toISOString(),
       protected: false,
     },
+    {
+      id: 'vm-job-hidden',
+      owner_id: 'jobs',
+      name: 'job-ci-9999',
+      status: 'running',
+      vcpus: 2,
+      memory_mb: 2048,
+      disk_mb: 20480,
+      ip_address: '172.16.0.99',
+      mac_address: '02:fc:00:00:00:99',
+      tap_device: 'tap99',
+      disk_path: '/var/lib/compute/vms/job-ci-9999/disk.ext4',
+      rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
+      kernel_path: '/var/lib/compute/vmlinux',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
   ];
   let templates = [];
+  let volumes = [
+    {
+      id: 'vol-data-1',
+      name: 'ci-cache',
+      pool: 'default',
+      size_gb: 25,
+      used_gb: 4,
+      status: 'available',
+      attached_vm: '',
+      device_path: '/dev/vdb',
+      mount_point: '/mnt/ci-cache',
+      filesystem: 'ext4',
+      iops: 3000,
+      throughput: '250 MB/s',
+      snapshots: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  ];
+  let portForwards = [];
+  let ciRepos = [];
+  let jobs = [];
   let users = [
     {
       id: 'usr_admin',
@@ -63,6 +102,7 @@ function createMockServer() {
   ];
   const cloneCalls = [];
   const launchCalls = [];
+  const createCalls = [];
   let currentUserRole = 'admin';
 
   const mime = {
@@ -132,17 +172,118 @@ function createMockServer() {
       if (p === '/api/v1/config') {
         return json(200, {
           server: { listen: '0.0.0.0:18080' },
-          defaults: { vcpus: 2, memory_mb: 1024, disk_size_mb: 51200, image: 'ubuntu' },
+          defaults: { vcpus: 2, memory_mb: 2048, disk_size_mb: 20480, image: 'ubuntu-24' },
           images: { available: [{ name: 'ubuntu-24' }], vms_dir: '/var/lib/compute/vms', images_dir: '/var/lib/compute/images' },
           resources: { max_running_vms: 20, max_total_disk_mb: 512000, max_total_vcpus: 16, max_total_memory_mb: 32768 },
+        });
+      }
+      if (p === '/api/v1/admin/resources') {
+        return json(200, {
+          timestamp: new Date().toISOString(),
+          cpu: {
+            cores: 16,
+            model: 'AMD EPYC 7313P',
+            usage_percent: 34.5,
+            user_percent: 25.0,
+            system_percent: 7.5,
+            iowait_percent: 2.0,
+            idle_percent: 65.5,
+            load_1m: 1.42,
+            load_5m: 1.18,
+            load_15m: 0.95,
+          },
+          memory: {
+            total_mb: 65536,
+            used_mb: 24576,
+            available_mb: 40960,
+            free_mb: 32000,
+            cached_mb: 7200,
+            buffers_mb: 1760,
+            used_percent: 37.5,
+            swap_total_mb: 0,
+            swap_used_mb: 0,
+          },
+          disk: {
+            path: '/var/lib/compute',
+            total_gb: 500,
+            used_gb: 145,
+            free_gb: 355,
+            available_gb: 340,
+            used_percent: 29.0,
+            mounts: [
+              { label: 'compute-data', path: '/var/lib/compute', total_gb: 500, used_gb: 145, available_gb: 340, used_percent: 29.0 },
+            ],
+          },
+          disk_io: {
+            read_ops: 12400,
+            write_ops: 8300,
+            read_bytes: 1024000000,
+            write_bytes: 512000000,
+            read_mb: 976.5,
+            write_mb: 488.2,
+            read_mb_per_sec: 14.2,
+            write_mb_per_sec: 8.6,
+            read_iops: 320,
+            write_iops: 180,
+            io_in_progress: 1,
+            devices: [
+              { device: 'nvme0n1', read_ops: 12400, write_ops: 8300, read_bytes: 1024000000, write_bytes: 512000000, read_mb: 976.5, write_mb: 488.2, io_in_progress: 1 },
+            ],
+          },
+          network: {
+            rx_bytes: 2048000000,
+            tx_bytes: 1024000000,
+            rx_packets: 150000,
+            tx_packets: 120000,
+            rx_mb: 1953.1,
+            tx_mb: 976.5,
+            rx_mb_per_sec: 3.45,
+            tx_mb_per_sec: 1.9,
+            interfaces: ['eth0', 'fcbr0'],
+          },
+          system: {
+            hostname: 'compute-host-01',
+            os: 'linux',
+            arch: 'amd64',
+            kernel_version: '6.8.0',
+            uptime_seconds: 86400,
+            kvm_available: true,
+          },
+          allocations: {
+            sandboxes: { total: 1, running: 1, stopped: 0, vcpus_allocated: 2, running_vcpus: 2, memory_mb_allocated: 1024, running_memory_mb: 1024, disk_mb_allocated: 20480, disk_gb_allocated: 20 },
+            ci_jobs: { total: jobs.length, queued: 0, running: 0, succeeded: jobs.length, failed: 0, vcpus_allocated: 0, memory_mb_allocated: 0, disk_mb_allocated: 0, disk_gb_allocated: 0 },
+            volumes: { total: volumes.length, attached: 0, available: volumes.length, disk_mb_allocated: 25600, disk_gb_allocated: 25 },
+            workers: { total: 1, ready: 1, offline: 0 },
+            limits: { max_running_vms: 20, max_total_vcpus: 16, max_total_memory_mb: 32768, max_total_disk_mb: 512000, min_free_disk_space_mb: 4096 },
+            allocated_vcpus: 2,
+            running_vcpus: 2,
+            job_vcpus: 0,
+            max_total_vcpus: 16,
+            allocated_memory_mb: 1024,
+            running_memory_mb: 1024,
+            job_memory_mb: 0,
+            max_total_memory_mb: 32768,
+            allocated_vm_disk_gb: 20,
+            allocated_volume_disk_gb: 25,
+            max_total_disk_gb: 500,
+          },
+          capacity_warnings: ['Memory headroom approaching threshold in test warning'],
         });
       }
       if (p === '/api/v1/network/config') {
         return json(200, { bridge_name: 'fcbr0', mode: 'nat', subnet: '172.16.0.0/24', bridge_ip: '172.16.0.1' });
       }
       if (p === '/api/v1/network/allocations') return json(200, []);
+      if (p === '/api/v1/network/port-forwards' && req.method === 'GET') return json(200, portForwards);
+      if (p === '/api/v1/network/port-forwards' && req.method === 'POST') {
+        const pf = { id: `pf-${portForwards.length + 1}`, ...body, status: 'active', created_at: new Date().toISOString() };
+        portForwards = [...portForwards, pf];
+        return json(201, pf);
+      }
+      if (p === '/api/v1/volumes' && req.method === 'GET') return json(200, volumes);
       if (p === '/api/v1/workers') return json(200, []);
       if (p === '/api/v1/worker-tokens') return json(200, []);
+      if (p === '/api/v1/pools') return json(200, []);
       if (p === '/api/v1/events') return json(200, []);
       if (p === '/api/v1/events/stream') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -151,17 +292,95 @@ function createMockServer() {
       if (p === '/api/v1/queue') return json(200, { count: 0, queued_vms: [] });
       if (p === '/api/v1/tiers') return json(200, []);
       if (p === '/api/v1/environments') return json(200, []);
-      if (p === '/api/v1/images') return json(200, []);
       if (p === '/api/v1/api-keys') return json(200, []);
       if (p === '/api/v1/keys') return json(200, []);
-      if (p === '/api/v1/agent-profiles') return json(200, []);
+
+      if (p === '/api/v1/ci/repos' && req.method === 'GET') return json(200, ciRepos);
+      if (p === '/api/v1/ci/repos' && req.method === 'POST') {
+        const name = body.name || 'acme/api-service';
+        const created = {
+          id: `gh_${ciRepos.length + 1}`,
+          owner_id: 'usr_admin',
+          name,
+          repo_url: body.repo_url,
+          default_branch: body.default_branch || 'main',
+          has_token: Boolean(body.github_token),
+          has_webhook_secret: true,
+          webhook_secret: body.webhook_secret || 'whsec_test_secret_123',
+          default_command: body.default_command || 'npm test',
+          vcpus: body.vcpus || 2,
+          memory_mb: body.memory_mb || 2048,
+          timeout_sec: body.timeout_sec || 600,
+          status: 'connected',
+          created_at: new Date().toISOString(),
+        };
+        ciRepos = [...ciRepos, created];
+        return json(201, created);
+      }
+      const triggerMatch = p.match(/^\/api\/v1\/ci\/repos\/([^/]+)\/trigger$/);
+      if (triggerMatch && req.method === 'POST') {
+        const repo = ciRepos.find((r) => r.id === triggerMatch[1]);
+        const job = {
+          id: `job-${jobs.length + 1}`,
+          owner_id: 'usr_admin',
+          pool_id: 'default',
+          type: 'command',
+          state: 'succeeded',
+          priority: 10,
+          repo_id: repo?.id,
+          repo_name: repo?.name,
+          repo_url: repo?.repo_url,
+          branch: body.branch || repo?.default_branch || 'main',
+          commit_sha: body.commit_sha || 'abc1234def',
+          source: 'manual',
+          vm_id: 'job-ci-runner-1',
+          spec_json: JSON.stringify({ command: body.command || repo?.default_command }),
+          result_json: '{"exit_code":0}',
+          queued_at: new Date().toISOString(),
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        jobs = [...jobs, job];
+        return json(201, job);
+      }
+      if (p === '/api/v1/jobs' && req.method === 'GET') return json(200, jobs);
+      if (p.match(/^\/api\/v1\/jobs\/[^/]+\/logs$/) && req.method === 'GET') {
+        return json(200, [{ id: 'log-1', job_id: 'job-1', attempt_id: 'att-1', stream: 'stdout', seq: 1, data: 'All CI tests passed', created_at: new Date().toISOString() }]);
+      }
 
       if (p === '/api/v1/vms' && req.method === 'GET') return json(200, vms);
+      if (p === '/api/v1/vms' && req.method === 'POST') {
+        createCalls.push(body);
+        const created = {
+          id: `vm-created-${createCalls.length}`,
+          name: body.name || 'sbx-created',
+          status: 'stopped',
+          vcpus: body.vcpus || 2,
+          memory_mb: body.memory_mb || 2048,
+          disk_mb: body.disk_mb || ((body.disk_gb || 20) * 1024),
+          ip_address: `172.16.0.${30 + createCalls.length}`,
+          mac_address: `02:fc:00:00:00:3${createCalls.length}`,
+          tap_device: `tap3${createCalls.length}`,
+          disk_path: `/var/lib/compute/vms/${body.name}/disk.ext4`,
+          rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
+          kernel_path: '/var/lib/compute/vmlinux',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        vms = [...vms, created];
+        return json(201, created);
+      }
 
       const vmMatch = p.match(/^\/api\/v1\/vms\/([^/]+)(?:\/(.*))?$/);
       if (vmMatch) {
         const [, id, sub] = vmMatch;
         const src = vms.find((v) => v.id === id);
+        if (sub === 'run' && req.method === 'POST') {
+          vms = vms.map((v) => (v.id === id ? { ...v, status: 'running' } : v));
+          return json(200, vms.find((v) => v.id === id));
+        }
         if (sub === 'clone' && req.method === 'POST') {
           cloneCalls.push({ id, body });
           const created = {
@@ -171,7 +390,7 @@ function createMockServer() {
             status: body.auto_start ? 'running' : 'stopped',
             vcpus: body.vcpus || src?.vcpus || 2,
             memory_mb: body.memory_mb || src?.memory_mb || 1024,
-            disk_mb: body.disk_gb ? body.disk_gb * 1024 : (src?.disk_mb || 51200),
+            disk_mb: body.disk_mb || (body.disk_gb ? body.disk_gb * 1024 : (src?.disk_mb || 20480)),
             ip_address: `172.16.0.${20 + cloneCalls.length}`,
             network_isolation: body.network_isolated ? 'isolated' : 'account',
             mac_address: `02:fc:00:00:00:2${cloneCalls.length}`,
@@ -226,7 +445,7 @@ function createMockServer() {
           status: body.auto_start === false ? 'stopped' : 'running',
           vcpus: body.vcpus || tpl?.vcpus || 2,
           memory_mb: body.memory_mb || tpl?.memory_mb || 1024,
-          disk_mb: 51200,
+          disk_mb: 20480,
           ip_address: `172.16.0.${40 + launchCalls.length}`,
           mac_address: `02:fc:00:00:00:4${launchCalls.length}`,
           tap_device: `tap4${launchCalls.length}`,
@@ -286,6 +505,7 @@ function createMockServer() {
     server,
     cloneCalls,
     launchCalls,
+    createCalls,
     setUserRole: (role) => {
       currentUserRole = role;
     },
@@ -331,6 +551,19 @@ class CDPClient {
     }
     return res.result?.value;
   }
+  async realClick(pointExpr) {
+    const pt = await this.evalJS(`(() => {
+      const el = ${pointExpr};
+      if (!el) return null;
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const r = el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`);
+    assert(pt, `Element not found for realClick: ${pointExpr}`);
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: pt.x, y: pt.y });
+    await this.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
+  }
   close() {
     this.ws.close();
   }
@@ -346,14 +579,14 @@ async function waitFor(cdp, fnExpr, timeoutMs = 5000, label = fnExpr) {
   throw new Error(`Timeout waiting for: ${label}`);
 }
 
-test('Compute branding, self-hosted lifecycle UX (replicate, pause, snapshot, launch), and admin user management', async (t) => {
+test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Terminal, CI & Admin Resources', async (t) => {
   const chromeBin = findChromium();
   if (!chromeBin) {
     t.skip('No Chromium/Chrome binary found for browser E2E verification');
     return;
   }
 
-  const { server, cloneCalls, launchCalls, setUserRole } = createMockServer();
+  const { server, cloneCalls, launchCalls, createCalls, setUserRole } = createMockServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}/`;
@@ -428,23 +661,66 @@ test('Compute branding, self-hosted lifecycle UX (replicate, pause, snapshot, la
       };
     `);
 
-    await t.test('Branding is Compute and fake billing metrics are removed', async () => {
+    await t.test('Branding is Compute, job VMs are hidden, quotas & defaults match self-hosted model', async () => {
       const pageText = await cdp.evalJS(`document.body.innerText`);
       assert(!pageText.toLowerCase().includes('boat.dev'), 'Must not mention boat.dev');
       assert(!pageText.includes('$0.018'), 'Must not display fake $0.018 cost');
+      assert(!pageText.includes('job-ci-9999'), 'Defensive filter must hide owner_id=jobs VM from Sandboxes list');
       assert(pageText.includes('Compute'), 'Sidebar must display Compute branding');
       assert(pageText.includes('Resources'), 'Instances table must have Resources column');
-      assert(pageText.includes('2 vCPU · 1 GB · 50 GB'), 'Resources cell should show vCPU, RAM, Disk');
+      assert(pageText.includes('2 vCPU · 1 GB · 20 GB'), 'Resources cell should show vCPU, RAM, 20 GB Disk');
 
       await cdp.evalJS(`window.location.hash = '#/settings'`);
-      await waitFor(cdp, `window.location.hash === '#/settings' && document.body.innerText.includes('Organization & Quotas')`, 4000, 'settings quotas');
+      await waitFor(cdp, `window.location.hash === '#/settings' && document.body.innerText.includes('Default VM Resources')`, 4000, 'settings defaults');
       const settingsText = await cdp.evalJS(`document.body.innerText`);
       assert(!settingsText.includes('Hourly Burn'), 'Settings must not mention Hourly Burn');
       assert(!settingsText.includes('Organization & Billing'), 'Settings must not mention Billing');
-      assert(settingsText.includes('Allocated Compute & Memory'), 'Settings must show self-hosted compute allocation');
+      assert(settingsText.includes('Default Disk Size'), 'Settings must show Default Disk Size');
+      assert(settingsText.includes('20 GB'), 'Settings must show 20 GB default disk size');
+      assert(settingsText.includes('ubuntu-24'), 'Settings must show ubuntu-24 default image');
+
+      await cdp.evalJS(`window.location.hash = '#/workers'`);
+      await waitFor(cdp, `window.location.hash === '#/workers' && document.body.innerText.includes('Quotas & Resource Limits')`, 4000, 'workers quotas');
+      const workersText = await cdp.evalJS(`document.body.innerText`);
+      assert(workersText.includes('Allocated Compute & Memory'), 'Workers page must show self-hosted compute allocation');
 
       await cdp.evalJS(`window.location.hash = '#/instances'`);
       await waitFor(cdp, `window.location.hash === '#/instances' && document.body.innerText.includes('sbx-alpha')`, 4000, 'back to instances');
+    });
+
+    await t.test('Single New button (no chevron) opens Create Sandbox with 20 GB default and Ubuntu 24.04 LTS', async () => {
+      const hasChevron = await cdp.evalJS(`Boolean(document.querySelector('button[aria-label="More creation options"]'))`);
+      assert.equal(hasChevron, false, 'Split dropdown chevron button must be removed');
+
+      const clickedNew = await cdp.evalJS(`window.__clickButtonByText('New')`);
+      assert.equal(clickedNew, true, 'Single New button must exist');
+      await waitFor(cdp, `document.getElementById('advanced-create-title') !== null`, 3000, 'create modal open');
+
+      const modalInfo = await cdp.evalJS(`(() => {
+        const dialog = document.querySelector('[role="dialog"]');
+        const diskInput = dialog.querySelector('input[aria-label="Disk size in GB"]');
+        const imageSelect = dialog.querySelector('select[aria-label="Base OS image"]');
+        return {
+          text: dialog.innerText,
+          diskVal: diskInput ? diskInput.value : null,
+          hasOsPicker: Boolean(imageSelect),
+        };
+      })()`);
+      assert.equal(modalInfo.hasOsPicker, false, 'Base OS picker must be removed');
+      assert(modalInfo.text.includes('Ubuntu 24.04 LTS'), 'Create modal should state Ubuntu 24.04 LTS');
+      assert.equal(modalInfo.diskVal, '20', 'Default disk size must be 20 GB');
+
+      await cdp.evalJS(`(() => {
+        const input = document.querySelector('input[aria-label="Sandbox name"]');
+        window.__setReactInput(input, 'sbx-default-20g');
+        input.closest('form').requestSubmit();
+      })()`);
+      await waitFor(cdp, `document.getElementById('advanced-create-title') === null`, 3000, 'create modal closed');
+      await waitFor(cdp, `document.body.innerText.includes('sbx-default-20g')`, 4000, 'created sandbox rendered');
+      assert.equal(createCalls.length, 1);
+      assert.equal(createCalls[0].name, 'sbx-default-20g');
+      assert.equal(createCalls[0].image, 'ubuntu-24');
+      assert.equal(createCalls[0].disk_mb, 20480);
     });
 
     await t.test('Replicate dialog creates multiple replicas with overrides', async () => {
@@ -478,7 +754,16 @@ test('Compute branding, self-hosted lifecycle UX (replicate, pause, snapshot, la
       await waitFor(cdp, `!document.body.innerText.includes('PAUSED (STATE SAVED)')`, 4000, 'resumed to running');
     });
 
-    await t.test('Create Snapshot from row, inspect in Inspector Snapshots tab, and Launch from Snapshots page', async () => {
+    await t.test('Redesigned calm Sandbox Detail View replaces legacy Inspector and Snapshots page omits Image Builder', async () => {
+      await cdp.evalJS(`Array.from(document.querySelectorAll('tr')).find(r => r.innerText.includes('sbx-alpha')).click()`);
+      await waitFor(cdp, `document.querySelector('[data-testid="sandbox-detail-panel"]') !== null`, 3000, 'detail panel open');
+      const detailText = await cdp.evalJS(`document.querySelector('[data-testid="sandbox-detail-panel"]').innerText`);
+      assert(!detailText.includes('SANDBOX INSPECTOR'), 'Legacy SANDBOX INSPECTOR header must be gone');
+      assert(!detailText.includes('Execute Command'), 'Non-interactive exec must be removed');
+      assert(!detailText.includes('Execute via SSH'), 'Legacy Execute via SSH section must be removed');
+      assert(detailText.includes('Reconnect') && detailText.includes('Pop Out'), 'Embedded terminal controls must be present');
+      assert(detailText.includes('Compute Specs') && detailText.includes('Attached Volumes') && detailText.includes('Port Forwards & Ingress'), 'Resource and connectivity cards must render');
+
       await cdp.evalJS(`document.querySelector('button[aria-label="Snapshot sbx-alpha"]').click()`);
       await waitFor(cdp, `document.getElementById('create-snapshot-title') !== null`, 3000, 'snapshot modal open');
       await cdp.evalJS(`
@@ -490,24 +775,16 @@ test('Compute branding, self-hosted lifecycle UX (replicate, pause, snapshot, la
       `);
       await waitFor(cdp, `document.getElementById('create-snapshot-title') === null`, 3000, 'snapshot modal closed');
 
-      await cdp.evalJS(`Array.from(document.querySelectorAll('tr')).find(r => r.innerText.includes('sbx-alpha')).click()`);
-      await waitFor(cdp, `document.body.innerText.includes('SANDBOX INSPECTOR')`, 3000, 'inspector open');
-      await cdp.evalJS(`
-        (() => {
-          const tabs = Array.from(document.querySelectorAll('button'));
-          const snapTab = tabs.find(b => b.innerText.trim() === 'Snapshots');
-          snapTab.click();
-        })()
-      `);
-      await waitFor(cdp, `document.body.innerText.includes('alpha-golden')`, 4000, 'snapshot listed in inspector');
-
       await cdp.evalJS(`window.location.hash = '#/snapshots'`);
       await waitFor(
         cdp,
-        `window.location.hash === '#/snapshots' && !document.body.innerText.includes('SANDBOX INSPECTOR') && document.body.innerText.includes('alpha-golden') && Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim().includes('Launch'))`,
+        `window.location.hash === '#/snapshots' && document.querySelector('[data-testid="sandbox-detail-panel"]') === null && document.body.innerText.includes('alpha-golden') && Array.from(document.querySelectorAll('button')).some(b => b.innerText.trim().includes('Launch'))`,
         4000,
         'snapshots page loaded',
       );
+      const snapPageText = await cdp.evalJS(`document.body.innerText`);
+      assert(!snapPageText.includes('Custom Rootfs Images') && !snapPageText.includes('Build Image'), 'Custom Rootfs Image builder must be removed from Snapshots page');
+
       const clickedLaunch = await cdp.evalJS(`window.__clickButtonByText('Launch')`);
       assert.equal(clickedLaunch, true, 'Launch button must be found and clicked');
       await waitFor(cdp, `document.getElementById('launch-snapshot-title') !== null`, 3000, 'launch modal open');
@@ -527,6 +804,59 @@ test('Compute branding, self-hosted lifecycle UX (replicate, pause, snapshot, la
       assert.equal(launchCalls.length, 1);
       assert.equal(launchCalls[0].body.name, 'sbx-from-golden');
       assert.equal(launchCalls[0].body.auto_start, true);
+    });
+
+    await t.test('Raw popup terminal route renders pure chromeless xterm viewport', async () => {
+      await cdp.evalJS(`window.location.hash = '#/terminal/vm-alpha?user=compute'`);
+      await waitFor(cdp, `document.querySelector('[data-testid="raw-terminal-window"]') !== null`, 4000, 'raw terminal window');
+      const termStats = await cdp.evalJS(`(() => {
+        const root = document.querySelector('[data-testid="raw-terminal-window"]');
+        return {
+          buttonCount: root.querySelectorAll('button').length,
+          hasXterm: Boolean(root.querySelector('.xterm')),
+          width: root.clientWidth,
+          height: root.clientHeight,
+        };
+      })()`);
+      assert.equal(termStats.buttonCount, 0, 'Raw terminal window must have zero buttons/chrome');
+      assert.equal(termStats.hasXterm, true, 'Raw terminal window must mount xterm canvas');
+      assert(termStats.width >= 1000 && termStats.height >= 700, 'Raw terminal must fill viewport');
+    });
+
+    await t.test('CI Jobs page connects GitHub repos, triggers runs, and streams logs', async () => {
+      await cdp.evalJS(`window.location.hash = '#/jobs'`);
+      await waitFor(cdp, `window.location.hash === '#/jobs' && document.body.innerText.includes('CI Jobs')`, 4000, 'ci jobs page loaded');
+
+      const clickedConnect = await cdp.evalJS(`window.__clickButtonByText('Connect GitHub Repository')`);
+      assert.equal(clickedConnect, true, 'Connect GitHub Repository button must be present');
+      await waitFor(cdp, `document.getElementById('ci-repo-modal-title') !== null`, 3000, 'connect repo modal open');
+      await cdp.evalJS(`(() => {
+        window.__setReactInput(document.querySelector('input[aria-label="Repository URL"]'), 'https://github.com/acme/api-service');
+        window.__setReactInput(document.querySelector('input[aria-label="Default branch"]'), 'main');
+        window.__setReactInput(document.querySelector('input[aria-label="Default CI command"]'), 'npm test');
+        document.getElementById('ci-repo-modal-title').closest('form').requestSubmit();
+      })()`);
+      await waitFor(cdp, `document.getElementById('ci-repo-modal-title') === null`, 3000, 'connect repo modal closed');
+      await waitFor(cdp, `document.body.innerText.includes('whsec_test_secret_123') && document.body.innerText.includes('acme/api-service')`, 4000, 'connected repo and secret banner');
+
+      const clickedTrigger = await cdp.evalJS(`window.__clickButtonByText('Trigger')`);
+      assert.equal(clickedTrigger, true, 'Trigger button must exist for connected repo');
+      await waitFor(cdp, `document.body.innerText.includes('Trigger CI Run')`, 3000, 'trigger modal open');
+      await cdp.evalJS(`window.__clickButtonByText('Start CI Run')`);
+      await waitFor(cdp, `document.querySelector('[data-testid="job-logs-drawer"]') !== null`, 4000, 'job logs drawer open');
+      await waitFor(cdp, `document.querySelector('[data-testid="job-logs-drawer"]').innerText.includes('All CI tests passed')`, 4000, 'job logs rendered');
+    });
+
+    await t.test('Admin Resources page shows live host metrics, warnings, and platform allocations', async () => {
+      await cdp.evalJS(`window.location.hash = '#/resources'`);
+      await waitFor(cdp, `window.location.hash === '#/resources' && document.body.innerText.includes('34.5%')`, 4000, 'resources telemetry loaded');
+      const resText = await cdp.evalJS(`document.body.innerText`);
+      assert(resText.includes('37.5%'), 'Expected host memory utilization percentage');
+      assert(resText.includes('29.0%'), 'Expected host disk utilization percentage');
+      assert(resText.includes('compute-host-01'), 'Expected host system hostname');
+      assert(resText.includes('Platform Allocations'), 'Expected Platform Allocations section');
+      const hasWarning = await cdp.evalJS(`document.querySelector('[data-testid="capacity-warnings-banner"]')?.innerText.includes('Memory headroom approaching threshold')`);
+      assert.equal(hasWarning, true, 'Expected capacity warnings banner');
     });
 
     await t.test('Access Users tab displays signup status, provisions users, and deletes non-admin users', async () => {
