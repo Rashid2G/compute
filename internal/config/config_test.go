@@ -40,6 +40,15 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Server.JailerBaseDir != "/srv/jailer" {
 		t.Fatalf("expected default JailerBaseDir /srv/jailer, got %s", cfg.Server.JailerBaseDir)
 	}
+	if cfg.Server.AdminUsername != "admin" {
+		t.Fatalf("expected default AdminUsername admin, got %s", cfg.Server.AdminUsername)
+	}
+	if cfg.Server.AdminEmail != "admin@compute.local" {
+		t.Fatalf("expected default AdminEmail admin@compute.local, got %s", cfg.Server.AdminEmail)
+	}
+	if cfg.Server.SignupEnabled {
+		t.Fatalf("expected SignupEnabled to be false by default")
+	}
 }
 
 func TestTiersAndValidation(t *testing.T) {
@@ -48,7 +57,7 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("expected 3 fixed tiers, got %d", len(tiers))
 	}
 
-	// Valid tiers: 1, 2, 4
+	// Valid tiers: 1, 2, 4, 8, 16
 	v, m, d, err := ValidateAndNormalizeSpecs(1, 0, 0)
 	if err != nil || v != 1 || m != 2048 || d != DiskSize50GB {
 		t.Fatalf("tier 1 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
@@ -64,6 +73,16 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("tier 4 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
 	}
 
+	v, m, d, err = ValidateAndNormalizeSpecs(8, 0, 0)
+	if err != nil || v != 8 || m != 16384 || d != DiskSize50GB {
+		t.Fatalf("tier 8 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
+	}
+
+	v, m, d, err = ValidateAndNormalizeSpecs(16, 0, 0)
+	if err != nil || v != 16 || m != 32768 || d != DiskSize50GB {
+		t.Fatalf("tier 16 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
+	}
+
 	// 100GB via 100
 	v, m, d, err = ValidateAndNormalizeSpecs(2, 2048, 100)
 	if err != nil || v != 2 || m != 2048 || d != DiskSize100GB {
@@ -76,9 +95,9 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("expected error for 3 vcpus, got nil")
 	}
 
-	_, _, _, err = ValidateAndNormalizeSpecs(8, 0, 0)
+	_, _, _, err = ValidateAndNormalizeSpecs(32, 0, 0)
 	if err == nil {
-		t.Fatalf("expected error for 8 vcpus, got nil")
+		t.Fatalf("expected error for 32 vcpus, got nil")
 	}
 
 	// Custom disk sizes: 2048 MB, 20 GB, 100 GB

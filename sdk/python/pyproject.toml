@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compute-sdk"
-version = "0.2.0"
+version = "1.0.0"
 authors = [
   { name="Compute Team", email="dev@compute.local" },
 ]
-description = "Official Python SDK for Compute Sandboxes (E2B / Boat.dev Parity)"
+description = "Official Python SDK for Compute Sandboxes"
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [

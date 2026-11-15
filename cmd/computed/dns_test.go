@@ -46,9 +46,9 @@ func TestSandboxLabelForVM(t *testing.T) {
 func TestVMHostnameDefaultOwner(t *testing.T) {
 	s := &Server{cfg: config.GlobalConfig{}}
 	s.cfg.DNS.Enabled = true
-	s.cfg.DNS.BaseDomain = "compute-lab.tail1234.ts.net"
+	s.cfg.DNS.BaseDomain = "compute.tail1234.ts.net"
 
-	if got := s.vmHostname(&db.VM{Name: "myvm", OwnerID: "default"}); got != "myvm.default.compute-lab.tail1234.ts.net" {
+	if got := s.vmHostname(&db.VM{Name: "myvm", OwnerID: "default"}); got != "myvm.default.compute.tail1234.ts.net" {
 		t.Fatalf("hostname = %q", got)
 	}
 

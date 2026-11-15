@@ -418,6 +418,9 @@ type CreateRequest struct {
 	VCPUs            int    `json:"vcpus"`                // 1, 2, or 4
 	MemoryMB         int    `json:"memory_mb,omitempty"`  // Optional: default 2048, 4096, 8192
 	DiskMB           int    `json:"disk_mb,omitempty"`    // 51200 (50GB) or 102400 (100GB)
+	DiskGB           int    `json:"disk_gb,omitempty"`    // Optional convenience override in GB
+	Description      string `json:"description,omitempty"`
+	AutoStart        bool   `json:"auto_start,omitempty"`
 	Image            string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
 	Template         string `json:"template,omitempty"`   // VM Template name or ID to launch from
 	CloneFrom        string `json:"clone_from,omitempty"` // VM ID to clone persistent disk from
@@ -428,6 +431,7 @@ type CreateRequest struct {
 	DedicatedIP      *bool  `json:"dedicated_ip,omitempty"`
 	NetworkIsolation string `json:"network_isolation,omitempty"` // "account" (default) or "isolated"
 	Isolated         *bool  `json:"isolated,omitempty"`          // Convenience boolean alias: true => "isolated", false => "account"
+	NetworkIsolated  *bool  `json:"network_isolated,omitempty"`  // Boolean alias for isolated
 	DHCP             *bool  `json:"dhcp,omitempty"`
 	SSHKeyID         string `json:"ssh_key_id,omitempty"`
 	SSHPublicKey     string `json:"ssh_public_key,omitempty"`
@@ -456,12 +460,13 @@ type CreateRequest struct {
 func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 	type Alias CreateRequest
 	aux := struct {
-		RawPublicIP    interface{} `json:"public_ip,omitempty"`
-		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
-		RawIsolated    interface{} `json:"isolated,omitempty"`
-		RawIsolate     interface{} `json:"isolate,omitempty"`
-		RawDHCP        interface{} `json:"dhcp,omitempty"`
-		RawProtected   interface{} `json:"protected,omitempty"`
+		RawPublicIP        interface{} `json:"public_ip,omitempty"`
+		RawDedicatedIP     interface{} `json:"dedicated_ip,omitempty"`
+		RawIsolated        interface{} `json:"isolated,omitempty"`
+		RawIsolate         interface{} `json:"isolate,omitempty"`
+		RawNetworkIsolated interface{} `json:"network_isolated,omitempty"`
+		RawDHCP            interface{} `json:"dhcp,omitempty"`
+		RawProtected       interface{} `json:"protected,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -504,6 +509,12 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 		r.Isolated = b
 	} else if b := parseBool(aux.RawIsolate); b != nil {
 		r.Isolated = b
+	} else if b := parseBool(aux.RawNetworkIsolated); b != nil {
+		r.Isolated = b
+		r.NetworkIsolated = b
+	}
+	if r.DiskMB <= 0 && r.DiskGB > 0 {
+		r.DiskMB = r.DiskGB * 1024
 	}
 	if b := parseBool(aux.RawDHCP); b != nil {
 		r.DHCP = b
@@ -1026,7 +1037,11 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	if err := validateSSHPassword(req.SSHPassword); err != nil {
 		return nil, err
 	}
-	networkIsolation, err := resolveNetworkIsolation(req.NetworkIsolation, req.Isolated)
+	isolatedFlag := req.Isolated
+	if isolatedFlag == nil {
+		isolatedFlag = req.NetworkIsolated
+	}
+	networkIsolation, err := resolveNetworkIsolation(req.NetworkIsolation, isolatedFlag)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,7 +1112,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				req.MemoryMB = 8192
 			}
 		default:
-			return nil, fmt.Errorf("disk space issue: invalid tier '%s': supported tiers are '1vcpu', '2vcpu', or '4vcpu' (inspired by boat.dev)", req.Tier)
+			return nil, fmt.Errorf("disk space issue: invalid tier '%s': supported tiers are '1vcpu', '2vcpu', or '4vcpu'", req.Tier)
 		}
 	}
 
@@ -1111,6 +1126,9 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 	memoryMB := req.MemoryMB
 	diskMB := req.DiskMB
+	if diskMB <= 0 && req.DiskGB > 0 {
+		diskMB = req.DiskGB * 1024
+	}
 	if diskMB <= 0 {
 		diskMB = m.defaults.DiskSizeMB
 		if diskMB <= 0 {
@@ -1424,6 +1442,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		Name:               name,
 		Status:             db.StatusCreated,
 		Protected:          protected,
+		Description:        strings.TrimSpace(req.Description),
 		VCPUs:              vcpus,
 		MemoryMB:           memoryMB,
 		DiskMB:             diskMB,
@@ -1461,20 +1480,32 @@ func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest
 	defer srcLock.RUnlock()
 
 	req.CloneFrom = srcVMID
-	srcVM, _ := m.getVMUnsafe(ctx, srcVMID)
-	if req.PublicIP == nil && req.PublicIPEnabled == nil && req.DedicatedIP == nil {
-		if srcVM != nil {
+	srcVM, _ := m.lookupVMForRequest(ctx, &req, srcVMID, req.OwnerID)
+	if srcVM == nil {
+		srcVM, _ = m.getVMUnsafe(ctx, srcVMID)
+	}
+	if srcVM != nil {
+		if req.Tier == "" && req.VCPUs <= 0 && srcVM.VCPUs > 0 {
+			req.VCPUs = srcVM.VCPUs
+		}
+		if req.MemoryMB <= 0 && srcVM.MemoryMB > 0 {
+			req.MemoryMB = srcVM.MemoryMB
+		}
+		if req.DiskMB <= 0 && req.DiskGB <= 0 && srcVM.DiskMB > 0 {
+			req.DiskMB = srcVM.DiskMB
+		}
+		if req.PublicIP == nil && req.PublicIPEnabled == nil && req.DedicatedIP == nil {
 			req.PublicIP = &srcVM.PublicIPEnabled
 			req.PublicIPEnabled = &srcVM.PublicIPEnabled
 		}
-	}
-	if strings.TrimSpace(req.NetworkIsolation) == "" && req.Isolated == nil && srcVM != nil {
-		if norm, ok := db.NormalizeNetworkIsolation(srcVM.NetworkIsolation); ok {
-			req.NetworkIsolation = norm
+		if strings.TrimSpace(req.NetworkIsolation) == "" && req.Isolated == nil && req.NetworkIsolated == nil {
+			if norm, ok := db.NormalizeNetworkIsolation(srcVM.NetworkIsolation); ok {
+				req.NetworkIsolation = norm
+			}
 		}
-	}
-	if req.Protected == nil && srcVM != nil {
-		req.Protected = &srcVM.Protected
+		if req.Protected == nil {
+			req.Protected = &srcVM.Protected
+		}
 	}
 	return m.CreateVM(ctx, req)
 }
@@ -1869,8 +1900,10 @@ func (m *Manager) canRunVM(candidate *db.VM) (bool, string) {
 	// would overcommit the machine's actually available RAM and trigger the OOM
 	// killer. Reserve headroom for the daemon, page cache, and host services.
 	const hostReserveMB = 256
-	if available := hostMemoryAvailableMB(); available > 0 && candidate.MemoryMB+hostReserveMB > available {
-		return false, fmt.Sprintf("insufficient host memory (requested %d MB + %d MB reserve, %d MB available)", candidate.MemoryMB, hostReserveMB, available)
+	if m.launcher == nil && os.Geteuid() == 0 {
+		if available := hostMemoryAvailableMB(); available > 0 && candidate.MemoryMB+hostReserveMB > available {
+			return false, fmt.Sprintf("insufficient host memory (requested %d MB + %d MB reserve, %d MB available)", candidate.MemoryMB, hostReserveMB, available)
+		}
 	}
 
 	return true, ""

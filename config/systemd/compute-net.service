@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/home/rashid/on-demand-vms/scripts/setup-host.sh mft3br0 172.16.0.1/16 172.16.0.0/16 172.16.0.1 none
+ExecStart=/opt/compute/scripts/setup-host.sh mft3br0 172.16.0.1/16 172.16.0.0/16 172.16.0.1 none
 
 [Install]
 WantedBy=multi-user.target

@@ -60,7 +60,7 @@ Before executing workloads, verify the daemon connection and configure authentic
 ### Discovery & Health Checks
 The `compute` CLI and client connect to the control plane daemon determined by environment variables:
 - `COMPUTE_DAEMON` (or `COMPUTE_HOST`): Host address and port (default: `127.0.0.1:18080`).
-- Remote deployment example: `export COMPUTE_DAEMON="192.168.1.70:18080"` (for `compute-lab`).
+- Remote deployment example: `export COMPUTE_DAEMON="10.0.0.10:18080"`.
 - Unix socket example: `export COMPUTE_DAEMON="unix:///var/run/computed.sock"`.
 
 **Verify Daemon Health:**
@@ -466,7 +466,7 @@ compute sandbox delete compute-dogfood
 
 | Error / Symptom | Root Cause | Remediation |
 | :--- | :--- | :--- |
-| `connection to daemon failed: dial tcp 127.0.0.1:18080: connect: connection refused` | `computed` daemon is not running or running on a different port/host. | Check `COMPUTE_DAEMON` env variable. Start daemon with `sudo ./bin/computed` or verify remote host IP (`192.168.1.70:18080`). |
+| `connection to daemon failed: dial tcp 127.0.0.1:18080: connect: connection refused` | `computed` daemon is not running or running on a different port/host. | Check `COMPUTE_DAEMON` env variable. Start daemon with `sudo ./bin/computed` or verify remote host address (`<host>:18080`). |
 | `unauthorized: private sandbox preview requires authentication` | Attempting to access preview URL without API key or auth token. | Pass `Authorization: Bearer <token>` header, or register public port forward via `POST /api/v1/network/port-forwards` with `"public": true`. |
 | `sandbox is deletion protected` | Protection flag is enabled on sandbox. | Run `compute sandbox unprotect <name>` before calling delete. |
 | `failed to allocate IP: IP pool exhausted` | Stale or unreleased network allocations from aborted microVMs. | Run `compute network prune` to clean orphaned leases and TAP devices. |

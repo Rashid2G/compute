@@ -33,6 +33,12 @@ func (testRunner) Run(context.Context, string, ...string) ([]byte, error) {
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	server, _ := newTestServerWithVMManager(t)
+	return server
+}
+
+func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
+	t.Helper()
 	root := t.TempDir()
 	store, err := db.NewStore(filepath.Join(root, "db", "test.sqlite"))
 	if err != nil {
@@ -63,9 +69,10 @@ func newTestServer(t *testing.T) *httptest.Server {
 	cfg.ConfigPath = "config/daemon.json"
 	// Unit tests should not boot job sandboxes in the background.
 	cfg.Jobs.LocalExecution = false
-	server := httptest.NewServer(NewServer(vm.NewManager(vm.Config{}, store, netMgr, storMgr), cfg))
+	vmMgr := vm.NewManager(vm.Config{}, store, netMgr, storMgr)
+	server := httptest.NewServer(NewServer(vmMgr, cfg))
 	t.Cleanup(server.Close)
-	return server
+	return server, vmMgr
 }
 
 func TestHealth(t *testing.T) {

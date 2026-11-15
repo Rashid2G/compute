@@ -14,7 +14,8 @@ func clearEnv(t *testing.T) {
 	for _, key := range []string{
 		"COMPUTE_LISTEN", "COMPUTE_BIND_ADDRESS", "COMPUTE_API_PORT",
 		"COMPUTE_DB_PATH", "COMPUTE_FIRECRACKER_BIN", "COMPUTE_AUTH_ENABLED",
-		"COMPUTE_ADMIN_SECRET", "COMPUTE_ADMIN_PASSWORD", "COMPUTE_EDGE_LISTEN",
+		"COMPUTE_SIGNUP_ENABLED", "COMPUTE_ADMIN_SECRET", "COMPUTE_ADMIN_USERNAME",
+		"COMPUTE_ADMIN_EMAIL", "COMPUTE_ADMIN_PASSWORD", "COMPUTE_EDGE_LISTEN",
 		"COMPUTE_CGROUP_ENFORCE", "COMPUTE_JAILER_ENABLED", "COMPUTE_JAILER_BIN",
 		"COMPUTE_JAILER_DIR", "COMPUTE_TLS_CERT_FILE", "COMPUTE_TLS_KEY_FILE",
 		"COMPUTE_NETWORK_MODE", "COMPUTE_BRIDGE_NAME", "COMPUTE_BRIDGE_IP",
@@ -48,6 +49,9 @@ func TestEnvOverridesApplyWithoutConfigFile(t *testing.T) {
 	t.Setenv("COMPUTE_BIND_ADDRESS", "0.0.0.0")
 	t.Setenv("COMPUTE_API_PORT", "19090")
 	t.Setenv("COMPUTE_AUTH_ENABLED", "true")
+	t.Setenv("COMPUTE_SIGNUP_ENABLED", "true")
+	t.Setenv("COMPUTE_ADMIN_USERNAME", "rootadmin")
+	t.Setenv("COMPUTE_ADMIN_EMAIL", "ops@compute.local")
 	t.Setenv("COMPUTE_ADMIN_PASSWORD", "test-password")
 	t.Setenv("COMPUTE_DEFAULT_VCPUS", "2")
 	t.Setenv("COMPUTE_DEFAULT_MEMORY_MB", "4096")
@@ -66,7 +70,7 @@ func TestEnvOverridesApplyWithoutConfigFile(t *testing.T) {
 	if cfg.Server.ListenAddr != "0.0.0.0:19090" {
 		t.Fatalf("listen = %q", cfg.Server.ListenAddr)
 	}
-	if !cfg.Server.AuthEnabled || cfg.Server.AdminPassword != "test-password" {
+	if !cfg.Server.AuthEnabled || !cfg.Server.SignupEnabled || cfg.Server.AdminUsername != "rootadmin" || cfg.Server.AdminEmail != "ops@compute.local" || cfg.Server.AdminPassword != "test-password" {
 		t.Fatalf("auth env not applied: %+v", cfg.Server)
 	}
 	if cfg.Defaults.VCPUs != 2 || cfg.Defaults.MemoryMB != 4096 {

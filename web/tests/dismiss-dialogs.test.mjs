@@ -187,6 +187,8 @@ function createMockServer() {
 
     if (p.startsWith('/api/v1/')) {
       if (p === '/api/v1/auth/me') return json(200, { user: { id: 'u1', username: 'admin', role: 'admin' } });
+      if (p === '/api/v1/auth/status') return json(200, { auth_enabled: true, signup_enabled: false });
+      if (p === '/api/v1/users' && req.method === 'GET') return json(200, [{ id: 'u1', username: 'admin', email: 'admin@local', role: 'admin', status: 'active' }]);
       if (p === '/api/v1/health') return json(200, { status: 'ok' });
       if (p === '/api/v1/stats') {
         return json(200, {
@@ -741,24 +743,24 @@ test('operation dialogs and drawers close immediately while loading toasts persi
 
     await t.test('Images & Templates drawers close immediately while loading toasts show', async () => {
       await cdp.send('Page.navigate', { url: `${baseUrl}#/images` });
-      await waitFor(cdp, `document.body.innerText.includes('Create Snapshot Template')`, 3000, 'images page');
-      await cdp.evalJS(`window.__clickButtonByText('Create Snapshot Template')`);
-      await waitFor(cdp, `document.body.innerText.includes('Create Reusable Snapshot Template')`, 3000, 'template drawer open');
+      await waitFor(cdp, `document.body.innerText.includes('Create Snapshot')`, 3000, 'images page');
+      await cdp.evalJS(`window.__clickButtonByText('Create Snapshot')`);
+      await waitFor(cdp, `document.body.innerText.includes('Create Sandbox Snapshot')`, 3000, 'snapshot modal open');
       await cdp.evalJS(`
         (() => {
-          const sel = document.querySelector('select[aria-label="Template source sandbox"]');
+          const sel = document.querySelector('select[aria-label="Snapshot source sandbox"]');
           if (!sel.value && sel.options.length > 1) {
             window.__setReactInput(sel, sel.options[1].value);
           }
-          const input = document.querySelector('input[placeholder="ubuntu-24.04-warm-snap"]');
+          const input = document.querySelector('input[aria-label="Snapshot name"]');
           window.__setReactInput(input, 'tpl-fast');
           input.closest('form').requestSubmit();
         })()
       `);
       await sleep(70);
-      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Create Reusable Snapshot Template')`), true);
-      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Creating snapshot template "tpl-fast"'));
-      await waitFor(cdp, `window.__getToastsText().includes('Snapshot template "tpl-fast" created')`, 3000, 'template toast success');
+      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Create Sandbox Snapshot')`), true);
+      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Creating snapshot "tpl-fast"'));
+      await waitFor(cdp, `window.__getToastsText().includes('Snapshot "tpl-fast" created')`, 3000, 'snapshot toast success');
 
       await cdp.evalJS(`window.__clickButtonByText('Custom Rootfs Images')`);
       await waitFor(cdp, `window.__clickButtonByText('Build Rootfs Image')`, 3000, 'build image button');

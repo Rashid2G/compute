@@ -227,7 +227,7 @@ PROFILE
 
 # Bake the host automation SSH public key when available.
 PUBKEY=""
-for candidate in "${REPO_ROOT}/data/images/ssh/id_ed25519.pub" /root/.ssh/id_ed25519.pub /home/rashid/.ssh/id_ed25519.pub; do
+for candidate in "${REPO_ROOT}/data/images/ssh/id_ed25519.pub" /root/.ssh/id_ed25519.pub "${HOME}/.ssh/id_ed25519.pub"; do
     if [[ -f "$candidate" ]]; then PUBKEY="$(cat "$candidate")"; break; fi
 done
 if [[ -n "$PUBKEY" ]]; then

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -210,5 +211,263 @@ func TestManager_QueryParameterRestrictions(t *testing.T) {
 	genericReq.Header.Set("Upgrade", "websocket")
 	if _, err := mgr.AuthenticateRequest(genericReq); err == nil {
 		t.Errorf("expected AuthenticateRequest on generic route with Upgrade header to be rejected, but it succeeded")
+	}
+}
+
+func TestManager_EnsureAdminAndSecretResolution(t *testing.T) {
+	mgr, st, _ := setupTestManager(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	mgr.SetAdminIdentity("superadmin", "super@compute.local")
+
+	// 1. Seed initial admin
+	admin, err := mgr.EnsureAdmin(ctx, "super@compute.local", "superadmin", "Super Admin", "InitialPass123!")
+	if err != nil {
+		t.Fatalf("EnsureAdmin create failed: %v", err)
+	}
+	if admin.Username != "superadmin" || admin.Email != "super@compute.local" || admin.Role != "admin" || admin.Status != "active" {
+		t.Fatalf("unexpected seeded admin: %+v", admin)
+	}
+
+	// Verify admin_secret resolves to the seeded DB user & org
+	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req.Header.Set("Authorization", "Bearer test_admin_bootstrap_secret_123")
+	authCtx, err := mgr.AuthenticateRequest(req)
+	if err != nil {
+		t.Fatalf("AuthenticateRequest with admin_secret failed: %v", err)
+	}
+	if authCtx.User.ID != admin.ID || authCtx.User.Username != "superadmin" || authCtx.OrgID == "" {
+		t.Errorf("expected admin_secret to resolve seeded admin %q with org, got user=%+v org=%q", admin.ID, authCtx.User, authCtx.OrgID)
+	}
+
+	// 2. Trigger failed logins lockout on the admin user
+	for i := 0; i < 6; i++ {
+		_, _, _, _ = mgr.Login(ctx, "superadmin", "WrongPassword", "127.0.0.1", "test")
+	}
+	if _, _, _, err := mgr.Login(ctx, "superadmin", "InitialPass123!", "127.0.0.1", "test"); err == nil {
+		t.Fatal("expected locked out admin login to fail before EnsureAdmin sync")
+	}
+
+	// 3. Re-run EnsureAdmin with rotated password; should update hash and clear lockout
+	synced, err := mgr.EnsureAdmin(ctx, "super@compute.local", "superadmin", "Super Admin", "RotatedPass456!")
+	if err != nil {
+		t.Fatalf("EnsureAdmin sync failed: %v", err)
+	}
+	if synced.ID != admin.ID {
+		t.Fatalf("expected EnsureAdmin to update existing admin %q, got %q", admin.ID, synced.ID)
+	}
+	if _, _, _, err := mgr.Login(ctx, "superadmin", "InitialPass123!", "127.0.0.1", "test"); err == nil {
+		t.Fatal("expected old admin password to be rejected after EnsureAdmin sync")
+	}
+	loggedIn, _, _, err := mgr.Login(ctx, "superadmin", "RotatedPass456!", "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("expected rotated admin password login to succeed after EnsureAdmin sync, got: %v", err)
+	}
+	if loggedIn.ID != admin.ID {
+		t.Errorf("expected user ID %q, got %q", admin.ID, loggedIn.ID)
+	}
+}
+
+func TestManager_EnsureAdmin_RenameAndPasswordRotationInPlace(t *testing.T) {
+	mgr, st, _ := setupTestManager(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	queries := db.New(st.Reader())
+
+	// 1. Initial boot with default admin identity
+	initial, err := mgr.EnsureAdmin(ctx, "admin@compute.local", "admin", "Administrator", "AdminPass123!")
+	if err != nil {
+		t.Fatalf("initial EnsureAdmin failed: %v", err)
+	}
+	if _, _, _, err := mgr.Login(ctx, "admin", "AdminPass123!", "127.0.0.1", "test"); err != nil {
+		t.Fatalf("initial admin login failed: %v", err)
+	}
+
+	// 2. Restart with renamed username, email, and rotated password
+	renamed, err := mgr.EnsureAdmin(ctx, "newops@compute.local", "newops", "New Ops", "NewPass123!")
+	if err != nil {
+		t.Fatalf("renamed EnsureAdmin failed: %v", err)
+	}
+	if renamed.ID != initial.ID {
+		t.Fatalf("expected in-place rename preserving ID %q, got %q", initial.ID, renamed.ID)
+	}
+	if renamed.Username != "newops" || renamed.Email != "newops@compute.local" {
+		t.Fatalf("unexpected renamed fields: %+v", renamed)
+	}
+
+	// Personal org slug/name should be updated in-place as well
+	org, err := queries.GetOrganizationByID(ctx, auth.PersonalOrgID(initial.ID))
+	if err != nil {
+		t.Fatalf("GetOrganizationByID failed: %v", err)
+	}
+	if org.Slug != "newops" || org.Name != "newops's Workspace" {
+		t.Fatalf("expected personal org updated to newops, got slug=%q name=%q", org.Slug, org.Name)
+	}
+
+	// Old credentials must no longer log in
+	if _, _, _, err := mgr.Login(ctx, "admin", "AdminPass123!", "127.0.0.1", "test"); err == nil {
+		t.Fatal("expected old admin username/password login to fail after rename")
+	}
+
+	// New credentials must log in with the preserved User.ID
+	loggedIn, _, _, err := mgr.Login(ctx, "newops", "NewPass123!", "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("expected newops login to succeed: %v", err)
+	}
+	if loggedIn.ID != initial.ID {
+		t.Fatalf("expected preserved ID %q, got %q", initial.ID, loggedIn.ID)
+	}
+
+	// Only a single admin user should exist
+	users, err := mgr.Users(ctx)
+	if err != nil {
+		t.Fatalf("Users failed: %v", err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("expected exactly 1 user after rename, got %d", len(users))
+	}
+
+	// 3. Subsequent rename from non-default "newops" to "ops2" also updates sole admin in-place
+	renamed2, err := mgr.EnsureAdmin(ctx, "ops2@compute.local", "ops2", "Ops Two", "OpsTwoPass789!")
+	if err != nil {
+		t.Fatalf("second EnsureAdmin rename failed: %v", err)
+	}
+	if renamed2.ID != initial.ID || renamed2.Username != "ops2" {
+		t.Fatalf("expected second rename to preserve ID %q and set username ops2, got %+v", initial.ID, renamed2)
+	}
+	if _, _, _, err := mgr.Login(ctx, "newops", "NewPass123!", "127.0.0.1", "test"); err == nil {
+		t.Fatal("expected previous newops login to fail after second rename")
+	}
+	if _, _, _, err := mgr.Login(ctx, "ops2", "OpsTwoPass789!", "127.0.0.1", "test"); err != nil {
+		t.Fatalf("expected ops2 login to succeed: %v", err)
+	}
+}
+
+func TestManager_DeleteUser(t *testing.T) {
+	mgr, st, _ := setupTestManager(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	admin, err := mgr.EnsureAdmin(ctx, "admin@compute.local", "admin", "Administrator", "AdminPass123!")
+	if err != nil {
+		t.Fatalf("EnsureAdmin failed: %v", err)
+	}
+
+	// Cannot delete primary bootstrap admin
+	if err := mgr.DeleteUser(ctx, admin.ID); err == nil {
+		t.Fatal("expected DeleteUser on primary bootstrap admin to fail")
+	}
+
+	// Create regular user with session + API key
+	user, err := mgr.Signup(ctx, "temp@example.com", "tempuser", "Temp User", "TempPass123!", "user")
+	if err != nil {
+		t.Fatalf("Signup failed: %v", err)
+	}
+	_, sessToken, _, err := mgr.Login(ctx, "tempuser", "TempPass123!", "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+	apiToken, _, err := mgr.KeyManager().GenerateAPIKey(ctx, user.ID, "temp-key", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey failed: %v", err)
+	}
+
+	// Delete user
+	if err := mgr.DeleteUser(ctx, user.ID); err != nil {
+		t.Fatalf("DeleteUser failed: %v", err)
+	}
+
+	if got, err := mgr.UserByID(ctx, user.ID); err != nil || got != nil {
+		t.Fatalf("expected user to be deleted, got user=%v err=%v", got, err)
+	}
+
+	// Session and API key must no longer authenticate
+	sessReq := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+	sessReq.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sessToken})
+	if _, err := mgr.AuthenticateRequest(sessReq); err == nil {
+		t.Fatal("expected deleted user's session cookie to be rejected")
+	}
+
+	keyReq := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	keyReq.Header.Set("Authorization", "Bearer "+apiToken)
+	if _, err := mgr.AuthenticateRequest(keyReq); err == nil {
+		t.Fatal("expected deleted user's API key to be rejected")
+	}
+}
+
+func TestManager_KeyPrefixAndLegacyCompatibility(t *testing.T) {
+	mgr, st, _ := setupTestManager(t)
+	defer st.Close()
+
+	if auth.DefaultKeyPrefix != "cmp_" {
+		t.Fatalf("expected DefaultKeyPrefix to be cmp_, got %q", auth.DefaultKeyPrefix)
+	}
+
+	ctx := context.Background()
+	user, err := mgr.Signup(ctx, "keys@compute.local", "keyuser", "Key User", "StrongPass123!", "user")
+	if err != nil {
+		t.Fatalf("Signup failed: %v", err)
+	}
+
+	token, rec, err := mgr.KeyManager().GenerateAPIKey(ctx, user.ID, "compute-cli", nil)
+	if err != nil {
+		t.Fatalf("GenerateAPIKey failed: %v", err)
+	}
+	if !strings.HasPrefix(token, "cmp_") {
+		t.Fatalf("expected generated key to start with cmp_, got %q", token)
+	}
+	if !strings.HasPrefix(rec.Prefix, "cmp_") {
+		t.Fatalf("expected stored key prefix to start with cmp_, got %q", rec.Prefix)
+	}
+
+	// Authenticate with standard cmp_ token, cmp_live_ alias, and legacy mfk_ alias.
+	variants := []string{
+		token,
+		"cmp_live_" + strings.TrimPrefix(token, "cmp_"),
+		"mfk_" + strings.TrimPrefix(token, "cmp_"),
+	}
+	for _, tok := range variants {
+		req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		authCtx, err := mgr.AuthenticateRequest(req)
+		if err != nil {
+			t.Fatalf("expected token %q to authenticate, got error: %v", tok[:12], err)
+		}
+		if authCtx.User.ID != user.ID {
+			t.Fatalf("expected user %q, got %q", user.ID, authCtx.User.ID)
+		}
+	}
+}
+
+func TestManager_EnsureAdminInvalidatesStaleSessions(t *testing.T) {
+	mgr, st, _ := setupTestManager(t)
+	defer st.Close()
+
+	ctx := context.Background()
+	admin, err := mgr.EnsureAdmin(ctx, "admin@compute.local", "admin", "Admin", "InitialPass123!")
+	if err != nil {
+		t.Fatalf("EnsureAdmin failed: %v", err)
+	}
+
+	_, sessToken, _, err := mgr.Login(ctx, "admin", "InitialPass123!", "127.0.0.1", "test")
+	if err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: sessToken})
+	if _, err := mgr.AuthenticateRequest(req); err != nil {
+		t.Fatalf("expected initial session to authenticate, got: %v", err)
+	}
+
+	// Rotate password in-place via EnsureAdmin.
+	if _, err := mgr.EnsureAdmin(ctx, "admin@compute.local", "admin", "Admin", "RotatedPass456!"); err != nil {
+		t.Fatalf("EnsureAdmin rotation failed: %v", err)
+	}
+
+	if _, err := mgr.AuthenticateRequest(req); err == nil {
+		t.Fatalf("expected stale session cookie for %s to be invalidated after password rotation", admin.ID)
 	}
 }

@@ -138,7 +138,7 @@ export function Topbar({
             )
           )}
 
-          {/* Signature boat.dev/dashboard Split Action Button [ ▷ New | ⌄ ] */}
+          {/* Primary Split Action Button [ ▷ New | ⌄ ] */}
           <div className="inline-flex items-center">
             <button
               type="button"

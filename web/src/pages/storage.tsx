@@ -476,7 +476,7 @@ export function StoragePage({
               className={cn(
                 'px-3 capitalize transition-colors first:border-l-0 border-l border-border',
                 statusFilter === st
-                  ? 'boat-selected font-medium'
+                  ? 'compute-selected font-medium'
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >
