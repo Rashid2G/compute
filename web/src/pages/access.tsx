@@ -288,7 +288,7 @@ export function AccessPage({
             <button
               type="button"
               onClick={() => setCreateKeyOpen((v) => !v)}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+              className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
             >
               <Plus className="h-3.5 w-3.5" />
               <span>Create API Key</span>
@@ -298,7 +298,7 @@ export function AccessPage({
             <button
               type="button"
               onClick={() => setAddSshOpen((v) => !v)}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+              className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
             >
               <Plus className="h-3.5 w-3.5" />
               <span>Add SSH Key</span>
@@ -308,7 +308,7 @@ export function AccessPage({
             <button
               type="button"
               onClick={() => void handleCreateWorkerToken()}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+              className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
             >
               <Plus className="h-3.5 w-3.5" />
               <span>Generate Worker Token</span>
@@ -318,7 +318,7 @@ export function AccessPage({
             <button
               type="button"
               onClick={() => setCreateUserOpen((v) => !v)}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+              className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
             >
               <Plus className="h-3.5 w-3.5" />
               <span>Create User</span>
@@ -342,7 +342,7 @@ export function AccessPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'api-keys'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -357,7 +357,7 @@ export function AccessPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'ssh-keys'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -372,7 +372,7 @@ export function AccessPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'worker-tokens'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -387,7 +387,7 @@ export function AccessPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'users'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -399,25 +399,25 @@ export function AccessPage({
       {tab === 'api-keys' && (
         <div className="space-y-4">
           {createdPlainToken && (
-            <div className="border border-[#263fa9] bg-[#0f1634]/50 p-3.5 space-y-2">
+            <div className="border border-primary bg-selected/60 p-3.5 space-y-2">
               <div className="flex items-center justify-between text-[12px]">
-                <span className="font-medium text-white">
+                <span className="font-medium text-foreground">
                   Copy your new secret API key now (shown once):
                 </span>
                 <button
                   type="button"
                   onClick={() => setCreatedPlainToken(null)}
-                  className="text-muted-foreground hover:text-white"
+                  className="text-muted-foreground hover:text-foreground"
                 >
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <div className="flex items-center justify-between border border-border bg-[#060606] px-3 py-2 font-mono text-[12px] text-white">
+              <div className="flex items-center justify-between border border-border bg-[#0a0a0b] px-3 py-2 font-mono text-[12px] text-foreground">
                 <span>{createdPlainToken}</span>
                 <button
                   type="button"
                   onClick={() => copy(createdPlainToken)}
-                  className="inline-flex items-center gap-1 text-xs text-[#929fd3] hover:text-white"
+                  className="inline-flex items-center gap-1 text-xs text-primary dark:text-[var(--accent-bright)] hover:underline"
                 >
                   {copiedText === createdPlainToken ? (
                     <Check className="h-3.5 w-3.5 text-success" />
@@ -495,7 +495,7 @@ export function AccessPage({
                 </button>
                 <button
                   type="submit"
-                  className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+                  className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
                 >
                   Generate Key
                 </button>
@@ -625,7 +625,7 @@ export function AccessPage({
                 </button>
                 <button
                   type="submit"
-                  className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+                  className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
                 >
                   Save SSH Key
                 </button>
@@ -716,12 +716,12 @@ export function AccessPage({
           </div>
 
           {createdWorkerToken && (
-            <div className="border border-[#263fa9] bg-[#0f1634]/50 p-3 font-mono text-[12px] text-white flex items-center justify-between">
+            <div className="border border-primary bg-selected/60 p-3 font-mono text-[12px] text-foreground flex items-center justify-between">
               <span>{createdWorkerToken}</span>
               <button
                 type="button"
                 onClick={() => copy(createdWorkerToken)}
-                className="text-xs underline"
+                className="text-xs text-primary dark:text-[var(--accent-bright)] underline"
               >
                 Copy Token
               </button>
@@ -796,7 +796,7 @@ export function AccessPage({
           {!isAdmin ? (
             <div className="border border-border bg-muted/20 p-6 space-y-2">
               <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
-                <Shield className="h-4 w-4 text-[#5e7ff5]" />
+                <Shield className="h-4 w-4 text-primary" />
                 <span>Admin privileges required to manage users</span>
               </div>
               <p className="text-[12px] text-muted-foreground">
@@ -810,7 +810,7 @@ export function AccessPage({
               {/* Public Signup Policy Status Banner */}
               <div className="flex flex-wrap items-center justify-between gap-2 border border-border bg-muted/20 px-3.5 py-2.5 text-[12px]">
                 <div className="flex items-center gap-2">
-                  <Users className="h-3.5 w-3.5 text-[#5e7ff5]" />
+                  <Users className="h-3.5 w-3.5 text-primary" />
                   <span className="font-medium text-foreground">
                     Public Signup:
                   </span>
@@ -926,7 +926,7 @@ export function AccessPage({
                     </button>
                     <button
                       type="submit"
-                      className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+                      className="h-8 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
                     >
                       Provision User
                     </button>
@@ -982,7 +982,7 @@ export function AccessPage({
                               <div className="font-medium text-foreground">
                                 {u.username}
                                 {u.id === effectiveUser?.id && (
-                                  <span className="ml-1.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.5 font-mono text-[9.5px] text-[#5e7ff5] uppercase">
+                                  <span className="ml-1.5 border border-primary/40 bg-primary/10 px-1 py-0.5 font-mono text-[9.5px] text-primary dark:text-[var(--accent-bright)] uppercase">
                                     you
                                   </span>
                                 )}
@@ -1002,7 +1002,7 @@ export function AccessPage({
                                 className={cn(
                                   'border px-1.5 py-0.5 text-[10.5px] uppercase',
                                   u.role === 'admin'
-                                    ? 'border-[#5e7ff5]/40 bg-[#5e7ff5]/10 text-[#5e7ff5]'
+                                    ? 'border-primary/40 bg-primary/10 text-primary dark:text-[var(--accent-bright)]'
                                     : 'border-border bg-muted/30 text-muted-foreground',
                                 )}
                               >

@@ -46,10 +46,10 @@ function formatUptime(seconds: number): string {
 
 function UsageBar({
   percent,
-  tone = 'cobalt',
+  tone = 'ember',
 }: {
   percent: number;
-  tone?: 'cobalt' | 'warning' | 'danger';
+  tone?: 'ember' | 'warning' | 'danger';
 }) {
   const clamped = Math.max(0, Math.min(100, percent || 0));
   const autoTone =
@@ -61,7 +61,7 @@ function UsageBar({
           'h-full transition-all duration-300',
           autoTone === 'danger' && 'bg-destructive',
           autoTone === 'warning' && 'bg-warning',
-          autoTone === 'cobalt' && 'bg-[#263fa9]',
+          autoTone === 'ember' && 'bg-primary',
         )}
         style={{ width: `${clamped}%` }}
       />
@@ -112,7 +112,7 @@ export function ResourcesPage({
     return (
       <div className="border border-border bg-muted/20 p-6 space-y-2">
         <div className="flex items-center gap-2 text-[14px] font-medium text-foreground">
-          <Shield className="h-4 w-4 text-[#5e7ff5]" />
+          <Shield className="h-4 w-4 text-primary" />
           <span>Administrator access required</span>
         </div>
         <p className="text-[12px] text-muted-foreground">
@@ -181,7 +181,7 @@ export function ResourcesPage({
             <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
               Resources
             </h1>
-            <span className="border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1.5 py-0.5 font-mono text-[10px] uppercase text-[#5e7ff5]">
+            <span className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] uppercase text-primary dark:text-[var(--accent-bright)]">
               Admin
             </span>
           </div>
@@ -203,7 +203,7 @@ export function ResourcesPage({
               type="checkbox"
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[#263fa9]"
+              className="h-3.5 w-3.5 accent-primary"
             />
             <span>Auto-refresh (4s)</span>
           </label>
