@@ -148,7 +148,7 @@ h1{font-family:"Funnel Display",Inter,sans-serif;font-weight:500;font-size:28px;
 p.sub{color:#8a919e;margin:0 0 32px;font-size:14px}
 a.card{display:flex;justify-content:space-between;align-items:center;gap:16px;text-decoration:none;color:inherit;
   border:1px solid #1d2330;border-radius:10px;padding:14px 18px;margin-bottom:10px;background:#0b0e14;transition:border-color .15s}
-a.card:hover{border-color:#263fa9}
+a.card:hover{border-color:#d94e1f}
 .card .name{font-family:"IBM Plex Mono",monospace;font-size:15px}
 .card .meta{color:#8a919e;font-size:12px;margin-top:2px}
 .badge{font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #2a3140;color:#8a919e;white-space:nowrap}

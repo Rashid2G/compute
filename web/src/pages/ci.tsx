@@ -387,7 +387,7 @@ export function CIPage({
           <button
             type="button"
             onClick={() => setDispatchOpen(true)}
-            className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] font-medium text-foreground hover:border-[#263fa9]"
+            className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] font-medium text-foreground hover:border-primary"
           >
             <Play className="h-3 w-3" />
             <span>Run Ad-hoc Job</span>
@@ -395,7 +395,7 @@ export function CIPage({
           <button
             type="button"
             onClick={openConnectModal}
-            className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+            className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>Connect GitHub Repository</span>
@@ -448,7 +448,7 @@ export function CIPage({
       <div className="border border-border bg-background">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/20 px-4 py-3">
           <div className="flex items-center gap-2">
-            <GitBranch className="h-4 w-4 text-[#5e7ff5]" />
+            <GitBranch className="h-4 w-4 text-primary" />
             <h2 className="text-[13px] font-medium text-foreground">
               Connected GitHub Repositories ({repos.length})
             </h2>
@@ -463,7 +463,7 @@ export function CIPage({
               onClick={() =>
                 copyWithState('webhook-url', webhookUrl, 'webhook endpoint URL')
               }
-              className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 text-foreground hover:border-[#263fa9]"
+              className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 text-foreground hover:border-primary"
             >
               {copiedKey === 'webhook-url' ? (
                 <Check className="h-3 w-3 text-success" />
@@ -493,7 +493,7 @@ export function CIPage({
             <button
               type="button"
               onClick={openConnectModal}
-              className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+              className="inline-flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
             >
               <GitBranch className="h-3.5 w-3.5" />
               <span>Connect GitHub Repository</span>
@@ -515,7 +515,7 @@ export function CIPage({
                       {repo.default_branch || 'main'}
                     </span>
                     {repo.has_token && (
-                      <span className="inline-flex items-center gap-1 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1.5 py-0.5 font-mono text-[10px] text-[#5e7ff5]">
+                      <span className="inline-flex items-center gap-1 border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] text-primary dark:text-[var(--accent-bright)]">
                         <KeyRound className="h-2.5 w-2.5" />
                         token
                       </span>
@@ -554,7 +554,7 @@ export function CIPage({
                   <button
                     type="button"
                     onClick={() => openTriggerModal(repo)}
-                    className="inline-flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11.5px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                    className="inline-flex h-7 items-center gap-1 bg-primary px-2.5 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover"
                   >
                     <Play className="h-3 w-3" />
                     <span>Trigger</span>
@@ -563,7 +563,7 @@ export function CIPage({
                     type="button"
                     onClick={() => openEditModal(repo)}
                     aria-label={`Edit ${repo.name}`}
-                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2 text-[11.5px] text-foreground hover:border-[#263fa9]"
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2 text-[11.5px] text-foreground hover:border-primary"
                   >
                     <Edit3 className="h-3 w-3" />
                     <span>Edit</span>
@@ -635,7 +635,7 @@ export function CIPage({
                       onClick={() => setSelectedJob(job)}
                       className={cn(
                         'cursor-pointer hover:bg-muted/30',
-                        selectedJob?.id === job.id && 'bg-[#0f1634]/60',
+                        selectedJob?.id === job.id && 'bg-selected/60',
                       )}
                     >
                       <td className="py-2 px-3 text-foreground font-medium">
@@ -677,7 +677,7 @@ export function CIPage({
                             isJobSuccess(job.state) &&
                               'border-success/40 bg-success/10 text-success',
                             (job.state === 'running' || job.state === 'assigned') &&
-                              'border-[#263fa9] bg-[#0f1634] text-white',
+                              'border-primary bg-selected text-selected-foreground',
                             job.state === 'queued' &&
                               'border-warning/40 bg-warning/10 text-warning',
                             (job.state === 'failed' ||
@@ -709,7 +709,7 @@ export function CIPage({
                           <button
                             type="button"
                             onClick={() => setSelectedJob(job)}
-                            className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                            className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-primary"
                           >
                             Logs
                           </button>
@@ -751,7 +751,7 @@ export function CIPage({
                 </span>
               )}
               {isJobActive(selectedJob.state) && (
-                <span className="border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1.5 py-0.5 text-[10px] text-[#5e7ff5]">
+                <span className="border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary dark:text-[var(--accent-bright)]">
                   LIVE STREAM
                 </span>
               )}
@@ -837,7 +837,7 @@ export function CIPage({
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <GitBranch className="h-4 w-4 text-[#5e7ff5]" />
+                <GitBranch className="h-4 w-4 text-primary" />
                 <h2 id="ci-repo-modal-title" className="text-[15px] font-medium">
                   {editingRepo
                     ? `Edit ${editingRepo.name}`
@@ -1010,7 +1010,7 @@ export function CIPage({
               </button>
               <button
                 type="submit"
-                className="h-8 bg-[#263fa9] px-3.5 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                className="h-8 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
               >
                 {editingRepo ? 'Save Repository' : 'Connect Repository'}
               </button>
@@ -1034,7 +1034,7 @@ export function CIPage({
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Play className="h-4 w-4 text-[#5e7ff5]" />
+                <Play className="h-4 w-4 text-primary" />
                 <h2 className="text-[15px] font-medium">
                   Trigger CI Run · {triggerTarget.name}
                 </h2>
@@ -1098,7 +1098,7 @@ export function CIPage({
               </button>
               <button
                 type="submit"
-                className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
               >
                 <Play className="h-3 w-3" />
                 <span>Start CI Run</span>
@@ -1123,7 +1123,7 @@ export function CIPage({
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Terminal className="h-4 w-4 text-[#5e7ff5]" />
+                <Terminal className="h-4 w-4 text-primary" />
                 <h2 className="text-[15px] font-medium">
                   Run Ad-hoc Ephemeral Job
                 </h2>
@@ -1227,7 +1227,7 @@ export function CIPage({
               </button>
               <button
                 type="submit"
-                className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
               >
                 <Play className="h-3 w-3" />
                 <span>Run Job</span>

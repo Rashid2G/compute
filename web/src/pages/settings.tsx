@@ -121,7 +121,7 @@ export function SettingsPage({
               className={cn(
                 'flex items-center gap-2 border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
                 active
-                  ? 'border-[#263fa9] text-foreground font-medium'
+                  ? 'border-primary text-foreground font-medium'
                   : 'border-transparent text-muted-foreground hover:text-foreground',
               )}
             >
@@ -268,7 +268,7 @@ export function SettingsPage({
                   <button
                     type="button"
                     onClick={onRefresh}
-                    className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-[#263fa9] transition-colors"
+                    className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-primary transition-colors"
                   >
                     <RefreshCw className="h-3.5 w-3.5" />
                     <span>Refresh Cluster State</span>
@@ -299,8 +299,7 @@ export function SettingsPage({
                 Theme Polarity
               </h2>
               <p className="text-xs text-muted-foreground">
-                Choose between Daylight crisp paper (#fefefe) and Pitch-black
-                high-contrast (#060606) with Maritime Cobalt (#263fa9) accents.
+                Choose between Daylight crisp paper (#fafaf9) and Dark obsidian (#0a0a0b) with Ember (#c2410c) accents.
               </p>
             </div>
 
@@ -311,28 +310,28 @@ export function SettingsPage({
                 className={cn(
                   'border p-4 text-left transition-colors space-y-3',
                   theme === 'light'
-                    ? 'border-[#263fa9] bg-[#f1f3f9]'
+                    ? 'border-primary bg-selected'
                     : 'border-border bg-background hover:border-foreground/40',
                 )}
               >
                 <div className="flex items-center justify-between">
-                  <span className="inline-flex items-center gap-2 text-[13px] font-medium text-[#060606]">
-                    <Sun className="h-4 w-4 text-[#263fa9]" />
+                  <span className="inline-flex items-center gap-2 text-[13px] font-medium text-foreground">
+                    <Sun className="h-4 w-4 text-primary" />
                     <span>Light Mode</span>
                   </span>
                   {theme === 'light' && (
-                    <span className="border border-[#263fa9] bg-[#263fa9] px-1.5 py-0.5 font-mono text-[10px] uppercase text-white">
+                    <span className="border border-primary bg-primary px-1.5 py-0.5 font-mono text-[10px] uppercase text-primary-foreground">
                       Active
                     </span>
                   )}
                 </div>
-                <div className="border border-[#e0e0e0] bg-[#fefefe] p-2.5 space-y-1.5">
-                  <div className="h-2 w-20 bg-[#263fa9]" />
-                  <div className="h-2 w-32 bg-[#e0e0e0]" />
-                  <div className="h-2 w-24 bg-[#f2f2f2]" />
+                <div className="border border-[#e2e0d8] bg-[#fafaf9] p-2.5 space-y-1.5">
+                  <div className="h-2 w-20 bg-primary" />
+                  <div className="h-2 w-32 bg-[#e2e0d8]" />
+                  <div className="h-2 w-24 bg-[#f4f3ef]" />
                 </div>
-                <p className="text-[11px] text-[#4d4d4d]">
-                  Crisp daylight paper (#fefefe) surface with neutral hairlines.
+                <p className="text-[11px] text-[#706f68]">
+                  Crisp daylight paper (#fafaf9) surface with neutral hairlines.
                 </p>
               </button>
 
@@ -342,28 +341,28 @@ export function SettingsPage({
                 className={cn(
                   'border p-4 text-left transition-colors space-y-3',
                   theme === 'dark'
-                    ? 'border-[#263fa9] bg-[#0f1634]'
+                    ? 'border-primary bg-selected'
                     : 'border-border bg-background hover:border-foreground/40',
                 )}
               >
                 <div className="flex items-center justify-between">
                   <span className="inline-flex items-center gap-2 text-[13px] font-medium text-foreground">
-                    <Moon className="h-4 w-4 text-[#6b7cc4]" />
+                    <Moon className="h-4 w-4 text-primary dark:text-[var(--accent-bright)]" />
                     <span>Dark Mode</span>
                   </span>
                   {theme === 'dark' && (
-                    <span className="border border-[#263fa9] bg-[#263fa9] px-1.5 py-0.5 font-mono text-[10px] uppercase text-white">
+                    <span className="border border-primary bg-primary px-1.5 py-0.5 font-mono text-[10px] uppercase text-primary-foreground">
                       Active
                     </span>
                   )}
                 </div>
-                <div className="border border-[#2e2e2e] bg-[#060606] p-2.5 space-y-1.5">
-                  <div className="h-2 w-20 bg-[#263fa9]" />
-                  <div className="h-2 w-32 bg-[#2e2e2e]" />
-                  <div className="h-2 w-24 bg-[#1a1a1a]" />
+                <div className="border border-[#27272a] bg-[#0a0a0b] p-2.5 space-y-1.5">
+                  <div className="h-2 w-20 bg-primary" />
+                  <div className="h-2 w-32 bg-[#27272a]" />
+                  <div className="h-2 w-24 bg-[#131315]" />
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  High-contrast obsidian (#060606) for low-glare operations.
+                  High-contrast obsidian (#0a0a0b) for low-glare operations.
                 </p>
               </button>
             </div>

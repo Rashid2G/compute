@@ -269,7 +269,7 @@ export function ImagesTemplatesPage({
                 if (next) applyProfile(next);
                 else setSelectedProfileName(e.target.value);
               }}
-              className="h-8 w-36 appearance-none border border-border bg-background pl-7 pr-7 text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+              className="h-8 w-36 appearance-none border border-border bg-background pl-7 pr-7 text-[12px] text-foreground focus:border-primary focus:outline-none cursor-pointer"
             >
               {profiles.length === 0 ? (
                 <option value="base">base</option>
@@ -409,7 +409,7 @@ export function ImagesTemplatesPage({
                     value={newRepoInput}
                     onChange={(e) => setNewRepoInput(e.target.value)}
                     placeholder="owner/repository"
-                    className="h-7 flex-1 border border-border bg-background px-2 font-mono text-[11.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                    className="h-7 flex-1 border border-border bg-background px-2 font-mono text-[11.5px] text-foreground focus:border-primary focus:outline-none"
                   />
                   <button
                     type="button"
@@ -422,7 +422,7 @@ export function ImagesTemplatesPage({
                       setNewRepoInput('');
                       setGithubReposChecked(true);
                     }}
-                    className="h-7 bg-[#263fa9] px-2.5 text-[11px] text-white"
+                    className="h-7 bg-primary hover:bg-primary-hover px-2.5 text-[11px] text-primary-foreground"
                   >
                     Add Repo
                   </button>
@@ -519,7 +519,7 @@ export function ImagesTemplatesPage({
                   placeholder={
                     'DATABASE_URL=postgres://user:pass@host:5432/db\n~/.config/token=secret_value'
                   }
-                  className="w-full border border-border bg-background p-2.5 font-mono text-[11.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                  className="w-full border border-border bg-background p-2.5 font-mono text-[11.5px] text-foreground focus:border-primary focus:outline-none"
                 />
               </div>
             )}
@@ -607,7 +607,7 @@ export function ImagesTemplatesPage({
           <button
             type="button"
             onClick={() => setCreateSnapOpen(true)}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+            className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
             <Camera className="h-3.5 w-3.5" />
             <span>Create Snapshot</span>
@@ -684,7 +684,7 @@ export function ImagesTemplatesPage({
                       <button
                         type="button"
                         onClick={() => openLaunchModal(tpl)}
-                        className="flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
+                        className="flex h-7 items-center gap-1 bg-primary hover:bg-primary-hover px-2.5 text-[11px] font-medium text-primary-foreground"
                       >
                         <Play className="h-3 w-3 fill-current" />
                         <span>Launch</span>
@@ -737,7 +737,7 @@ export function ImagesTemplatesPage({
           >
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
-                <Play className="h-4 w-4 text-[#5e7ff5]" />
+                <Play className="h-4 w-4 text-primary" />
                 <h2
                   id="launch-snapshot-title"
                   className="text-[15px] font-medium text-foreground"
@@ -776,7 +776,7 @@ export function ImagesTemplatesPage({
                   value={launchName}
                   onChange={(e) => setLaunchName(e.target.value)}
                   required
-                  className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                  className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
                 />
               </div>
 
@@ -786,7 +786,7 @@ export function ImagesTemplatesPage({
                   type="checkbox"
                   checked={launchAutoStart}
                   onChange={(e) => setLaunchAutoStart(e.target.checked)}
-                  className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+                  className="h-3.5 w-3.5 accent-primary cursor-pointer"
                 />
                 <label
                   htmlFor="launch-snap-autostart"
@@ -806,7 +806,7 @@ export function ImagesTemplatesPage({
                 </button>
                 <button
                   type="submit"
-                  className="inline-flex h-9 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[12px] font-medium text-white"
+                  className="inline-flex h-9 items-center gap-1.5 bg-primary hover:bg-primary-hover px-4 text-[12px] font-medium text-primary-foreground"
                 >
                   <Play className="h-3 w-3 fill-current" />
                   <span>Launch Sandbox</span>
@@ -839,11 +839,11 @@ function SquareCheckbox({
       className={cn(
         'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center border transition-colors focus:outline-none',
         checked
-          ? 'border-[#263fa9] bg-[#263fa9] text-white'
+          ? 'border-primary bg-primary text-primary-foreground'
           : 'border-border bg-background hover:border-foreground/50',
       )}
     >
-      {checked && <span className="block h-2 w-2 bg-white" />}
+      {checked && <span className="block h-2 w-2 bg-primary-foreground" />}
     </button>
   );
 }

@@ -119,7 +119,7 @@ export function ApiPage({ config, embedded = false }: ApiPageProps) {
               className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5"
             >
               <div className="flex items-center gap-3">
-                <span className="border border-[#263fa9] bg-[#0f1634] px-2 py-0.5 text-[10px] text-white">
+                <span className="border border-primary bg-selected px-2 py-0.5 text-[10px] text-selected-foreground">
                   {ep.method}
                 </span>
                 <span className="text-foreground">{ep.path}</span>
