@@ -31,7 +31,7 @@ config explicitly.
 | `COMPUTE_SIGNUP_ENABLED` | `false` | Allow public self-registration via `POST /api/v1/auth/signup` and the login page. |
 | `COMPUTE_ADMIN_USERNAME` | `admin` | Seeded administrator username. |
 | `COMPUTE_ADMIN_EMAIL` | `admin@compute.local` | Seeded administrator email address. |
-| `COMPUTE_ADMIN_PASSWORD` | — | Initial/synced admin password. Required when auth is enabled unless a secret is set. |
+| `COMPUTE_ADMIN_PASSWORD` | `admin` in Compose | Initial/synced admin password. Required when auth is enabled unless `COMPUTE_ADMIN_SECRET` is set (clear with `COMPUTE_ADMIN_PASSWORD=` in `.env`); the daemon refuses to start with `admin` on non-loopback addresses. |
 | `COMPUTE_ADMIN_SECRET` | — | Bootstrap admin secret alternative. |
 | `COMPUTE_TLS_CERT_FILE` | — | PEM certificate for native HTTPS. Must be paired with the key. |
 | `COMPUTE_TLS_KEY_FILE` | — | PEM private key for native HTTPS. |
@@ -42,7 +42,8 @@ config explicitly.
 | `COMPUTE_JAILER_DIR` | `/srv/jailer` | Jailer base directory. |
 
 Authentication is on by default. The daemon refuses to start when auth is
-enabled and both `COMPUTE_ADMIN_PASSWORD` and `COMPUTE_ADMIN_SECRET` are empty.
+enabled and both `COMPUTE_ADMIN_PASSWORD` and `COMPUTE_ADMIN_SECRET` are empty,
+or when `COMPUTE_ADMIN_PASSWORD=admin` is used on a non-loopback listen address.
 It never logs a generated password; if no credential is configured for an
 existing install, a one-time credential may be written to
 `<master>/admin-password` with mode `0600`.
@@ -83,21 +84,24 @@ rules for the sandbox subnet.
 | `COMPUTE_DEFAULT_KERNEL` | `vmlinux` | Kernel filename under the images directory. |
 | `COMPUTE_DEFAULT_ROOTFS` | `ubuntu-24.04.ext4` | Root filesystem filename. |
 | `COMPUTE_SSH_KEY_PATH` | `<images>/ssh/id_ed25519` | Internal SSH private key used to reach guests. |
-| `COMPUTE_IMAGES_MODE` | `build` in `.env.example` | `download`, `prebuilt`, `build`, or `none`. |
+| `COMPUTE_IMAGES_MODE` | `auto` | `auto`, `download`, `prebuilt`, `build`, or `none`. |
 | `COMPUTE_IMAGE_MANIFEST_URL` | — | HTTPS URL of the signed/checksummed image manifest. |
 | `COMPUTE_IMAGE_ALLOW_HTTP` | `false` | Allow plain HTTP manifest/artifact URLs for local testing. |
+| `COMPUTE_ROOTFS_SIZE_MB` | `2048` | Sparse ext4 rootfs image size in MB for `auto` bootstrap. |
+| `COMPUTE_KERNEL_SRC` | — | Local uncompressed ELF kernel path for air-gapped `auto` bootstrap. |
+| `COMPUTE_KERNEL_URL` | — | Custom kernel HTTPS URL (must pair with `COMPUTE_KERNEL_SHA256`). |
+| `COMPUTE_KERNEL_SHA256` | — | Expected SHA-256 hex digest for `COMPUTE_KERNEL_URL` or `COMPUTE_KERNEL_SRC`. |
 
 The bootstrap (`computed init --images`, run by the `compute-init` service)
-verifies SHA-256 checksums for downloaded artifacts, validates that the kernel
-is an ELF image and the rootfs has an ext4 superblock, generates the internal
-Ed25519 SSH key when missing, and records `.installed.json` for idempotency.
-Downloads are written to `*.part` and atomically renamed only after the
-checksum matches.
+defaults to `auto`: when `COMPUTE_IMAGE_MANIFEST_URL` is unset, it downloads
+and SHA-256-verifies the pinned Firecracker CI kernel, builds the Ubuntu 24.04
+rootfs via chroot inside the container, generates the internal Ed25519 SSH key,
+and records `.installed.json` for idempotency. Downloads are written to `*.part`
+and atomically renamed only after verification succeeds.
 
-Artifacts are not published yet. Until a release manifest exists, install the
-pinned kernel with `scripts/build-kernel.sh`, build the rootfs with
-`scripts/build-rootfs.sh` (or run `make build-images`), and use
-`build`/`prebuilt`.
+If you prefer building base images on the host or air-gapped media, run
+`make build-images` (or `scripts/build-kernel.sh` + `scripts/build-rootfs.sh`)
+and set `COMPUTE_IMAGES_MODE=build` or `prebuilt`.
 
 ## DNS
 
