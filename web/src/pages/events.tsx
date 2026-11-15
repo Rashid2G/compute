@@ -251,7 +251,7 @@ export function EventsPage({
               setActiveTab('webhooks');
               setAddWhOpen(true);
             }}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+            className="flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>Add Webhook</span>
@@ -267,7 +267,7 @@ export function EventsPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
             activeTab === 'webhooks'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -279,7 +279,7 @@ export function EventsPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
             activeTab === 'otel'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -291,7 +291,7 @@ export function EventsPage({
           className={cn(
             'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
             activeTab === 'audit'
-              ? 'border-[#263fa9] text-foreground font-medium'
+              ? 'border-primary text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
@@ -381,7 +381,7 @@ export function EventsPage({
                         className={cn(
                           'border px-2 py-0.5 font-mono text-[11px] transition-colors',
                           checked
-                            ? 'border-[#263fa9] bg-[#0f1634] text-white'
+                            ? 'border-primary bg-selected text-selected-foreground font-medium'
                             : 'border-border bg-background text-muted-foreground',
                         )}
                       >
@@ -402,7 +402,7 @@ export function EventsPage({
                 </button>
                 <button
                   type="submit"
-                  className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+                  className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
                 >
                   Save Endpoint
                 </button>
@@ -533,7 +533,7 @@ export function EventsPage({
                             <button
                               type="button"
                               onClick={() => void handleTestWebhook(wh)}
-                              className="inline-flex items-center gap-1 border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                              className="inline-flex items-center gap-1 border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-primary"
                             >
                               <Send className="h-3 w-3" />
                               <span>Ping</span>
@@ -660,7 +660,7 @@ export function EventsPage({
                     traces_enabled: e.target.checked,
                   }))
                 }
-                className="accent-[#263fa9]"
+                className="accent-primary"
               />
               <span>Traces</span>
             </label>
@@ -674,7 +674,7 @@ export function EventsPage({
                     metrics_enabled: e.target.checked,
                   }))
                 }
-                className="accent-[#263fa9]"
+                className="accent-primary"
               />
               <span>Metrics</span>
             </label>
@@ -688,7 +688,7 @@ export function EventsPage({
                     logs_enabled: e.target.checked,
                   }))
                 }
-                className="accent-[#263fa9]"
+                className="accent-primary"
               />
               <span>Logs</span>
             </label>
@@ -698,14 +698,14 @@ export function EventsPage({
             <button
               type="button"
               onClick={() => void handleTestOTel()}
-              className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-[#263fa9]"
+              className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-primary"
             >
               <Play className="h-3 w-3" />
               <span>Send Test Span</span>
             </button>
             <button
               type="submit"
-              className="h-8 bg-[#263fa9] px-4 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+              className="h-8 bg-primary px-4 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
             >
               Save OTel Config
             </button>
@@ -724,7 +724,7 @@ export function EventsPage({
                 value={auditSearch}
                 onChange={(e) => setAuditSearch(e.target.value)}
                 placeholder="Search event, actor, target…"
-                className="h-8 w-full border border-border bg-background pl-8 pr-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-8 w-full border border-border bg-background pl-8 pr-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
               />
             </div>
             <span className="flex items-center gap-1.5 font-mono text-[11px] text-success">
@@ -791,20 +791,20 @@ export function EventsPage({
           </div>
 
           {selectedEvent && (
-            <div className="border border-border bg-[#060606] p-3.5 space-y-2 font-mono text-[11.5px]">
+            <div className="border border-border bg-[#0a0a0b] p-3.5 space-y-2 font-mono text-[11.5px]">
               <div className="flex items-center justify-between text-muted-foreground">
                 <span>
-                  Event Payload: <strong className="text-white">{selectedEvent.id}</strong> ({selectedEvent.event})
+                  Event Payload: <strong className="text-[#f5f5f4]">{selectedEvent.id}</strong> ({selectedEvent.event})
                 </span>
                 <button
                   type="button"
                   onClick={() => setSelectedEvent(null)}
-                  className="text-muted-foreground hover:text-white"
+                  className="text-muted-foreground hover:text-[#f5f5f4]"
                 >
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <pre className="overflow-x-auto text-[#fefefe]">
+              <pre className="overflow-x-auto text-[#f5f5f4]">
                 {selectedEvent.payload || '{}'}
               </pre>
             </div>

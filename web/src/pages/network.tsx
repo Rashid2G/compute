@@ -161,7 +161,7 @@ export function NetworkPage({
               onRefresh();
               void loadPortForwards();
             }}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-[12px] font-medium text-white"
+            className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
             <RefreshCw className="h-3.5 w-3.5" />
             <span>Reconcile Bridge</span>
@@ -229,7 +229,7 @@ export function NetworkPage({
             className={cn(
               'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
               subTab === 'leases'
-                ? 'border-[#263fa9] text-foreground font-medium'
+                ? 'border-primary text-foreground font-medium'
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
           >
@@ -241,7 +241,7 @@ export function NetworkPage({
             className={cn(
               'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
               subTab === 'port-forwarding'
-                ? 'border-[#263fa9] text-foreground font-medium'
+                ? 'border-primary text-foreground font-medium'
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
           >
@@ -253,7 +253,7 @@ export function NetworkPage({
           <button
             type="button"
             onClick={() => setAddPfOpen((v) => !v)}
-            className="flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11.5px] font-medium text-white"
+            className="flex h-7 items-center gap-1 bg-primary hover:bg-primary-hover px-2.5 text-[11.5px] font-medium text-primary-foreground"
           >
             <Plus className="h-3 w-3" />
             <span>Add Port Rule</span>
@@ -331,7 +331,7 @@ export function NetworkPage({
                         <button
                           type="button"
                           onClick={() => void handleInspect(lease.vm_id)}
-                          className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                          className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-primary"
                         >
                           {inspectingId === lease.vm_id
                             ? 'Probing…'
@@ -346,7 +346,7 @@ export function NetworkPage({
           </div>
 
           {inspectResult && (
-            <div className="border border-[#263fa9] bg-background p-4 space-y-2 font-mono text-[11.5px]">
+            <div className="border border-primary bg-background p-4 space-y-2 font-mono text-[11.5px]">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Activity className="h-3.5 w-3.5 text-[color:var(--link)]" />
@@ -485,7 +485,7 @@ export function NetworkPage({
                 </button>
                 <button
                   type="submit"
-                  className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+                  className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
                 >
                   Save Rule
                 </button>

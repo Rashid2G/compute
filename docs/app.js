@@ -7,7 +7,7 @@
   const sidebar = document.getElementById("doc-sidebar");
   const menuBtn = document.getElementById("mobile-menu-btn");
 
-  // 1. Theme toggle
+  // 1. Theme toggle (defaults to dark Obsidian & Ember Copper)
   function applyTheme(theme) {
     if (theme === "dark") {
       root.classList.add("dark");
@@ -31,8 +31,6 @@
 
   if (savedTheme === "dark" || savedTheme === "light") {
     applyTheme(savedTheme);
-  } else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
-    applyTheme("dark");
   } else {
     applyTheme("dark");
   }
@@ -55,7 +53,7 @@
     });
   }
 
-  // 3. Copy-to-clipboard buttons on code blocks
+  // 3. Copy-to-clipboard buttons
   document.querySelectorAll(".code-block").forEach((block) => {
     const btn = block.querySelector(".copy-btn");
     const codeEl = block.querySelector("pre code");
@@ -63,14 +61,18 @@
 
     btn.addEventListener("click", async () => {
       const text = codeEl.innerText;
-      try {
-        await navigator.clipboard.writeText(text);
+      const markCopied = () => {
         btn.textContent = "Copied";
         btn.classList.add("copied");
         setTimeout(() => {
           btn.textContent = "Copy";
           btn.classList.remove("copied");
         }, 1600);
+      };
+
+      try {
+        await navigator.clipboard.writeText(text);
+        markCopied();
       } catch (_) {
         const ta = document.createElement("textarea");
         ta.value = text;
@@ -80,17 +82,31 @@
         ta.select();
         document.execCommand("copy");
         document.body.removeChild(ta);
-        btn.textContent = "Copied";
-        btn.classList.add("copied");
-        setTimeout(() => {
-          btn.textContent = "Copy";
-          btn.classList.remove("copied");
-        }, 1600);
+        markCopied();
       }
     });
   });
 
-  // 4. Client-side search & filter
+  // 4. Tabbed code/reference groups
+  document.querySelectorAll("[data-tabs]").forEach((group) => {
+    const buttons = Array.from(group.querySelectorAll(".tab-btn"));
+    const panels = Array.from(group.querySelectorAll(".tab-panel"));
+    buttons.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const target = btn.getAttribute("data-tab-target");
+        buttons.forEach((b) => {
+          const active = b === btn;
+          b.classList.toggle("active", active);
+          b.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        panels.forEach((p) => {
+          p.classList.toggle("active", p.getAttribute("data-tab-panel") === target);
+        });
+      });
+    });
+  });
+
+  // 5. Client-side search filter
   const sections = Array.from(document.querySelectorAll(".doc-section"));
   const navGroups = Array.from(document.querySelectorAll(".nav-group"));
   const navLinks = Array.from(document.querySelectorAll(".nav-link"));
@@ -105,7 +121,8 @@
         visibleIds.add(sec.id);
         return;
       }
-      const haystack = (sec.getAttribute("data-keywords") || "") + " " + sec.textContent;
+      const haystack =
+        (sec.getAttribute("data-keywords") || "") + " " + sec.textContent;
       const match = haystack.toLowerCase().includes(q);
       sec.classList.toggle("search-dimmed", !match);
       if (match) visibleIds.add(sec.id);
@@ -127,7 +144,10 @@
     });
 
     if (searchEmpty) {
-      searchEmpty.classList.toggle("visible", Boolean(q && totalNavMatches === 0));
+      searchEmpty.classList.toggle(
+        "visible",
+        Boolean(q && totalNavMatches === 0)
+      );
     }
   }
 
@@ -138,9 +158,12 @@
 
     document.addEventListener("keydown", (e) => {
       if (
-        (e.key === "/" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k")) &&
+        (e.key === "/" ||
+          ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k")) &&
         document.activeElement !== searchInput &&
-        !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName || "")
+        !["INPUT", "TEXTAREA", "SELECT"].includes(
+          document.activeElement?.tagName || ""
+        )
       ) {
         e.preventDefault();
         searchInput.focus();
@@ -153,7 +176,7 @@
     });
   }
 
-  // 5. Scroll-spy active nav link
+  // 6. Scroll-spy active section link
   if ("IntersectionObserver" in window && sections.length > 0) {
     const linkById = new Map();
     navLinks.forEach((link) => {
@@ -171,7 +194,7 @@
           }
         });
       },
-      { rootMargin: "-20% 0px -70% 0px", threshold: 0 }
+      { rootMargin: "-18% 0px -72% 0px", threshold: 0 }
     );
 
     sections.forEach((sec) => observer.observe(sec));

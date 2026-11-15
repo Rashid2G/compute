@@ -119,7 +119,7 @@ export function CloneVMDialog({
       >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <Copy className="h-4 w-4 text-[#5e7ff5]" />
+            <Copy className="h-4 w-4 text-primary dark:text-[var(--accent-bright)]" />
             <h2
               id="clone-vm-title"
               className="text-[15px] font-medium text-foreground"
@@ -171,7 +171,7 @@ export function CloneVMDialog({
                   )
                 }
                 required
-                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>
 
@@ -189,7 +189,7 @@ export function CloneVMDialog({
                     className={cn(
                       'font-mono text-[12px] border-l first:border-l-0 border-border transition-colors',
                       replicaCount === cnt
-                        ? 'bg-[#263fa9] text-white font-medium'
+                        ? 'bg-primary text-primary-foreground font-medium'
                         : 'bg-background text-muted-foreground hover:text-foreground',
                     )}
                   >
@@ -222,7 +222,7 @@ export function CloneVMDialog({
                 aria-label="Replica vCPUs"
                 value={vcpus}
                 onChange={(e) => setVcpus(Number(e.target.value))}
-                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
               >
                 {[1, 2, 4, 8, 16].map((c) => (
                   <option key={c} value={c}>
@@ -240,7 +240,7 @@ export function CloneVMDialog({
                 aria-label="Replica memory MB"
                 value={memoryMb}
                 onChange={(e) => setMemoryMb(Number(e.target.value))}
-                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
               >
                 {[512, 1024, 2048, 4096, 8192, 16384].map((mb) => (
                   <option key={mb} value={mb}>
@@ -263,7 +263,7 @@ export function CloneVMDialog({
                 onChange={(e) =>
                   setDiskGb(Math.max(1, Number(e.target.value) || 10))
                 }
-                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>
           </div>
@@ -278,7 +278,7 @@ export function CloneVMDialog({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Worker pool replica or staging branch"
-              className="h-9 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
             />
           </div>
 
@@ -293,7 +293,7 @@ export function CloneVMDialog({
                 className={cn(
                   'border px-3 py-2 text-left text-[12px] transition-colors',
                   networkIsolation === 'account'
-                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    ? 'border-primary bg-selected text-selected-foreground'
                     : 'border-border bg-background text-foreground hover:border-foreground/40',
                 )}
               >
@@ -308,7 +308,7 @@ export function CloneVMDialog({
                 className={cn(
                   'border px-3 py-2 text-left text-[12px] transition-colors',
                   networkIsolation === 'isolated'
-                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    ? 'border-primary bg-selected text-selected-foreground'
                     : 'border-border bg-background text-foreground hover:border-foreground/40',
                 )}
               >
@@ -329,7 +329,7 @@ export function CloneVMDialog({
               type="checkbox"
               checked={autoStart}
               onChange={(e) => setAutoStart(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+              className="h-3.5 w-3.5 accent-primary cursor-pointer"
             />
             <label
               htmlFor="clone-auto-start"
@@ -349,7 +349,7 @@ export function CloneVMDialog({
             </button>
             <button
               type="submit"
-              className="inline-flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[12.5px] font-medium text-white transition-colors"
+              className="inline-flex h-9 items-center gap-2 bg-primary hover:bg-primary-hover px-4 text-[12.5px] font-medium text-primary-foreground transition-colors"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>
