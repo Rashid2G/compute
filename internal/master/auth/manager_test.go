@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/store"
+	"github.com/Rashid2G/compute/internal/store/db"
 )
 
 func setupTestManager(t *testing.T) (*auth.Manager, *store.Store, *pki.MasterKey) {

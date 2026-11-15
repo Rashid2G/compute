@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/network"
+	"github.com/Rashid2G/compute/internal/network"
 )
 
 func TestDefaultConfig(t *testing.T) {

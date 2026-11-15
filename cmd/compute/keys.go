@@ -11,7 +11,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/compute/internal/db"
 	"golang.org/x/crypto/ssh"
 )
 

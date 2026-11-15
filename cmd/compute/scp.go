@@ -16,7 +16,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/compute/internal/vm"
 )
 
 // scpTimeoutSeconds bounds each per-operation remote command (tar, extract,

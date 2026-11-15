@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/Rashid2G/on-demand-vms/internal/network"
+	"github.com/Rashid2G/compute/internal/network"
 )
 
 // Supported fixed VM tiers and limits

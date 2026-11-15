@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	jailer "github.com/Rashid2G/on-demand-vms/internal/node/runtime/firecracker"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/compute/internal/db"
+	jailer "github.com/Rashid2G/compute/internal/node/runtime/firecracker"
+	"github.com/Rashid2G/compute/internal/storage"
 )
 
 func TestJailerDirectoryStructure(t *testing.T) {

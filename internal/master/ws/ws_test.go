@@ -12,11 +12,11 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/store"
+	"github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 func setupTestWSServer(t *testing.T) (*httptest.Server, *Server, *auth.KeyManager, *auth.SessionManager, *db.User, string, func()) {
