@@ -72,7 +72,12 @@ host-prepare: ## Apply idempotent Linux host kernel modules and sysctl settings 
 setup-host: ## Configure host bridge and NAT rules for Firecracker sandboxes
 	./scripts/setup-host.sh
 
-build-images: ## Build Firecracker rootfs and kernel artifacts into IMAGES_DIR
+build-images: ## Install the Firecracker kernel and build the rootfs into IMAGES_DIR
+	sudo env \
+		COMPUTE_KERNEL_SRC="$(COMPUTE_KERNEL_SRC)" \
+		COMPUTE_KERNEL_URL="$(COMPUTE_KERNEL_URL)" \
+		COMPUTE_KERNEL_SHA256="$(COMPUTE_KERNEL_SHA256)" \
+		./scripts/build-kernel.sh $(IMAGES_DIR)
 	sudo ./scripts/build-rootfs.sh $(IMAGES_DIR) 1024
 
 validate-compose: ## Validate docker-compose.yml and .env.example contract

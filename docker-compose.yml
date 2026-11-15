@@ -40,7 +40,7 @@ services:
     environment:
       COMPUTE_DATA_DIR: /var/lib/compute
       COMPUTE_IMAGES_DIR: /var/lib/compute/images
-      COMPUTE_IMAGES_MODE: ${COMPUTE_IMAGES_MODE:-download}
+      COMPUTE_IMAGES_MODE: ${COMPUTE_IMAGES_MODE:-build}
       COMPUTE_IMAGE_MANIFEST_URL: ${COMPUTE_IMAGE_MANIFEST_URL:-}
       COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
       COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
@@ -69,7 +69,7 @@ services:
       - .env
     environment:
       COMPUTE_DATA_DIR: /var/lib/compute
-      COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-0.0.0.0}
+      COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-127.0.0.1}
       COMPUTE_API_PORT: ${COMPUTE_API_PORT:-18080}
       COMPUTE_AUTH_ENABLED: ${COMPUTE_AUTH_ENABLED:-true}
       COMPUTE_SIGNUP_ENABLED: ${COMPUTE_SIGNUP_ENABLED:-false}
@@ -118,7 +118,7 @@ services:
       - /usr/local/bin/compute
       - gui
       - --addr
-      - ${COMPUTE_GUI_BIND_ADDRESS:-0.0.0.0}
+      - ${COMPUTE_GUI_BIND_ADDRESS:-127.0.0.1}
       - --port
       - ${COMPUTE_GUI_PORT:-8080}
       - --daemon
