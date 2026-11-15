@@ -1,6 +1,6 @@
 [Unit]
 Description=Compute Host Network Bridge (NAT)
-Documentation=https://github.com/Rashid2G/on-demand-vms
+Documentation=https://github.com/Rashid2G/compute
 After=network-online.target
 Wants=network-online.target
 

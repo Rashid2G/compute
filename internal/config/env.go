@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/network"
+	"github.com/Rashid2G/compute/internal/network"
 )
 
 // ApplyEnvOverrides applies COMPUTE_* environment variables to cfg.

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/image"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/image"
 )
 
 func writeFakeImages(t *testing.T, dir string) {

@@ -410,7 +410,7 @@ compute sandbox start compute-dogfood
 compute sandbox exec compute-dogfood -- bash -c "
   sudo apt-get update -y && \
   sudo apt-get install -y golang make git nodejs npm && \
-  git clone https://github.com/Rashid2G/on-demand-vms.git /home/compute/on-demand-vms
+  git clone https://github.com/Rashid2G/compute.git /home/compute/on-demand-vms
 "
 
 # 3. Build compute binaries inside the sandbox
