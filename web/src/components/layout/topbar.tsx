@@ -143,7 +143,7 @@ export function Topbar({
             <button
               type="button"
               onClick={onNew}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-xs font-medium text-white transition-colors"
+              className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-xs font-medium text-primary-foreground transition-colors"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>New</span>
@@ -152,7 +152,7 @@ export function Topbar({
               type="button"
               onClick={onNew}
               title="Advanced create sandbox"
-              className="flex h-8 w-7 items-center justify-center border-l border-[#495eb7]/60 bg-[#263fa9] hover:bg-[#1e3180] text-white transition-colors"
+              className="flex h-8 w-7 items-center justify-center border-l border-primary-foreground/20 bg-primary hover:bg-primary-hover text-primary-foreground transition-colors"
             >
               <ChevronDown className="h-3.5 w-3.5" />
             </button>

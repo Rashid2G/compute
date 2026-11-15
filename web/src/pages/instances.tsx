@@ -534,19 +534,19 @@ export function InstancesPage({
 
   return (
     <div className="space-y-4">
-      {/* Top Page Title & Split Cobalt Action Button */}
+      {/* Top Page Title & Split Action Button */}
       <div className="flex items-center justify-between">
         <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
           Sandboxes
         </h1>
 
         <div className="relative flex items-center">
-          {/* Split Cobalt [ ▷ New | ⌄ ] Button */}
+          {/* Split Primary [ ▷ New | ⌄ ] Button */}
           <div className="inline-flex items-stretch">
             <button
               type="button"
               onClick={onNew}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180] transition-colors"
+              className="flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
             >
               <Play className="h-3 w-3" />
               <span>New</span>
@@ -555,7 +555,7 @@ export function InstancesPage({
               type="button"
               onClick={() => setSplitMenuOpen((prev) => !prev)}
               aria-label="More creation options"
-              className="flex h-8 w-7 items-center justify-center border-l border-[#fefefe]/20 bg-[#263fa9] text-[#fefefe] hover:bg-[#1e3180] transition-colors"
+              className="flex h-8 w-7 items-center justify-center border-l border-primary-foreground/20 bg-primary text-primary-foreground hover:bg-primary-hover transition-colors"
             >
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
@@ -607,7 +607,7 @@ export function InstancesPage({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search name, URL, hostname, id"
-            className="h-8 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            className="h-8 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
         </div>
 
@@ -617,7 +617,7 @@ export function InstancesPage({
             aria-label="Filter by state"
             value={stateFilter}
             onChange={(e) => setStateFilter(e.target.value)}
-            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">State</option>
             <option value="running">Running</option>
@@ -635,7 +635,7 @@ export function InstancesPage({
             aria-label="Filter by snapshot"
             value={snapshotFilter}
             onChange={(e) => setSnapshotFilter(e.target.value)}
-            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">Snapshot</option>
             <option value="has-snapshot">Has snapshot</option>
@@ -650,7 +650,7 @@ export function InstancesPage({
             aria-label="Filter by tier type"
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value)}
-            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+            className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">Type</option>
             <option value="small">small (2 vCPU)</option>
@@ -662,9 +662,9 @@ export function InstancesPage({
         </div>
 
         {selectedIds.length > 0 && (
-          <div className="ml-auto flex flex-wrap items-center gap-1.5 border border-[#263fa9]/60 bg-[#0f1634]/50 px-2.5 py-1.5 shadow-sm">
+          <div className="ml-auto flex flex-wrap items-center gap-1.5 border border-primary/60 bg-selected px-2.5 py-1.5 shadow-sm">
             <span className="mr-1 inline-flex items-center gap-1.5 font-mono text-[11px] text-foreground">
-              <span className="h-1.5 w-1.5 bg-[#5e7ff5]" />
+              <span className="h-1.5 w-1.5 bg-primary dark:bg-[var(--accent-bright)]" />
               {selectedIds.length} selected
             </span>
             <span className="h-4 w-px bg-border" />
@@ -691,7 +691,7 @@ export function InstancesPage({
               type="button"
               onClick={() => void handleBatchSnapshot()}
               title="Pause & save state for selected running sandboxes"
-              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-primary hover:text-primary dark:hover:text-[var(--accent-bright)] transition-colors cursor-pointer"
             >
               <Pause className="h-3 w-3" />
               <span>Pause</span>
@@ -700,7 +700,7 @@ export function InstancesPage({
               type="button"
               onClick={() => void handleBatchClone()}
               title="Replicate all selected sandboxes"
-              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+              className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-primary hover:text-primary dark:hover:text-[var(--accent-bright)] transition-colors cursor-pointer"
             >
               <Copy className="h-3 w-3" />
               <span>Replicate</span>
@@ -710,7 +710,7 @@ export function InstancesPage({
                 type="button"
                 onClick={handleBatchUnprotect}
                 title="Remove deletion protection from selected sandboxes"
-                className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-[#5e7ff5] hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
+                className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-primary dark:text-[var(--accent-bright)] hover:border-primary transition-colors cursor-pointer"
               >
                 <Shield className="h-3 w-3" />
                 <span>Unprotect</span>
@@ -752,7 +752,7 @@ export function InstancesPage({
                     aria-label="Select all sandboxes"
                     checked={allSelected}
                     onChange={toggleAll}
-                    className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+                    className="h-3.5 w-3.5 accent-primary cursor-pointer"
                   />
                 </th>
                 <th className="py-2 px-1 font-normal">Name / URL</th>
@@ -796,10 +796,10 @@ export function InstancesPage({
                 <tr>
                   <td colSpan={12} className="py-20 text-center">
                     <div className="mx-auto flex max-w-xs flex-col items-center justify-center space-y-3.5">
-                      {/* Cobalt Blue Dithered Dot-Matrix Isometric Compute Cube */}
+                      {/* Ember Dithered Dot-Matrix Isometric Compute Cube */}
                       <svg
                         viewBox="0 0 120 110"
-                        className="h-28 w-32 text-[#263fa9]"
+                        className="h-28 w-32 text-primary dark:text-[var(--accent-bright)]"
                         fill="currentColor"
                         shapeRendering="crispEdges"
                         aria-hidden="true"
@@ -833,7 +833,7 @@ export function InstancesPage({
                       <button
                         type="button"
                         onClick={onNew}
-                        className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180] transition-colors"
+                        className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                       >
                         <Play className="h-3 w-3" />
                         <span>New</span>
@@ -868,7 +868,7 @@ export function InstancesPage({
                       className={cn(
                         'cursor-pointer transition-colors',
                         isSelected
-                          ? 'bg-[#0f1634]/75'
+                          ? 'bg-selected/75'
                           : 'hover:bg-muted/40',
                       )}
                     >
@@ -881,7 +881,7 @@ export function InstancesPage({
                           aria-label={`Select ${vm.name}`}
                           checked={isChecked}
                           onChange={() => toggleRow(vm.id)}
-                          className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+                          className="h-3.5 w-3.5 accent-primary cursor-pointer"
                         />
                       </td>
 
@@ -892,7 +892,7 @@ export function InstancesPage({
                           {vm.protected && (
                             <span
                               title="Deletion protected"
-                              className="inline-flex items-center gap-0.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.2 text-[9px] font-mono text-[#5e7ff5] uppercase"
+                              className="inline-flex items-center gap-0.5 border border-primary/40 bg-primary/10 px-1 py-0.2 text-[9px] font-mono text-primary dark:text-[var(--accent-bright)] uppercase"
                             >
                               <Shield className="h-2.5 w-2.5" />
                               prot
@@ -927,7 +927,7 @@ export function InstancesPage({
                         <button
                           type="button"
                           onClick={() => copyText(vm.internal_id || vm.id)}
-                          className="inline-flex items-center gap-1 border border-border bg-muted/40 px-1.5 py-0.5 text-foreground hover:border-[#263fa9] transition-colors"
+                          className="inline-flex items-center gap-1 border border-border bg-muted/40 px-1.5 py-0.5 text-foreground hover:border-primary transition-colors"
                           title={`Copy ${vm.internal_id || vm.id}`}
                         >
                           <span>{shortId}</span>
@@ -1092,7 +1092,7 @@ export function InstancesPage({
                             onClick={() => setSnapshotTarget(vm)}
                             title="Create Snapshot"
                             aria-label={`Snapshot ${vm.name}`}
-                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors"
+                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-primary hover:text-foreground transition-colors"
                           >
                             <Camera className="h-2.5 w-2.5" />
                             <span>Snapshot</span>
@@ -1103,7 +1103,7 @@ export function InstancesPage({
                             onClick={() => setCloneTarget(vm)}
                             title="Replicate Sandbox"
                             aria-label={`Replicate ${vm.name}`}
-                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors"
+                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-primary hover:text-foreground transition-colors"
                           >
                             <Copy className="h-2.5 w-2.5" />
                             <span>Replicate</span>
@@ -1115,7 +1115,7 @@ export function InstancesPage({
                                 type="button"
                                 title="More actions"
                                 aria-label={`More actions for ${vm.name}`}
-                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors outline-none data-[state=open]:border-[#263fa9] data-[state=open]:text-foreground"
+                                className="flex h-6 w-6 items-center justify-center border border-border bg-background text-muted-foreground hover:border-primary hover:text-foreground transition-colors outline-none data-[state=open]:border-primary data-[state=open]:text-foreground"
                               >
                                 <MoreHorizontal className="h-3 w-3" />
                               </button>
@@ -1272,7 +1272,7 @@ export function InstancesPage({
               <button
                 type="button"
                 onClick={() => setSnapshotTarget(selectedVM)}
-                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-[#263fa9] transition-colors"
+                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-primary transition-colors"
               >
                 <Camera className="h-3 w-3" />
                 <span>Snapshot</span>
@@ -1281,7 +1281,7 @@ export function InstancesPage({
               <button
                 type="button"
                 onClick={() => setCloneTarget(selectedVM)}
-                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-[#263fa9] transition-colors"
+                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-primary transition-colors"
               >
                 <Copy className="h-3 w-3" />
                 <span>Replicate</span>
@@ -1292,7 +1292,7 @@ export function InstancesPage({
               <button
                 type="button"
                 onClick={() => onConsole(selectedVM)}
-                className="flex h-7 items-center gap-1.5 bg-[#263fa9] px-2.5 text-[11px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                className="flex h-7 items-center gap-1.5 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
               >
                 <Terminal className="h-3 w-3" />
                 <span>Open Full Console</span>
@@ -1310,7 +1310,7 @@ export function InstancesPage({
                 className={cn(
                   'flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] transition-colors',
                   selectedVM.protected
-                    ? 'border-[#5e7ff5]/50 text-[#5e7ff5] hover:bg-[#5e7ff5]/10'
+                    ? 'border-primary/50 text-primary dark:text-[var(--accent-bright)] hover:bg-primary/10'
                     : 'text-foreground hover:bg-muted/50',
                 )}
                 title={selectedVM.protected ? 'Unprotect sandbox' : 'Protect sandbox against deletion'}
@@ -1349,7 +1349,7 @@ export function InstancesPage({
                 className={cn(
                   'border-b-2 px-3 py-2 text-[12px] transition-colors whitespace-nowrap',
                   deepDiveTab === t.id
-                    ? 'border-[#263fa9] text-foreground font-medium'
+                    ? 'border-primary text-foreground font-medium'
                     : 'border-transparent text-muted-foreground hover:text-foreground',
                 )}
               >
@@ -1472,13 +1472,13 @@ export function InstancesPage({
                       if (e.key === 'Enter') void handleRunExec();
                     }}
                     placeholder="Enter shell command to run inside microVM…"
-                    className="h-8 flex-1 border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                    className="h-8 flex-1 border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
                   />
                   <button
                     type="button"
                     disabled={execRunning || selectedVM.status !== 'running'}
                     onClick={() => void handleRunExec()}
-                    className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180] disabled:opacity-50"
+                    className="h-8 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50"
                   >
                     {execRunning ? 'Running…' : 'Execute via SSH'}
                   </button>
@@ -1500,7 +1500,7 @@ export function InstancesPage({
                     <span>Duration: {execMeta.durationMs} ms</span>
                   </div>
                 )}
-                <pre className="max-h-56 overflow-auto border border-border bg-[#060606] p-3 font-mono text-[11.5px] leading-relaxed text-[#fefefe]">
+                <pre className="max-h-56 overflow-auto border border-border bg-[#0a0a0b] p-3 font-mono text-[11.5px] leading-relaxed text-[#f5f5f4]">
                   {execOutput ||
                     (selectedVM.status === 'running'
                       ? 'Click "Execute via SSH" to run command on live guest.'
@@ -1677,7 +1677,7 @@ export function InstancesPage({
                           )
                           .catch((err) => toast.error(errorMessage(err)));
                       }}
-                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-primary"
                     >
                       Toggle
                     </button>
@@ -1711,7 +1711,7 @@ export function InstancesPage({
                           )
                           .catch((err) => toast.error(errorMessage(err)));
                       }}
-                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9] shrink-0"
+                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-primary shrink-0"
                     >
                       {(selectedVM.network_isolation || 'account') === 'isolated'
                         ? 'Allow Account'
@@ -1739,7 +1739,7 @@ export function InstancesPage({
                     <button
                       type="button"
                       onClick={() => setSnapshotTarget(selectedVM)}
-                      className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                      className="inline-flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
                     >
                       <Camera className="h-3.5 w-3.5" />
                       <span>Create Snapshot</span>
@@ -1758,7 +1758,7 @@ export function InstancesPage({
                       <button
                         type="button"
                         onClick={() => onResume(selectedVM)}
-                        className="inline-flex h-8 items-center gap-1.5 bg-success px-3 text-[12px] font-medium text-[#fefefe]"
+                        className="inline-flex h-8 items-center gap-1.5 bg-success px-3 text-[12px] font-medium text-success-foreground"
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
                         <span>Resume MicroVM</span>
@@ -1818,7 +1818,7 @@ export function InstancesPage({
                               <button
                                 type="button"
                                 onClick={() => handleSpawnFromSnapshot(tpl)}
-                                className="inline-flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
+                                className="inline-flex h-7 items-center gap-1 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
                               >
                                 <Play className="h-3 w-3 fill-current" />
                                 <span>Spawn Sandbox</span>

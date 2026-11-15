@@ -151,7 +151,7 @@ export function JobsPage({
 
               {/* Step 1 */}
               <div className="relative flex items-start gap-3.5">
-                <div className="relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[#3b5bdb] bg-background font-mono text-[10.5px] font-medium text-[#5c7cfa]">
+                <div className="relative z-10 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-primary bg-background font-mono text-[10.5px] font-medium text-primary dark:text-[var(--accent-bright)]">
                   1
                 </div>
                 <div className="space-y-2">
@@ -168,7 +168,7 @@ export function JobsPage({
                     <button
                       type="button"
                       onClick={() => setDispatchOpen(true)}
-                      className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-white hover:bg-[#1e3180] transition-colors"
+                      className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                     >
                       <GitBranch className="h-3.5 w-3.5" />
                       <span>Connect GitHub</span>
@@ -321,7 +321,7 @@ export function JobsPage({
                 value={jobCommand}
                 onChange={(e) => setJobCommand(e.target.value)}
                 required
-                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>
             <div>
@@ -364,7 +364,7 @@ export function JobsPage({
               </button>
               <button
                 type="submit"
-                className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180] disabled:opacity-50"
+                className="flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50"
               >
                 <Play className="h-3 w-3 fill-current" />
                 <span>Run Job</span>
@@ -411,7 +411,7 @@ export function JobsPage({
                     onClick={() => setSelectedJob(job)}
                     className={cn(
                       'cursor-pointer hover:bg-muted/30',
-                      selectedJob?.id === job.id && 'bg-[#0f1634]/60',
+                      selectedJob?.id === job.id && 'bg-selected/60',
                     )}
                   >
                     <td className="py-2 px-3 text-foreground font-medium">
@@ -430,7 +430,7 @@ export function JobsPage({
                           job.state === 'completed' &&
                             'border-success/40 bg-success/10 text-success',
                           job.state === 'running' &&
-                            'border-[#263fa9] bg-[#0f1634] text-white',
+                            'border-primary bg-selected text-selected-foreground',
                           job.state === 'queued' &&
                             'border-warning/40 bg-warning/10 text-warning',
                           (job.state === 'failed' ||
@@ -452,7 +452,7 @@ export function JobsPage({
                         <button
                           type="button"
                           onClick={() => setSelectedJob(job)}
-                          className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9]"
+                          className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-primary"
                         >
                           Logs
                         </button>
@@ -496,7 +496,7 @@ export function JobsPage({
               <X className="h-4 w-4" />
             </button>
           </div>
-          <pre className="max-h-48 overflow-auto border border-border bg-[#060606] p-3 font-mono text-[11px] text-[#fefefe]">
+          <pre className="max-h-48 overflow-auto border border-border bg-[#0a0a0b] p-3 font-mono text-[11px] text-[#f5f5f4]">
             {logsLoading
               ? 'Loading job execution logs…'
               : jobLogs.length > 0
