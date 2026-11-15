@@ -37,15 +37,16 @@ fi
 say_ok "${ENV_FILE} present"
 
 printf '\n==> Compose interpolation\n'
-TEMP_ENV=0
-if [ ! -f .env ]; then
-    # Compose requires the service env_file to exist. Use the example values for
-    # validation exactly as a fresh install would after `cp .env.example .env`.
-    cp "${ENV_FILE}" .env
-    TEMP_ENV=1
-    trap 'if [ "${TEMP_ENV}" = "1" ]; then rm -f .env; fi' EXIT
-fi
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    # First verify out-of-the-box `docker compose up` with no .env file when none exists,
+    # or explicitly with /dev/null as env-file if a developer .env exists locally.
+    EMPTY_ENV="$(mktemp)"
+    trap 'rm -f "${EMPTY_ENV}"' EXIT
+    if docker compose --env-file "${EMPTY_ENV}" -f "${COMPOSE_FILE}" config --quiet; then
+        say_ok "docker compose config succeeded with zero .env overrides"
+    else
+        say_fail "docker compose config failed without .env"
+    fi
     if docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config --quiet; then
         say_ok "docker compose config succeeded with ${ENV_FILE}"
     else
@@ -77,12 +78,16 @@ services = doc.get("services") or {}
 for name in ("compute-init", "computed"):
     if name not in services:
         problems.append(f"missing service {name}")
+for name, svc in services.items():
+    if isinstance(svc, dict) and svc.get("env_file"):
+        problems.append(f"{name} must not require env_file (.env should remain optional)")
 for name in ("computed", "compute-worker"):
     svc = services.get(name) or {}
     if svc.get("network_mode") != "host":
         problems.append(f"{name} must use network_mode: host")
-if (services.get("computed") or {}).get("privileged") is not True:
-    problems.append("computed must be privileged")
+for name in ("compute-init", "computed"):
+    if (services.get(name) or {}).get("privileged") is not True:
+        problems.append(f"{name} must be privileged")
 init = services.get("compute-init") or {}
 if not init.get("command"):
     problems.append("compute-init must override command to init --images")
@@ -117,7 +122,7 @@ else
 fi
 
 printf '\n==> Shell syntax\n'
-for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/validate-compose.sh; do
+for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/build-rootfs-chroot.sh scripts/validate-compose.sh; do
     if [ -f "${script}" ] && bash -n "${script}"; then
         say_ok "bash -n ${script}"
     fi
