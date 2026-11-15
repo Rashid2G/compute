@@ -88,6 +88,27 @@ func TestDaemonClientGetConfigAndQueue(t *testing.T) {
 	}
 }
 
+func TestQueuedVMReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"count":1,"queued_vms":[{"position":1,"vm_id":"vm-123","vm_name":"queued-vm","reason":"insufficient host memory"}]}`)
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL)
+	if got := queuedVMReason(context.Background(), client, "vm-123"); got != "insufficient host memory" {
+		t.Fatalf("queuedVMReason = %q, want %q", got, "insufficient host memory")
+	}
+	if got := queuedVMReason(context.Background(), client, "vm-missing"); got != "" {
+		t.Fatalf("queuedVMReason for unknown VM = %q, want empty", got)
+	}
+
+	srv.Close()
+	if got := queuedVMReason(context.Background(), client, "vm-123"); got != "" {
+		t.Fatalf("queuedVMReason after queue failure = %q, want empty", got)
+	}
+}
+
 func TestCLIValidation(t *testing.T) {
 	for _, args := range [][]string{{"sandbox", "start"}, {"sandbox", "delete"}, {"bogus"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
@@ -555,7 +576,7 @@ func TestVersionCLI(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"name":"Compute Daemon","service":"computed","project":"Compute","version":"2.0.0","release_name":"Vulcan","go_version":"go1.23","os":"linux","arch":"amd64"}`)
+		fmt.Fprintln(w, `{"name":"Compute Daemon","service":"computed","project":"Compute","version":"1.0.0","release_name":"Compute","go_version":"go1.23","os":"linux","arch":"amd64"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -569,7 +590,7 @@ func TestVersionCLI(t *testing.T) {
 			t.Fatalf("version --client failed: %v, out: %s", err, string(out))
 		}
 		outStr := string(out)
-		if !strings.Contains(outStr, "Compute CLI") || !strings.Contains(outStr, "2.0.0") || !strings.Contains(outStr, "Vulcan") {
+		if !strings.Contains(outStr, "Compute CLI") || !strings.Contains(outStr, "1.0.0") || !strings.Contains(outStr, "Compute") {
 			t.Fatalf("unexpected version output: %s", outStr)
 		}
 	})
@@ -582,8 +603,8 @@ func TestVersionCLI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("version --short failed: %v, out: %s", err, string(out))
 		}
-		if strings.TrimSpace(string(out)) != "2.0.0" {
-			t.Fatalf("expected 2.0.0, got %q", string(out))
+		if strings.TrimSpace(string(out)) != "1.0.0" {
+			t.Fatalf("expected 1.0.0, got %q", string(out))
 		}
 	})
 
@@ -665,7 +686,7 @@ func TestCLIErrorExplanationAndAvailableCommands(t *testing.T) {
 			name:      "no_args_provided",
 			args:      "",
 			wantError: "Error: no command specified.",
-			wantHelp:  "Core Commands (Boat.dev Style):",
+			wantHelp:  "Core Commands:",
 		},
 		{
 			name:      "unknown_sandbox_subcommand",
@@ -745,5 +766,72 @@ func TestCLIErrorExplanationAndAvailableCommands(t *testing.T) {
 				t.Errorf("output does not contain command help %q: %s", tc.wantHelp, outStr)
 			}
 		})
+	}
+}
+
+func TestBuildExecCommandQuoting(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected string
+	}{
+		{
+			name:     "empty",
+			input:    []string{},
+			expected: "",
+		},
+		{
+			name:     "single string preserved as raw command",
+			input:    []string{"mkdir -p /foo/bar && echo done"},
+			expected: "mkdir -p /foo/bar && echo done",
+		},
+		{
+			name:     "compound bash -c preserves payload intact",
+			input:    []string{"bash", "-c", "mkdir -p /path && cmd"},
+			expected: "bash -c 'mkdir -p /path && cmd'",
+		},
+		{
+			name:     "python -c with single quotes",
+			input:    []string{"python3", "-c", "print('hello world')"},
+			expected: "python3 -c 'print('\\''hello world'\\'')'",
+		},
+		{
+			name:     "simple command and safe flags",
+			input:    []string{"ls", "-la", "/var/log"},
+			expected: "ls -la /var/log",
+		},
+		{
+			name:     "argument with spaces",
+			input:    []string{"touch", "file with spaces.txt"},
+			expected: "touch 'file with spaces.txt'",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildExecCommand(tc.input)
+			if got != tc.expected {
+				t.Fatalf("expected %q, got %q", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestSandboxHelpListsDiscoveryAndStartFlags(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "sandbox")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON=127.0.0.1:1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sandbox help failed: %v: %s", err, out)
+	}
+	outStr := string(out)
+	for _, expected := range []string{
+		"images",
+		"templates",
+		"--start/--boot",
+	} {
+		if !strings.Contains(outStr, expected) {
+			t.Errorf("sandbox help missing expected term %q:\n%s", expected, outStr)
+		}
 	}
 }

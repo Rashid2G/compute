@@ -17,7 +17,10 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute
 # Final runtime image
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables tar gzip bash socat openssh-client
+# e2fsprogs-extra provides debugfs, and mount/losetup provide the loop mount
+# fallback; both are used to configure SSH keys, passwords, and sshd policy
+# inside guest disk images.
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables tar gzip bash socat openssh-client e2fsprogs-extra mount losetup
 
 # Install Firecracker & Jailer static binaries for worker microVM execution
 ARG FIRECRACKER_VERSION=v1.17.0

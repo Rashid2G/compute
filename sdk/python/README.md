@@ -1,6 +1,6 @@
 # Compute Python SDK
 
-Official Python client for launching and interacting with Compute Sandboxes with full E2B and Boat.dev parity.
+Official Python client for launching and interacting with Compute Firecracker microVM sandboxes.
 
 ## Installation
 

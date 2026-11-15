@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -122,6 +123,20 @@ func NewHandler(daemonURL string) (http.Handler, error) {
 		}
 		r.Header.Set("X-Compute-Proxy-Loop", "1")
 		r.Host = targetURL.Host
+
+		// Forward configured admin secret / API key if browser request lacks authentication
+		if r.Header.Get("Authorization") == "" && r.Header.Get("X-API-Key") == "" {
+			if cookie, err := r.Cookie("compute_session"); err != nil || cookie.Value == "" {
+				fallbackKey := os.Getenv("COMPUTE_ADMIN_SECRET")
+				if fallbackKey == "" {
+					fallbackKey = os.Getenv("COMPUTE_API_KEY")
+				}
+				if fallbackKey != "" {
+					r.Header.Set("Authorization", "Bearer "+fallbackKey)
+				}
+			}
+		}
+
 		proxy.ServeHTTP(w, r)
 	})
 

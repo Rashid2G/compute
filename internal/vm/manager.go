@@ -16,18 +16,21 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/dns"
 	"github.com/Rashid2G/on-demand-vms/internal/firecracker"
 	"github.com/Rashid2G/on-demand-vms/internal/image"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	jailer "github.com/Rashid2G/on-demand-vms/internal/node/runtime/firecracker"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
@@ -45,16 +48,6 @@ type Config struct {
 	CgroupDevOverride   bool
 	Defaults            config.DefaultsConfig
 	Resources           config.ResourceLimits
-	// TailscaleDefaultSandboxes gives every new sandbox tailnet addressing
-	// unless the create request explicitly opts out.
-	TailscaleDefaultSandboxes bool
-}
-
-// TailscaleProvisioner joins a running sandbox to the operator's tailnet as an
-// ephemeral, tagged device and reports the assigned identity back.
-type TailscaleProvisioner interface {
-	Provision(ctx context.Context, vmID, vmIP, sshKeyPath string) (*tailscale.ProvisionResult, error)
-	Teardown(ctx context.Context, vmIP, sshKeyPath string)
 }
 
 type Manager struct {
@@ -73,7 +66,7 @@ type Manager struct {
 	queueMu               sync.Mutex
 	processChecker        func(pid int) bool
 	launcher              func(ctx context.Context, vm *db.VM) error
-	tsProvisioner         TailscaleProvisioner
+	guestSyncer           func(ctx context.Context, vm *db.VM) error
 	mu                    sync.RWMutex
 	vms                   map[string]*db.VM
 	templates             map[string]*db.Template
@@ -172,14 +165,6 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 	}
 
 	return m
-}
-
-// SetTailscaleProvisioner wires the tailnet sandbox provisioner. When unset,
-// sandboxes still boot normally but tailnet addressing is skipped.
-func (m *Manager) SetTailscaleProvisioner(p TailscaleProvisioner) {
-	m.mu.Lock()
-	m.tsProvisioner = p
-	m.mu.Unlock()
 }
 
 func (m *Manager) getVMLock(vmID string) *sync.RWMutex {
@@ -427,27 +412,39 @@ func (m *Manager) SetResourceLimits(limits config.ResourceLimits) {
 }
 
 type CreateRequest struct {
-	Name            string `json:"name"`
-	OwnerID         string `json:"owner_id,omitempty"`
-	Tier            string `json:"tier,omitempty"`       // "1vcpu", "2vcpu", "4vcpu" (or "micro", "small", "medium")
-	VCPUs           int    `json:"vcpus"`                // 1, 2, or 4
-	MemoryMB        int    `json:"memory_mb,omitempty"`  // Optional: default 2048, 4096, 8192
-	DiskMB          int    `json:"disk_mb,omitempty"`    // 51200 (50GB) or 102400 (100GB)
-	Image           string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
-	Template        string `json:"template,omitempty"`   // VM Template name or ID to launch from
-	CloneFrom       string `json:"clone_from,omitempty"` // VM ID to clone persistent disk from
-	IPAddress       string `json:"ip_address,omitempty"`
-	MACAddress      string `json:"mac_address,omitempty"`
-	PublicIP        *bool  `json:"public_ip,omitempty"`
-	PublicIPEnabled *bool  `json:"public_ip_enabled,omitempty"`
-	DedicatedIP     *bool  `json:"dedicated_ip,omitempty"`
-	DHCP            *bool  `json:"dhcp,omitempty"`
-	// Tailscale requests tailnet addressing for the sandbox: it joins the
-	// operator's tailnet as an ephemeral tagged device and gets a 100.x IP
-	// plus a MagicDNS name. Nil falls back to the daemon-wide default.
-	Tailscale    *bool  `json:"tailscale,omitempty"`
-	SSHKeyID     string `json:"ssh_key_id,omitempty"`
-	SSHPublicKey string `json:"ssh_public_key,omitempty"`
+	Name             string `json:"name"`
+	OwnerID          string `json:"owner_id,omitempty"`
+	Tier             string `json:"tier,omitempty"`       // "1vcpu", "2vcpu", "4vcpu" (or "micro", "small", "medium")
+	VCPUs            int    `json:"vcpus"`                // 1, 2, or 4
+	MemoryMB         int    `json:"memory_mb,omitempty"`  // Optional: default 2048, 4096, 8192
+	DiskMB           int    `json:"disk_mb,omitempty"`    // 51200 (50GB) or 102400 (100GB)
+	DiskGB           int    `json:"disk_gb,omitempty"`    // Optional convenience override in GB
+	Description      string `json:"description,omitempty"`
+	AutoStart        bool   `json:"auto_start,omitempty"`
+	Image            string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
+	Template         string `json:"template,omitempty"`   // VM Template name or ID to launch from
+	CloneFrom        string `json:"clone_from,omitempty"` // VM ID to clone persistent disk from
+	IPAddress        string `json:"ip_address,omitempty"`
+	MACAddress       string `json:"mac_address,omitempty"`
+	PublicIP         *bool  `json:"public_ip,omitempty"`
+	PublicIPEnabled  *bool  `json:"public_ip_enabled,omitempty"`
+	DedicatedIP      *bool  `json:"dedicated_ip,omitempty"`
+	NetworkIsolation string `json:"network_isolation,omitempty"` // "account" (default) or "isolated"
+	Isolated         *bool  `json:"isolated,omitempty"`          // Convenience boolean alias: true => "isolated", false => "account"
+	NetworkIsolated  *bool  `json:"network_isolated,omitempty"`  // Boolean alias for isolated
+	DHCP             *bool  `json:"dhcp,omitempty"`
+	SSHKeyID         string `json:"ssh_key_id,omitempty"`
+	SSHPublicKey     string `json:"ssh_public_key,omitempty"`
+	// SSHNoDefaultKey opts out of the caller's default account key. When a
+	// creation request names no key explicitly and this flag is false, the
+	// control plane injects the owner's default key automatically. Clients
+	// set it when the user explicitly chose "no account key" for the sandbox.
+	SSHNoDefaultKey bool `json:"ssh_no_default_key,omitempty"`
+	// SSHPassword is an optional password for the guest's managed SSH accounts
+	// (compute and root). It is applied to the disk image at creation time and
+	// never persisted. When empty, password authentication is disabled and the
+	// accounts stay locked, leaving the embedded public key as the only way in.
+	SSHPassword string `json:"ssh_password,omitempty"`
 
 	Protected *bool `json:"protected,omitempty"`
 
@@ -463,10 +460,13 @@ type CreateRequest struct {
 func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 	type Alias CreateRequest
 	aux := struct {
-		RawPublicIP    interface{} `json:"public_ip,omitempty"`
-		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
-		RawDHCP        interface{} `json:"dhcp,omitempty"`
-		RawProtected   interface{} `json:"protected,omitempty"`
+		RawPublicIP        interface{} `json:"public_ip,omitempty"`
+		RawDedicatedIP     interface{} `json:"dedicated_ip,omitempty"`
+		RawIsolated        interface{} `json:"isolated,omitempty"`
+		RawIsolate         interface{} `json:"isolate,omitempty"`
+		RawNetworkIsolated interface{} `json:"network_isolated,omitempty"`
+		RawDHCP            interface{} `json:"dhcp,omitempty"`
+		RawProtected       interface{} `json:"protected,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -504,6 +504,17 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 			r.PublicIP = b
 			r.PublicIPEnabled = b
 		}
+	}
+	if b := parseBool(aux.RawIsolated); b != nil {
+		r.Isolated = b
+	} else if b := parseBool(aux.RawIsolate); b != nil {
+		r.Isolated = b
+	} else if b := parseBool(aux.RawNetworkIsolated); b != nil {
+		r.Isolated = b
+		r.NetworkIsolated = b
+	}
+	if r.DiskMB <= 0 && r.DiskGB > 0 {
+		r.DiskMB = r.DiskGB * 1024
 	}
 	if b := parseBool(aux.RawDHCP); b != nil {
 		r.DHCP = b
@@ -547,18 +558,19 @@ type ExecStreamEvent struct {
 }
 
 type NetworkInspectResult struct {
-	VMID            string `json:"vm_id"`
-	VMName          string `json:"vm_name"`
-	Status          string `json:"status"`
-	IPAddress       string `json:"ip_address"`
-	PublicIP        string `json:"public_ip,omitempty"`
-	PublicIPEnabled bool   `json:"public_ip_enabled"`
-	MACAddress      string `json:"mac_address"`
-	TAPDevice       string `json:"tap_device"`
-	BridgeName      string `json:"bridge_name"`
-	Gateway         string `json:"gateway"`
-	Reachable       bool   `json:"reachable"`
-	Connectivity    string `json:"connectivity"`
+	VMID             string `json:"vm_id"`
+	VMName           string `json:"vm_name"`
+	Status           string `json:"status"`
+	IPAddress        string `json:"ip_address"`
+	PublicIP         string `json:"public_ip,omitempty"`
+	PublicIPEnabled  bool   `json:"public_ip_enabled"`
+	NetworkIsolation string `json:"network_isolation"`
+	MACAddress       string `json:"mac_address"`
+	TAPDevice        string `json:"tap_device"`
+	BridgeName       string `json:"bridge_name"`
+	Gateway          string `json:"gateway"`
+	Reachable        bool   `json:"reachable"`
+	Connectivity     string `json:"connectivity"`
 }
 
 type QueueItem struct {
@@ -837,6 +849,181 @@ func (m *Manager) generateNickname(ctx context.Context, ownerID string) string {
 	return fmt.Sprintf("%s-%s", RandomNickname(), uid[:4])
 }
 
+// hasExtFilesystem reports whether path contains an ext2/3/4 superblock magic.
+// It is used to decide whether a failure to apply the SSH access policy must
+// abort sandbox creation: placeholder disks in tests and non-ext images cannot
+// be configured, while a real guest disk must never be left with its old policy.
+func hasExtFilesystem(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [2]byte
+	if _, err := f.ReadAt(magic[:], 1080); err != nil {
+		return false
+	}
+	// ext superblock magic 0xEF53, stored little-endian at superblock offset 0x38.
+	return magic[0] == 0x53 && magic[1] == 0xEF
+}
+
+func validateSSHPassword(password string) error {
+	if password == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(password) < 8 {
+		return fmt.Errorf("invalid ssh password: must be at least 8 characters")
+	}
+	// bcrypt only considers the first 72 bytes, so reject longer inputs rather
+	// than silently truncating them.
+	if len(password) > 72 {
+		return fmt.Errorf("invalid ssh password: must be at most 72 bytes")
+	}
+	if strings.ContainsAny(password, "\x00\r\n") {
+		return fmt.Errorf("invalid ssh password: must not contain NUL or newline characters")
+	}
+	return nil
+}
+
+func resolveNetworkIsolation(mode string, isolated *bool) (string, error) {
+	trimmed := strings.TrimSpace(mode)
+	if trimmed != "" {
+		norm, ok := db.NormalizeNetworkIsolation(trimmed)
+		if !ok {
+			return "", fmt.Errorf("invalid network_isolation %q: expected %q or %q", mode, db.NetworkIsolationAccount, db.NetworkIsolationIsolated)
+		}
+		if isolated != nil {
+			want := db.NetworkIsolationAccount
+			if *isolated {
+				want = db.NetworkIsolationIsolated
+			}
+			if norm != want {
+				return "", fmt.Errorf("conflicting network isolation settings: network_isolation=%q and isolated=%t", mode, *isolated)
+			}
+		}
+		return norm, nil
+	}
+	if isolated != nil {
+		if *isolated {
+			return db.NetworkIsolationIsolated, nil
+		}
+		return db.NetworkIsolationAccount, nil
+	}
+	return db.NetworkIsolationAccount, nil
+}
+
+func sameAccountOwners(ownerA, ownerB string) bool {
+	a := strings.TrimSpace(ownerA)
+	b := strings.TrimSpace(ownerB)
+	if a == "" {
+		a = "default"
+	}
+	if b == "" {
+		b = "default"
+	}
+	if a == b {
+		return true
+	}
+	// Match a user account (usr_<id>) with its personal organization (org_<id>).
+	if strings.HasPrefix(a, "usr_") && b == "org_"+strings.TrimPrefix(a, "usr_") {
+		return true
+	}
+	if strings.HasPrefix(b, "usr_") && a == "org_"+strings.TrimPrefix(b, "usr_") {
+		return true
+	}
+	return false
+}
+
+func (m *Manager) listVMsForIsolation(ctx context.Context) []*db.VM {
+	if m.store != nil {
+		if vms, err := m.store.ListVMs(ctx); err == nil {
+			return vms
+		}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	seen := make(map[string]bool)
+	var out []*db.VM
+	for _, v := range m.vms {
+		if v == nil {
+			continue
+		}
+		key := v.InternalID
+		if key == "" {
+			key = v.ID
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, v)
+	}
+	return out
+}
+
+func (m *Manager) buildIsolationConfigForVM(targetVM *db.VM, allVMs []*db.VM) network.IsolationConfig {
+	isolated := db.IsNetworkIsolated(targetVM)
+	cfg := network.IsolationConfig{
+		TAPDevice:        targetVM.TAPDevice,
+		IPAddress:        targetVM.IPAddress,
+		MACAddress:       targetVM.MACAddress,
+		OwnerID:          targetVM.OwnerID,
+		Isolated:         isolated,
+		AllowSameAccount: !isolated,
+	}
+	if isolated {
+		return cfg
+	}
+	for _, peer := range allVMs {
+		if peer == nil || peer.TAPDevice == "" || peer.TAPDevice == targetVM.TAPDevice {
+			continue
+		}
+		if peer.InternalID != "" && targetVM.InternalID != "" {
+			if peer.InternalID == targetVM.InternalID {
+				continue
+			}
+		} else if peer.ID == targetVM.ID {
+			continue
+		}
+		if peer.Status != db.StatusRunning {
+			continue
+		}
+		if db.IsNetworkIsolated(peer) {
+			continue
+		}
+		if sameAccountOwners(targetVM.OwnerID, peer.OwnerID) {
+			cfg.AllowedPeerTAPs = append(cfg.AllowedPeerTAPs, peer.TAPDevice)
+		}
+	}
+	return cfg
+}
+
+func (m *Manager) applyVMNetworkIsolation(ctx context.Context, targetVM *db.VM) {
+	if m.netMgr == nil || targetVM == nil || targetVM.TAPDevice == "" {
+		return
+	}
+	allVMs := m.listVMsForIsolation(ctx)
+	isoCfg := m.buildIsolationConfigForVM(targetVM, allVMs)
+	_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
+}
+
+func (m *Manager) reconcileAccountNetworkIsolation(ctx context.Context, ownerID string) {
+	if m.netMgr == nil {
+		return
+	}
+	allVMs := m.listVMsForIsolation(ctx)
+	for _, v := range allVMs {
+		if v == nil || v.TAPDevice == "" || v.Status != db.StatusRunning {
+			continue
+		}
+		if !sameAccountOwners(v.OwnerID, ownerID) {
+			continue
+		}
+		isoCfg := m.buildIsolationConfigForVM(v, allVMs)
+		_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
+	}
+}
+
 // CreateVM reserves networking, validates disk space and images, and registers a created VM
 func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, error) {
 	uid := uuid.New().String()
@@ -846,6 +1033,17 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	ownerID := req.OwnerID
 	if ownerID == "" {
 		ownerID = "default"
+	}
+	if err := validateSSHPassword(req.SSHPassword); err != nil {
+		return nil, err
+	}
+	isolatedFlag := req.Isolated
+	if isolatedFlag == nil {
+		isolatedFlag = req.NetworkIsolated
+	}
+	networkIsolation, err := resolveNetworkIsolation(req.NetworkIsolation, isolatedFlag)
+	if err != nil {
+		return nil, err
 	}
 	// Internal job service processes may consume images/templates that the
 	// control plane already authorized for a tenant.
@@ -857,6 +1055,13 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	var externalID, name string
 	if strings.TrimSpace(req.Name) != "" {
 		name = strings.TrimSpace(req.Name)
+		// Sandbox names are exposed as DNS names
+		// (<sandbox>.<username>.<base-domain>), so new names must be
+		// valid DNS labels. Existing sandboxes keep working: their names
+		// are sanitized for DNS purposes at lookup time.
+		if !dns.ValidLabel(name) {
+			return nil, fmt.Errorf("invalid sandbox name %q: names must be lowercase letters, digits, and dashes (a DNS label, max %d chars) so they can be used as <name>.<username>.<base-domain> hostnames", name, dns.MaxLabelLength)
+		}
 		externalID = name
 		existing, _ := m.store.GetVMByOwner(ctx, ownerID, name)
 		if existing != nil {
@@ -907,7 +1112,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				req.MemoryMB = 8192
 			}
 		default:
-			return nil, fmt.Errorf("disk space issue: invalid tier '%s': supported tiers are '1vcpu', '2vcpu', or '4vcpu' (inspired by boat.dev)", req.Tier)
+			return nil, fmt.Errorf("disk space issue: invalid tier '%s': supported tiers are '1vcpu', '2vcpu', or '4vcpu'", req.Tier)
 		}
 	}
 
@@ -921,6 +1126,9 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 	memoryMB := req.MemoryMB
 	diskMB := req.DiskMB
+	if diskMB <= 0 && req.DiskGB > 0 {
+		diskMB = req.DiskGB * 1024
+	}
 	if diskMB <= 0 {
 		diskMB = m.defaults.DiskSizeMB
 		if diskMB <= 0 {
@@ -968,7 +1176,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	if req.Template != "" && tpl != nil {
 		// Launch from template disk
 		if _, err := os.Stat(tpl.DiskPath); err != nil {
-			return nil, fmt.Errorf("disk space issue: template disk not found at %s: %w", tpl.DiskPath, err)
+			return nil, fmt.Errorf("template disk not found at %s: %w", tpl.DiskPath, err)
 		}
 		var err error
 		diskPath, err = m.storMgr.InitVMDiskFromImageWithResize(internalID, tpl.DiskPath, diskMB)
@@ -1023,7 +1231,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				return nil, fmt.Errorf("disk space issue: custom image '%s' is not ready (status: %s)", imageName, customImg.Status)
 			}
 			if _, err := os.Stat(customImg.RootfsPath); err != nil {
-				return nil, fmt.Errorf("disk space issue: custom image rootfs not found at %s: %w", customImg.RootfsPath, err)
+				return nil, fmt.Errorf("custom image rootfs not found at %s: %w", customImg.RootfsPath, err)
 			}
 			var err error
 			diskPath, err = m.storMgr.InitVMDiskFromImageWithResize(internalID, customImg.RootfsPath, diskMB)
@@ -1042,11 +1250,11 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				return nil, fmt.Errorf("disk space issue: failed to resolve template '%s': %w", imageName, tplErr)
 			}
 			if namedTpl != nil && !resourceOwnerAllowed(&req, imageLookupOwner, namedTpl.OwnerID) {
-				return nil, fmt.Errorf("disk space issue: template '%s' not found", imageName)
+				return nil, fmt.Errorf("template '%s' not found", imageName)
 			}
 			if namedTpl != nil {
 				if _, err := os.Stat(namedTpl.DiskPath); err != nil {
-					return nil, fmt.Errorf("disk space issue: template disk not found at %s: %w", namedTpl.DiskPath, err)
+					return nil, fmt.Errorf("template disk not found at %s: %w", namedTpl.DiskPath, err)
 				}
 				var err error
 				diskPath, err = m.storMgr.InitVMDiskFromImageWithResize(internalID, namedTpl.DiskPath, diskMB)
@@ -1065,20 +1273,20 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 				// a foreign custom image must never shadow them.
 				if req.Image != "" && !m.isPlatformBaseImage(imageName) {
 					if foreignImg, _ := m.store.GetImage(ctx, imageName); foreignImg != nil {
-						return nil, fmt.Errorf("disk space issue: custom image '%s' not found or not accessible", imageName)
+						return nil, fmt.Errorf("custom image '%s' not found or not accessible", imageName)
 					}
 					if foreignTpl, _ := m.store.GetTemplate(ctx, imageName); foreignTpl != nil {
-						return nil, fmt.Errorf("disk space issue: template '%s' not found", imageName)
+						return nil, fmt.Errorf("template '%s' not found", imageName)
 					}
 				}
 				// Resolve base image (compute supports Ubuntu 24 base image)
 				var err error
 				kernelPath, rootfsPath, err = m.storMgr.ResolveImage(imageName)
 				if err != nil {
-					return nil, fmt.Errorf("disk space issue: %w", err)
+					return nil, err
 				}
 				if _, err := os.Stat(rootfsPath); err != nil {
-					return nil, fmt.Errorf("disk space issue: base rootfs image not found at %s: %w", rootfsPath, err)
+					return nil, fmt.Errorf("base rootfs image not found at %s: %w", rootfsPath, err)
 				}
 
 				// Initialize persistent disk from base image with sparse resize to 50GB / 100GB
@@ -1095,6 +1303,9 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	var embeddedKeyName string
 	if req.SSHPublicKey != "" {
 		embeddedPubKey = strings.TrimSpace(req.SSHPublicKey)
+		if _, _, _, _, err := ssh.ParseAuthorizedKey([]byte(embeddedPubKey)); err != nil {
+			return nil, fmt.Errorf("invalid ssh_public_key: %w", err)
+		}
 		embeddedKeyName = "custom"
 	} else if req.SSHKeyID != "" {
 		key, err := m.lookupSSHKeyForRequest(ctx, &req, req.SSHKeyID, ownerID)
@@ -1115,7 +1326,33 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 
 	if diskPath != "" {
-		_ = m.storMgr.EmbedSSHKey(diskPath, embeddedPubKey)
+		accountKeys, keyErr := m.GlobalSSHKeys(ctx, ownerID)
+		if keyErr != nil {
+			m.storMgr.CleanupVM(internalID)
+			return nil, fmt.Errorf("failed to resolve account-wide ssh keys: %w", keyErr)
+		}
+		err := m.storMgr.ConfigureSSHAccess(diskPath, storage.SSHAccess{
+			PublicKey:  embeddedPubKey,
+			PublicKeys: accountKeys,
+			Password:   req.SSHPassword,
+		})
+		if err != nil {
+			if req.SSHPassword != "" {
+				m.storMgr.CleanupVM(internalID)
+				return nil, fmt.Errorf("failed to configure ssh password: %w", err)
+			}
+			// A real guest disk must never keep its previous password policy
+			// when the sandbox was created without a password. Placeholder or
+			// non-ext images used by tests and some custom images are the only
+			// case where the policy cannot be applied.
+			if hasExtFilesystem(diskPath) {
+				m.storMgr.CleanupVM(internalID)
+				return nil, fmt.Errorf("failed to enforce public-key-only SSH access: %w", err)
+			}
+			log.Printf("[vm-manager] %s: failed to apply SSH access configuration (non-ext disk): %v", externalID, err)
+		}
+	} else if req.SSHPassword != "" {
+		return nil, fmt.Errorf("invalid ssh password: sandbox disk is not available")
 	}
 
 	// 2. Fetch current IP allocations
@@ -1193,48 +1430,38 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		publicIP = ip // Dedicated IP on main network is considered as the public IP
 	}
 
-	// Resolve tailnet addressing: request flag wins, then the daemon default.
-	tailscaleEnabled := m.cfg.TailscaleDefaultSandboxes
-	if req.Tailscale != nil {
-		tailscaleEnabled = *req.Tailscale
-	}
-	if tailscaleEnabled {
-		if m.tsProvisioner == nil {
-			log.Printf("[vm-manager] %s: tailscale requested but no provisioner configured; skipping tailnet addressing", externalID)
-		} else {
-			log.Printf("[vm-manager] %s: tailnet addressing requested", externalID)
-		}
-	}
-
 	protected := false
 	if req.Protected != nil {
 		protected = *req.Protected
 	}
 
 	vm := &db.VM{
-		ID:               externalID,
-		InternalID:       internalID,
-		OwnerID:          ownerID,
-		Name:             name,
-		Status:           db.StatusCreated,
-		Protected:        protected,
-		VCPUs:            vcpus,
-		MemoryMB:         memoryMB,
-		DiskMB:           diskMB,
-		IPAddress:        ip,
-		PublicIP:         publicIP,
-		PublicIPEnabled:  publicIPEnabled,
-		MACAddress:       mac,
-		TAPDevice:        tapDev,
-		TailscaleEnabled: tailscaleEnabled,
-		RootfsPath:       rootfsPath,
-		KernelPath:       kernelPath,
-		DiskPath:         diskPath,
-		SSHKeyPath:       sshKeyPath,
-		SSHKeyName:       embeddedKeyName,
-		SSHPublicKey:     embeddedPubKey,
-		CreatedAt:        time.Now().UTC(),
-		UpdatedAt:        time.Now().UTC(),
+		ID:                 externalID,
+		InternalID:         internalID,
+		OwnerID:            ownerID,
+		Name:               name,
+		Status:             db.StatusCreated,
+		Protected:          protected,
+		Description:        strings.TrimSpace(req.Description),
+		VCPUs:              vcpus,
+		MemoryMB:           memoryMB,
+		DiskMB:             diskMB,
+		IPAddress:          ip,
+		PublicIP:           publicIP,
+		PublicIPEnabled:    publicIPEnabled,
+		NetworkIsolation:   networkIsolation,
+		MACAddress:         mac,
+		TAPDevice:          tapDev,
+		TailscaleEnabled:   false,
+		RootfsPath:         rootfsPath,
+		KernelPath:         kernelPath,
+		DiskPath:           diskPath,
+		SSHKeyPath:         sshKeyPath,
+		SSHKeyName:         embeddedKeyName,
+		SSHPublicKey:       embeddedPubKey,
+		SSHPasswordEnabled: req.SSHPassword != "",
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
 	}
 
 	if err := m.saveVMRecord(ctx, vm); err != nil {
@@ -1253,15 +1480,32 @@ func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest
 	defer srcLock.RUnlock()
 
 	req.CloneFrom = srcVMID
-	srcVM, _ := m.getVMUnsafe(ctx, srcVMID)
-	if req.PublicIP == nil && req.PublicIPEnabled == nil && req.DedicatedIP == nil {
-		if srcVM != nil {
+	srcVM, _ := m.lookupVMForRequest(ctx, &req, srcVMID, req.OwnerID)
+	if srcVM == nil {
+		srcVM, _ = m.getVMUnsafe(ctx, srcVMID)
+	}
+	if srcVM != nil {
+		if req.Tier == "" && req.VCPUs <= 0 && srcVM.VCPUs > 0 {
+			req.VCPUs = srcVM.VCPUs
+		}
+		if req.MemoryMB <= 0 && srcVM.MemoryMB > 0 {
+			req.MemoryMB = srcVM.MemoryMB
+		}
+		if req.DiskMB <= 0 && req.DiskGB <= 0 && srcVM.DiskMB > 0 {
+			req.DiskMB = srcVM.DiskMB
+		}
+		if req.PublicIP == nil && req.PublicIPEnabled == nil && req.DedicatedIP == nil {
 			req.PublicIP = &srcVM.PublicIPEnabled
 			req.PublicIPEnabled = &srcVM.PublicIPEnabled
 		}
-	}
-	if req.Protected == nil && srcVM != nil {
-		req.Protected = &srcVM.Protected
+		if strings.TrimSpace(req.NetworkIsolation) == "" && req.Isolated == nil && req.NetworkIsolated == nil {
+			if norm, ok := db.NormalizeNetworkIsolation(srcVM.NetworkIsolation); ok {
+				req.NetworkIsolation = norm
+			}
+		}
+		if req.Protected == nil {
+			req.Protected = &srcVM.Protected
+		}
 	}
 	return m.CreateVM(ctx, req)
 }
@@ -1303,7 +1547,12 @@ func (m *Manager) RunVM(ctx context.Context, vmID string) error {
 	if vm.PID > 0 {
 		go m.watchProcessExit(vm.ID, vm.PID, nil)
 	}
-	return m.saveVMRecord(ctx, vm)
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		return err
+	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
+	m.maybeSyncSSHKeys(vm)
+	return nil
 }
 
 // startVMProcess executes the Firecracker binary, attaches TAP, and boots the microVM
@@ -1321,24 +1570,7 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 	}
 
 	// Apply L2/L3 Anti-Spoofing and Bridge Port Isolation
-	if m.netMgr != nil {
-		isoCfg := network.IsolationConfig{
-			TAPDevice:  vm.TAPDevice,
-			IPAddress:  vm.IPAddress,
-			MACAddress: vm.MACAddress,
-			OwnerID:    vm.OwnerID,
-		}
-		if vm.OwnerID != "" && vm.OwnerID != "default" && m.store != nil {
-			if peers, err := m.store.ListVMsByOwner(ctx, vm.OwnerID); err == nil {
-				for _, peer := range peers {
-					if peer != nil && peer.ID != vm.ID && peer.TAPDevice != "" && peer.Status == db.StatusRunning {
-						isoCfg.AllowedPeerTAPs = append(isoCfg.AllowedPeerTAPs, peer.TAPDevice)
-					}
-				}
-			}
-		}
-		_ = m.netMgr.ApplyAntiSpoofAndIsolation(ctx, isoCfg)
-	}
+	m.applyVMNetworkIsolation(ctx, vm)
 
 	// 2. Setup Cgroups v2 resource limits
 	if m.cgroupMgr != nil {
@@ -1482,7 +1714,6 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 				if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 					go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 				}
-				m.maybeProvisionTailscale(vm)
 				go m.watchProcessExit(vm.ID, vm.PID, cmd)
 				return nil
 			}
@@ -1585,7 +1816,6 @@ func (m *Manager) startVMProcess(ctx context.Context, vm *db.VM) error {
 	if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 		go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 	}
-	m.maybeProvisionTailscale(vm)
 	go m.watchProcessExit(vm.ID, vm.PID, cmd)
 	return nil
 }
@@ -1606,12 +1836,7 @@ func (m *Manager) pollDHCPLease(vmID, mac string, publicIPEnabled bool) {
 				}
 				_ = m.saveVMRecord(context.Background(), vm)
 				_ = m.netMgr.ConfigureVMPublicIP(context.Background(), leasedIP, vm.TAPDevice, publicIPEnabled)
-				_ = m.netMgr.ApplyAntiSpoofAndIsolation(context.Background(), network.IsolationConfig{
-					TAPDevice:  vm.TAPDevice,
-					IPAddress:  leasedIP,
-					MACAddress: vm.MACAddress,
-					OwnerID:    vm.OwnerID,
-				})
+				m.reconcileAccountNetworkIsolation(context.Background(), vm.OwnerID)
 			}
 			vmLock.Unlock()
 			return true
@@ -1636,68 +1861,6 @@ func (m *Manager) pollDHCPLease(vmID, mac string, publicIPEnabled bool) {
 			}
 		}
 	}
-}
-
-// maybeProvisionTailscale kicks off async tailnet provisioning after a
-// successful VM launch. It never blocks the launch path and never fails the VM.
-func (m *Manager) maybeProvisionTailscale(vm *db.VM) {
-	if vm == nil || !vm.TailscaleEnabled {
-		return
-	}
-	m.mu.RLock()
-	prov := m.tsProvisioner
-	m.mu.RUnlock()
-	if prov == nil {
-		return
-	}
-	go m.provisionTailscale(vm.ID, prov)
-}
-
-func (m *Manager) provisionTailscale(vmID string, prov TailscaleProvisioner) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
-	defer cancel()
-
-	// Wait for a routable IP (DHCP lease resolution may still be in flight).
-	var vm *db.VM
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		v, _ := m.getVMUnsafe(context.Background(), vmID)
-		if v == nil {
-			return
-		}
-		if v.IPAddress != "" && v.IPAddress != "dhcp" {
-			vm = v
-			break
-		}
-		if time.Now().After(deadline) {
-			log.Printf("[vm-manager] %s: tailscale provisioning skipped (no routable IP resolved)", vmID)
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-
-	res, err := prov.Provision(ctx, vm.ID, vm.IPAddress, vm.SSHKeyPath)
-	if err != nil {
-		log.Printf("[vm-manager] %s: tailscale provisioning failed: %v", vm.ID, err)
-		return
-	}
-
-	// Persist the assigned tailnet identity on the VM record.
-	vmLock := m.getVMLock(vm.ID)
-	vmLock.Lock()
-	updated, _ := m.getVMUnsafe(context.Background(), vm.ID)
-	if updated != nil && updated.Status == db.StatusRunning {
-		updated.TailnetIP = res.TailnetIP
-		updated.TailnetDNS = res.DNSName
-		updated.TailscaleDeviceID = res.DeviceID
-		_ = m.saveVMRecord(context.Background(), updated)
-	}
-	vmLock.Unlock()
-	log.Printf("[vm-manager] %s: joined tailnet at %s (%s)", vm.ID, res.TailnetIP, res.DNSName)
 }
 
 // canRunVM checks if the candidate VM can run without violating resource limits
@@ -1737,8 +1900,10 @@ func (m *Manager) canRunVM(candidate *db.VM) (bool, string) {
 	// would overcommit the machine's actually available RAM and trigger the OOM
 	// killer. Reserve headroom for the daemon, page cache, and host services.
 	const hostReserveMB = 256
-	if available := hostMemoryAvailableMB(); available > 0 && candidate.MemoryMB+hostReserveMB > available {
-		return false, fmt.Sprintf("insufficient host memory (requested %d MB + %d MB reserve, %d MB available)", candidate.MemoryMB, hostReserveMB, available)
+	if m.launcher == nil && os.Geteuid() == 0 {
+		if available := hostMemoryAvailableMB(); available > 0 && candidate.MemoryMB+hostReserveMB > available {
+			return false, fmt.Sprintf("insufficient host memory (requested %d MB + %d MB reserve, %d MB available)", candidate.MemoryMB, hostReserveMB, available)
+		}
 	}
 
 	return true, ""
@@ -1802,6 +1967,7 @@ func (m *Manager) processQueue(ctx context.Context) {
 			if err := m.startVMProcess(ctx, v); err == nil {
 				v.Status = db.StatusRunning
 				_ = m.saveVMRecord(ctx, v)
+				m.reconcileAccountNetworkIsolation(ctx, v.OwnerID)
 				vmLock.Unlock()
 				m.queueMu.Lock()
 				delete(m.queueReasons, id)
@@ -1951,6 +2117,7 @@ func (m *Manager) SaveState(ctx context.Context, vmID string) error {
 		vmLock.Unlock()
 		return err
 	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 
 	vmLock.Unlock()
 	m.processQueue(ctx)
@@ -1993,6 +2160,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	if err := m.netMgr.SetupTAP(ctx, vm.TAPDevice); err != nil {
 		return fmt.Errorf("failed to setup TAP device: %w", err)
 	}
+	m.applyVMNetworkIsolation(ctx, vm)
 
 	// 2. Setup Cgroups v2 resource limits
 	if m.cgroupMgr != nil {
@@ -2037,6 +2205,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 			if m.cgroupMgr != nil {
 				_ = m.cgroupMgr.Teardown(vm.ID)
 			}
+			_ = m.netMgr.RemoveAntiSpoofAndIsolation(ctx, network.IsolationConfig{TAPDevice: vm.TAPDevice})
 			_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 			_ = os.Remove(sockPath)
 		}
@@ -2140,7 +2309,12 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	vm.DesiredRunning = true
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
 	go m.watchProcessExit(vm.ID, vm.PID, cmd)
-	return m.saveVMRecord(ctx, vm)
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		return err
+	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
+	m.maybeSyncSSHKeys(vm)
+	return nil
 }
 
 // StopVM gracefully shuts down a running VM, flushing caches, and cleaning runtime resources
@@ -2172,16 +2346,6 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string) error {
 	if vm.PID > 0 && m.isAlive(vm.PID) {
 		// 1. Try graceful sync over SSH if accessible
 		if vm.IPAddress != "" && vm.SSHKeyPath != "" {
-			// Best-effort: leave the tailnet before poweroff so the ephemeral
-			// device is removed immediately rather than timing out.
-			if vm.TailscaleEnabled {
-				m.mu.RLock()
-				prov := m.tsProvisioner
-				m.mu.RUnlock()
-				if prov != nil {
-					prov.Teardown(ctx, vm.IPAddress, vm.SSHKeyPath)
-				}
-			}
 			syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Second)
 			sshCmd := exec.CommandContext(syncCtx, "ssh",
 				"-i", vm.SSHKeyPath,
@@ -2248,7 +2412,11 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string) error {
 	vm.Status = db.StatusStopped
 	vm.DesiredRunning = false
 	vm.PID = 0
-	return m.saveVMRecord(ctx, vm)
+	if err := m.saveVMRecord(ctx, vm); err != nil {
+		return err
+	}
+	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
+	return nil
 }
 
 // StopVMForOwner stops only the VM belonging to ownerID. It is used by the
@@ -2286,7 +2454,11 @@ func (m *Manager) DeleteVMForOwner(ctx context.Context, ownerID, vmID string) er
 		return fmt.Errorf("vm %s not found", vmID)
 	}
 	if vm.Protected {
-		return fmt.Errorf("item %s is protected against deletion", vmID)
+		displayName := vm.Name
+		if displayName == "" {
+			displayName = vmID
+		}
+		return fmt.Errorf("item %s is protected against deletion", displayName)
 	}
 	key := vm.InternalID
 	if key == "" {
@@ -2302,8 +2474,12 @@ func (m *Manager) DeleteVM(ctx context.Context, vmID string) error {
 
 	vm, _ := m.getVMUnsafe(ctx, vmID)
 	if vm != nil && vm.Protected {
+		displayName := vm.Name
+		if displayName == "" {
+			displayName = vmID
+		}
 		vmLock.Unlock()
-		return fmt.Errorf("item %s is protected against deletion", vmID)
+		return fmt.Errorf("item %s is protected against deletion", displayName)
 	}
 	if vm != nil {
 		_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
@@ -2387,8 +2563,14 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 	}
 
 	activeTAPs := make(map[string]bool)
+	knownTAPs := make(map[string]bool)
+	reconcileOwners := make(map[string]bool)
 	for _, v := range vms {
-		if v.Status == db.StatusRunning {
+		if v.TAPDevice != "" {
+			knownTAPs[v.TAPDevice] = true
+		}
+		switch v.Status {
+		case db.StatusRunning:
 			if !m.isAlive(v.PID) {
 				log.Printf("[vm] reconcile marking %s stopped: pid=%d not alive", v.ID, v.PID)
 				v.Status = db.StatusStopped
@@ -2405,19 +2587,90 @@ func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
 				}
 				_ = m.store.SaveVM(ctx, v)
 				_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
+				owner := v.OwnerID
+				if owner == "" {
+					owner = "default"
+				}
+				reconcileOwners[owner] = true
 			} else {
 				activeTAPs[v.TAPDevice] = true
 			}
-		} else {
+		case db.StatusCreated, db.StatusQueued:
+			// A sandbox moves from "created" to "running" only after Firecracker
+			// has booted. RunVM creates the TAP before that transition, so
+			// pruning it here would delete the device out from under a booting
+			// VM ("Setting tap interface offload flags failed: File descriptor
+			// in bad state"). Keep its TAP until the VM starts or is removed.
+			if v.TAPDevice != "" {
+				activeTAPs[v.TAPDevice] = true
+			}
+		default:
 			_ = m.netMgr.RemoveTAP(ctx, v.TAPDevice)
 		}
 	}
 
-	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs)
+	pruned, err := m.netMgr.PruneOrphanTAPs(ctx, activeTAPs, knownTAPs)
 	m.mu.Unlock()
 
+	for owner := range reconcileOwners {
+		m.reconcileAccountNetworkIsolation(ctx, owner)
+	}
 	m.processQueue(ctx)
 	return pruned, err
+}
+
+// FlushGuestFilesystems asks every running sandbox to flush its dirty page
+// cache to its disk. A container or PID-namespace restart kills Firecracker
+// without giving the guest a chance to power off, so writes made since the
+// guest's last writeback would be lost and the filesystem would be left
+// unclean. Best-effort, time-bounded by ctx, and never stops the sandbox; it
+// returns the number of guests that acknowledged the flush.
+func (m *Manager) FlushGuestFilesystems(ctx context.Context) int {
+	if m.store == nil {
+		return 0
+	}
+	vms, err := m.store.ListVMs(ctx)
+	if err != nil {
+		log.Printf("[vm] guest flush skipped: %v", err)
+		return 0
+	}
+	var wg sync.WaitGroup
+	var flushed int32
+	for _, vm := range vms {
+		if vm == nil || vm.Status != db.StatusRunning || vm.IPAddress == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(vm *db.VM) {
+			defer wg.Done()
+			if err := m.flushGuest(ctx, vm); err != nil {
+				log.Printf("[vm] guest flush failed for %s: %v", vm.Name, err)
+				return
+			}
+			atomic.AddInt32(&flushed, 1)
+		}(vm)
+	}
+	wg.Wait()
+	return int(atomic.LoadInt32(&flushed))
+}
+
+func (m *Manager) flushGuest(ctx context.Context, vm *db.VM) error {
+	if m.guestSyncer != nil {
+		return m.guestSyncer(ctx, vm)
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	args := []string{
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "ConnectTimeout=2",
+	}
+	if vm.SSHKeyPath != "" {
+		args = append(args, "-i", vm.SSHKeyPath)
+	}
+	args = append(args, fmt.Sprintf("compute@%s", vm.IPAddress), "sync")
+	return exec.CommandContext(flushCtx, "ssh", args...).Run()
 }
 
 // StartDesiredVMs restarts sandboxes that were running before the daemon (or
@@ -2523,28 +2776,35 @@ func (m *Manager) InspectNetworkForOwner(ctx context.Context, vmID, ownerID stri
 	if vm.PublicIPEnabled && publicIP == "" && vm.IPAddress != "" {
 		publicIP = vm.IPAddress
 	}
+	networkIsolation := db.NetworkIsolationAccount
+	if db.IsNetworkIsolated(vm) {
+		networkIsolation = db.NetworkIsolationIsolated
+	}
 	return &NetworkInspectResult{
-		VMID:            vm.ID,
-		VMName:          vm.Name,
-		Status:          string(vm.Status),
-		IPAddress:       vm.IPAddress,
-		PublicIP:        publicIP,
-		PublicIPEnabled: vm.PublicIPEnabled,
-		MACAddress:      vm.MACAddress,
-		TAPDevice:       vm.TAPDevice,
-		BridgeName:      bridgeName,
-		Gateway:         gwIP,
-		Reachable:       reachable,
-		Connectivity:    connStatus,
+		VMID:             vm.ID,
+		VMName:           vm.Name,
+		Status:           string(vm.Status),
+		IPAddress:        vm.IPAddress,
+		PublicIP:         publicIP,
+		PublicIPEnabled:  vm.PublicIPEnabled,
+		NetworkIsolation: networkIsolation,
+		MACAddress:       vm.MACAddress,
+		TAPDevice:        vm.TAPDevice,
+		BridgeName:       bridgeName,
+		Gateway:          gwIP,
+		Reachable:        reachable,
+		Connectivity:     connStatus,
 	}, nil
 }
 
 // UpdateVMConfigRequest defines configuration options that can be updated on an existing VM
 type UpdateVMConfigRequest struct {
-	PublicIP        *bool `json:"public_ip,omitempty"`
-	PublicIPEnabled *bool `json:"public_ip_enabled,omitempty"`
-	DedicatedIP     *bool `json:"dedicated_ip,omitempty"`
-	Protected       *bool `json:"protected,omitempty"`
+	PublicIP         *bool   `json:"public_ip,omitempty"`
+	PublicIPEnabled  *bool   `json:"public_ip_enabled,omitempty"`
+	DedicatedIP      *bool   `json:"dedicated_ip,omitempty"`
+	Protected        *bool   `json:"protected,omitempty"`
+	NetworkIsolation *string `json:"network_isolation,omitempty"`
+	Isolated         *bool   `json:"isolated,omitempty"`
 }
 
 func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
@@ -2553,6 +2813,8 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 		RawPublicIP    interface{} `json:"public_ip,omitempty"`
 		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
 		RawProtected   interface{} `json:"protected,omitempty"`
+		RawIsolated    interface{} `json:"isolated,omitempty"`
+		RawIsolate     interface{} `json:"isolate,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -2594,10 +2856,15 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 	if b := parseBool(aux.RawProtected); b != nil {
 		r.Protected = b
 	}
+	if b := parseBool(aux.RawIsolated); b != nil {
+		r.Isolated = b
+	} else if b := parseBool(aux.RawIsolate); b != nil {
+		r.Isolated = b
+	}
 	return nil
 }
 
-// UpdateVMConfig updates configuration parameters on an existing VM (such as toggling dedicated public IP on or off)
+// UpdateVMConfig updates configuration parameters on an existing VM (such as toggling dedicated public IP or network isolation)
 func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMConfigRequest) (*db.VM, error) {
 	vmLock := m.getVMLock(vmID)
 	vmLock.Lock()
@@ -2608,20 +2875,46 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 		return nil, fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
 
-	var changed bool
-	var enabled bool
-	if req.PublicIP != nil {
-		enabled = *req.PublicIP
-		changed = true
-	} else if req.PublicIPEnabled != nil {
-		enabled = *req.PublicIPEnabled
-		changed = true
-	} else if req.DedicatedIP != nil {
-		enabled = *req.DedicatedIP
-		changed = true
+	var nextNetworkIsolation string
+	var isolationChanged bool
+	if req.NetworkIsolation != nil || req.Isolated != nil {
+		var modeStr string
+		if req.NetworkIsolation != nil {
+			modeStr = *req.NetworkIsolation
+			if strings.TrimSpace(modeStr) == "" && req.Isolated == nil {
+				return nil, fmt.Errorf("invalid network_isolation %q: expected %q or %q", modeStr, db.NetworkIsolationAccount, db.NetworkIsolationIsolated)
+			}
+		}
+		resolved, err := resolveNetworkIsolation(modeStr, req.Isolated)
+		if err != nil {
+			return nil, err
+		}
+		nextNetworkIsolation = resolved
+		currentIsolation := db.NetworkIsolationAccount
+		if db.IsNetworkIsolated(vm) {
+			currentIsolation = db.NetworkIsolationIsolated
+		}
+		if currentIsolation != nextNetworkIsolation || vm.NetworkIsolation != nextNetworkIsolation {
+			isolationChanged = true
+		}
 	}
 
-	if changed {
+	var changed bool
+	var enabled bool
+	var publicIPChanged bool
+	if req.PublicIP != nil {
+		enabled = *req.PublicIP
+		publicIPChanged = true
+	} else if req.PublicIPEnabled != nil {
+		enabled = *req.PublicIPEnabled
+		publicIPChanged = true
+	} else if req.DedicatedIP != nil {
+		enabled = *req.DedicatedIP
+		publicIPChanged = true
+	}
+
+	if publicIPChanged {
+		changed = true
 		vm.PublicIPEnabled = enabled
 		if enabled {
 			vm.PublicIP = vm.IPAddress // Dedicated IP on main network is considered as public IP
@@ -2639,10 +2932,18 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 		changed = true
 	}
 
+	if isolationChanged {
+		vm.NetworkIsolation = nextNetworkIsolation
+		changed = true
+	}
+
 	if changed {
 		vm.UpdatedAt = time.Now().UTC()
 		if err := m.saveVMRecord(ctx, vm); err != nil {
 			return nil, fmt.Errorf("failed to save vm config: %w", err)
+		}
+		if isolationChanged && vm.Status == db.StatusRunning {
+			m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 		}
 	}
 
@@ -2688,10 +2989,7 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	if vm.SSHKeyPath != "" {
 		sshArgs = append(sshArgs, "-i", vm.SSHKeyPath)
 	}
-	command := req.Command
-	if user != "root" {
-		command = `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; fi; ` + command
-	}
+	command := `if [ -f "$HOME/.compute-env" ]; then set -a; . "$HOME/.compute-env"; set +a; elif [ -f "/home/compute/.compute-env" ]; then set -a; . "/home/compute/.compute-env"; set +a; fi; ` + req.Command
 	sshArgs = append(sshArgs, fmt.Sprintf("%s@%s", user, vm.IPAddress), command)
 
 	return exec.CommandContext(execCtx, "ssh", sshArgs...), execCtx, cancel, nil
@@ -3239,6 +3537,7 @@ func (m *Manager) handleProcessExit(vmID string, pid int) {
 		if vm.PublicIPEnabled && vm.IPAddress != "" {
 			_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
 		}
+		m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 		go m.processQueue(context.Background())
 	}
 }

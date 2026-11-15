@@ -5,9 +5,9 @@ Wants=computed.service
 
 [Service]
 Type=simple
-User=rashid
-WorkingDirectory=/home/rashid/on-demand-vms
-ExecStart=/home/rashid/on-demand-vms/bin/compute gui --addr 0.0.0.0 --port 8080 --daemon http://127.0.0.1:18080
+User=compute
+WorkingDirectory=/var/lib/compute
+ExecStart=/usr/local/bin/compute gui --addr 0.0.0.0 --port 8080 --daemon http://127.0.0.1:18080
 Restart=always
 RestartSec=3s
 

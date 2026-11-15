@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,12 @@ func (testRunner) Run(context.Context, string, ...string) ([]byte, error) {
 }
 
 func newTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server, _ := newTestServerWithVMManager(t)
+	return server
+}
+
+func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
 	t.Helper()
 	root := t.TempDir()
 	store, err := db.NewStore(filepath.Join(root, "db", "test.sqlite"))
@@ -62,9 +69,10 @@ func newTestServer(t *testing.T) *httptest.Server {
 	cfg.ConfigPath = "config/daemon.json"
 	// Unit tests should not boot job sandboxes in the background.
 	cfg.Jobs.LocalExecution = false
-	server := httptest.NewServer(NewServer(vm.NewManager(vm.Config{}, store, netMgr, storMgr), cfg))
+	vmMgr := vm.NewManager(vm.Config{}, store, netMgr, storMgr)
+	server := httptest.NewServer(NewServer(vmMgr, cfg))
 	t.Cleanup(server.Close)
-	return server
+	return server, vmMgr
 }
 
 func TestHealth(t *testing.T) {
@@ -135,11 +143,11 @@ func TestQueueEndpoint(t *testing.T) {
 	}
 }
 
-func TestDiskSpaceIssueOnCreate(t *testing.T) {
+func TestUnsupportedImageOnCreate(t *testing.T) {
 	server := newTestServer(t)
 	client := server.Client()
 
-	// Try creating with a nonexistent image
+	// Try creating with a nonexistent/unsupported image
 	createReq := vm.CreateRequest{Name: "bad-img-vm", Image: "nonexistent-distro"}
 	data, _ := json.Marshal(createReq)
 	resp, err := client.Post(server.URL+"/api/v1/vms", "application/json", strings.NewReader(string(data)))
@@ -149,13 +157,59 @@ func TestDiskSpaceIssueOnCreate(t *testing.T) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 Bad Request for disk space issue, got %d", resp.StatusCode)
+		t.Fatalf("expected 400 Bad Request for unsupported image, got %d", resp.StatusCode)
 	}
 
 	var errResp map[string]string
 	_ = json.NewDecoder(resp.Body).Decode(&errResp)
-	if !strings.Contains(errResp["error"], "disk space issue") {
-		t.Fatalf("expected error mentioning 'disk space issue', got: %v", errResp)
+	if !strings.Contains(errResp["error"], "unsupported image") {
+		t.Fatalf("expected error mentioning 'unsupported image', got: %v", errResp)
+	}
+	// Verify it does NOT misclassify as disk space issue
+	if strings.Contains(errResp["error"], "disk space issue") {
+		t.Fatalf("unexpected 'disk space issue' in image error: %v", errResp)
+	}
+}
+
+func TestProtectedVMDeleteReportsHumanReadableName(t *testing.T) {
+	server := newTestServer(t)
+	client := server.Client()
+
+	// Create a protected sandbox named user-flow-box
+	prot := true
+	createReq := vm.CreateRequest{Name: "user-flow-box", Protected: &prot}
+	data, _ := json.Marshal(createReq)
+	resp, err := client.Post(server.URL+"/api/v1/vms", "application/json", strings.NewReader(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", resp.StatusCode)
+	}
+
+	// Attempt to delete it
+	delReq, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/vms/user-flow-box", nil)
+	delResp, err := client.Do(delReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer delResp.Body.Close()
+
+	if delResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request, got %d", delResp.StatusCode)
+	}
+	var errResp map[string]string
+	_ = json.NewDecoder(delResp.Body).Decode(&errResp)
+
+	errMsg := errResp["error"]
+	expectedMsg := "item user-flow-box is protected against deletion"
+	if errMsg != expectedMsg {
+		t.Fatalf("expected exact error %q, got %q", expectedMsg, errMsg)
+	}
+	// Verify no internal identifier ins_ was leaked
+	if strings.Contains(errMsg, "ins_") {
+		t.Fatalf("internal database identifier leaked in error: %q", errMsg)
 	}
 }
 
@@ -796,7 +850,62 @@ func TestSSHKeyEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 OK for lookup by name, got %d", respGetName.StatusCode)
 	}
 
-	// 5. Create VM with embedded SSH key
+	// 4b. Toggle account-wide scope and apply it
+	patchBody, _ := json.Marshal(map[string]interface{}{"all_sandboxes": true})
+	patchReq, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/keys/"+createdKey.ID, bytes.NewReader(patchBody))
+	respPatch, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respPatch.Body.Close()
+	if respPatch.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for patch, got %d", respPatch.StatusCode)
+	}
+	var patched db.SSHKey
+	_ = json.NewDecoder(respPatch.Body).Decode(&patched)
+	if !patched.AllSandboxes {
+		t.Fatalf("expected all_sandboxes=true after patch, got %+v", patched)
+	}
+
+	respApply, err := http.Post(server.URL+"/api/v1/keys/"+createdKey.ID+"/apply", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respApply.Body.Close()
+	if respApply.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for apply, got %d", respApply.StatusCode)
+	}
+	var applyResp struct {
+		Key  db.SSHKey `json:"key"`
+		Sync *struct {
+			Applied []string `json:"applied"`
+			Failed  []struct {
+				VMID string `json:"vm_id"`
+			} `json:"failed"`
+		} `json:"sync"`
+	}
+	_ = json.NewDecoder(respApply.Body).Decode(&applyResp)
+	if !applyResp.Key.AllSandboxes {
+		t.Fatalf("expected applied key to be account-wide, got %+v", applyResp.Key)
+	}
+
+	// 5. Reject a private key supplied inline as ssh_public_key
+	badVMReq, _ := json.Marshal(vm.CreateRequest{
+		Name:         "bad-key-vm",
+		VCPUs:        1,
+		MemoryMB:     512,
+		SSHPublicKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----",
+	})
+	respBadVM, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(badVMReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respBadVM.Body.Close()
+	if respBadVM.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for private key as ssh_public_key, got %d", respBadVM.StatusCode)
+	}
+
+	// 5b. Create VM with embedded SSH key
 	vmReq, _ := json.Marshal(vm.CreateRequest{
 		Name:     "key-vm",
 		VCPUs:    1,
@@ -829,6 +938,128 @@ func TestSSHKeyEndpoints(t *testing.T) {
 	respCheck, _ := http.Get(server.URL + "/api/v1/keys/my-laptop")
 	if respCheck.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 after deletion, got %d", respCheck.StatusCode)
+	}
+}
+
+func TestSSHKeyDefaultSelection(t *testing.T) {
+	server := newTestServer(t)
+
+	key1Pub := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKVMQHURyGt9mXytbJpOeTM4z4jIIhwMQ+aeXq/vDwAj test@laptop"
+	key2Pub := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKVMQHURyGt9mXytbJpOeTM4z4jIIhwMQ+aeXq/vDwAj test@workstation"
+
+	createKey := func(name, pub string) db.SSHKey {
+		req, _ := json.Marshal(map[string]string{"name": name, "public_key": pub})
+		resp, err := http.Post(server.URL+"/api/v1/keys", "application/json", bytes.NewReader(req))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 for key %s, got %d", name, resp.StatusCode)
+		}
+		var key db.SSHKey
+		_ = json.NewDecoder(resp.Body).Decode(&key)
+		return key
+	}
+	createVM := func(noDefaultKey bool) db.VM {
+		body := map[string]interface{}{"name": fmt.Sprintf("def-vm-%d", time.Now().UnixNano()), "vcpus": 1, "memory_mb": 512}
+		if noDefaultKey {
+			body["ssh_no_default_key"] = true
+		}
+		req, _ := json.Marshal(body)
+		resp, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(req))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 for sandbox create, got %d", resp.StatusCode)
+		}
+		var created db.VM
+		_ = json.NewDecoder(resp.Body).Decode(&created)
+		return created
+	}
+
+	// The first key on the account becomes the default automatically.
+	key1 := createKey("laptop", key1Pub)
+	if !key1.IsDefault {
+		t.Fatalf("expected first key to become the default, got %+v", key1)
+	}
+	key2 := createKey("workstation", key2Pub)
+	if key2.IsDefault {
+		t.Fatalf("expected later keys to not steal the default, got %+v", key2)
+	}
+
+	// A sandbox created without a key embeds the account default.
+	vm1 := createVM(false)
+	if vm1.SSHKeyName != key1.Name || vm1.SSHPublicKey != key1Pub {
+		t.Fatalf("expected default key embedded, got name=%q pubkey=%q", vm1.SSHKeyName, vm1.SSHPublicKey)
+	}
+
+	// Opting out leaves the sandbox without an account key.
+	vm2 := createVM(true)
+	if vm2.SSHKeyName != "" || vm2.SSHPublicKey != "" {
+		t.Fatalf("expected no key after opt-out, got name=%q pubkey=%q", vm2.SSHKeyName, vm2.SSHPublicKey)
+	}
+
+	// An explicit key always wins over the default.
+	vmReq, _ := json.Marshal(vm.CreateRequest{Name: "explicit-key-vm", VCPUs: 1, MemoryMB: 512, SSHKeyID: key2.Name})
+	respVM, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(vmReq))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respVM.Body.Close()
+	var vm3 db.VM
+	_ = json.NewDecoder(respVM.Body).Decode(&vm3)
+	if vm3.SSHKeyName != key2.Name || vm3.SSHPublicKey != key2Pub {
+		t.Fatalf("expected explicit key embedded, got name=%q pubkey=%q", vm3.SSHKeyName, vm3.SSHPublicKey)
+	}
+
+	// Promoting key2 to default moves the flag off key1 and future creations
+	// embed key2.
+	patchBody, _ := json.Marshal(map[string]interface{}{"is_default": true})
+	patchReq, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/keys/"+key2.ID, bytes.NewReader(patchBody))
+	respPatch, err := http.DefaultClient.Do(patchReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respPatch.Body.Close()
+	var patched db.SSHKey
+	_ = json.NewDecoder(respPatch.Body).Decode(&patched)
+	if !patched.IsDefault {
+		t.Fatalf("expected key2 to be default after patch, got %+v", patched)
+	}
+	vm4 := createVM(false)
+	if vm4.SSHKeyName != key2.Name || vm4.SSHPublicKey != key2Pub {
+		t.Fatalf("expected new default key embedded, got name=%q pubkey=%q", vm4.SSHKeyName, vm4.SSHPublicKey)
+	}
+	respStale, err := http.Get(server.URL + "/api/v1/keys/" + key1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respStale.Body.Close()
+	var stale db.SSHKey
+	_ = json.NewDecoder(respStale.Body).Decode(&stale)
+	if stale.IsDefault {
+		t.Fatalf("expected old default flag to be cleared, got %+v", stale)
+	}
+
+	// Clearing the default returns creation to keyless behavior.
+	clearBody, _ := json.Marshal(map[string]interface{}{"is_default": false})
+	clearReq, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/keys/"+key2.ID, bytes.NewReader(clearBody))
+	respClear, err := http.DefaultClient.Do(clearReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respClear.Body.Close()
+	var cleared db.SSHKey
+	_ = json.NewDecoder(respClear.Body).Decode(&cleared)
+	if cleared.IsDefault {
+		t.Fatalf("expected default flag cleared, got %+v", cleared)
+	}
+	vm5 := createVM(false)
+	if vm5.SSHKeyName != "" || vm5.SSHPublicKey != "" {
+		t.Fatalf("expected no key with no default set, got name=%q pubkey=%q", vm5.SSHKeyName, vm5.SSHPublicKey)
 	}
 }
 
@@ -964,7 +1195,7 @@ func TestWorkerAndJobEndpoints(t *testing.T) {
 	}
 
 	// 4. Submit a Job
-	jobReq := `{"type":"command","pool_id":"default","priority":10,"spec":{"image_id":"alpine","architecture":"amd64","vcpus":2,"memory_mb":1024,"command":["echo","hello"]}}`
+	jobReq := `{"type":"command","pool_id":"default","priority":10,"spec":{"image_id":"ubuntu-24","architecture":"amd64","vcpus":2,"memory_mb":1024,"command":["echo","hello"]}}`
 	respJob, err := http.Post(server.URL+"/api/v1/jobs", "application/json", bytes.NewBufferString(jobReq))
 	if err != nil {
 		t.Fatalf("failed to create job: %v", err)

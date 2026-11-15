@@ -76,9 +76,12 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 		return nil, fmt.Errorf("template with name '%s' already exists", cleanName)
 	}
 
-	baseImage := strings.TrimSpace(req.BaseImage)
-	if baseImage == "" {
+	baseImage := strings.ToLower(strings.TrimSpace(req.BaseImage))
+	switch baseImage {
+	case "", "ubuntu", "ubuntu-24", "ubuntu-24.04", "ubuntu-2404":
 		baseImage = "ubuntu-24.04"
+	default:
+		return nil, fmt.Errorf("unsupported base image '%s': only Ubuntu 24.04 is supported", req.BaseImage)
 	}
 
 	sizeMB := req.SizeMB
@@ -176,12 +179,7 @@ func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outp
 	}
 	defer os.RemoveAll(workDir)
 
-	baseDockerImage := "ubuntu:24.04"
-	if strings.Contains(req.BaseImage, "alpine") {
-		return fmt.Errorf("alpine base images are not supported by the custom image builder; use ubuntu or debian")
-	} else if strings.Contains(req.BaseImage, "debian") {
-		baseDockerImage = "debian:12"
-	}
+	const baseDockerImage = "ubuntu:24.04"
 
 	// Build package list for apt-get
 	pkgsArg := strings.Join(req.Packages, " ")
@@ -217,14 +215,15 @@ RUN (userdel -r ubuntu 2>/dev/null || true) && \
     mkdir -p /etc/sudoers.d && \
     echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute && \
     chmod 0440 /etc/sudoers.d/compute && \
-    echo "root:root" | chpasswd && \
-    echo "compute:compute" | chpasswd
+    usermod -p '!' root && \
+    usermod -p '!' compute
 
 RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true && \
     sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "UsePAM no" >> /etc/ssh/sshd_config && \
     echo "StrictModes no" >> /etc/ssh/sshd_config

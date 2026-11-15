@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,13 +25,24 @@ func readDiskPrefix(path string, n int) string {
 	return string(buf[:nRead])
 }
 
-type testRunner struct{ calls [][]string }
+type testRunner struct {
+	calls [][]string
+	taps  []string
+}
 
 func (r *testRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	r.calls = append(r.calls, append([]string{name}, args...))
 	cmdStr := strings.Join(append([]string{name}, args...), " ")
 	if strings.Contains(cmdStr, "ip -o link show") {
-		return []byte("1: lo: <LOOPBACK>\n10: mftap-dead: <BROADCAST>\n"), nil
+		taps := r.taps
+		if len(taps) == 0 {
+			taps = []string{"mftap-dead"}
+		}
+		var out strings.Builder
+		for i, tap := range taps {
+			fmt.Fprintf(&out, "%d: %s: <BROADCAST>\n", i+10, tap)
+		}
+		return []byte(out.String()), nil
 	}
 	return []byte("ok"), nil
 }
@@ -165,6 +177,41 @@ func TestDeleteVMCleansStorageAndDatabase(t *testing.T) {
 	}
 }
 
+func TestFlushGuestFilesystemsSyncsRunningVMs(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, _ := testManager(t)
+
+	running := &db.VM{ID: "vm-flush", Name: "flush", Status: db.StatusRunning, IPAddress: "10.20.0.10", SSHKeyPath: "/tmp/key"}
+	noIP := &db.VM{ID: "vm-noip", Name: "noip", Status: db.StatusRunning, SSHKeyPath: "/tmp/key"}
+	stopped := &db.VM{ID: "vm-stopped-flush", Name: "stopped", Status: db.StatusStopped, IPAddress: "10.20.0.11", SSHKeyPath: "/tmp/key"}
+	for _, vm := range []*db.VM{running, noIP, stopped} {
+		if err := store.SaveVM(ctx, vm); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var synced []string
+	m.guestSyncer = func(_ context.Context, vm *db.VM) error {
+		synced = append(synced, vm.ID)
+		return nil
+	}
+
+	if got := m.FlushGuestFilesystems(ctx); got != 1 {
+		t.Fatalf("expected 1 flushed guest, got %d (synced=%v)", got, synced)
+	}
+	if len(synced) != 1 || synced[0] != running.ID {
+		t.Fatalf("expected only the running VM with an IP to be flushed, got %v", synced)
+	}
+
+	// A failing guest is logged but does not block the others.
+	m.guestSyncer = func(_ context.Context, vm *db.VM) error {
+		return fmt.Errorf("guest unreachable")
+	}
+	if got := m.FlushGuestFilesystems(ctx); got != 0 {
+		t.Fatalf("expected 0 flushed guests when sync fails, got %d", got)
+	}
+}
+
 func TestStopVMStoppedAndMissingProcess(t *testing.T) {
 	ctx := context.Background()
 	m, store, _, _ := testManager(t)
@@ -220,7 +267,6 @@ func TestSaveStateAndResumeValidateState(t *testing.T) {
 func TestReconcileAndPrune(t *testing.T) {
 	ctx := context.Background()
 	m, store, _, _ := testManager(t)
-
 	// Dead running VM
 	vmDead := &db.VM{ID: "vm-dead", Name: "dead", Status: db.StatusRunning, PID: 9999998, TAPDevice: "mftap-dead", IPAddress: "10.20.0.99"}
 	if err := store.SaveVM(ctx, vmDead); err != nil {
@@ -241,6 +287,55 @@ func TestReconcileAndPrune(t *testing.T) {
 	}
 	if loaded.Status != db.StatusStopped || loaded.PID != 0 {
 		t.Fatalf("expected dead VM to be marked stopped, got: %+v", loaded)
+	}
+}
+
+// A sandbox that is still booting keeps status "created" in the database while
+// RunVM has already created its TAP. ReconcileAndPrune runs every few seconds,
+// so it must not delete that TAP: doing so made Firecracker fail with
+// "Setting tap interface offload flags failed: File descriptor in bad state".
+func TestReconcileAndPruneKeepsTAPForBootingVM(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, runner := testManager(t)
+	runner.taps = []string{"mftap-booting", "mftap-stale", "mftap-foreign"}
+
+	booting := &db.VM{ID: "vm-booting", Name: "booting", Status: db.StatusCreated, TAPDevice: "mftap-booting"}
+	if err := store.SaveVM(ctx, booting); err != nil {
+		t.Fatal(err)
+	}
+	stale := &db.VM{ID: "vm-stale", Name: "stale", Status: db.StatusStopped, TAPDevice: "mftap-stale"}
+	if err := store.SaveVM(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := m.ReconcileAndPrune(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileAndPrune error = %v", err)
+	}
+	for _, tap := range pruned {
+		if tap == "mftap-booting" {
+			t.Fatalf("reconciler pruned the TAP of a booting VM: %v", pruned)
+		}
+		if tap == "mftap-foreign" {
+			t.Fatalf("reconciler pruned a TAP it does not own (another deployment): %v", pruned)
+		}
+	}
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "del") && strings.Contains(joined, "mftap-booting") {
+			t.Fatalf("reconciler removed the booting VM TAP: %s", joined)
+		}
+		if strings.Contains(joined, "del") && strings.Contains(joined, "mftap-foreign") {
+			t.Fatalf("reconciler removed a foreign TAP: %s", joined)
+		}
+	}
+
+	loaded, err := store.GetVM(ctx, booting.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != db.StatusCreated {
+		t.Fatalf("booting VM status changed to %q", loaded.Status)
 	}
 }
 
@@ -850,5 +945,130 @@ func TestVMStatusOutageRecovery(t *testing.T) {
 
 	if !restarted {
 		t.Fatalf("expected StartDesiredVMs to restart desired running VM after outage")
+	}
+}
+
+func TestVMNetworkIsolationModesAndAccountReconciliation(t *testing.T) {
+	ctx := context.Background()
+	m, store, _, runner := testManager(t)
+
+	vmA, err := m.CreateVM(ctx, CreateRequest{Name: "alice-a", OwnerID: "usr_alice"})
+	if err != nil {
+		t.Fatalf("create vmA: %v", err)
+	}
+	if vmA.NetworkIsolation != db.NetworkIsolationAccount {
+		t.Fatalf("expected default network_isolation=account, got %q", vmA.NetworkIsolation)
+	}
+
+	vmB, err := m.CreateVM(ctx, CreateRequest{Name: "alice-b", OwnerID: "usr_alice", NetworkIsolation: "account"})
+	if err != nil {
+		t.Fatalf("create vmB: %v", err)
+	}
+
+	vmC, err := m.CreateVM(ctx, CreateRequest{Name: "alice-org", OwnerID: "org_alice"})
+	if err != nil {
+		t.Fatalf("create vmC (personal org): %v", err)
+	}
+
+	isoTrue := true
+	vmD, err := m.CreateVM(ctx, CreateRequest{Name: "alice-iso", OwnerID: "usr_alice", Isolated: &isoTrue})
+	if err != nil {
+		t.Fatalf("create vmD (isolated): %v", err)
+	}
+	if vmD.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected vmD network_isolation=isolated, got %q", vmD.NetworkIsolation)
+	}
+
+	vmOther, err := m.CreateVM(ctx, CreateRequest{Name: "bob-a", OwnerID: "usr_bob"})
+	if err != nil {
+		t.Fatalf("create vmOther: %v", err)
+	}
+
+	// Conflicting or invalid values must fail.
+	if _, err := m.CreateVM(ctx, CreateRequest{Name: "bad-mode", OwnerID: "usr_alice", NetworkIsolation: "public"}); err == nil {
+		t.Fatalf("expected invalid network_isolation error")
+	}
+	if _, err := m.CreateVM(ctx, CreateRequest{Name: "conflict-mode", OwnerID: "usr_alice", NetworkIsolation: "account", Isolated: &isoTrue}); err == nil {
+		t.Fatalf("expected conflicting network_isolation error")
+	}
+
+	// Mark all VMs running so reconciliation builds peer allowlists.
+	for _, v := range []*db.VM{vmA, vmB, vmC, vmD, vmOther} {
+		v.Status = db.StatusRunning
+		if err := store.SaveVM(ctx, v); err != nil {
+			t.Fatalf("save running vm %s: %v", v.Name, err)
+		}
+	}
+
+	runner.calls = nil
+	m.reconcileAccountNetworkIsolation(ctx, "usr_alice")
+
+	var aAllowsB, aAllowsC, aAllowsD, aAllowsOther bool
+	var dIsolatedOn, dHasAccept bool
+	for _, call := range runner.calls {
+		line := strings.Join(call, " ")
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmB.TAPDevice)) {
+			aAllowsB = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmC.TAPDevice)) {
+			aAllowsC = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmD.TAPDevice)) {
+			aAllowsD = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmOther.TAPDevice)) {
+			aAllowsOther = true
+		}
+		if strings.Contains(line, fmt.Sprintf("bridge link set dev %s isolated on", vmD.TAPDevice)) {
+			dIsolatedOn = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s", vmD.TAPDevice)) && strings.Contains(line, "-j ACCEPT") {
+			dHasAccept = true
+		}
+	}
+	if !aAllowsB || !aAllowsC {
+		t.Errorf("expected vmA to allow vmB (%v) and personal-org vmC (%v)", aAllowsB, aAllowsC)
+	}
+	if aAllowsD || aAllowsOther {
+		t.Errorf("vmA must not allow isolated vmD (%v) or other-tenant vmOther (%v)", aAllowsD, aAllowsOther)
+	}
+	if !dIsolatedOn || dHasAccept {
+		t.Errorf("expected isolated vmD to have bridge isolated on (%v) and no ACCEPT rules (%v)", dIsolatedOn, dHasAccept)
+	}
+
+	// Switch vmB to isolated live via UpdateVMConfig.
+	runner.calls = nil
+	isoMode := db.NetworkIsolationIsolated
+	updatedB, err := m.UpdateVMConfig(ctx, vmB.InternalID, UpdateVMConfigRequest{NetworkIsolation: &isoMode})
+	if err != nil {
+		t.Fatalf("UpdateVMConfig vmB -> isolated: %v", err)
+	}
+	if updatedB.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected vmB isolated after update, got %q", updatedB.NetworkIsolation)
+	}
+	var bIsolatedOn, aStillAllowsB, aStillAllowsC bool
+	for _, call := range runner.calls {
+		line := strings.Join(call, " ")
+		if strings.Contains(line, fmt.Sprintf("bridge link set dev %s isolated on", vmB.TAPDevice)) {
+			bIsolatedOn = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmB.TAPDevice)) && !strings.Contains(line, " -D ") {
+			aStillAllowsB = true
+		}
+		if strings.Contains(line, fmt.Sprintf("-i %s -o %s -j ACCEPT", vmA.TAPDevice, vmC.TAPDevice)) && !strings.Contains(line, " -D ") {
+			aStillAllowsC = true
+		}
+	}
+	if !bIsolatedOn || aStillAllowsB || !aStillAllowsC {
+		t.Errorf("unexpected rules after live isolation of vmB: bIsolatedOn=%v aAllowsB=%v aAllowsC=%v", bIsolatedOn, aStillAllowsB, aStillAllowsC)
+	}
+
+	// Clone inherits source VM network isolation when omitted.
+	cloneOfD, err := m.CloneVM(ctx, vmD.InternalID, CreateRequest{Name: "alice-iso-clone", OwnerID: "usr_alice"})
+	if err != nil {
+		t.Fatalf("CloneVM vmD: %v", err)
+	}
+	if cloneOfD.NetworkIsolation != db.NetworkIsolationIsolated {
+		t.Fatalf("expected cloned VM to inherit isolated mode, got %q", cloneOfD.NetworkIsolation)
 	}
 }

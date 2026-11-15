@@ -26,20 +26,21 @@ func TestStore(t *testing.T) {
 	ctx := context.Background()
 
 	vm := &VM{
-		ID:             "vm-test-1",
-		Name:           "test-vm",
-		Status:         StatusCreated,
-		DesiredRunning: true,
-		VCPUs:          1,
-		MemoryMB:       512,
-		IPAddress:      "172.16.0.2",
-		MACAddress:     "06:00:ac:10:00:02",
-		TAPDevice:      "mftap-test-1",
-		RootfsPath:     "/tmp/rootfs.ext4",
-		KernelPath:     "/tmp/vmlinux",
-		DiskPath:       "/tmp/disk.ext4",
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
+		ID:                 "vm-test-1",
+		Name:               "test-vm",
+		Status:             StatusCreated,
+		DesiredRunning:     true,
+		VCPUs:              1,
+		MemoryMB:           512,
+		IPAddress:          "172.16.0.2",
+		MACAddress:         "06:00:ac:10:00:02",
+		TAPDevice:          "mftap-test-1",
+		RootfsPath:         "/tmp/rootfs.ext4",
+		KernelPath:         "/tmp/vmlinux",
+		DiskPath:           "/tmp/disk.ext4",
+		SSHPasswordEnabled: true,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
 	}
 
 	if err := store.SaveVM(ctx, vm); err != nil {
@@ -55,6 +56,9 @@ func TestStore(t *testing.T) {
 	}
 	if !got.DesiredRunning {
 		t.Fatalf("expected desired_running to persist as true: %+v", got)
+	}
+	if !got.SSHPasswordEnabled {
+		t.Fatalf("expected ssh_password_enabled to persist as true: %+v", got)
 	}
 
 	// Update status
@@ -290,11 +294,12 @@ func TestStore_SSHKeys(t *testing.T) {
 	ctx := context.Background()
 
 	key1 := &SSHKey{
-		ID:          "ssh-key-1",
-		OwnerID:     "default",
-		Name:        "laptop",
-		PublicKey:   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey1 test@laptop",
-		Fingerprint: "SHA256:testfingerprint1",
+		ID:           "ssh-key-1",
+		OwnerID:      "default",
+		Name:         "laptop",
+		PublicKey:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey1 test@laptop",
+		Fingerprint:  "SHA256:testfingerprint1",
+		AllSandboxes: true,
 	}
 
 	key2 := &SSHKey{
@@ -317,7 +322,7 @@ func TestStore_SSHKeys(t *testing.T) {
 	if err != nil || gotByID == nil {
 		t.Fatalf("failed to get key by ID: %v", err)
 	}
-	if gotByID.Name != "laptop" || gotByID.Fingerprint != "SHA256:testfingerprint1" {
+	if gotByID.Name != "laptop" || gotByID.Fingerprint != "SHA256:testfingerprint1" || !gotByID.AllSandboxes {
 		t.Fatalf("unexpected key by ID: %+v", gotByID)
 	}
 
@@ -352,6 +357,75 @@ func TestStore_SSHKeys(t *testing.T) {
 	}
 }
 
+func TestStore_SSHKeyDefault(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "compute-db-key-default-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	key1 := &SSHKey{ID: "ssh-key-1", OwnerID: "default", Name: "laptop", PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey1 test@laptop", Fingerprint: "SHA256:fp1"}
+	key2 := &SSHKey{ID: "ssh-key-2", OwnerID: "default", Name: "workstation", PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey2 test@workstation", Fingerprint: "SHA256:fp2"}
+	if err := store.SaveSSHKey(ctx, key1); err != nil {
+		t.Fatalf("failed to save key1: %v", err)
+	}
+	if err := store.SaveSSHKey(ctx, key2); err != nil {
+		t.Fatalf("failed to save key2: %v", err)
+	}
+
+	// No default until one is chosen.
+	def, err := store.GetDefaultSSHKey(ctx, "default")
+	if err != nil || def != nil {
+		t.Fatalf("expected no default key, got %+v err=%v", def, err)
+	}
+
+	// Setting the default flags exactly one key per owner.
+	if err := store.SetDefaultSSHKey(ctx, "default", key1.ID); err != nil {
+		t.Fatalf("SetDefaultSSHKey failed: %v", err)
+	}
+	def, err = store.GetDefaultSSHKey(ctx, "default")
+	if err != nil || def == nil || def.ID != key1.ID {
+		t.Fatalf("expected key1 as default, got %+v err=%v", def, err)
+	}
+	got1, _ := store.GetSSHKey(ctx, key1.ID)
+	if got1 == nil || !got1.IsDefault {
+		t.Fatalf("expected key1 to carry is_default, got %+v", got1)
+	}
+
+	// Promoting key2 clears key1's flag.
+	if err := store.SetDefaultSSHKey(ctx, "default", key2.ID); err != nil {
+		t.Fatalf("SetDefaultSSHKey(key2) failed: %v", err)
+	}
+	got1, _ = store.GetSSHKey(ctx, key1.ID)
+	got2, _ := store.GetSSHKey(ctx, key2.ID)
+	if got1 == nil || got1.IsDefault {
+		t.Fatalf("expected key1 to lose is_default, got %+v", got1)
+	}
+	if got2 == nil || !got2.IsDefault {
+		t.Fatalf("expected key2 to carry is_default, got %+v", got2)
+	}
+
+	// Defaults are owner-scoped: another owner's key cannot be flagged, and
+	// clearing only removes the flag from the exact key.
+	if err := store.SetDefaultSSHKey(ctx, "other-owner", key2.ID); err == nil {
+		t.Fatalf("expected error flagging a foreign owner's key as default")
+	}
+	if err := store.ClearDefaultSSHKey(ctx, "default", key2.ID); err != nil {
+		t.Fatalf("ClearDefaultSSHKey failed: %v", err)
+	}
+	def, err = store.GetDefaultSSHKey(ctx, "default")
+	if err != nil || def != nil {
+		t.Fatalf("expected no default key after clearing, got %+v err=%v", def, err)
+	}
+}
+
 func TestStore_FailStaleJobs(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
@@ -383,6 +457,138 @@ func TestStore_FailStaleJobs(t *testing.T) {
 	}
 	if j, _ := store.GetJob(ctx, "job-running"); j == nil || j.State != "failed" {
 		t.Fatalf("running job should be failed, got %+v", j)
+	}
+}
+
+func TestStore_AuthorizeWorkerTokenReconnect(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	tok := &WorkerToken{
+		Token:     "tok-reconnect",
+		Name:      "worker-a",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, tok); err != nil {
+		t.Fatalf("SaveWorkerToken: %v", err)
+	}
+
+	// First enrollment succeeds and consumes the token.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", "worker-a"); err != nil {
+		t.Fatalf("first authorize: %v", err)
+	}
+	// The same named worker may reconnect after a restart.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", "worker-a"); err != nil {
+		t.Fatalf("reconnect with same name: %v", err)
+	}
+	// A different worker name is rejected.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", "intruder"); err == nil {
+		t.Fatal("expected different worker name to be rejected")
+	}
+	// Missing name is rejected once the token has been consumed.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-reconnect", ""); err == nil {
+		t.Fatal("expected empty worker name to be rejected after consumption")
+	}
+	// Unknown token is rejected.
+	if err := store.AuthorizeWorkerToken(ctx, "tok-missing", "worker-a"); err == nil {
+		t.Fatal("expected unknown token to be rejected")
+	}
+	// Expired token is rejected.
+	expired := &WorkerToken{
+		Token:     "tok-expired",
+		Name:      "worker-b",
+		PoolID:    "default",
+		ExpiresAt: time.Now().UTC().Add(-time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, expired); err != nil {
+		t.Fatalf("SaveWorkerToken expired: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-expired", "worker-b"); err == nil {
+		t.Fatal("expected expired token to be rejected")
+	}
+}
+
+func TestStore_AuthorizeWorkerTokenBindsUnnamedToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Tokens created without --name carry no binding. The first enrollment
+	// names the token after the connecting worker so a restart can reconnect.
+	unbound := &WorkerToken{Token: "tok-unbound", PoolID: "default", ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := store.SaveWorkerToken(ctx, unbound); err != nil {
+		t.Fatalf("SaveWorkerToken: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-unbound", "worker-x"); err != nil {
+		t.Fatalf("first authorize: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-unbound", "worker-x"); err != nil {
+		t.Fatalf("reconnect with same name: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-unbound", "worker-y"); err == nil {
+		t.Fatal("expected a different worker to be rejected")
+	}
+	tokens, err := store.ListWorkerTokens(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range tokens {
+		if tok.Token == "tok-unbound" && tok.Name != "worker-x" {
+			t.Fatalf("token not bound to first worker: %q", tok.Name)
+		}
+	}
+
+	// The old placeholder name is treated as unbound so tokens minted by an
+	// earlier release keep working after an upgrade.
+	legacy := &WorkerToken{Token: "tok-legacy", Name: "worker-token", PoolID: "default", ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := store.SaveWorkerToken(ctx, legacy); err != nil {
+		t.Fatalf("SaveWorkerToken: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-legacy", "worker-z"); err != nil {
+		t.Fatalf("legacy first authorize: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-legacy", "worker-z"); err != nil {
+		t.Fatalf("legacy reconnect: %v", err)
+	}
+}
+
+func TestStore_AuthorizeWorkerTokenReconnectAfterExpiry(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(filepath.Join(tmpDir, "test.db"))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	tok := &WorkerToken{Token: "tok-bound", Name: "worker-a", PoolID: "default", ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := store.SaveWorkerToken(ctx, tok); err != nil {
+		t.Fatalf("SaveWorkerToken: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-bound", "worker-a"); err != nil {
+		t.Fatalf("first authorize: %v", err)
+	}
+
+	// Enrollment tokens expire quickly; an already enrolled worker must still
+	// be able to reconnect after a restart that happens later.
+	if _, err := store.db.ExecContext(ctx, `UPDATE worker_tokens SET expires_at=? WHERE token=?`, time.Now().UTC().Add(-time.Hour), "tok-bound"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-bound", "worker-a"); err != nil {
+		t.Fatalf("reconnect after expiry: %v", err)
+	}
+	if err := store.AuthorizeWorkerToken(ctx, "tok-bound", "worker-b"); err == nil {
+		t.Fatal("expected a different worker to be rejected after expiry")
 	}
 }
 
@@ -804,5 +1010,133 @@ func TestStore_VMTailnetFields(t *testing.T) {
 	}
 	if all[0].TailnetIP != "100.64.7.8" {
 		t.Fatalf("tailnet_ip missing in list: %+v", all[0])
+	}
+}
+
+func TestStore_MigratesSSHPasswordEnabled(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	ctx := context.Background()
+
+	vm := &VM{ID: "legacy-vm", Name: "legacy-vm", OwnerID: "default", Status: StatusStopped}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		store.Close()
+		t.Fatalf("failed to save VM: %v", err)
+	}
+	// Simulate a database created before ssh_password_enabled existed.
+	if _, err := store.db.Exec("ALTER TABLE vms DROP COLUMN ssh_password_enabled"); err != nil {
+		store.Close()
+		t.Fatalf("failed to drop column: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("failed to close store: %v", err)
+	}
+
+	reopened, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen store: %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.GetVM(ctx, "legacy-vm")
+	if err != nil {
+		t.Fatalf("GetVM after migration: %v", err)
+	}
+	if got == nil || got.SSHPasswordEnabled {
+		t.Fatalf("migrated VM = %+v, want ssh_password_enabled=false", got)
+	}
+
+	all, err := reopened.ListVMs(ctx)
+	if err != nil {
+		t.Fatalf("ListVMs after migration: %v", err)
+	}
+	if len(all) != 1 || all[0].SSHPasswordEnabled {
+		t.Fatalf("migrated list = %+v, want one VM with ssh_password_enabled=false", all)
+	}
+}
+
+func TestStore_NetworkIsolationPersistenceAndMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "iso.db")
+
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	ctx := context.Background()
+
+	vmAcc := &VM{
+		ID:               "vm-iso-default",
+		InternalID:       "ins_iso_default",
+		Name:             "vm-iso-default",
+		OwnerID:          "usr_1",
+		Status:           StatusRunning,
+		IPAddress:        "172.16.0.21",
+		MACAddress:       "06:00:ac:10:00:15",
+		TAPDevice:        "mftap-21",
+		NetworkIsolation: "", // should normalize to account
+	}
+	vmIso := &VM{
+		ID:               "vm-iso-only",
+		InternalID:       "ins_iso_only",
+		Name:             "vm-iso-only",
+		OwnerID:          "usr_1",
+		Status:           StatusRunning,
+		IPAddress:        "172.16.0.22",
+		MACAddress:       "06:00:ac:10:00:16",
+		TAPDevice:        "mftap-22",
+		NetworkIsolation: NetworkIsolationIsolated,
+	}
+	if err := store.SaveVM(ctx, vmAcc); err != nil {
+		t.Fatalf("SaveVM vmAcc: %v", err)
+	}
+	if err := store.SaveVM(ctx, vmIso); err != nil {
+		t.Fatalf("SaveVM vmIso: %v", err)
+	}
+
+	gotAcc, err := store.GetVMByOwner(ctx, "usr_1", "vm-iso-default")
+	if err != nil || gotAcc == nil || gotAcc.NetworkIsolation != NetworkIsolationAccount {
+		t.Fatalf("expected default network_isolation=account, got %+v (err=%v)", gotAcc, err)
+	}
+	gotIso, err := store.GetVMByOwner(ctx, "usr_1", "vm-iso-only")
+	if err != nil || gotIso == nil || gotIso.NetworkIsolation != NetworkIsolationIsolated {
+		t.Fatalf("expected network_isolation=isolated, got %+v (err=%v)", gotIso, err)
+	}
+
+	alloc, err := store.GetNetworkAllocation(ctx, "mftap-22")
+	if err != nil || alloc == nil || alloc.NetworkIsolation != NetworkIsolationIsolated {
+		t.Fatalf("expected allocation network_isolation=isolated, got %+v (err=%v)", alloc, err)
+	}
+	allocs, err := store.GetNetworkAllocations(ctx)
+	if err != nil || len(allocs) != 2 {
+		t.Fatalf("expected 2 allocations, got %d (err=%v)", len(allocs), err)
+	}
+
+	// Simulate pre-migration DB lacking network_isolation column.
+	if _, err := store.db.Exec("ALTER TABLE vms DROP COLUMN network_isolation"); err != nil {
+		store.Close()
+		t.Fatalf("drop network_isolation failed: %v", err)
+	}
+	_ = store.Close()
+
+	reopened, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer reopened.Close()
+
+	listed, err := reopened.ListVMsByOwner(ctx, "usr_1")
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("ListVMsByOwner after migration: %d (err=%v)", len(listed), err)
+	}
+	for _, v := range listed {
+		if v.NetworkIsolation != NetworkIsolationAccount {
+			t.Fatalf("expected migrated VM %s to default to account, got %q", v.ID, v.NetworkIsolation)
+		}
 	}
 }

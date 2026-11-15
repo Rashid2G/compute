@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -67,12 +66,36 @@ func main() {
 		handleSandboxSSH(context.Background(), client, os.Args[2:])
 		return
 
+	case "url":
+		handleSandboxURL(ctx, client, os.Args[2:])
+		return
+
 	case "auth":
 		handleAuthCommand(ctx, client, os.Args[2:])
 		return
 
+	case "keys", "key", "ssh-keys":
+		handleKeysCommand(ctx, client, os.Args[2:])
+		return
+
 	case "sandbox", "vm":
 		handleSandboxCommand(ctx, client, os.Args[2:])
+		return
+
+	case "file", "files":
+		handleSandboxFileCommand(ctx, client, os.Args[2:])
+		return
+
+	case "cp":
+		handleSandboxCpCommand(ctx, client, os.Args[2:])
+		return
+
+	case "scp":
+		handleSandboxScpCommand(ctx, client, os.Args[2:])
+		return
+
+	case "process", "processes", "ps":
+		handleSandboxProcessCommand(ctx, client, os.Args[2:])
 		return
 
 	case "job", "jobs":
@@ -81,10 +104,6 @@ func main() {
 
 	case "network", "net":
 		handleNetworkCommand(ctx, client, os.Args[2:])
-		return
-
-	case "tailscale", "ts":
-		handleTailscaleCommand(ctx, client, os.Args[2:])
 		return
 
 	case "worker", "workers":
@@ -97,6 +116,10 @@ func main() {
 
 	case "image", "images":
 		handleImageCommand(ctx, client, os.Args[2:])
+		return
+
+	case "doctor", "check":
+		handleDoctorCommand(ctx, client, os.Args[2:])
 		return
 
 	case "template", "templates":
@@ -172,7 +195,7 @@ func printUsage() {
 func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "Usage: compute <command> [subcommand] [options]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Core Commands (Boat.dev Style):")
+	fmt.Fprintln(w, "Core Commands:")
 	fmt.Fprintln(w, "  auth               User accounts, authentication and API keys (login, signup, whoami, keys, logout)")
 	fmt.Fprintln(w, "  sandbox, vm        Manage isolated compute sandboxes (list, create, start, stop, exec, ssh, delete, info)")
 	fmt.Fprintln(w, "  job, jobs          Run and monitor distributed compute jobs (run, list, info, logs, cancel)")
@@ -180,9 +203,16 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  pool, pools        Manage worker pools (list, create, delete)")
 	fmt.Fprintln(w, "  image, images      Manage base and custom rootfs images (list, build, inspect, delete)")
 	fmt.Fprintln(w, "  template, templates Manage VM disk templates (list, create, launch, inspect, delete)")
+	fmt.Fprintln(w, "  keys               Manage saved SSH public keys (list, add, update, apply, delete)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Tools & Utilities:")
+	fmt.Fprintln(w, "  file               Read, write, list, mkdir, and remove files in sandboxes")
+	fmt.Fprintln(w, "  cp                 Copy files between local host and sandboxes")
+	fmt.Fprintln(w, "  scp                Copy files/directories to and from sandboxes (scp-style, -r for directories)")
+	fmt.Fprintln(w, "  process, ps        List, start, and kill processes inside sandboxes")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
+	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
+	fmt.Fprintln(w, "  doctor, check      Print daemon readiness checks with remediation for failures")
 	fmt.Fprintln(w, "  version, -v        Display version, build, and release information (--client, --short, --json)")
 	fmt.Fprintln(w, "  gui, web, ui       Launch the Web UI dashboard (--port, --addr, --daemon)")
 	fmt.Fprintln(w, "  completion         Generate shell autocompletion script (bash, zsh, fish)")
@@ -190,6 +220,32 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global Options:")
 	fmt.Fprintln(w, "  COMPUTE_DAEMON      Daemon address (default: 127.0.0.1:18080)")
+}
+
+// queuedVMReason returns the admission-queue reason for a VM, or "" when the
+// VM is not queued (or the queue cannot be read).
+func queuedVMReason(ctx context.Context, client *DaemonClient, vmID string) string {
+	queue, err := client.GetQueue(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, item := range queue.QueuedVMs {
+		if item != nil && item.VMID == vmID {
+			return item.Reason
+		}
+	}
+	return ""
+}
+
+// printQueuedHint explains why a sandbox is waiting instead of booting.
+func printQueuedHint(ctx context.Context, client *DaemonClient, v *db.VM) {
+	reason := queuedVMReason(ctx, client, v.ID)
+	if reason == "" {
+		reason = "host capacity is insufficient for the requested resources"
+	}
+	fmt.Printf("  Queue reason:  %s\n", reason)
+	fmt.Printf("  Hint:          stop a running sandbox or free host resources; for a smaller\n")
+	fmt.Printf("                 request use --memory/--vcpus, then run 'compute sandbox start %s'\n", v.Name)
 }
 
 // Sandbox command implementation
@@ -211,17 +267,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Println("No sandboxes found. Create one with: compute sandbox create --name <name>")
 			return
 		}
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tSTATUS\tVCPUS\tMEM(MB)\tIP ADDRESS\tPROTECTED")
-		for _, v := range vms {
-			prot := "no"
-			if v.Protected {
-				prot = "yes"
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
-				v.ID, v.Name, v.Status, v.VCPUs, v.MemoryMB, v.IPAddress, prot)
-		}
-		w.Flush()
+		writeSandboxList(os.Stdout, vms)
 		return
 	}
 
@@ -238,27 +284,72 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		image := createCmd.String("image", "", "Base image name")
 		template := createCmd.String("template", "", "Template name or ID")
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
+		noSSHKey := createCmd.Bool("no-ssh-key", false, "Exclude the account's default SSH key from this sandbox")
+		sshPassword := createCmd.String("ssh-password", "", "Optional SSH password for compute/root (min 8 chars; use '-' to read from stdin)")
+		networkIsolation := createCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' (communicate with account sandboxes) or 'isolated' (own sandbox only)")
+		isolated := createCmd.Bool("isolated", false, "Isolate this sandbox on its own network (shorthand for --network-isolation isolated)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
-		tailscale := createCmd.Bool("tailscale", false, "Join the operator's tailnet (ephemeral device with a 100.x IP and MagicDNS name)")
+		startNow := createCmd.Bool("start", false, "Immediately boot/start the sandbox after creation")
+		bootNow := createCmd.Bool("boot", false, "Alias for --start")
 		createCmd.Parse(subArgs)
 
-		var tsEnabled *bool
+		isolatedSet := false
 		createCmd.Visit(func(f *flag.Flag) {
-			if f.Name == "tailscale" {
-				tsEnabled = tailscale
+			if f.Name == "isolated" {
+				isolatedSet = true
 			}
 		})
+		var isolatedPtr *bool
+		if isolatedSet {
+			val := *isolated
+			isolatedPtr = &val
+		}
+
+		password := *sshPassword
+		if password == "-" {
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading SSH password from stdin: %v\n", err)
+				os.Exit(1)
+			}
+			password = strings.TrimRight(string(data), "\r\n")
+		}
+		// --ssh-key accepts a saved key name/ID, a literal public key, or a path
+		// to a public key file. Files and literals are sent inline; names are
+		// resolved by the daemon against the caller's account keys.
+		sshKeyID := ""
+		sshPublicKey := ""
+		if strings.TrimSpace(*sshKey) != "" {
+			candidate := strings.TrimSpace(*sshKey)
+			if looksLikePublicKey(candidate) {
+				sshPublicKey = candidate
+			} else if data, err := os.ReadFile(expandHome(candidate)); err == nil && len(data) > 0 {
+				sshPublicKey = strings.TrimSpace(string(data))
+			} else {
+				sshKeyID = candidate
+			}
+			if sshPublicKey != "" {
+				if err := validatePublicKey(sshPublicKey); err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading SSH key %s: %v\n", candidate, err)
+					os.Exit(1)
+				}
+			}
+		}
 		v, err := client.CreateVM(ctx, vm.CreateRequest{
-			Name:      *name,
-			Tier:      *tier,
-			VCPUs:     *vcpus,
-			MemoryMB:  *mem,
-			DiskMB:    *disk,
-			Image:     *image,
-			Template:  *template,
-			SSHKeyID:  *sshKey,
-			Protected: protected,
-			Tailscale: tsEnabled,
+			Name:             *name,
+			Tier:             *tier,
+			VCPUs:            *vcpus,
+			MemoryMB:         *mem,
+			DiskMB:           *disk,
+			Image:            *image,
+			Template:         *template,
+			SSHKeyID:         sshKeyID,
+			SSHPublicKey:     sshPublicKey,
+			SSHNoDefaultKey:  *noSSHKey,
+			SSHPassword:      password,
+			Protected:        protected,
+			NetworkIsolation: *networkIsolation,
+			Isolated:         isolatedPtr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error creating sandbox: %v\n", err)
@@ -268,12 +359,31 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		if v.Protected {
 			protMsg = " [protected]"
 		}
-		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s%s (vCPUs=%d, RAM=%dMB)\n",
-			v.ID, v.Name, v.IPAddress, v.Status, protMsg, v.VCPUs, v.MemoryMB)
-		if v.TailnetIP != "" {
-			fmt.Printf("Tailnet:         IP=%s DNS=%s (reachable from any machine in your tailnet)\n", v.TailnetIP, v.TailnetDNS)
-		} else if v.TailscaleEnabled {
-			fmt.Println("Tailnet:         provisioning in progress; run 'compute sandbox info' shortly")
+		netMode := v.NetworkIsolation
+		if netMode == "" {
+			netMode = db.NetworkIsolationAccount
+		}
+		fmt.Printf("Sandbox Created: ID=%s Name=%s IP=%s Status=%s Network=%s%s (vCPUs=%d, RAM=%dMB)\n",
+			v.ID, v.Name, v.IPAddress, v.Status, netMode, protMsg, v.VCPUs, v.MemoryMB)
+		if v.SSHPasswordEnabled {
+			fmt.Println("SSH auth:        password enabled for compute and root (embedded public keys also accepted)")
+		} else {
+			fmt.Println("SSH auth:        public key only (no SSH password configured)")
+		}
+
+		if *startNow || *bootNow {
+			fmt.Printf("Booting sandbox %s...\n", v.Name)
+			runningVM, err := client.RunVM(ctx, v.ID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error booting sandbox %s: %v\n", v.Name, err)
+				os.Exit(1)
+			}
+			v = runningVM
+			fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s\n",
+				v.ID, v.Name, v.IPAddress, v.Status)
+			if v.Status == db.StatusQueued {
+				printQueuedHint(ctx, client, v)
+			}
 		}
 
 	case "start", "run":
@@ -434,9 +544,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 
 	case "info", "inspect", "show":
 		if len(subArgs) < 1 {
-			printCommandError("missing required sandbox name or ID.", "Usage: compute sandbox info <name|id>", "sandbox")
+			printCommandError("missing required sandbox name or ID.", "Usage: compute sandbox info <name|id|hostname>", "sandbox")
 		}
-		v, err := client.GetVM(ctx, subArgs[0])
+		v, err := resolveSandboxReference(ctx, client, subArgs[0])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error inspecting sandbox: %v\n", err)
 			os.Exit(1)
@@ -452,14 +562,34 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		}
 		if v.TailnetIP != "" {
 			fmt.Printf("  Tailnet IP:    %s\n", v.TailnetIP)
-			if v.TailnetDNS != "" {
-				fmt.Printf("  Tailnet DNS:   %s\n", v.TailnetDNS)
-			}
 		} else if v.TailscaleEnabled {
 			fmt.Printf("  Tailnet:       provisioning in progress\n")
 		}
+		for _, line := range sandboxAccessLines(sandboxAccessForVM(v, "compute", 0)) {
+			fmt.Println(line)
+		}
+		if v.SSHPasswordEnabled {
+			fmt.Printf("  SSH auth:      password enabled for compute and root\n")
+		} else {
+			fmt.Printf("  SSH auth:      public key only\n")
+		}
+		netMode := v.NetworkIsolation
+		if netMode == "" {
+			netMode = db.NetworkIsolationAccount
+		}
+		if netMode == db.NetworkIsolationIsolated {
+			fmt.Printf("  Network:       isolated (own sandbox only)\n")
+		} else {
+			fmt.Printf("  Network:       account (can communicate with all account sandboxes)\n")
+		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
+		if v.Status == db.StatusQueued {
+			printQueuedHint(ctx, client, v)
+		}
+
+	case "url":
+		handleSandboxURL(ctx, client, subArgs)
 
 	case "protect":
 		if len(subArgs) < 1 {
@@ -485,13 +615,48 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		}
 		fmt.Printf("Sandbox %s: deletion protection disabled\n", v.Name)
 
+	case "network-isolation":
+		if len(subArgs) < 2 {
+			printCommandError("missing required sandbox or mode.", "Usage: compute sandbox network-isolation <name|id> <account|isolated>", "sandbox")
+		}
+		targetRef, err := resolveSandboxReference(ctx, client, subArgs[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error resolving sandbox %s: %v\n", subArgs[0], err)
+			os.Exit(1)
+		}
+		mode, ok := db.NormalizeNetworkIsolation(subArgs[1])
+		if !ok {
+			printCommandError(fmt.Sprintf("invalid network isolation mode %q (expected 'account' or 'isolated').", subArgs[1]), "Usage: compute sandbox network-isolation <name|id> <account|isolated>", "sandbox")
+		}
+		updated, err := client.SetVMNetworkIsolation(ctx, targetRef.ID, mode)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error updating network isolation for sandbox %s: %v\n", subArgs[0], err)
+			os.Exit(1)
+		}
+		fmt.Printf("Sandbox %s: network isolation set to %s\n", updated.Name, updated.NetworkIsolation)
+
+	case "images", "image":
+		handleImageCommand(ctx, client, append([]string{"list"}, subArgs...))
+
+	case "templates", "template":
+		handleTemplateCommand(ctx, client, append([]string{"list"}, subArgs...))
+
+	case "file", "files":
+		handleSandboxFileCommand(ctx, client, subArgs)
+
+	case "cp":
+		handleSandboxCpCommand(ctx, client, subArgs)
+
+	case "process", "processes", "ps":
+		handleSandboxProcessCommand(ctx, client, subArgs)
+
 	default:
 		printCommandError(fmt.Sprintf("unknown sandbox command '%s'.", sub), "", "sandbox")
 	}
 }
 
 func printSSHUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: compute [sandbox] ssh [options] [user@]<name|id> [-- <cmd...> ]\n\n")
+	fmt.Fprintf(os.Stderr, "Usage: compute [sandbox] ssh [options] [user@]<name|id|hostname> [-- <cmd...> ]\n\n")
 	fmt.Fprintf(os.Stderr, "Connect to sandbox SSH via WebSocket connection through the daemon.\n\n")
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	fmt.Fprintf(os.Stderr, "  -u, --user <username>       SSH user (default: compute)\n")
@@ -503,7 +668,7 @@ func printSSHUsage() {
 
 func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) {
 	if len(args) < 1 {
-		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id> [-- <cmd...> ]", "ssh")
+		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id|hostname> [-- <cmd...> ]", "ssh")
 	}
 
 	var user string
@@ -573,7 +738,7 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 	}
 
 	if target == "" {
-		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id> [-- <cmd...> ]", "ssh")
+		printCommandError("missing sandbox target for SSH.", "Usage: compute [sandbox] ssh [options] [user@]<name|id|hostname> [-- <cmd...> ]", "ssh")
 	}
 
 	vmID := target
@@ -589,7 +754,7 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 	}
 
 	quickCtx, quickCancel := context.WithTimeout(ctx, 10*time.Second)
-	v, err := client.GetVM(quickCtx, vmID)
+	v, err := resolveSandboxReference(quickCtx, client, vmID)
 	quickCancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting sandbox %s: %v\n", vmID, err)
@@ -835,7 +1000,7 @@ func handleExecCommand(ctx context.Context, client *DaemonClient, args []string)
 	}
 
 	req := vm.ExecRequest{
-		Command: strings.Join(cmdArgs, " "),
+		Command: buildExecCommand(cmdArgs),
 		User:    user,
 		Timeout: *timeout,
 	}
@@ -893,6 +1058,47 @@ func handleExecCommand(ctx context.Context, client *DaemonClient, args []string)
 	if exitCode != 0 {
 		os.Exit(exitCode)
 	}
+}
+
+// quoteForRemoteShell wraps an argument in single quotes if it contains spaces
+// or shell metacharacters, escaping any inner single quotes, so that compound
+// arguments (e.g. bash -c "mkdir -p /path && cmd") survive remote SSH shell execution.
+func quoteForRemoteShell(arg string) string {
+	if len(arg) == 0 {
+		return "''"
+	}
+	safe := true
+	for i := 0; i < len(arg); i++ {
+		c := arg[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			c == '_' || c == '-' || c == '.' || c == '/' || c == ':' || c == '=' || c == '@' {
+			continue
+		}
+		safe = false
+		break
+	}
+	if safe {
+		return arg
+	}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
+// buildExecCommand combines command arguments into a remote shell string.
+// If a single argument is supplied, it is treated as a raw shell command string.
+// If multiple arguments are supplied, each argument is safely shell-quoted so
+// subcommands, flags, and compound commands preserve their boundaries over SSH.
+func buildExecCommand(cmdArgs []string) string {
+	if len(cmdArgs) == 0 {
+		return ""
+	}
+	if len(cmdArgs) == 1 {
+		return cmdArgs[0]
+	}
+	quoted := make([]string, len(cmdArgs))
+	for i, a := range cmdArgs {
+		quoted[i] = quoteForRemoteShell(a)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // Job Command Implementation
@@ -1126,9 +1332,11 @@ func handleWorkerCommand(ctx context.Context, client *DaemonClient, args []strin
 		}
 		tokenCmd := flag.NewFlagSet("worker token create", flag.ExitOnError)
 		pool := tokenCmd.String("pool", "default", "Worker pool ID")
+		name := tokenCmd.String("name", "", "Worker name to bind the token to (default: bind to the first worker that enrolls)")
 		tokenCmd.Parse(args[2:])
 
 		resp, err := client.CreateWorkerToken(ctx, api.WorkerTokenCreateRequest{
+			Name:   *name,
 			PoolID: *pool,
 		})
 		if err != nil {
@@ -1247,6 +1455,32 @@ func handlePoolCommand(ctx context.Context, client *DaemonClient, args []string)
 	default:
 		printCommandError(fmt.Sprintf("unknown pool command '%s'.", sub), "", "pool")
 	}
+}
+
+// handleDoctorCommand renders the daemon readiness report with remediation.
+func handleDoctorCommand(ctx context.Context, client *DaemonClient, args []string) {
+	_ = args
+	report, err := client.GetReadiness(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot reach the Compute daemon: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Check that the daemon is running and COMPUTE_DAEMON points at it (default 127.0.0.1:18080).")
+		os.Exit(1)
+	}
+	for _, check := range report.Checks {
+		status := "OK"
+		if !check.OK {
+			status = strings.ToUpper(string(check.Severity))
+		}
+		fmt.Printf("[%-8s] %-14s %s\n", status, check.Name, check.Detail)
+		if !check.OK && check.Remediation != "" {
+			fmt.Printf("           fix: %s\n", check.Remediation)
+		}
+	}
+	if !report.OK {
+		fmt.Println("\nReadiness failed. Fix the critical items above.")
+		os.Exit(1)
+	}
+	fmt.Println("\nReadiness: all critical checks passed.")
 }
 
 // Image Command Implementation
@@ -1433,11 +1667,27 @@ func handleTemplateCommand(ctx context.Context, client *DaemonClient, args []str
 		launchCmd := flag.NewFlagSet("template launch", flag.ExitOnError)
 		name := launchCmd.String("name", "", "Name for launched VM")
 		tier := launchCmd.String("tier", "", "VM tier ('1vcpu', '2vcpu', '4vcpu')")
+		networkIsolation := launchCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' or 'isolated'")
+		isolated := launchCmd.Bool("isolated", false, "Isolate this sandbox on its own network")
 		launchCmd.Parse(args[2:])
 
+		isolatedSet := false
+		launchCmd.Visit(func(f *flag.Flag) {
+			if f.Name == "isolated" {
+				isolatedSet = true
+			}
+		})
+		var isolatedPtr *bool
+		if isolatedSet {
+			val := *isolated
+			isolatedPtr = &val
+		}
+
 		v, err := client.LaunchTemplate(ctx, tplName, vm.CreateRequest{
-			Name: *name,
-			Tier: *tier,
+			Name:             *name,
+			Tier:             *tier,
+			NetworkIsolation: *networkIsolation,
+			Isolated:         isolatedPtr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error launching VM from template %s: %v\n", tplName, err)
@@ -1615,122 +1865,6 @@ func handleNetworkCommand(ctx context.Context, client *DaemonClient, args []stri
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown network command %q.\n\n", args[0])
 		fmt.Fprintln(os.Stderr, "Usage: compute network status|list|inspect <id>|prune")
-		os.Exit(1)
-	}
-}
-
-func handleTailscaleCommand(ctx context.Context, client *DaemonClient, args []string) {
-	if len(args) == 0 {
-		args = []string{"status"}
-	}
-	switch args[0] {
-	case "status", "info", "show":
-		st, err := client.GetTailscaleStatus(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching tailscale status: %v\n", err)
-			os.Exit(1)
-		}
-		if !st.Enabled {
-			fmt.Println("Tailscale integration is disabled on this daemon.")
-			fmt.Println("Enable it with the 'tailscale' section in daemon config or COMPUTE_TAILSCALE_ENABLED=true.")
-			return
-		}
-		fmt.Printf("Integration:      enabled\n")
-		fmt.Printf("API key:          %s\n", map[bool]string{true: "configured", false: "missing"}[st.APIKeyConfigured])
-		if st.NodeTag != "" {
-			fmt.Printf("Master tag:       %s\n", st.NodeTag)
-		}
-		if st.SandboxTag != "" {
-			fmt.Printf("Sandbox tag:      %s\n", st.SandboxTag)
-		}
-		fmt.Printf("Sandboxes auto:   %t\n", st.DefaultSandboxes)
-		if st.Host != nil {
-			fmt.Printf("\nHost device:\n")
-			if !st.Host.Installed {
-				fmt.Printf("  tailscale:      not installed on this host\n")
-			} else if !st.Host.Running {
-				fmt.Printf("  tailscale:      installed but not connected (run 'sudo tailscale up --advertise-tags=%s --hostname=compute-master')\n", st.NodeTag)
-			} else {
-				fmt.Printf("  tailscale:      v%s\n", st.Host.Version)
-				if st.Host.TailnetIP != "" {
-					fmt.Printf("  tailnet IP:     %s\n", st.Host.TailnetIP)
-				}
-				if st.Host.DNSName != "" {
-					fmt.Printf("  MagicDNS name:  %s\n", st.Host.DNSName)
-				}
-				if len(st.Host.Tags) > 0 {
-					fmt.Printf("  tags:           %s\n", strings.Join(st.Host.Tags, ", "))
-				}
-			}
-		}
-		if st.WorkerControlPlaneURL != "" {
-			fmt.Printf("\nWorkers connect with:\n  --control-plane %s\n", st.WorkerControlPlaneURL)
-		}
-		if len(st.Sandboxes) > 0 {
-			fmt.Printf("\nTailnet sandboxes (%d):\n", len(st.Sandboxes))
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "  HOST\tTAILNET IP\tMAGICDNS NAME")
-			for _, sb := range st.Sandboxes {
-				fmt.Fprintf(w, "  %s\t%s\t%s\n", sb.ID, sb.TailnetIP, sb.TailnetDNS)
-			}
-			_ = w.Flush()
-		}
-
-	case "policy":
-		st, err := client.GetTailscaleStatus(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching tailscale policy: %v\n", err)
-			os.Exit(1)
-		}
-		if st.RecommendedPolicy == "" {
-			fmt.Fprintln(os.Stderr, "Policy recommendations require the tailscale integration with an API key on the daemon.")
-			os.Exit(1)
-		}
-		fmt.Println(st.RecommendedPolicy)
-		fmt.Println("Review the snippet above, then apply it in the tailnet policy file:")
-		fmt.Println("https://console.tailscale.com/admin/acls — Compute never edits it for you.")
-
-	case "cleanup":
-		confirm := false
-		fs := flag.NewFlagSet("tailscale cleanup", flag.ExitOnError)
-		fs.BoolVar(&confirm, "confirm", false, "Actually delete stale devices (default is a dry run)")
-		fs.Parse(args[1:])
-		var res struct {
-			DryRun bool `json:"dry_run"`
-			Stale  []struct {
-				ID       string `json:"id"`
-				Name     string `json:"name"`
-				LastSeen string `json:"last_seen"`
-			} `json:"stale"`
-			Deleted []string `json:"deleted"`
-		}
-		u := "/api/v1/tailscale/cleanup"
-		if confirm {
-			u += "?confirm=true"
-		}
-		if err := client.doRequest(ctx, http.MethodPost, u, nil, &res); err != nil {
-			fmt.Fprintf(os.Stderr, "Error running tailscale cleanup: %v\n", err)
-			os.Exit(1)
-		}
-		if len(res.Stale) == 0 && len(res.Deleted) == 0 {
-			fmt.Println("No stale tagged sandbox devices found; the tailnet is clean.")
-			return
-		}
-		for _, s := range res.Stale {
-			fmt.Printf("Stale:  %s (last seen %s)\n", s.Name, s.LastSeen)
-		}
-		for _, name := range res.Deleted {
-			fmt.Printf("Deleted: %s\n", name)
-		}
-		if res.DryRun {
-			fmt.Printf("%d stale device(s) found. Re-run with --confirm to delete them.\n", len(res.Stale))
-		} else {
-			fmt.Printf("Deleted %d stale device(s).\n", len(res.Deleted))
-		}
-
-	default:
-		fmt.Fprintf(os.Stderr, "Unknown tailscale command %q.\n\n", args[0])
-		fmt.Fprintln(os.Stderr, "Usage: compute tailscale status|policy|cleanup [--confirm]")
 		os.Exit(1)
 	}
 }

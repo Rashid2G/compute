@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
 	"github.com/Rashid2G/on-demand-vms/internal/jobs"
 	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
 	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
@@ -31,6 +33,7 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/scheduler"
 	"github.com/Rashid2G/on-demand-vms/internal/store"
 	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
+	storedb "github.com/Rashid2G/on-demand-vms/internal/store/db"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/api"
 	"github.com/Rashid2G/on-demand-vms/pkg/version"
@@ -50,6 +53,22 @@ type Server struct {
 	metaStore    *store.Store
 	fcVersion    string
 	ingressProxy *network.IngressProxy
+	dns          *dnsRuntime
+	guiHandler   http.Handler
+
+	// DNS/ingress caches (daemon-owned, response only).
+	userIndexMu     sync.RWMutex
+	userIndex       map[string]*storedb.User
+	userIndexExpiry time.Time
+	vmListMu        sync.RWMutex
+	vmListCache     map[string]vmListEntry
+	dnsHostMu       sync.RWMutex
+	dnsHostIPs      []net.IP
+	dnsHostExpiry   time.Time
+
+	tailnetDomainMu     sync.RWMutex
+	tailnetDomain       string
+	tailnetDomainExpiry time.Time
 
 	eventMu       sync.RWMutex
 	eventSubs     map[chan *db.AuditEvent]struct{}
@@ -168,9 +187,10 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 				Name:               "base",
 				IsDefault:          true,
 				Version:            1,
-				SecretsEnabled:     true,
-				BoatCredsEnabled:   true,
-				AgentCredsEnabled:  true,
+				SecretsEnabled:      true,
+				ComputeCredsEnabled: true,
+				BoatCredsEnabled:    true,
+				AgentCredsEnabled:   true,
 				CredentialProfile:  "Owner's default",
 				GitHubReposEnabled: false,
 				GitHubRepos:        []string{},
@@ -207,23 +227,62 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 				}
 				authMgr = auth.NewManager(queries, mk, 7*24*time.Hour, adminSecret)
 
-				// Seed default admin if no users exist
+				adminUsername := strings.TrimSpace(strings.ToLower(cfg.Server.AdminUsername))
+				if adminUsername == "" {
+					adminUsername = strings.TrimSpace(strings.ToLower(os.Getenv("COMPUTE_ADMIN_USERNAME")))
+				}
+				if adminUsername == "" {
+					adminUsername = "admin"
+				}
+				adminEmail := strings.TrimSpace(cfg.Server.AdminEmail)
+				if adminEmail == "" {
+					adminEmail = strings.TrimSpace(os.Getenv("COMPUTE_ADMIN_EMAIL"))
+				}
+				if adminEmail == "" {
+					adminEmail = "admin@compute.local"
+				}
+				authMgr.SetAdminIdentity(adminUsername, adminEmail)
+
+				// Bootstrap or sync configured admin account on startup
 				ctx := context.Background()
+				adminPW := cfg.Server.AdminPassword
+				if adminPW == "" {
+					adminPW = os.Getenv("COMPUTE_ADMIN_PASSWORD")
+				}
 				users, _ := queries.ListUsers(ctx)
-				if len(users) == 0 {
-					adminPW := cfg.Server.AdminPassword
-					if adminPW == "" {
-						adminPW = os.Getenv("COMPUTE_ADMIN_PASSWORD")
+				hasAdmin := false
+				adminRoleCount := 0
+				for _, u := range users {
+					if u == nil {
+						continue
 					}
-					if adminPW == "" {
-						pwBytes := make([]byte, 32)
-						if _, err := rand.Read(pwBytes); err != nil {
-							panic("failed to generate secure random admin password: " + err.Error())
-						}
-						adminPW = hex.EncodeToString(pwBytes)
-						log.Printf("[computed] SECURITY NOTICE: No admin password configured. Generated secure random admin password: %s", adminPW)
+					if u.Role == "admin" {
+						adminRoleCount++
 					}
-					_, _ = authMgr.Signup(ctx, "admin@compute.local", "admin", "Administrator", adminPW, "admin")
+					if u.Username == adminUsername || strings.EqualFold(u.Email, adminEmail) || u.ID == "usr_system_admin" ||
+						(u.Role == "admin" && (u.Username == "admin" || strings.EqualFold(u.Email, "admin@compute.local"))) {
+						hasAdmin = true
+						break
+					}
+				}
+				if !hasAdmin && adminRoleCount == 1 {
+					hasAdmin = true
+				}
+				if !hasAdmin && adminPW == "" {
+					pwBytes := make([]byte, 32)
+					if _, err := rand.Read(pwBytes); err != nil {
+						panic("failed to generate secure random admin password: " + err.Error())
+					}
+					adminPW = hex.EncodeToString(pwBytes)
+					credPath := filepath.Join(masterDir, "admin-password")
+					if err := os.WriteFile(credPath, []byte(adminPW+"\n"), 0600); err != nil {
+						log.Printf("[computed] Warning: no admin password configured and the one-time credential file could not be written: %v", err)
+					} else {
+						log.Printf("[computed] SECURITY NOTICE: no admin password configured; a one-time credential was written to %s (mode 0600). Set COMPUTE_ADMIN_PASSWORD to manage it explicitly.", credPath)
+					}
+				}
+				if _, err := authMgr.EnsureAdmin(ctx, adminEmail, adminUsername, "Administrator", adminPW); err != nil {
+					log.Printf("[computed] Warning: failed to bootstrap admin account (%v)", err)
 				}
 			} else {
 				log.Printf("[computed] Warning: failed to initialize auth store (%v)", err)
@@ -234,21 +293,36 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	}
 
 	s := &Server{
-		vmMgr:     vmMgr,
-		cfg:       cfg,
-		mux:       http.NewServeMux(),
-		workers:   workers,
-		scheduler: sched,
-		jobRunner: jobRunner,
-		authMgr:   authMgr,
-		metaStore: metaStore,
-		fcVersion: fcVersion,
-		eventSubs: make(map[chan *db.AuditEvent]struct{}),
+		vmMgr:       vmMgr,
+		cfg:         cfg,
+		mux:         http.NewServeMux(),
+		workers:     workers,
+		scheduler:   sched,
+		jobRunner:   jobRunner,
+		authMgr:     authMgr,
+		metaStore:   metaStore,
+		fcVersion:   fcVersion,
+		eventSubs:   make(map[chan *db.AuditEvent]struct{}),
+		vmListCache: make(map[string]vmListEntry),
 	}
 
 	var domains []string
 	if cfg.Network.BaseDomain != "" {
 		domains = append(domains, cfg.Network.BaseDomain)
+	}
+	// The DNS zones double as ingress wildcard zones so HTTP requests to
+	// <sandbox>[.<port>][.<username>].<zone> route to guest ports.
+	for _, zone := range cfg.DNSBaseDomains() {
+		dup := false
+		for _, d := range domains {
+			if strings.EqualFold(d, zone) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			domains = append(domains, zone)
+		}
 	}
 	domains = append(domains, "preview.localhost", "compute.internal", "compute.dev", "localhost")
 
@@ -358,6 +432,9 @@ func getActor(r *http.Request) string {
 
 func (s *Server) SetAuthManager(mgr *auth.Manager) {
 	s.authMgr = mgr
+	if mgr != nil {
+		mgr.SetAdminIdentity(s.cfg.Server.AdminUsername, s.cfg.Server.AdminEmail)
+	}
 	s.configureAuthIntegrations()
 }
 
@@ -553,17 +630,21 @@ func (s *Server) wrapAuth(handler http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("/api/v1/ready", s.handleReady)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
 
 	// Auth & Identity
+	s.mux.HandleFunc("/api/v1/auth/status", s.handleAuthStatus)
 	s.mux.HandleFunc("/api/v1/auth/signup", s.handleAuthSignup)
 	s.mux.HandleFunc("/api/v1/auth/login", s.handleAuthLogin)
 	s.mux.HandleFunc("/api/v1/auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("/api/v1/auth/me", s.wrapAuth(s.handleAuthMe))
 	s.mux.HandleFunc("/api/v1/auth/keys", s.wrapAuth(s.handleAuthKeys))
 	s.mux.HandleFunc("/api/v1/auth/keys/", s.wrapAuth(s.handleAuthKeyActions))
+	s.mux.HandleFunc("/api/v1/users", s.wrapAuth(s.handleUsers))
+	s.mux.HandleFunc("/api/v1/users/", s.wrapAuth(s.handleUserActions))
 	s.mux.HandleFunc("/api/v1/orgs", s.wrapAuth(s.handleOrgs))
 	s.mux.HandleFunc("/api/v1/orgs/", s.wrapAuth(s.handleOrgActions))
 	s.mux.HandleFunc("/api/v1/limits", s.wrapAuth(s.handleLimits))
@@ -576,9 +657,6 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
 	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
-	s.mux.HandleFunc("/api/v1/tailscale/status", s.wrapAuth(s.handleTailscaleStatus))
-	s.mux.HandleFunc("/api/v1/tailscale/policy", s.wrapAuth(s.handleTailscalePolicy))
-	s.mux.HandleFunc("/api/v1/tailscale/cleanup", s.wrapAuth(s.handleTailscaleCleanup))
 	s.mux.HandleFunc("/api/v1/network", s.wrapAuth(s.handleNetworkInfo))
 	s.mux.HandleFunc("/api/v1/network/allocations", s.wrapAuth(s.handleNetworkAllocations))
 	s.mux.HandleFunc("/api/v1/network/inspect/", s.wrapAuth(s.handleNetworkInspect))
@@ -602,6 +680,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/jobs/", s.wrapAuth(s.handleJobActions))
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
 	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
+	s.mux.HandleFunc("/", s.handleRoot)
 
 	// Volumes
 	s.mux.HandleFunc("/api/v1/volumes", s.wrapAuth(s.handleVolumes))
@@ -634,10 +713,25 @@ func (s *Server) routes() {
 	// Port Forwards
 	s.mux.HandleFunc("/api/v1/network/port-forwards", s.wrapAuth(s.handlePortForwards))
 	s.mux.HandleFunc("/api/v1/network/port-forwards/", s.wrapAuth(s.handlePortForwardActions))
+
+	// DNS responder status (sandbox hostname routing)
+	s.mux.HandleFunc("/api/v1/dns/status", s.wrapAuth(s.handleDNSStatus))
 }
 
 func (s *Server) SetGUIHandler(h http.Handler) {
-	s.mux.Handle("/", h)
+	s.guiHandler = h
+}
+
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if (r.URL.Path == "/" || r.URL.Path == "/deployments") && deploymentsIndexEnabled() {
+		s.handleDeploymentsIndex(w, r)
+		return
+	}
+	if s.guiHandler != nil {
+		s.guiHandler.ServeHTTP(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 // ResolveTarget resolves target microVM details for the unified ingress reverse proxy.
@@ -661,6 +755,48 @@ func (s *Server) ResolveTarget(ctx context.Context, idOrName string) (*network.T
 		Status:    string(v.Status),
 		IPAddress: v.IPAddress,
 	}, nil
+}
+
+// ResolveTargetForOwner resolves a sandbox within a specific owner's
+// namespace, backing the "<sandbox>.<username>.<zone>" ingress wildcard form.
+// ownerLabel is the username DNS label; the resolved VM must belong to that
+// user (or their personal organization), keeping tenant isolation intact.
+func (s *Server) ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel string) (*network.TargetInfo, error) {
+	if s.vmMgr == nil {
+		return nil, fmt.Errorf("vm manager not available")
+	}
+	if strings.TrimSpace(idOrName) == "" || strings.TrimSpace(ownerLabel) == "" {
+		return nil, fmt.Errorf("sandbox %q not found", idOrName)
+	}
+
+	var ownerIDs []string
+	if !s.authEnabled() {
+		ownerIDs = []string{"default"}
+	} else {
+		user, ok := s.dnsUserForLabel(ownerLabel)
+		if !ok {
+			return nil, fmt.Errorf("unknown owner %q", ownerLabel)
+		}
+		ownerIDs = []string{user.ID, auth.PersonalOrgID(user.ID)}
+	}
+
+	want := strings.ToLower(strings.TrimSpace(idOrName))
+	for _, v := range s.listVMsForOwnersCached(ctx, ownerIDs) {
+		if v == nil {
+			continue
+		}
+		if strings.EqualFold(v.Name, idOrName) || strings.EqualFold(v.ID, idOrName) ||
+			strings.EqualFold(v.InternalID, idOrName) || sandboxLabelForVM(v) == want {
+			return &network.TargetInfo{
+				ID:        v.ID,
+				Name:      v.Name,
+				OwnerID:   v.OwnerID,
+				Status:    string(v.Status),
+				IPAddress: v.IPAddress,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("sandbox %q not found", idOrName)
 }
 
 // IsPortPublic checks whether a given guest port on a VM is configured for public exposure.
@@ -690,6 +826,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version": version.Version,
 		"name":    "Compute Daemon",
 	})
+}
+
+// handleReady is the readiness probe: it verifies that the host can actually
+// run sandboxes (KVM, firecracker, images, SSH key, database, cgroups, bridge)
+// and returns 503 with remediation when a critical component is missing.
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	report := doctor.Run(s.cfg)
+	w.Header().Set("Content-Type", "application/json")
+	if !report.OK {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(report)
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -897,6 +1050,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		if vms == nil {
 			vms = []*db.VM{}
 		}
+		s.decorateVMHostnames(vms)
 		json.NewEncoder(w).Encode(vms)
 
 	case http.MethodPost:
@@ -905,8 +1059,17 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		if ownerID, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
+		} else if req.SSHPublicKey == "" && req.SSHKeyID == "" && !req.SSHNoDefaultKey && req.OwnerID == ownerID {
+			// Include the caller's default account key unless the request
+			// chose a key explicitly or opted out. Admins creating sandboxes
+			// for another owner do not get their own default key injected.
+			if def, err := s.vmMgr.GetStore().GetDefaultSSHKey(ctx, ownerID); err != nil {
+				log.Printf("[ssh-keys] default key lookup for %s: %v", ownerID, err)
+			} else if def != nil {
+				req.SSHKeyID = def.ID
+			}
 		}
 
 		if req.CloneFrom != "" {
@@ -977,7 +1140,11 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
+			if strings.Contains(err.Error(), "base rootfs image not found") || strings.Contains(err.Error(), "image not found") || strings.Contains(err.Error(), "custom image rootfs not found") || (strings.Contains(err.Error(), "template '") && strings.Contains(err.Error(), "' not found")) {
+				httpError(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -990,7 +1157,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			"vcpus":     created.VCPUs,
 			"memory_mb": created.MemoryMB,
 		})
-		json.NewEncoder(w).Encode(created)
+		s.encodeVM(w, created)
 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1025,14 +1192,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	// lookup would otherwise resolve to another tenant's VM.
 	requestedID := vmID
 	vmID = vmIdentifier(v)
+	displayName := v.Name
+	if displayName == "" {
+		displayName = requestedID
+	}
 
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			json.NewEncoder(w).Encode(v)
+			s.encodeVM(w, v)
 		case http.MethodDelete:
 			if v.Protected {
-				httpError(w, fmt.Sprintf("item %s is protected against deletion", vmID), http.StatusBadRequest)
+				httpError(w, fmt.Sprintf("item %s is protected against deletion", displayName), http.StatusBadRequest)
 				return
 			}
 			s.removePortForwardsForVM(ctx, v, true)
@@ -1044,7 +1215,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			if delErr != nil {
 				if strings.Contains(delErr.Error(), "protected against deletion") {
-					httpError(w, delErr.Error(), http.StatusBadRequest)
+					httpError(w, fmt.Sprintf("item %s is protected against deletion", displayName), http.StatusBadRequest)
 					return
 				}
 				httpError(w, delErr.Error(), http.StatusInternalServerError)
@@ -1061,11 +1232,15 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
 			if err != nil {
+				if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
+					httpError(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
-			json.NewEncoder(w).Encode(updated)
+			s.encodeVM(w, updated)
 
 		default:
 			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1099,7 +1274,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	case "clone":
 		var req vm.CreateRequest
 		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
@@ -1115,16 +1293,32 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") {
+			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if req.AutoStart {
+			if err := s.enforceRunQuota(ctx, r, cloned); err != nil {
+				httpError(w, err.Error(), http.StatusTooManyRequests)
+				return
+			}
+			if runErr := s.vmMgr.RunVM(ctx, cloned.ID); runErr != nil {
+				log.Printf("[computed] clone %s auto_start skipped/failed: %v", cloned.ID, runErr)
+			} else if started, getErr := s.vmMgr.GetVM(ctx, cloned.ID); getErr == nil && started != nil {
+				cloned = started
+				if cloned.Status == db.StatusRunning {
+					s.mountAttachedVolumes(ctx, cloned)
+					s.applyEnvironment(ctx, cloned)
+					s.applyPortForwardsForVM(ctx, cloned)
+				}
+			}
+		}
 		s.recordEvent("sandbox.cloned", getActor(r), cloned.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": cloned.ID})
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(cloned)
+		s.encodeVM(w, cloned)
 
 	case "run", "start":
 		if err := s.enforceRunQuota(ctx, r, v); err != nil {
@@ -1144,7 +1338,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "save-state", "snapshot":
 		if err := s.vmMgr.SaveState(ctx, vmID); err != nil {
@@ -1153,7 +1347,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		v, _ := s.vmMgr.GetVM(ctx, vmID)
 		s.recordEvent("snapshot.created", getActor(r), vmID, "delivered", 50, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "resume":
 		if err := s.enforceRunQuota(ctx, r, v); err != nil {
@@ -1172,7 +1366,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.applyPortForwardsForVM(ctx, v)
 		}
 		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "stop":
 		if _, isAdmin := s.currentOwnerID(r); isAdmin {
@@ -1189,7 +1383,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			s.removePortForwardsForVM(ctx, v, false)
 		}
 		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
-		json.NewEncoder(w).Encode(v)
+		s.encodeVM(w, v)
 
 	case "exec":
 		var req vm.ExecRequest
@@ -1265,20 +1459,69 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(updated)
 
+	case "network-isolation":
+		var req vm.UpdateVMConfigRequest
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		q := r.URL.Query()
+		if val := strings.TrimSpace(q.Get("network_isolation")); val != "" {
+			req.NetworkIsolation = &val
+		} else if val := strings.TrimSpace(q.Get("mode")); val != "" {
+			req.NetworkIsolation = &val
+		}
+		if val := strings.TrimSpace(q.Get("isolated")); val != "" {
+			lower := strings.ToLower(val)
+			switch lower {
+			case "on", "true", "1", "yes", "enabled":
+				b := true
+				req.Isolated = &b
+			case "off", "false", "0", "no", "disabled":
+				b := false
+				req.Isolated = &b
+			default:
+				httpError(w, fmt.Sprintf("invalid isolated query parameter %q: expected boolean", val), http.StatusBadRequest)
+				return
+			}
+		}
+		if req.NetworkIsolation == nil && req.Isolated == nil {
+			httpError(w, "missing network_isolation or isolated parameter", http.StatusBadRequest)
+			return
+		}
+		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		if err != nil {
+			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
+				httpError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("sandbox.network_isolation_updated", getActor(r), vmID, "delivered", 20, map[string]string{"network_isolation": updated.NetworkIsolation})
+		s.encodeVM(w, updated)
+
 	case "config":
 		var req vm.UpdateVMConfigRequest
 		if r.Body != nil {
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 				return
 			}
 		}
 		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
 		if err != nil {
+			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
+				httpError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(updated)
+		s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
+		s.encodeVM(w, updated)
 
 	case "protect":
 		t := true
@@ -1299,6 +1542,17 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		}
 		s.recordEvent("sandbox.unprotected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": false})
 		json.NewEncoder(w).Encode(updated)
+
+	case "reconcile-ssh", "reconcile":
+		if err := s.vmMgr.SyncSSHKeysForVM(ctx, v.ID); err != nil {
+			httpError(w, "failed to reconcile SSH access: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "reconciled",
+			"sandbox": v.Name,
+			"id":      v.ID,
+		})
 
 	default:
 		httpError(w, "unknown action: "+action, http.StatusBadRequest)
@@ -1606,7 +1860,10 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 		}
 		var req vm.CreateRequest
 		if r.Body != nil {
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
@@ -1884,8 +2141,38 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateKeyRequest struct {
-	Name      string `json:"name"`
-	PublicKey string `json:"public_key"`
+	Name         string `json:"name"`
+	PublicKey    string `json:"public_key"`
+	AllSandboxes bool   `json:"all_sandboxes"`
+	// IsDefault makes the new key the owner's default: it is embedded into
+	// every new sandbox unless the creation request chooses otherwise. When
+	// omitted, the first key on an account becomes the default automatically.
+	IsDefault bool `json:"is_default,omitempty"`
+}
+
+type UpdateKeyRequest struct {
+	Name         *string `json:"name"`
+	PublicKey    *string `json:"public_key"`
+	AllSandboxes *bool   `json:"all_sandboxes"`
+	IsDefault    *bool   `json:"is_default"`
+}
+
+// syncAccountSSHKeys reconciles account-wide keys for a key's owner. It never
+// fails the key operation: per-sandbox failures are reported in the response
+// payload and logged.
+func (s *Server) syncAccountSSHKeys(ctx context.Context, key *db.SSHKey) *vm.SSHKeySyncResult {
+	if key == nil || s.vmMgr == nil {
+		return nil
+	}
+	result, err := s.vmMgr.SyncSSHKeysForOwner(ctx, key.OwnerID)
+	if err != nil {
+		log.Printf("[ssh-keys] reconcile owner %s: %v", key.OwnerID, err)
+		return &vm.SSHKeySyncResult{Failed: []vm.SSHKeySyncFailure{{Error: err.Error()}}}
+	}
+	if len(result.Failed) > 0 {
+		log.Printf("[ssh-keys] reconcile owner %s: %d applied, %d failed", key.OwnerID, len(result.Applied), len(result.Failed))
+	}
+	return result
 }
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
@@ -1950,21 +2237,49 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 		_, _ = rand.Read(b)
 		keyID := fmt.Sprintf("ssh_%s", hex.EncodeToString(b))
 
+		// The first key an account saves becomes its default automatically so
+		// new sandboxes embed it without any extra configuration.
+		isDefault := req.IsDefault
+		if !isDefault {
+			existing, err := s.vmMgr.GetStore().ListSSHKeys(r.Context(), ownerID)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to list keys: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
+			isDefault = len(existing) == 0
+		}
+
 		key := &db.SSHKey{
-			ID:          keyID,
-			OwnerID:     ownerID,
-			Name:        req.Name,
-			PublicKey:   req.PublicKey,
-			Fingerprint: fingerprint,
-			CreatedAt:   time.Now().UTC(),
+			ID:           keyID,
+			OwnerID:      ownerID,
+			Name:         req.Name,
+			PublicKey:    req.PublicKey,
+			Fingerprint:  fingerprint,
+			AllSandboxes: req.AllSandboxes,
+			IsDefault:    isDefault,
+			CreatedAt:    time.Now().UTC(),
 		}
 
 		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
 			return
 		}
+		if key.IsDefault {
+			if err := s.vmMgr.GetStore().SetDefaultSSHKey(r.Context(), key.OwnerID, key.ID); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to set default key: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
+		}
 
-		s.recordEvent("ssh_key.created", getActor(r), key.Name, "delivered", 15, map[string]string{"name": key.Name, "fingerprint": key.Fingerprint})
+		if key.AllSandboxes {
+			s.syncAccountSSHKeys(r.Context(), key)
+		}
+		s.recordEvent("ssh_key.created", getActor(r), key.Name, "delivered", 15, map[string]interface{}{
+			"name":          key.Name,
+			"fingerprint":   key.Fingerprint,
+			"all_sandboxes": key.AllSandboxes,
+			"is_default":    key.IsDefault,
+		})
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(key)
 
@@ -1974,10 +2289,33 @@ func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
-	idOrName := strings.TrimPrefix(r.URL.Path, "/api/v1/keys/")
-	idOrName = strings.TrimSpace(idOrName)
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/keys/"), "/")
+	parts := strings.Split(rest, "/")
+	idOrName := ""
+	if len(parts) > 0 {
+		idOrName = strings.TrimSpace(parts[0])
+	}
+	action := ""
+	if len(parts) > 1 {
+		action = strings.ToLower(strings.TrimSpace(parts[1]))
+	}
 	if idOrName == "" {
 		http.Error(w, `{"error":"key id or name required"}`, http.StatusBadRequest)
+		return
+	}
+
+	if idOrName == "reconcile" {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		ownerID, _, _ := s.callerIdentity(r)
+		res, err := s.vmMgr.SyncSSHKeysForOwner(r.Context(), ownerID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"reconciliation failed: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "reconciled", "sync": res})
 		return
 	}
 
@@ -1991,8 +2329,103 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if action != "" {
+		if action != "apply" {
+			http.Error(w, `{"error":"unknown key action"}`, http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		key.AllSandboxes = true
+		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		sync := s.syncAccountSSHKeys(r.Context(), key)
+		s.recordEvent("ssh_key.applied", getActor(r), key.Name, "delivered", 25, map[string]interface{}{
+			"id": key.ID, "name": key.Name, "all_sandboxes": true,
+		})
+		json.NewEncoder(w).Encode(map[string]interface{}{"key": key, "sync": sync})
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
+		json.NewEncoder(w).Encode(key)
+
+	case http.MethodPatch, http.MethodPut:
+		var req UpdateKeyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request payload"}`, http.StatusBadRequest)
+			return
+		}
+		oldKey := key.PublicKey
+		if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" {
+				http.Error(w, `{"error":"name cannot be empty"}`, http.StatusBadRequest)
+				return
+			}
+			key.Name = name
+		}
+		keyChanged := false
+		if req.PublicKey != nil {
+			pub := strings.TrimSpace(*req.PublicKey)
+			if pub == "" {
+				http.Error(w, `{"error":"public_key cannot be empty"}`, http.StatusBadRequest)
+				return
+			}
+			parsed, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pub))
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"invalid public key format: %v"}`, err), http.StatusBadRequest)
+				return
+			}
+			if pub != key.PublicKey {
+				keyChanged = true
+			}
+			key.PublicKey = pub
+			key.Fingerprint = ssh.FingerprintSHA256(parsed)
+		}
+		if req.AllSandboxes != nil {
+			key.AllSandboxes = *req.AllSandboxes
+		}
+		if req.IsDefault != nil {
+			key.IsDefault = *req.IsDefault
+		}
+		if err := s.vmMgr.GetStore().SaveSSHKey(r.Context(), key); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"failed to save key: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+		if req.IsDefault != nil && *req.IsDefault {
+			// Clear the flag from the owner's other keys; SaveSSHKey above
+			// already persisted is_default for this row.
+			if err := s.vmMgr.GetStore().SetDefaultSSHKey(r.Context(), key.OwnerID, key.ID); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":"failed to set default key: %v"}`, err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		// Keep existing sandboxes in sync: update per-sandbox references when the
+		// key material changed, then reconcile the owner's managed key set.
+		if keyChanged && !key.AllSandboxes {
+			if affected, err := s.vmMgr.ReplaceSandboxSSHKey(r.Context(), key.OwnerID, oldKey, key.PublicKey); err != nil {
+				log.Printf("[ssh-keys] update sandbox references for %s: %v", key.ID, err)
+			} else {
+				for _, vmID := range affected {
+					if err := s.vmMgr.SyncSSHKeysForVM(r.Context(), vmID); err != nil {
+						log.Printf("[ssh-keys] sync %s after key update: %v", vmID, err)
+					}
+				}
+			}
+		}
+		if keyChanged || (req.AllSandboxes != nil) {
+			s.syncAccountSSHKeys(r.Context(), key)
+		}
+		s.recordEvent("ssh_key.updated", getActor(r), key.Name, "delivered", 15, map[string]interface{}{
+			"id": key.ID, "name": key.Name, "all_sandboxes": key.AllSandboxes, "is_default": key.IsDefault,
+		})
 		json.NewEncoder(w).Encode(key)
 
 	case http.MethodDelete:
@@ -2000,7 +2433,11 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to delete key: %v"}`, err), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("ssh_key.deleted", getActor(r), key.Name, "delivered", 15, map[string]string{"id": key.ID, "name": key.Name})
+		// Removing an account-wide key also removes it from existing sandboxes.
+		if key.AllSandboxes {
+			s.syncAccountSSHKeys(r.Context(), key)
+		}
+		s.recordEvent("ssh_key.deleted", getActor(r), key.Name, "delivered", 15, map[string]interface{}{"id": key.ID, "name": key.Name})
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": key.ID})
 
@@ -2769,8 +3206,8 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := s.vmMgr.GetStore().ConsumeWorkerTokenAtomic(r.Context(), workerToken); err != nil {
-			http.Error(w, "unauthorized: invalid or already consumed worker token", http.StatusUnauthorized)
+		if err := s.vmMgr.GetStore().AuthorizeWorkerToken(r.Context(), workerToken, r.Header.Get("X-Worker-Name")); err != nil {
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 	}
@@ -2923,9 +3360,9 @@ func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
 			poolID = "default"
 		}
 		name := req.Name
-		if name == "" {
-			name = "worker-token"
-		}
+		// An empty name means "unbound": the daemon binds the token to the
+		// first worker that enrolls with it, and that worker may reconnect
+		// later. A caller-supplied name pins enrollment to a worker name.
 		tokenStr := fmt.Sprintf("mft_%s", uuid.NewString()[:16])
 		expiresAt := time.Now().UTC().Add(30 * time.Minute)
 		now := time.Now().UTC()
@@ -2972,7 +3409,6 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 		fallbackVCPUs, fallbackMemMB, fallbackDiskMB = getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
 	}
 	for _, n := range nodes {
-		var capTailscaleIP string
 		if n.TotalVCPUs == 0 && n.CapabilitiesJSON != "" {
 			var cap struct {
 				VCPUs        int    `json:"vcpus"`
@@ -2980,7 +3416,6 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				MemoryMB     int    `json:"memory_mb"`
 				DiskMB       int    `json:"disk_mb"`
 				Architecture string `json:"architecture"`
-				TailscaleIP  string `json:"tailscale_ip"`
 			}
 			if err := json.Unmarshal([]byte(n.CapabilitiesJSON), &cap); err == nil {
 				if cap.VCPUs > 0 {
@@ -2997,7 +3432,6 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				if n.Arch == "" && cap.Architecture != "" {
 					n.Arch = cap.Architecture
 				}
-				capTailscaleIP = cap.TailscaleIP
 			}
 		}
 		if n.TotalVCPUs == 0 && fallbackVCPUs > 0 {
@@ -3019,15 +3453,19 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 			n.FCVersion = s.fcVersion
 		}
 		if n.UnderlayIP == "" {
-			// Prefer the node's real tailnet address from its capabilities
-			// before falling back to loopback.
-			if capTailscaleIP != "" {
-				n.UnderlayIP = capTailscaleIP
-			} else {
-				n.UnderlayIP = "127.0.0.1"
-			}
+			n.UnderlayIP = "127.0.0.1"
 		}
 	}
+}
+
+// workerUnderlayIP extracts the node's network address from its capability map.
+func workerUnderlayIP(caps map[string]interface{}) string {
+	if caps != nil {
+		if v, ok := caps["underlay_ip"].(string); ok && v != "" {
+			return v
+		}
+	}
+	return "127.0.0.1"
 }
 
 func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {

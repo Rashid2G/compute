@@ -1,67 +1,185 @@
-version: '3.8'
+name: compute
+
+# Host networking is mandatory for computed and compute-worker: the daemon
+# creates the sandbox bridge (mft3br0), TAP devices, NAT/iptables rules and a
+# DNS responder in its network namespace. In bridge mode those objects live
+# inside the container namespace, so host clients cannot reach guest IPs and
+# DNS/port-forward answers are unusable. Host mode keeps them on the host.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-daemon-image: &daemon-image
+  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-1.0.0}
+  build:
+    context: .
+    dockerfile: Dockerfile.daemon
+
+x-worker-image: &worker-image
+  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-1.0.0}
+  build:
+    context: .
+    dockerfile: Dockerfile.worker
+
+x-data-volume: &data-volume
+  ${COMPUTE_HOST_DATA_DIR:-./data}:/var/lib/compute
 
 services:
+  # One-shot bootstrap: downloads/verifies base images and generates the
+  # internal SSH key before the daemon starts. Idempotent; safe on every up.
+  compute-init:
+    <<: *daemon-image
+    restart: "no"
+    network_mode: host
+    logging: *default-logging
+    volumes:
+      - *data-volume
+    environment:
+      COMPUTE_DATA_DIR: /var/lib/compute
+      COMPUTE_IMAGES_DIR: /var/lib/compute/images
+      COMPUTE_IMAGES_MODE: ${COMPUTE_IMAGES_MODE:-build}
+      COMPUTE_IMAGE_MANIFEST_URL: ${COMPUTE_IMAGE_MANIFEST_URL:-}
+      COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
+      COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
+      COMPUTE_SSH_KEY_PATH: /var/lib/compute/images/ssh/id_ed25519
+    entrypoint: ["/usr/local/bin/computed"]
+    command: ["init", "--images"]
+
   computed:
-    build:
-      context: .
-      dockerfile: Dockerfile.daemon
-    container_name: computed
-    hostname: computed
+    <<: *daemon-image
     restart: unless-stopped
+    # Required for the sandbox bridge/TAP/NAT/DNS/edge objects to live on the
+    # host instead of a private container network namespace.
+    network_mode: host
     privileged: true
     # Manage host cgroups v2 (per-VM CPU/memory/pids limits) instead of the
     # container's private cgroup namespace, where controllers cannot be enabled.
     cgroup: host
-    ports:
-      - "18080:18080"
+    stop_grace_period: 30s
+    logging: *default-logging
+    ulimits:
+      nofile: 65536
+    depends_on:
+      compute-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      COMPUTE_DATA_DIR: /var/lib/compute
+      COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-127.0.0.1}
+      COMPUTE_API_PORT: ${COMPUTE_API_PORT:-18080}
+      COMPUTE_AUTH_ENABLED: ${COMPUTE_AUTH_ENABLED:-true}
+      COMPUTE_SIGNUP_ENABLED: ${COMPUTE_SIGNUP_ENABLED:-false}
+      COMPUTE_ADMIN_USERNAME: ${COMPUTE_ADMIN_USERNAME:-admin}
+      COMPUTE_ADMIN_EMAIL: ${COMPUTE_ADMIN_EMAIL:-admin@compute.local}
+      COMPUTE_ADMIN_PASSWORD: ${COMPUTE_ADMIN_PASSWORD:-}
+      COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
+      COMPUTE_TLS_CERT_FILE: ${COMPUTE_TLS_CERT_FILE:-}
+      COMPUTE_TLS_KEY_FILE: ${COMPUTE_TLS_KEY_FILE:-}
+      COMPUTE_DNS_ENABLED: ${COMPUTE_DNS_ENABLED:-false}
+      COMPUTE_DNS_BASE_DOMAIN: ${COMPUTE_DOMAIN:-}
+      COMPUTE_EDGE_LISTEN: ${COMPUTE_EDGE_LISTEN:-}
+      # Defensive marker: the daemon warns if it detects a private container
+      # network namespace while this is unset.
+      COMPUTE_HOST_NETWORK: "1"
     volumes:
-      - ${COMPUTE_DATA_DIR:-./data}:/var/lib/compute
-      - ./config:/etc/compute:ro
+      - *data-volume
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
       - /dev/kvm:/dev/kvm
     devices:
       - /dev/kvm:/dev/kvm
-    environment:
-      - COMPUTE_DATA_DIR=/var/lib/compute
-      - COMPUTE_DAEMON=0.0.0.0:18080
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:18080/api/v1/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
+      test: ["CMD", "curl", "-fsS", "http://${COMPUTE_HEALTHCHECK_HOST:-127.0.0.1}:${COMPUTE_API_PORT:-18080}/api/v1/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
+  # Optional separate GUI container. The daemon already serves the embedded UI
+  # on its API port; use this only when you want a dedicated :8080 listener.
   compute-gui:
-    build:
-      context: .
-      dockerfile: Dockerfile.daemon
-    container_name: compute-gui
+    <<: *daemon-image
+    profiles: ["gui"]
     restart: unless-stopped
+    network_mode: host
+    logging: *default-logging
     depends_on:
       computed:
         condition: service_healthy
-    ports:
-      - "8080:8080"
-    entrypoint: ["/usr/local/bin/compute", "gui", "--addr", "0.0.0.0", "--port", "8080", "--daemon", "http://computed:18080"]
-
-  compute-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    container_name: compute-worker
-    restart: unless-stopped
-    depends_on:
-      computed:
-        condition: service_healthy
-    privileged: true
-    volumes:
-      - /dev/kvm:/dev/kvm
-      - worker-data:/var/lib/compute-worker
+    env_file:
+      - .env
     environment:
-      - COMPUTE_CONTROL_PLANE=http://computed:18080
-      - COMPUTE_WORKER_NAME=docker-worker-primary
-      - COMPUTE_WORKER_POOL=default
-    command: ["run", "--control-plane", "http://computed:18080", "--name", "docker-worker-primary", "--pool", "default"]
+      COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
+      COMPUTE_API_KEY: ${COMPUTE_API_KEY:-}
+    entrypoint:
+      - /usr/local/bin/compute
+      - gui
+      - --addr
+      - ${COMPUTE_GUI_BIND_ADDRESS:-127.0.0.1}
+      - --port
+      - ${COMPUTE_GUI_PORT:-8080}
+      - --daemon
+      - http://127.0.0.1:${COMPUTE_API_PORT:-18080}
+    command: []
+
+  # Optional multi-host worker. Experimental: keep this out of the default
+  # single-host install; the control plane runs local VMs by default.
+  compute-worker:
+    <<: *worker-image
+    profiles: ["worker"]
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    cgroup: host
+    stop_grace_period: 30s
+    logging: *default-logging
+    ulimits:
+      nofile: 65536
+    depends_on:
+      computed:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      COMPUTE_CONTROL_PLANE: http://127.0.0.1:${COMPUTE_API_PORT:-18080}
+      COMPUTE_WORKER_TOKEN: ${COMPUTE_WORKER_TOKEN:-}
+      COMPUTE_WORKER_NAME: ${COMPUTE_WORKER_NAME:-docker-worker}
+      COMPUTE_POOL_ID: ${COMPUTE_POOL_ID:-default}
+      COMPUTE_WORKER_STATE_DIR: /var/lib/compute-worker
+      COMPUTE_IMAGES_DIR: /var/lib/compute/images
+      COMPUTE_VMS_DIR: /var/lib/compute-worker/vms
+      COMPUTE_SSH_KEY_PATH: /var/lib/compute/images/ssh/id_ed25519
+      COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
+      COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
+      COMPUTE_BRIDGE_NAME: ${COMPUTE_BRIDGE_NAME:-mft3br0}
+    command: ["run"]
+    volumes:
+      - worker-data:/var/lib/compute-worker
+      - ${COMPUTE_HOST_DATA_DIR:-./data}/images:/var/lib/compute/images:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      - /dev/kvm:/dev/kvm
+    devices:
+      - /dev/kvm:/dev/kvm
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f /usr/local/bin/compute-worker >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Local development helper: builds the daemon image with the working tree and
+  # prints its version. The default install pulls/builds the pinned image via
+  # COMPUTE_VERSION; the dev profile is for exercising local changes.
+  compute-dev:
+    <<: *daemon-image
+    profiles: ["dev"]
+    network_mode: host
+    logging: *default-logging
+    entrypoint: ["/usr/local/bin/computed"]
+    command: ["version"]
 
 volumes:
   worker-data:

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  Camera,
   ChevronDown,
   ChevronRight,
   Database,
@@ -17,9 +18,11 @@ import {
   Sparkles,
   Star,
   Trash2,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { CreateSnapshotDialog } from '@/components/create-snapshot-dialog';
 import { api, errorMessage } from '@/lib/api';
 import { formatMemory, formatRelativeTime } from '@/lib/format';
 import type {
@@ -54,7 +57,7 @@ export function ImagesTemplatesPage({
   const [newRepoInput, setNewRepoInput] = useState('');
   const [secretsChecked, setSecretsChecked] = useState(true);
   const [secretsText, setSecretsText] = useState('');
-  const [boatCredsChecked, setBoatCredsChecked] = useState(true);
+  const [computeCredsChecked, setComputeCredsChecked] = useState(true);
   const [agentsCredsChecked, setAgentsCredsChecked] = useState(true);
   const [credentialProfile, setCredentialProfile] = useState("Owner's default");
   const [version, setVersion] = useState(1);
@@ -72,19 +75,18 @@ export function ImagesTemplatesPage({
     'templates',
   );
 
-  // Create Snapshot Template modal/form state
-  const [createTplOpen, setCreateTplOpen] = useState(false);
-  const [tplSourceVM, setTplSourceVM] = useState('');
-  const [tplName, setTplName] = useState('');
-  const [tplDesc, setTplDesc] = useState('');
-  const [creatingTpl, setCreatingTpl] = useState(false);
+  // Create Snapshot modal state
+  const [createSnapOpen, setCreateSnapOpen] = useState(false);
+
+  // Launch Sandbox from Snapshot modal state
+  const [launchModalTpl, setLaunchModalTpl] = useState<Template | null>(null);
+  const [launchName, setLaunchName] = useState('');
+  const [launchAutoStart, setLaunchAutoStart] = useState(true);
 
   // Build Custom Rootfs Image modal/form state
   const [buildImgOpen, setBuildImgOpen] = useState(false);
   const [imgName, setImgName] = useState('');
-  const [imgBase, setImgBase] = useState('ubuntu');
   const [imgPackages, setImgPackages] = useState('curl, git, jq, htop');
-  const [buildingImg, setBuildingImg] = useState(false);
 
   const applyProfile = useCallback((p: EnvironmentProfileRecord) => {
     setSelectedProfileName(p.name);
@@ -93,7 +95,9 @@ export function ImagesTemplatesPage({
     setGithubRepos(p.github_repos || []);
     setSecretsChecked(Boolean(p.secrets_enabled));
     setSecretsText(p.secrets || '');
-    setBoatCredsChecked(Boolean(p.boat_credentials_enabled));
+    setComputeCredsChecked(
+      Boolean(p.compute_credentials_enabled ?? p.boat_credentials_enabled),
+    );
     setAgentsCredsChecked(Boolean(p.agent_credentials_enabled));
     setCredentialProfile(p.credential_profile || "Owner's default");
     setVersion(p.version || 1);
@@ -143,7 +147,7 @@ export function ImagesTemplatesPage({
         github_repos: githubRepos,
         secrets_enabled: secretsChecked,
         secrets: secretsText,
-        boat_credentials_enabled: boatCredsChecked,
+        compute_credentials_enabled: computeCredsChecked,
         agent_credentials_enabled: agentsCredsChecked,
         credential_profile: credentialProfile,
       });
@@ -169,7 +173,7 @@ export function ImagesTemplatesPage({
         github_repos: [],
         secrets_enabled: false,
         secrets: '',
-        boat_credentials_enabled: false,
+        compute_credentials_enabled: false,
         agent_credentials_enabled: false,
         credential_profile: "Owner's default",
       });
@@ -196,68 +200,65 @@ export function ImagesTemplatesPage({
     }
   }
 
-  async function handleCreateTemplate(e: React.FormEvent) {
-    e.preventDefault();
-    if (!tplSourceVM || !tplName.trim()) return;
-    setCreatingTpl(true);
-    try {
-      await api.createTemplate({
-        vm_id: tplSourceVM,
-        name: tplName.trim(),
-        description: tplDesc.trim(),
-      });
-      toast.success(`Snapshot template "${tplName.trim()}" created`);
-      setCreateTplOpen(false);
-      setTplName('');
-      setTplDesc('');
-      await loadSnapshotsAndImages();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setCreatingTpl(false);
-    }
+  function openLaunchModal(tpl: Template) {
+    setLaunchModalTpl(tpl);
+    setLaunchName(`${tpl.name}-${Math.random().toString(36).slice(2, 6)}`);
+    setLaunchAutoStart(true);
   }
 
-  async function handleLaunchFromTemplate(tpl: Template) {
-    const name = `${tpl.name}-${Math.random().toString(36).slice(2, 6)}`;
+  function handleLaunchSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!launchModalTpl) return;
+    const tpl = launchModalTpl;
+    const name = launchName.trim() || `${tpl.name}-spawn`;
+    const autoStart = launchAutoStart;
+
+    setLaunchModalTpl(null);
     const toastId = toast.loading(`Launching ${name} from ${tpl.name}…`);
-    try {
-      await api.launchTemplate(tpl.id, {
-        name,
+    void api
+      .restoreSnapshot(tpl.id, name, {
         vcpus: tpl.vcpus,
         memory_mb: tpl.memory_mb,
+        auto_start: autoStart,
+      })
+      .then(() => {
+        toast.success(`Launched ${name}`, { id: toastId });
+        onRefreshCluster?.();
+        onNavigate?.('instances');
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastId });
       });
-      toast.success(`Launched ${name}`, { id: toastId });
-      onRefreshCluster?.();
-      onNavigate?.('instances');
-    } catch (err) {
-      toast.error(errorMessage(err), { id: toastId });
-    }
   }
 
-  async function handleBuildImage(e: React.FormEvent) {
+  function handleBuildImage(e: React.FormEvent) {
     e.preventDefault();
-    if (!imgName.trim()) return;
-    setBuildingImg(true);
-    try {
-      const pkgs = imgPackages
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      await api.buildImage({
-        name: imgName.trim(),
-        base_image: imgBase,
-        packages: pkgs,
+    const name = imgName.trim();
+    if (!name) return;
+    const pkgs = imgPackages
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const payload = {
+      name,
+      base_image: 'ubuntu-24.04',
+      packages: pkgs,
+    };
+    setBuildImgOpen(false);
+    setImgName('');
+
+    const toastID = toast.loading(`Starting custom rootfs build "${name}"…`);
+    void api
+      .buildImage(payload)
+      .then(async () => {
+        toast.success(`Started building custom rootfs "${name}"`, {
+          id: toastID,
+        });
+        await loadSnapshotsAndImages();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Started building custom rootfs "${imgName.trim()}"`);
-      setBuildImgOpen(false);
-      setImgName('');
-      await loadSnapshotsAndImages();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setBuildingImg(false);
-    }
   }
 
   // ============================================================================
@@ -568,8 +569,8 @@ export function ImagesTemplatesPage({
           {/* 4. Compute credentials */}
           <div className="flex items-start gap-3.5">
             <SquareCheckbox
-              checked={boatCredsChecked}
-              onChange={setBoatCredsChecked}
+              checked={computeCredsChecked}
+              onChange={setComputeCredsChecked}
               label="Compute credentials"
             />
             <div className="space-y-0.5">
@@ -701,11 +702,11 @@ export function ImagesTemplatesPage({
           {snapshotSubTab === 'templates' ? (
             <button
               type="button"
-              onClick={() => setCreateTplOpen((v) => !v)}
+              onClick={() => setCreateSnapOpen(true)}
               className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
             >
-              <Plus className="h-3.5 w-3.5" />
-              <span>Create Snapshot Template</span>
+              <Camera className="h-3.5 w-3.5" />
+              <span>Create Snapshot</span>
             </button>
           ) : (
             <button
@@ -748,79 +749,6 @@ export function ImagesTemplatesPage({
         </button>
       </div>
 
-      {createTplOpen && snapshotSubTab === 'templates' && (
-        <form
-          onSubmit={handleCreateTemplate}
-          className="border border-border bg-muted/15 p-4 space-y-3"
-        >
-          <div className="text-[13px] font-medium text-foreground">
-            Create Reusable Snapshot Template from Sandbox
-          </div>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Source Sandbox
-              </label>
-              <select
-                aria-label="Template source sandbox"
-                value={tplSourceVM}
-                onChange={(e) => setTplSourceVM(e.target.value)}
-                required
-                className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
-              >
-                <option value="">Select a sandbox…</option>
-                {vms.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name} ({v.status})
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Template Name
-              </label>
-              <input
-                type="text"
-                value={tplName}
-                onChange={(e) => setTplName(e.target.value)}
-                placeholder="ubuntu-24.04-warm-snap"
-                required
-                className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Description
-              </label>
-              <input
-                type="text"
-                value={tplDesc}
-                onChange={(e) => setTplDesc(e.target.value)}
-                placeholder="Pre-seeded runtime image"
-                className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
-              />
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setCreateTplOpen(false)}
-              className="h-8 border border-border px-3 text-[12px] text-muted-foreground"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={creatingTpl || !tplSourceVM}
-              className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white disabled:opacity-50"
-            >
-              {creatingTpl ? 'Creating…' : 'Save Template'}
-            </button>
-          </div>
-        </form>
-      )}
-
       {buildImgOpen && snapshotSubTab === 'images' && (
         <form
           onSubmit={handleBuildImage}
@@ -847,15 +775,12 @@ export function ImagesTemplatesPage({
               <label className="block text-[11px] text-muted-foreground mb-1">
                 Base Distribution
               </label>
-              <select
+              <div
                 aria-label="Base distribution"
-                value={imgBase}
-                onChange={(e) => setImgBase(e.target.value)}
-                className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
+                className="flex h-8 w-full items-center border border-border bg-muted/30 px-2.5 font-mono text-[12px] text-muted-foreground"
               >
-                <option value="ubuntu">ubuntu</option>
-                <option value="debian">debian</option>
-              </select>
+                ubuntu 24.04
+              </div>
             </div>
             <div>
               <label className="block text-[11px] text-muted-foreground mb-1">
@@ -879,10 +804,9 @@ export function ImagesTemplatesPage({
             </button>
             <button
               type="submit"
-              disabled={buildingImg}
               className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white disabled:opacity-50"
             >
-              {buildingImg ? 'Building…' : 'Start Build'}
+              Start Build
             </button>
           </div>
         </form>
@@ -915,7 +839,7 @@ export function ImagesTemplatesPage({
                         : 'No snapshot templates saved yet.'}
                     </div>
                     <p className="text-[11.5px] text-muted-foreground/80 mt-1">
-                      Snapshot any sandbox or click "Create Snapshot Template"
+                      Snapshot any sandbox or click &ldquo;Create Snapshot&rdquo;
                       to clone sandboxes in milliseconds.
                     </p>
                   </td>
@@ -951,7 +875,7 @@ export function ImagesTemplatesPage({
                       <div className="inline-flex items-center gap-1.5">
                         <button
                           type="button"
-                          onClick={() => void handleLaunchFromTemplate(tpl)}
+                          onClick={() => openLaunchModal(tpl)}
                           className="flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
                         >
                           <Play className="h-3 w-3 fill-current" />
@@ -1061,6 +985,108 @@ export function ImagesTemplatesPage({
               </tbody>
             )}
           </table>
+        </div>
+      )}
+
+      <CreateSnapshotDialog
+        vm={null}
+        vms={vms}
+        open={createSnapOpen}
+        onOpenChange={setCreateSnapOpen}
+        onCreated={() => void loadSnapshotsAndImages()}
+      />
+
+      {launchModalTpl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setLaunchModalTpl(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="launch-snapshot-title"
+            className="w-full max-w-[420px] border border-border bg-background p-6 text-foreground"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Play className="h-4 w-4 text-[#5e7ff5]" />
+                <h2
+                  id="launch-snapshot-title"
+                  className="text-[15px] font-medium text-foreground"
+                >
+                  Launch Sandbox from Snapshot
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLaunchModalTpl(null)}
+                aria-label="Close launch modal"
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mb-4 border border-border bg-muted/20 p-3 text-xs space-y-1">
+              <div className="font-medium text-foreground">
+                Snapshot: {launchModalTpl.name}
+              </div>
+              <div className="font-mono text-[11px] text-muted-foreground">
+                {launchModalTpl.vcpus} vCPU ·{' '}
+                {formatMemory(launchModalTpl.memory_mb)}
+              </div>
+            </div>
+
+            <form onSubmit={handleLaunchSubmit} className="space-y-4">
+              <div className="space-y-1">
+                <label className="block text-[12px] text-muted-foreground">
+                  New Sandbox Name
+                </label>
+                <input
+                  type="text"
+                  aria-label="Launch sandbox name"
+                  value={launchName}
+                  onChange={(e) => setLaunchName(e.target.value)}
+                  required
+                  className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  id="launch-snap-autostart"
+                  type="checkbox"
+                  checked={launchAutoStart}
+                  onChange={(e) => setLaunchAutoStart(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+                />
+                <label
+                  htmlFor="launch-snap-autostart"
+                  className="text-[12px] text-foreground cursor-pointer select-none"
+                >
+                  Start immediately after launch
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setLaunchModalTpl(null)}
+                  className="h-9 border border-border px-4 text-[12px] text-muted-foreground hover:text-foreground"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="inline-flex h-9 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[12px] font-medium text-white"
+                >
+                  <Play className="h-3 w-3 fill-current" />
+                  <span>Launch Sandbox</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

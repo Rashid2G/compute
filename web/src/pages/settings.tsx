@@ -36,52 +36,50 @@ export function SettingsPage({
   const snapshottedCount =
     stats?.snapshotted_vms ?? vms.filter((v) => v.status === 'paused').length;
   const volumeGB = volumes.reduce((acc, v) => acc + (v.size_gb || 0), 0);
-
-  // Compute hourly burn rate from live running VMs
-  const hourlyBurnRate = vms
-    .filter((v) => v.status === 'running')
-    .reduce((acc, v) => {
-      if (v.vcpus <= 2) return acc + 0.018;
-      if (v.vcpus <= 4) return acc + 0.036;
-      if (v.vcpus <= 8) return acc + 0.072;
-      return acc + 0.144;
-    }, 0);
+  const allocatedVcpus = vms.reduce((acc, v) => acc + (v.vcpus || 0), 0);
+  const allocatedRamMB = vms.reduce((acc, v) => acc + (v.memory_mb || 0), 0);
+  const allocatedDiskGB = Math.round(
+    vms.reduce((acc, v) => acc + (v.disk_mb || 51200), 0) / 1024,
+  );
+  const runningVcpus =
+    stats?.running_vcpus ??
+    vms.filter((v) => v.status === 'running').reduce((acc, v) => acc + (v.vcpus || 0), 0);
 
   return (
     <div className="space-y-6">
       <div className="space-y-1">
         <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-          Organization &amp; Billing
+          Organization &amp; Quotas
         </h1>
         <p className="text-[12px] text-muted-foreground">
-          Live per-second Firecracker usage telemetry, cluster resource
-          guardrails, and daemon runtime configuration.
+          Self-hosted Firecracker resource allocation, cluster guardrails, and
+          daemon runtime configuration.
         </p>
       </div>
 
-      {/* Live Billing & Usage Summary */}
+      {/* Live Self-Hosted Resource Allocation Summary */}
       <div className="grid grid-cols-1 md:grid-cols-3 border border-border bg-background divide-y md:divide-y-0 md:divide-x divide-border">
         <div className="p-4 space-y-1">
           <div className="text-xs text-muted-foreground">
-            Active Hourly Burn Rate
+            Allocated Compute &amp; Memory
           </div>
           <div className="font-display text-2xl font-medium text-foreground tabular">
-            ${hourlyBurnRate.toFixed(3)}/h
+            {allocatedVcpus} vCPU · {formatMemory(allocatedRamMB)}
           </div>
           <div className="font-mono text-[11px] text-muted-foreground">
-            {runningVMs} running / {totalVMs} total sandboxes
+            {runningVMs} running ({runningVcpus} vCPU active) / {totalVMs} total sandboxes
           </div>
         </div>
         <div className="p-4 space-y-1">
           <div className="text-xs text-muted-foreground">
-            Provisioned Block &amp; Snapshot Storage
+            Provisioned Storage &amp; Saved State
           </div>
           <div className="font-display text-2xl font-medium text-foreground tabular">
-            {volumeGB} GB
+            {allocatedDiskGB + volumeGB} GB
           </div>
           <div className="font-mono text-[11px] text-muted-foreground">
-            {volumes.length} volumes · {snapshottedCount}{' '}
-            {snapshottedCount === 1 ? 'paused snapshot' : 'paused snapshots'}
+            {allocatedDiskGB} GB sandbox disks · {volumeGB} GB volumes ({volumes.length}) · {snapshottedCount}{' '}
+            {snapshottedCount === 1 ? 'paused state' : 'paused states'}
           </div>
         </div>
         <div className="p-4 space-y-1">

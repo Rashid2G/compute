@@ -16,13 +16,18 @@ Usage:
   compute sandbox create [flags]
   compute sandbox start|stop|save-state|resume|delete <name|id|pattern>...
   compute sandbox protect|unprotect <name|id>
-  compute sandbox info <name|id>
+  compute sandbox network-isolation <name|id> <account|isolated>
+  compute sandbox info <name|id|hostname>
+  compute sandbox url [flags] <name|id|hostname>
+  compute sandbox file <read|write|list|mkdir|remove> <sandbox> [args...]
+  compute sandbox cp <src> <dst>
+  compute sandbox process <list|start|kill> <sandbox> [args...]
   compute sandbox exec [flags] [user@]<name|id> -- <command...>
-  compute sandbox ssh [user@]<name|id> [<command...>]
+  compute sandbox ssh [user@]<name|id|hostname> [<command...>]
 
 Commands:
-  list, ls                 List sandboxes.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key, --protected).
+  list, ls                 List sandboxes with their URL or SSH name.
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -30,7 +35,14 @@ Commands:
   delete, rm               Delete one or more sandboxes.
   protect                  Enable deletion protection on a sandbox.
   unprotect                Disable deletion protection on a sandbox.
-  info, inspect, show      Display sandbox details.
+  network-isolation        Switch sandbox network access between 'account' (all account sandboxes) and 'isolated' (own sandbox only).
+  images                   Discover available base and custom rootfs images.
+  templates                Discover available reusable sandbox templates.
+  file                     Interact with sandbox filesystem (read, write, list, mkdir, remove).
+  cp                       Copy files between local host and sandbox.
+  process, ps              Inspect and manage background processes (list, start, kill).
+  info, inspect, show      Display sandbox details, hostname, SSH command and URLs.
+  url                      Print the best HTTP URL, or the SSH name when no URL resolves.
   exec                     Execute a command inside a sandbox, streaming output live.
   ssh                      Open an SSH session to a sandbox.
 
@@ -40,9 +52,91 @@ Exec flags (place before the sandbox target):
   --timeout <seconds>      Command timeout (0 = no timeout while streaming).
   --user <username>        SSH user (default: compute, or the user@target prefix).
 
+URL flags:
+  --json                   Print the full access model as JSON.
+  --port <n>               Include the port-scoped ingress URL for guest port <n>.
+  -u, --user <name>        SSH user (default: compute).
+  -v, --verbose            Show every sandbox name plus SSH/URL hints.
+
 Target patterns support shell-style matching. Quote '*' or other patterns:
   compute sandbox delete '*'
   compute sandbox stop 'dev-*'`,
+
+	"file": `Manage files and directories inside running sandboxes.
+
+Usage:
+  compute sandbox file read <sandbox> <path> [--format text|base64]
+  compute sandbox file write <sandbox> <path> [--content <data> | --file <path> | -]
+  compute sandbox file list <sandbox> [path]
+  compute sandbox file mkdir <sandbox> <path>
+  compute sandbox file remove <sandbox> <path>
+
+Actions:
+  read                     Read and output file contents from the sandbox.
+  write                    Write data from flag, file, or stdin to a remote file.
+  list, ls                 List directory contents inside the sandbox (default: /workspace).
+  mkdir                    Create a directory tree inside the sandbox.
+  remove, rm               Delete a file or directory tree inside the sandbox.`,
+
+	"cp": `Copy files between local filesystem and sandboxes.
+
+Usage:
+  compute sandbox cp <src> <dst>
+  compute cp <src> <dst>
+
+Examples:
+  compute sandbox cp ./app.py my-box:/workspace/app.py
+  compute sandbox cp my-box:/workspace/results.json ./results.json
+  compute sandbox cp box-1:/workspace/data.bin box-2:/workspace/data.bin`,
+
+	"scp": `Copy files and directories between the local host and sandboxes (scp-style).
+
+Usage:
+  compute scp [-r] <src> [<src>...] <dst>
+
+Remote paths are written as <sandbox>:<path>; local paths as plain paths.
+Directory sources require -r. A trailing slash on a remote directory source
+(e.g. trigger:/home/) copies the directory's contents.
+
+Flags:
+  -r, --recursive     Recursively copy directories (required for directory sources).
+
+Examples:
+  compute scp ./file trigger:/home/        push a file into a sandbox
+  compute scp trigger:/home/file ./        pull a file from a sandbox
+  compute scp -r ./mydir trigger:/home/    push a directory tree
+  compute scp -r trigger:/home/logs ./     pull a directory tree
+  compute scp a.txt b.txt trigger:/tmp/    push multiple files
+
+Transfers run as the sandbox's default user ('compute'); a user@ prefix on
+the sandbox name is accepted and ignored.`,
+
+	"process": `Inspect and manage processes inside running sandboxes.
+
+Usage:
+  compute sandbox process list <sandbox>
+  compute sandbox process start <sandbox> [--cwd <path>] [--env KEY=VAL] [--] <command...>
+  compute sandbox process kill <sandbox> <pid> [--signal SIGTERM|SIGKILL]
+
+Actions:
+  list, ls, ps             List running processes with PID, PPID, %CPU, %MEM, and command line.
+  start, run               Launch a detached background process inside the sandbox.
+  kill, signal             Send a termination signal (default SIGTERM) to a process.`,
+
+	"url": `Print the best HTTP URL or SSH target for a sandbox.
+
+Usage:
+  compute url [flags] [user@]<name|id|hostname>
+
+Flags:
+  --json              Print the full access model as JSON.
+  --port <n>          Include the port-scoped ingress URL for guest port <n>.
+  -u, --user <name>   SSH user (default: compute).
+  -v, --verbose       Show every sandbox name plus SSH/URL hints.
+
+The HTTP URL is only printed when the sandbox DNS zone is expected to resolve.
+Names under Tailscale's *.ts.net zone are answered by MagicDNS, so the command
+prints the tailnet DNS name or sandbox IP instead and explains why.`,
 
 	"job": `Run and monitor distributed jobs.
 
@@ -77,7 +171,7 @@ when no worker is connected (config: jobs.local_execution).`,
 
 Usage:
   compute worker list
-  compute worker token create [--pool <pool>]
+  compute worker token create [--pool <pool>] [--name <worker-name>]
   compute worker info <id>
   compute worker cordon <id>
   compute worker drain <id>
@@ -86,6 +180,9 @@ Usage:
 Commands:
   list, ls                 List enrolled worker nodes and statuses.
   token create             Generate an enrollment token for a new worker node.
+                           Unnamed tokens bind to the first worker that enrolls
+                           and are accepted again when that same worker restarts;
+                           --name pins the token to one worker name.
   info                     Display detailed worker specifications and capabilities.
   cordon                   Mark a worker as unschedulable.
   drain                    Evict running jobs and cordon worker.
@@ -122,7 +219,7 @@ Commands:
 Usage:
   compute template list
   compute template create <name> --vm <name|id> [--desc <text>]
-  compute template launch <name|id> [--name <vm-name>] [--tier <tier>]
+  compute template launch <name|id> [--name <vm-name>] [--tier <tier>] [--network-isolation <account|isolated>] [--isolated]
   compute template inspect <name|id>
   compute template delete <name|id>
 
@@ -174,6 +271,35 @@ Options:
   -p, --password <password>   SSH password
   -t                          Force pseudo-terminal allocation
   -T                          Disable pseudo-terminal allocation`,
+
+	"keys": `Manage saved SSH public keys for your account.
+
+Usage:
+  compute keys list
+  compute keys add --name <name> --key-file <path> [--all]
+  compute keys update <name|id> [--name <name>] [--key-file <path>] [--all|--no-all]
+  compute keys apply <name|id>
+  compute keys show <name|id>
+  compute keys delete <name|id>...
+
+Commands:
+  list, ls                 List saved public keys and their scope.
+  add, create              Save a public key (--key-file, or pass the key directly).
+  update, set              Rename, replace, or change the scope of a saved key.
+  apply                    Mark a key account-wide and push it to every sandbox.
+  show, info               Display a saved key's details.
+  delete, rm               Delete one or more saved keys.
+
+Flags:
+  --name <name>            Descriptive key name.
+  --key-file <path>        Public key file, or '-' to read from stdin.
+  --all                    Apply to all current and future sandboxes.
+  --no-all                 Stop applying the key to every sandbox.
+
+Account-wide keys (--all) are embedded into every sandbox you create and are
+pushed to existing running sandboxes over SSH and to stopped sandboxes offline.
+Without --all, a key is only embedded when you select it at creation time with
+'compute sandbox create --ssh-key <name|path>'.`,
 }
 
 func init() {
@@ -186,6 +312,8 @@ func init() {
 	commandHelp["autocomplete"] = commandHelp["completion"]
 	commandHelp["ui"] = commandHelp["gui"]
 	commandHelp["web"] = commandHelp["gui"]
+	commandHelp["key"] = commandHelp["keys"]
+	commandHelp["ssh-keys"] = commandHelp["keys"]
 }
 
 func printCommandError(reason string, usage string, group string) {

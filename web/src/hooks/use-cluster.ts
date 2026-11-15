@@ -34,7 +34,8 @@ export interface ClusterSnapshot {
   refresh: (silent?: boolean) => Promise<void>;
 }
 
-export function useCluster(): ClusterSnapshot {
+export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot {
+  const enabled = options.enabled ?? true;
   const [stats, setStats] = useState<StatsResult | null>(null);
   const [vms, setVMs] = useState<VM[]>([]);
   const [allocations, setAllocations] = useState<NetworkAllocation[]>([]);
@@ -53,6 +54,10 @@ export function useCluster(): ClusterSnapshot {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const inFlight = useRef(false);
+  const inFlightPromise = useRef<Promise<void> | null>(null);
+  const queuedRefresh = useRef(false);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const wsRef = useRef<WebSocket | null>(null);
 
   const applySnapshotData = useCallback(
@@ -98,6 +103,8 @@ export function useCluster(): ClusterSnapshot {
 
   const refresh = useCallback(
     async (silent = false) => {
+      if (!enabled) return;
+
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         try {
           wsRef.current.send(JSON.stringify({ type: 'refresh' }));
@@ -106,82 +113,108 @@ export function useCluster(): ClusterSnapshot {
         }
       }
 
-      if (inFlight.current) return;
+      if (inFlight.current) {
+        queuedRefresh.current = true;
+        return inFlightPromise.current ?? Promise.resolve();
+      }
       inFlight.current = true;
       if (!silent) setIsRefreshing(true);
 
-      try {
-        const [
-          health,
-          statsRes,
-          vmsRes,
-          allocRes,
-          netRes,
-          configRes,
-          queueRes,
-          workersRes,
-          jobsRes,
-          volumesRes,
-          eventsRes,
-        ] = await Promise.allSettled([
-          api.health(),
-          api.stats(),
-          api.listVMs(),
-          api.networkAllocations(),
-          api.networkConfig(),
-          api.config(),
-          api.queue(),
-          api.listWorkers(),
-          api.listJobs(),
-          api.listVolumes(),
-          api.listEvents(),
-        ]);
+      const run = (async () => {
+        try {
+          do {
+            queuedRefresh.current = false;
+            const [
+              health,
+              statsRes,
+              vmsRes,
+              allocRes,
+              netRes,
+              configRes,
+              queueRes,
+              workersRes,
+              jobsRes,
+              volumesRes,
+              eventsRes,
+            ] = await Promise.allSettled([
+              api.health(),
+              api.stats(),
+              api.listVMs(),
+              api.networkAllocations(),
+              api.networkConfig(),
+              api.config(),
+              api.queue(),
+              api.listWorkers(),
+              api.listJobs(),
+              api.listVolumes(),
+              api.listEvents(),
+            ]);
 
-        if (health.status === 'fulfilled') {
-          setDaemonOnline(true);
-          setLatency(health.value.latencyMs);
-        } else if (!wsConnected) {
-          setDaemonOnline(false);
-          setLatency(null);
+            if (health.status === 'fulfilled') {
+              setDaemonOnline(true);
+              setLatency(health.value.latencyMs);
+            } else if (!wsConnected) {
+              setDaemonOnline(false);
+              setLatency(null);
+            }
+
+            if (statsRes.status === 'fulfilled') setStats(statsRes.value);
+            if (vmsRes.status === 'fulfilled') setVMs(vmsRes.value);
+            if (allocRes.status === 'fulfilled') setAllocations(allocRes.value);
+            if (netRes.status === 'fulfilled') setNetworkConfig(netRes.value);
+            if (configRes.status === 'fulfilled') setConfig(configRes.value);
+            if (queueRes.status === 'fulfilled') setQueue(queueRes.value);
+            if (workersRes.status === 'fulfilled') setWorkers(workersRes.value);
+            if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value);
+            if (volumesRes.status === 'fulfilled') setVolumes(volumesRes.value);
+            if (eventsRes.status === 'fulfilled') setEvents(eventsRes.value);
+
+            if (
+              [
+                statsRes,
+                vmsRes,
+                allocRes,
+                netRes,
+                configRes,
+                queueRes,
+                workersRes,
+                jobsRes,
+                volumesRes,
+                eventsRes,
+              ].some((result) => result.status === 'fulfilled')
+            ) {
+              setLastUpdated(new Date());
+            }
+          } while (queuedRefresh.current && enabledRef.current);
+        } finally {
+          inFlight.current = false;
+          inFlightPromise.current = null;
+          setIsLoading(false);
+          setIsRefreshing(false);
         }
+      })();
 
-        if (statsRes.status === 'fulfilled') setStats(statsRes.value);
-        if (vmsRes.status === 'fulfilled') setVMs(vmsRes.value);
-        if (allocRes.status === 'fulfilled') setAllocations(allocRes.value);
-        if (netRes.status === 'fulfilled') setNetworkConfig(netRes.value);
-        if (configRes.status === 'fulfilled') setConfig(configRes.value);
-        if (queueRes.status === 'fulfilled') setQueue(queueRes.value);
-        if (workersRes.status === 'fulfilled') setWorkers(workersRes.value);
-        if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value);
-        if (volumesRes.status === 'fulfilled') setVolumes(volumesRes.value);
-        if (eventsRes.status === 'fulfilled') setEvents(eventsRes.value);
-
-        if (
-          [
-            statsRes,
-            vmsRes,
-            allocRes,
-            netRes,
-            configRes,
-            queueRes,
-            workersRes,
-            jobsRes,
-            volumesRes,
-            eventsRes,
-          ].some((result) => result.status === 'fulfilled')
-        ) {
-          setLastUpdated(new Date());
-        }
-      } finally {
-        inFlight.current = false;
-        setIsLoading(false);
-        setIsRefreshing(false);
-      }
+      inFlightPromise.current = run;
+      return run;
     },
-    [wsConnected],
+    [enabled, wsConnected],
   );
 
   useEffect(() => {
+    if (!enabled) {
+      setWsConnected(false);
+      setIsLoading(false);
+      if (wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {
+          // Ignore
+        }
+        wsRef.current = null;
+      }
+      return;
+    }
+
     let unmounted = false;
     let reconnectTimer: number | null = null;
     let retryAttempt = 0;
@@ -190,7 +223,8 @@ export function useCluster(): ClusterSnapshot {
       if (unmounted) return;
 
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/ws`;
+      const token = api.getAuthToken();
+      const wsUrl = `${wsProtocol}//${window.location.host}/api/v1/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 
       try {
         const ws = new WebSocket(wsUrl);
@@ -241,6 +275,7 @@ export function useCluster(): ClusterSnapshot {
       }
     }
 
+    setIsLoading(true);
     void refresh(true);
     connect();
 
@@ -253,9 +288,10 @@ export function useCluster(): ClusterSnapshot {
         } catch {
           // Ignore
         }
+        wsRef.current = null;
       }
     };
-  }, [applySnapshotData, refresh]);
+  }, [applySnapshotData, enabled, refresh]);
 
   return {
     stats,

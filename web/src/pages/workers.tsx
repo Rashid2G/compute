@@ -177,18 +177,23 @@ export function WorkersPage({
     }
   }
 
-  async function handleCreatePool(e: React.FormEvent) {
+  function handleCreatePool(e: React.FormEvent) {
     e.preventDefault();
-    if (!newPoolName.trim()) return;
-    try {
-      await api.createPool({ name: newPoolName.trim() });
-      toast.success(`Created worker pool "${newPoolName.trim()}"`);
-      setNewPoolName('');
-      setCreatePoolOpen(false);
-      await loadData();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
+    const name = newPoolName.trim();
+    if (!name) return;
+    setNewPoolName('');
+    setCreatePoolOpen(false);
+
+    const toastID = toast.loading(`Creating worker pool "${name}"…`);
+    void api
+      .createPool({ name })
+      .then(async () => {
+        toast.success(`Created worker pool "${name}"`, { id: toastID });
+        await loadData();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
+      });
   }
 
   return (
@@ -503,7 +508,7 @@ export function WorkersPage({
             className={cn(
               'px-3 transition-colors',
               poolFilter === 'all'
-                ? 'boat-selected font-medium'
+                ? 'compute-selected font-medium'
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >
@@ -517,7 +522,7 @@ export function WorkersPage({
               className={cn(
                 'border-l border-border px-3 transition-colors',
                 poolFilter === p.name
-                  ? 'boat-selected font-medium'
+                  ? 'compute-selected font-medium'
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >

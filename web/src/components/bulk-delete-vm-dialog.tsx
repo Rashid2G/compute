@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Loader2, TriangleAlert } from 'lucide-react';
+import { TriangleAlert } from 'lucide-react';
 
 import {
   AlertDialog,
@@ -17,7 +16,7 @@ interface BulkDeleteVMDialogProps {
   vms: VM[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onConfirm: (ids: string[]) => Promise<void>;
+  onConfirm: (ids: string[]) => Promise<void> | void;
 }
 
 export function BulkDeleteVMDialog({
@@ -26,21 +25,15 @@ export function BulkDeleteVMDialog({
   onOpenChange,
   onConfirm,
 }: BulkDeleteVMDialogProps) {
-  const [deleting, setDeleting] = useState(false);
-
-  async function confirm(event: React.MouseEvent) {
+  function confirm(event: React.MouseEvent) {
     event.preventDefault();
-    if (vms.length === 0 || deleting) return;
+    if (vms.length === 0) return;
 
-    setDeleting(true);
-    try {
-      await onConfirm(vms.map((v) => v.id));
-      onOpenChange(false);
-    } catch {
-      // The caller handles error toasts; keep dialog open for retry
-    } finally {
-      setDeleting(false);
-    }
+    const targetIds = vms.map((v) => v.id);
+    onOpenChange(false);
+    void Promise.resolve(onConfirm(targetIds)).catch(() => {
+      // The caller reports failures via toast notifications.
+    });
   }
 
   return (
@@ -79,19 +72,14 @@ export function BulkDeleteVMDialog({
         </div>
 
         <AlertDialogFooter className="mt-3 flex flex-row justify-end gap-2">
-          <AlertDialogCancel
-            disabled={deleting}
-            className="border-border bg-background hover:bg-muted text-foreground px-4"
-          >
+          <AlertDialogCancel className="border-border bg-background hover:bg-muted text-foreground px-4">
             Cancel
           </AlertDialogCancel>
           <AlertDialogAction
             onClick={confirm}
-            disabled={deleting}
             className="bg-destructive hover:bg-destructive/90 text-destructive-foreground font-medium px-4 inline-flex items-center"
           >
-            {deleting ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
-            {deleting ? 'Deleting…' : `Delete ${vms.length} instances`}
+            {vms.length === 1 ? 'Delete 1 instance' : `Delete ${vms.length} instances`}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

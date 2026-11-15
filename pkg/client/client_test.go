@@ -79,7 +79,7 @@ func TestClient_DialAndCall(t *testing.T) {
 	if err := client.Call(callCtx, "system.info", nil, &info); err != nil {
 		t.Fatalf("Call system.info failed: %v", err)
 	}
-	if info["version"] != "2.0.0" {
-		t.Errorf("expected version 2.0.0, got %s", info["version"])
+	if info["version"] != "1.0.0" {
+		t.Errorf("expected version 1.0.0, got %s", info["version"])
 	}
 }

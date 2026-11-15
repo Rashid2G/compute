@@ -59,6 +59,7 @@ export function NetworkPage({
 
   async function handlePrune() {
     setPruning(true);
+    const toastID = toast.loading('Pruning orphaned TAP interfaces…');
     try {
       const res = await api.pruneNetwork();
       const count = res.pruned_taps?.length ?? 0;
@@ -66,10 +67,11 @@ export function NetworkPage({
         count > 0
           ? `Pruned ${count} orphaned TAP interface(s)`
           : '0 orphaned TAP interfaces found · Bridge clean',
+        { id: toastID },
       );
       onRefresh();
     } catch (err) {
-      toast.error(errorMessage(err));
+      toast.error(errorMessage(err), { id: toastID });
     } finally {
       setPruning(false);
     }
@@ -87,24 +89,34 @@ export function NetworkPage({
     }
   }
 
-  async function handleCreatePortForward(e: React.FormEvent) {
+  function handleCreatePortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!pfVmId) return;
     const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
-    try {
-      await api.createPortForward({
-        host_port: pfHostPort,
-        guest_port: pfGuestPort,
-        vm_id: pfVmId,
-        vm_name: vmAlloc?.vm_name || pfVmId,
-        protocol: pfProto,
+    const payload = {
+      host_port: pfHostPort,
+      guest_port: pfGuestPort,
+      vm_id: pfVmId,
+      vm_name: vmAlloc?.vm_name || pfVmId,
+      protocol: pfProto,
+    };
+    setAddPfOpen(false);
+
+    const toastID = toast.loading(
+      `Adding DNAT port forward :${payload.host_port} -> :${payload.guest_port}…`,
+    );
+    void api
+      .createPortForward(payload)
+      .then(async () => {
+        toast.success(
+          `Added DNAT port forward :${payload.host_port} -> :${payload.guest_port}`,
+          { id: toastID },
+        );
+        await loadPortForwards();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Added DNAT port forward :${pfHostPort} -> :${pfGuestPort}`);
-      setAddPfOpen(false);
-      await loadPortForwards();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   return (
@@ -246,6 +258,7 @@ export function NetworkPage({
                   <th className="py-2.5 px-3 font-normal">Public IP / NAT</th>
                   <th className="py-2.5 px-3 font-normal">MAC Address</th>
                   <th className="py-2.5 px-3 font-normal">TAP Interface</th>
+                  <th className="py-2.5 px-3 font-normal">Sandbox Access</th>
                   <th className="py-2.5 px-3 font-normal">State</th>
                   <th className="py-2.5 px-3 text-right font-normal">
                     Actions
@@ -256,7 +269,7 @@ export function NetworkPage({
                 <tbody>
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={8}
                       className="py-16 text-center text-muted-foreground"
                     >
                       <Network className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
@@ -287,6 +300,13 @@ export function NetworkPage({
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         {lease.tap_device}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        <span className="border border-border bg-muted/40 px-1.5 py-0.5 text-[10px]">
+                          {lease.network_isolation === 'isolated'
+                            ? 'Isolated'
+                            : 'Account'}
+                        </span>
                       </td>
                       <td className="py-2.5 px-3">
                         <span className="border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase">
@@ -329,7 +349,7 @@ export function NetworkPage({
                   <X className="h-4 w-4" />
                 </button>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-1">
                 <div>
                   <span className="text-muted-foreground block text-[10.5px]">
                     Bridge
@@ -347,6 +367,16 @@ export function NetworkPage({
                     TAP Device
                   </span>
                   <span>{inspectResult.tap_device}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground block text-[10.5px]">
+                    Sandbox Access
+                  </span>
+                  <span>
+                    {inspectResult.network_isolation === 'isolated'
+                      ? 'Isolated (own only)'
+                      : 'Account sandboxes'}
+                  </span>
                 </div>
                 <div>
                   <span className="text-muted-foreground block text-[10.5px]">
@@ -457,6 +487,7 @@ export function NetworkPage({
                   <th className="py-2.5 px-3 font-normal">Host Port</th>
                   <th className="py-2.5 px-3 font-normal">Sandbox</th>
                   <th className="py-2.5 px-3 font-normal">Guest Port</th>
+                  <th className="py-2.5 px-3 font-normal">Public URL</th>
                   <th className="py-2.5 px-3 font-normal">Created</th>
                   <th className="py-2.5 px-3 text-right font-normal">
                     Actions
@@ -467,7 +498,7 @@ export function NetworkPage({
                 <tbody>
                   <tr>
                     <td
-                      colSpan={6}
+                      colSpan={7}
                       className="py-12 text-center text-muted-foreground"
                     >
                       No custom DNAT port-forwarding rules configured.
@@ -487,6 +518,20 @@ export function NetworkPage({
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         :{pf.guest_port}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {pf.public_url ? (
+                          <a
+                            href={pf.public_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[color:var(--link)] hover:underline"
+                          >
+                            {pf.public_url}
+                          </a>
+                        ) : (
+                          '-'
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         {formatRelativeTime(pf.created_at)}
@@ -521,3 +566,4 @@ export function NetworkPage({
     </div>
   );
 }
+

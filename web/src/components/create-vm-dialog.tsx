@@ -6,6 +6,8 @@ import type {
   CreateVMRequest,
   CustomImage,
   DaemonConfig,
+  NetworkIsolationMode,
+  SSHKey,
   StatsResult,
   Template,
 } from '@/lib/types';
@@ -56,13 +58,16 @@ export function CreateVMDialog({
   const [count, setCount] = useState<number>(1);
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
+  const [sshKeyId, setSshKeyId] = useState('');
+  const [sshPassword, setSshPassword] = useState('');
   const [setupScript, setSetupScript] = useState('');
+  const [networkIsolation, setNetworkIsolation] =
+    useState<NetworkIsolationMode>('account');
   const [protectedVM, setProtectedVM] = useState(false);
-  const [tailscaleVM, setTailscaleVM] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [images, setImages] = useState<CustomImage[]>([]);
+  const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
   const [stats, setStats] = useState<StatsResult | null>(null);
 
   useEffect(() => {
@@ -75,6 +80,10 @@ export function CreateVMDialog({
       .listImages()
       .then((res) => setImages(res || []))
       .catch(() => setImages([]));
+    void api
+      .listKeys()
+      .then((res) => setSshKeys(res || []))
+      .catch(() => setSshKeys([]));
     void api
       .stats()
       .then((res) => setStats(res))
@@ -103,58 +112,75 @@ export function CreateVMDialog({
     setMemoryMb((current) => Math.min(current, maxUsableMb));
   }, [open, maxUsableMb]);
 
+  // Never keep a typed password in memory after the dialog closes.
+  useEffect(() => {
+    if (!open) {
+      setSshPassword('');
+      setSshKeyId('');
+      setNetworkIsolation('account');
+    }
+  }, [open]);
+
   if (!open) return null;
 
   const availableImages = config?.images?.available ?? [];
   const willQueue = maxUsableMb !== null && memoryMb > maxUsableMb;
+  // The account's default key is embedded automatically by the daemon when
+  // the request carries no ssh_key_id, so "" means "use the default key".
+  const defaultKey = sshKeys.find((k) => k.is_default) ?? null;
 
-  async function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSubmitting(true);
-    try {
-      const baseName = sandboxName.trim();
-      const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
-      const totalToCreate = Math.max(1, count);
+    const baseName = sandboxName.trim();
+    const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
+    const totalToCreate = Math.max(1, count);
+    const trimmedScript = setupScript.trim() || undefined;
 
-      const creationTasks = Array.from({ length: totalToCreate }, async (_, i) => {
-        let name: string | undefined;
-        if (baseName) {
-          name = totalToCreate > 1 ? `${baseName}-${i + 1}` : baseName;
-        }
+    const payloads: CreateVMRequest[] = Array.from({ length: totalToCreate }, (_, i) => {
+      let name: string | undefined;
+      if (baseName) {
+        name = totalToCreate > 1 ? `${baseName}-${i + 1}` : baseName;
+      }
 
-        const payload: CreateVMRequest = {
-          name: name || undefined,
-          vcpus,
-          memory_mb: memoryMb,
-          disk_mb: calculatedDiskMb,
-          public_ip_enabled: true,
-          protected: protectedVM,
-          tailscale: tailscaleVM,
-        };
+      const payload: CreateVMRequest = {
+        name: name || undefined,
+        vcpus,
+        memory_mb: memoryMb,
+        disk_mb: calculatedDiskMb,
+        public_ip_enabled: true,
+        network_isolation: networkIsolation,
+        protected: protectedVM,
+        ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
+        ssh_no_default_key: sshKeyId === 'none' || undefined,
+        ssh_password: sshPassword || undefined,
+      };
 
-        if (fromSource.startsWith('tpl:')) {
-          payload.template = fromSource.slice(4);
-        } else if (fromSource.startsWith('img:')) {
-          payload.image = fromSource.slice(4);
-        } else {
-          payload.image = 'ubuntu-24';
-        }
+      if (fromSource.startsWith('tpl:')) {
+        payload.template = fromSource.slice(4);
+      } else if (fromSource.startsWith('img:')) {
+        payload.image = fromSource.slice(4);
+      } else {
+        payload.image = 'ubuntu-24';
+      }
 
-        return onCreate(payload, true, {
-          setupScript: setupScript.trim() || undefined,
-        });
-      });
+      return payload;
+    });
 
-      await Promise.all(creationTasks);
+    onOpenChange(false);
+    setSandboxName('');
+    setSshPassword('');
+    setSetupScript('');
+    setNetworkIsolation('account');
+    setProtectedVM(false);
+    setCount(1);
 
-      onOpenChange(false);
-      setSandboxName('');
-      setSetupScript('');
-      setProtectedVM(false);
-      setCount(1);
-    } finally {
-      setSubmitting(false);
-    }
+    void Promise.allSettled(
+      payloads.map((payload) =>
+        onCreate(payload, true, {
+          setupScript: trimmedScript,
+        }),
+      ),
+    );
   }
 
   return (
@@ -195,7 +221,7 @@ export function CreateVMDialog({
               type="text"
               aria-label="Sandbox name"
               value={sandboxName}
-              onChange={(e) => setSandboxName(e.target.value)}
+              onChange={(e) => setSandboxName(e.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').slice(0, 63))}
               placeholder="sbx-prod-api-01"
               className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
@@ -366,6 +392,60 @@ export function CreateVMDialog({
 
           <div className="space-y-1.5">
             <label className="block text-[12px] text-muted-foreground">
+              SSH key
+            </label>
+            <div className="relative">
+              <select
+                aria-label="SSH key"
+                value={sshKeyId}
+                onChange={(e) => setSshKeyId(e.target.value)}
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+              >
+                <option value="">
+                  {defaultKey
+                    ? `Default: ${defaultKey.name} (added automatically)`
+                    : 'Account-wide keys only'}
+                </option>
+                {defaultKey ? (
+                  <option value="none">No account key</option>
+                ) : null}
+                {sshKeys.map((key) => (
+                  <option key={key.id} value={key.id}>
+                    {key.name}
+                    {key.all_sandboxes ? ' (all sandboxes)' : ''}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            </div>
+            <p className="text-[10.5px] text-muted-foreground">
+              {defaultKey
+                ? `Your default key "${defaultKey.name}" is embedded automatically. Choose another key, or "No account key", to override.`
+                : 'Add a default key from Account SSH Keys and it will be embedded automatically here. Keys marked "all sandboxes" are always embedded.'}
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              SSH password (optional)
+            </label>
+            <input
+              type="password"
+              aria-label="SSH password"
+              autoComplete="new-password"
+              value={sshPassword}
+              onChange={(e) => setSshPassword(e.target.value)}
+              placeholder="Leave blank for public-key-only access"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            />
+            <p className="text-[10.5px] text-muted-foreground">
+              Minimum 8 characters. Applied to the compute and root accounts. If
+              left blank, password login is disabled.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
               Setup script (optional, runs after boot)
             </label>
             <textarea
@@ -376,6 +456,48 @@ export function CreateVMDialog({
               placeholder="#!/bin/bash&#10;apt-get update && apt-get install -y nginx"
               className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Sandbox network access
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setNetworkIsolation('account')}
+                className={cn(
+                  'flex flex-col items-start border px-3 py-2 text-left transition-colors',
+                  networkIsolation === 'account'
+                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    : 'border-border bg-background text-foreground hover:border-foreground/40',
+                )}
+              >
+                <span className="text-[12px] font-medium leading-tight">
+                  Account sandboxes
+                </span>
+                <span className="mt-1 text-[10px] text-muted-foreground leading-tight">
+                  Can communicate with all non-isolated sandboxes in your account
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setNetworkIsolation('isolated')}
+                className={cn(
+                  'flex flex-col items-start border px-3 py-2 text-left transition-colors',
+                  networkIsolation === 'isolated'
+                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    : 'border-border bg-background text-foreground hover:border-foreground/40',
+                )}
+              >
+                <span className="text-[12px] font-medium leading-tight">
+                  Isolated
+                </span>
+                <span className="mt-1 text-[10px] text-muted-foreground leading-tight">
+                  Isolated on its own; blocked from other sandboxes
+                </span>
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-2 pt-1 pb-1">
@@ -392,23 +514,6 @@ export function CreateVMDialog({
             >
               <Shield className="h-3.5 w-3.5 text-[#5e7ff5]" />
               <span>Enable deletion protection</span>
-            </label>
-          </div>
-
-          <div className="flex items-center gap-2 pb-1">
-            <input
-              id="enable-tailscale"
-              type="checkbox"
-              checked={tailscaleVM}
-              onChange={(e) => setTailscaleVM(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
-            />
-            <label
-              htmlFor="enable-tailscale"
-              className="text-[12px] text-foreground cursor-pointer select-none flex items-center gap-1.5"
-            >
-              <Globe className="h-3.5 w-3.5 text-[#5e7ff5]" />
-              <span>Join tailnet (reachable at a 100.x IP from any machine in your tailnet)</span>
             </label>
           </div>
 
@@ -431,16 +536,11 @@ export function CreateVMDialog({
           <div className="flex justify-end pt-2">
             <button
               type="submit"
-              disabled={submitting}
               className="flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>
-                {submitting
-                  ? 'Creating…'
-                  : count > 1
-                    ? `Create ${count} sandboxes`
-                    : 'Create'}
+                {count > 1 ? `Create ${count} sandboxes` : 'Create'}
               </span>
             </button>
           </div>

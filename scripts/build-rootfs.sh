@@ -67,31 +67,21 @@ RUN (userdel -r ubuntu 2>/dev/null || true) && \
     mkdir -p /etc/sudoers.d && \
     echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute && \
     chmod 0440 /etc/sudoers.d/compute && \
-    echo "root:root" | chpasswd && \
-    echo "compute:compute" | chpasswd
+    usermod -p '!' root && \
+    usermod -p '!' compute
 
 # Configure SSH daemon
 RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
     sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true && \
     sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "UsePAM no" >> /etc/ssh/sshd_config && \
     echo "StrictModes no" >> /etc/ssh/sshd_config
 
 DOCKERFILE
-
-# Optionally bake the tailscale binary into the image so sandboxes can join
-# the operator's tailnet immediately (compute tailscale / --tailscale).
-# Without it, the daemon can still install tailscale at first boot when
-# tailscale.auto_install_guest is enabled.
-if [ "${TAILSCALE:-0}" = "1" ]; then
-    cat << 'TAILSCALE_DOCKERFILE' >> "${BUILD_DIR}/Dockerfile"
-RUN curl -fsSL https://tailscale.com/install.sh | sh \
-    && tailscale version > /etc/compute-tailscale-version
-TAILSCALE_DOCKERFILE
-fi
 
 docker build -t compute-ubuntu:24.04 "${BUILD_DIR}"
 

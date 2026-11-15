@@ -233,3 +233,9 @@ type PoolResponse struct {
 	CreatedAt      int64                  `json:"created_at"`
 	UpdatedAt      int64                  `json:"updated_at"`
 }
+
+type AuthStatusResponse struct {
+	AuthEnabled   bool   `json:"auth_enabled"`
+	SignupEnabled bool   `json:"signup_enabled"`
+	AdminUsername string `json:"admin_username,omitempty"`
+}

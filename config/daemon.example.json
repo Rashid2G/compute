@@ -1,0 +1,67 @@
+{
+  "_comment": "Advanced reference configuration. Copy to docker-compose.override.yml or mount explicitly; the default install is configured through .env and does not need this file.",
+  "server": {
+    "listen": "127.0.0.1:18080",
+    "db_path": "/var/lib/compute/data/compute.db",
+    "firecracker_bin": "/usr/local/bin/firecracker",
+    "auth_enabled": true,
+    "edge_listen": "",
+    "jailer_enabled": false,
+    "jailer_binary": "/usr/local/bin/jailer",
+    "jailer_base_dir": "/srv/jailer",
+    "cgroup_enforce": true,
+    "tls_cert_file": "",
+    "tls_key_file": ""
+  },
+  "network": {
+    "mode": "nat",
+    "bridge_name": "mft3br0",
+    "bridge_ip": "172.16.0.1/16",
+    "subnet": "172.16.0.0/16",
+    "gateway_ip": "172.16.0.1",
+    "physical_nic": ""
+  },
+  "defaults": {
+    "vcpus": 1,
+    "memory_mb": 2048,
+    "disk_size_mb": 51200,
+    "image": "ubuntu-24"
+  },
+  "images": {
+    "images_dir": "/var/lib/compute/images",
+    "vms_dir": "/var/lib/compute/vms",
+    "default_kernel": "vmlinux",
+    "default_rootfs": "ubuntu-24.04.ext4",
+    "ssh_key_path": "/var/lib/compute/images/ssh/id_ed25519",
+    "available": [
+      {
+        "name": "ubuntu-24",
+        "kernel": "vmlinux",
+        "rootfs": "ubuntu-24.04.ext4",
+        "description": "Ubuntu 24.04 LTS (Noble Numbat)"
+      }
+    ]
+  },
+  "resources": {
+    "max_running_vms": 0,
+    "max_total_vcpus": 0,
+    "max_total_memory_mb": 0,
+    "max_total_disk_mb": 0,
+    "min_free_disk_space_mb": 512
+  },
+  "jobs": {
+    "local_execution": true,
+    "max_concurrent": 2,
+    "boot_timeout_seconds": 90
+  },
+  "dns": {
+    "enabled": false,
+    "listen": ":53",
+    "base_domain": "example.internal",
+    "extra_base_domains": [],
+    "host_addresses": [
+      "127.0.0.1"
+    ]
+  }
+}
+

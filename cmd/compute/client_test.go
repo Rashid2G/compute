@@ -388,9 +388,31 @@ func TestDaemonClient_Keys(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			json.NewEncoder(w).Encode(mockKey)
+		case http.MethodPatch:
+			var req UpdateKeyRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			updated := *mockKey
+			if req.Name != nil {
+				updated.Name = *req.Name
+			}
+			if req.AllSandboxes != nil {
+				updated.AllSandboxes = *req.AllSandboxes
+			}
+			json.NewEncoder(w).Encode(updated)
 		case http.MethodDelete:
 			w.WriteHeader(http.StatusOK)
 		}
+	})
+
+	mux.HandleFunc("/api/v1/keys/laptop/apply", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		applied := *mockKey
+		applied.AllSandboxes = true
+		json.NewEncoder(w).Encode(KeyApplyResult{Key: &applied})
 	})
 
 	server := httptest.NewServer(mux)
@@ -406,9 +428,22 @@ func TestDaemonClient_Keys(t *testing.T) {
 	}
 
 	// 2. Create
-	created, err := client.CreateKey(ctx, "laptop", mockKey.PublicKey)
+	created, err := client.CreateKey(ctx, "laptop", mockKey.PublicKey, false, false)
 	if err != nil || created.Name != "laptop" {
 		t.Fatalf("CreateKey failed: %v", err)
+	}
+
+	// 2b. Update scope
+	all := true
+	updated, err := client.UpdateKey(ctx, "laptop", UpdateKeyRequest{AllSandboxes: &all})
+	if err != nil || !updated.AllSandboxes {
+		t.Fatalf("UpdateKey failed: %v, got %+v", err, updated)
+	}
+
+	// 2c. Apply to all sandboxes
+	applied, err := client.ApplyKey(ctx, "laptop")
+	if err != nil || applied.Key == nil || !applied.Key.AllSandboxes {
+		t.Fatalf("ApplyKey failed: %v, got %+v", err, applied)
 	}
 
 	// 3. Get

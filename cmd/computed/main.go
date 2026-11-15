@@ -15,10 +15,10 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
 	"github.com/Rashid2G/on-demand-vms/internal/gui"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/version"
 )
@@ -77,6 +77,9 @@ func main() {
 	globalCfg, loadedPath, err := config.ResolveConfig(*configFile)
 	if err != nil && *configFile != "" {
 		log.Fatalf("Failed to load specified configuration from %s: %v", *configFile, err)
+	}
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
 	}
 	globalCfg.ConfigPath = loadedPath
 
@@ -138,6 +141,30 @@ func main() {
 			globalCfg.Server.CgroupEnforce = *cgroupEnforceFlag
 		}
 	})
+
+	// Authentication is on by default. Refuse to start without a credential
+	// instead of falling back to a generated password that nobody can read.
+	if globalCfg.Server.AuthEnabled && globalCfg.Server.AdminPassword == "" && globalCfg.Server.AdminSecret == "" {
+		log.Fatalf("Authentication is enabled but no admin credential is configured. Set COMPUTE_ADMIN_PASSWORD (recommended) or COMPUTE_ADMIN_SECRET in .env, or set COMPUTE_AUTH_ENABLED=false for a loopback-only development host.")
+	}
+	if (globalCfg.Server.TLSCertFile == "") != (globalCfg.Server.TLSKeyFile == "") {
+		log.Fatalf("COMPUTE_TLS_CERT_FILE and COMPUTE_TLS_KEY_FILE must both be set (or both be empty).")
+	}
+
+	// Fail before creating any host state if KVM, firecracker, images or the
+	// internal SSH key are missing. The readiness endpoint repeats these checks
+	// with remediation after startup.
+	if report := doctor.Preflight(globalCfg); !report.OK && !envTruthy("COMPUTE_ALLOW_UNREADY_STARTUP") {
+		for _, c := range report.Failures() {
+			if c.Severity == doctor.Critical {
+				log.Printf("[computed] preflight failed: %s: %s", c.Name, c.Detail)
+				if c.Remediation != "" {
+					log.Printf("[computed]   fix: %s", c.Remediation)
+				}
+			}
+		}
+		log.Fatalf("Startup preflight failed. Fix the critical checks above or set COMPUTE_ALLOW_UNREADY_STARTUP=true to start in a degraded state.")
+	}
 
 	isWired := globalCfg.Network.Mode == network.ModeNIC || globalCfg.Network.Mode == network.ModeWired
 
@@ -211,25 +238,7 @@ func main() {
 		CgroupDevOverride:         !globalCfg.Server.CgroupEnforce,
 		Defaults:                  globalCfg.Defaults,
 		Resources:                 globalCfg.Resources,
-		TailscaleDefaultSandboxes: globalCfg.Tailscale.Enabled && globalCfg.Tailscale.DefaultSandboxes,
 	}, store, netMgr, storMgr)
-
-	// Wire the tailnet sandbox provisioner when the integration is configured.
-	// Without an API key the daemon still reports local tailnet status but
-	// cannot mint sandbox keys; provisioning fails closed with a clear error.
-	if globalCfg.Tailscale.Enabled && globalCfg.Tailscale.APIKey != "" {
-		tsClient := tailscale.NewClient(globalCfg.Tailscale.APIKey, globalCfg.Tailscale.Tailnet)
-		vmMgr.SetTailscaleProvisioner(&tailscale.Provisioner{
-			Client:        tsClient,
-			SandboxTag:    globalCfg.Tailscale.ResolvedSandboxTag(),
-			KeyExpirySecs: globalCfg.Tailscale.KeyExpirySeconds,
-			AutoInstall:   globalCfg.Tailscale.AutoInstallResolved(),
-			Logger:        log.Default(),
-		})
-		log.Printf("[computed] Tailscale integration enabled (sandbox tag %s)", globalCfg.Tailscale.ResolvedSandboxTag())
-	} else if globalCfg.Tailscale.Enabled {
-		log.Printf("[computed] Tailscale enabled but no API key configured; sandbox tailnet addressing unavailable")
-	}
 
 	// Reconcile and prune any leftover orphan TAPs from previous runs
 	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -257,6 +266,16 @@ func main() {
 
 	// Start continuous background status monitor to detect microVM exits and maintain synced status
 	vmMgr.StartStatusMonitor(context.Background(), 3*time.Second)
+
+	// Built-in DNS responder: gives every sandbox a routable
+	// <sandbox>.<username>.<base-domain> name. SSH carries no hostname, so the
+	// wildcard dispatch for SSH happens here, at the DNS layer.
+	server.startDNS()
+
+	// HTTP edge listener (default :80 with DNS enabled): dispatches by Host
+	// header — the reserved "api" and apex/gui/www labels are served by the
+	// daemon, every other subdomain goes to the sandbox ingress wildcard.
+	startEdge(server, globalCfg)
 
 	// Mount embedded Web GUI
 	daemonTarget := globalCfg.Server.ListenAddr
@@ -290,8 +309,14 @@ func main() {
 	}
 
 	go func() {
-		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
+		var serveErr error
+		if globalCfg.Server.TLSCertFile != "" {
+			serveErr = httpServer.ServeTLS(listener, globalCfg.Server.TLSCertFile, globalCfg.Server.TLSKeyFile)
+		} else {
+			serveErr = httpServer.Serve(listener)
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", serveErr)
 		}
 	}()
 
@@ -303,6 +328,14 @@ func main() {
 	<-sigChan
 
 	log.Printf("[computed] Shutting down...")
+	// Firecracker children die with this container's PID namespace. Give
+	// running guests a moment to flush dirty pages so sandbox disks stay
+	// consistent and recent writes are not lost on restart.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if flushed := vmMgr.FlushGuestFilesystems(flushCtx); flushed > 0 {
+		log.Printf("[computed] flushed %d running sandbox filesystem(s)", flushed)
+	}
+	flushCancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)

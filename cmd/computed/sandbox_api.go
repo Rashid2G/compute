@@ -419,7 +419,9 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 			cdPrefix = fmt.Sprintf("cd %q && ", req.Cwd)
 		}
 
-		startCmd := fmt.Sprintf("sh -c '%s%snohup %s > /tmp/bg-proc.log 2>&1 & echo $!'", cdPrefix, envPrefix, req.Command)
+		shellCmd := fmt.Sprintf("%s%snohup %s > /tmp/bg-proc.log 2>&1 & echo $!", cdPrefix, envPrefix, req.Command)
+		escaped := strings.ReplaceAll(shellCmd, "'", `'\''`)
+		startCmd := fmt.Sprintf("sh -c '%s'", escaped)
 		res, err := s.vmMgr.ExecVM(ctx, vmID, vm.ExecRequest{
 			Command: startCmd,
 			Timeout: 10,

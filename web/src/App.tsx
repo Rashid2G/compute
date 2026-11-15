@@ -1,21 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 
 import { CommandPalette } from '@/components/command-palette';
 import { CreateVMDialog } from '@/components/create-vm-dialog';
 import { DeleteVMDialog } from '@/components/delete-vm-dialog';
 import { InspectVMDialog } from '@/components/inspect-vm-dialog';
+import { LoginDialog } from '@/components/login-dialog';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Topbar } from '@/components/layout/topbar';
 import { SSHKeysDialog } from '@/components/ssh-keys-dialog';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { useCluster } from '@/hooks/use-cluster';
-import { api, errorMessage } from '@/lib/api';
+import { api, errorMessage, onUnauthorized } from '@/lib/api';
 import { PAGES, resolvePageId, type PageId } from '@/lib/navigation';
-import type { CreateVMRequest, VM } from '@/lib/types';
+import type { AuthUser, CreateVMRequest, VM } from '@/lib/types';
 import { AccessPage } from '@/pages/access';
 import { ApiPage } from '@/pages/api';
+import { AuthPage } from '@/pages/auth';
 import { ConsolePage } from '@/pages/console';
 import { DashboardPage } from '@/pages/dashboard';
 import { EventsPage } from '@/pages/events';
@@ -29,6 +32,7 @@ import { StoragePage } from '@/pages/storage';
 import { WorkersPage } from '@/pages/workers';
 
 type Theme = 'light' | 'dark';
+type RoutePage = PageId | 'terminal' | 'login' | 'signup';
 
 function initialTheme(): Theme {
   const stored = window.localStorage.getItem('compute-theme');
@@ -36,8 +40,15 @@ function initialTheme(): Theme {
   return 'dark';
 }
 
-function parseRoute(): { page: PageId | 'terminal'; vmId: string | null } {
+function parseRoute(): { page: RoutePage; vmId: string | null } {
   const rawHash = window.location.hash.replace(/^#\/?/, '');
+  const clean = rawHash.split('?')[0].toLowerCase();
+  if (clean === 'login') {
+    return { page: 'login', vmId: null };
+  }
+  if (clean === 'signup') {
+    return { page: 'signup', vmId: null };
+  }
   if (rawHash.startsWith('terminal/')) {
     const rawId = rawHash.slice('terminal/'.length).split('?')[0];
     return { page: 'terminal', vmId: decodeURIComponent(rawId) };
@@ -50,7 +61,10 @@ function parseRoute(): { page: PageId | 'terminal'; vmId: string | null } {
 
 function pageFromHash(): PageId {
   const r = parseRoute();
-  return r.page === 'terminal' ? 'instances' : r.page;
+  if (r.page === 'terminal' || r.page === 'login' || r.page === 'signup') {
+    return 'instances';
+  }
+  return r.page;
 }
 
 export default function App() {
@@ -65,9 +79,77 @@ export default function App() {
   const [inspectTarget, setInspectTarget] = useState<VM | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VM | null>(null);
   const [consoleVMID, setConsoleVMID] = useState<string | null>(null);
+  const [loginOpen, setLoginOpen] = useState(false);
 
-  const cluster = useCluster();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(true);
+  const [signupEnabled, setSignupEnabled] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+
+  const isAuthenticated = authChecked && (!authEnabled || authUser !== null);
+  const cluster = useCluster({ enabled: isAuthenticated });
   const currentPage = PAGES.find((item) => item.id === page) ?? PAGES[0];
+
+  useEffect(() => {
+    return onUnauthorized(() => {
+      if (!authEnabled) return;
+      api.clearAuth();
+      setAuthUser(null);
+      if (window.location.hash !== '#/login' && window.location.hash !== '#/signup') {
+        window.location.hash = '#/login';
+      }
+    });
+  }, [authEnabled]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      let resolvedAuthEnabled = true;
+      try {
+        const status = await api.authStatus();
+        if (cancelled) return;
+        resolvedAuthEnabled = status.auth_enabled;
+        setAuthEnabled(status.auth_enabled);
+        setSignupEnabled(status.signup_enabled);
+      } catch {
+        // Older mock servers or endpoints without /auth/status fall back to authEnabled=true
+      }
+
+      if (!resolvedAuthEnabled) {
+        if (!cancelled) {
+          setAuthChecked(true);
+        }
+        return;
+      }
+
+      try {
+        const me = await api.me();
+        if (!cancelled) {
+          setAuthUser(me.user);
+        }
+      } catch {
+        if (!cancelled) {
+          api.clearAuth();
+          setAuthUser(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthChecked(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await api.logout();
+    setAuthUser(null);
+    window.location.hash = '#/login';
+    toast.info('Signed out');
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -78,14 +160,18 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (authChecked && authEnabled && authUser === null) {
+      document.title = route.page === 'signup' ? 'Compute — Create Account' : 'Compute — Sign In';
+      return;
+    }
     document.title = `Compute — ${currentPage.label}`;
-  }, [currentPage.label]);
+  }, [authChecked, authEnabled, authUser, currentPage.label, route.page]);
 
   useEffect(() => {
     function onHashChange() {
       const nextRoute = parseRoute();
       setRoute(nextRoute);
-      if (nextRoute.page !== 'terminal') {
+      if (nextRoute.page !== 'terminal' && nextRoute.page !== 'login' && nextRoute.page !== 'signup') {
         setPage(nextRoute.page);
       }
     }
@@ -94,7 +180,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!authChecked) return;
+    if (authEnabled && authUser === null) {
+      if (route.page !== 'login' && route.page !== 'signup') {
+        window.location.hash = '#/login';
+      }
+    } else if (route.page === 'login' || route.page === 'signup') {
+      window.location.hash = '#/instances';
+      setPage('instances');
+    }
+  }, [authChecked, authEnabled, authUser, route.page]);
+
+  useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (!isAuthenticated) return;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommandOpen((prev) => !prev);
@@ -102,7 +201,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [isAuthenticated]);
 
   const navigate = useCallback((next: PageId) => {
     setPage(next);
@@ -133,13 +232,14 @@ export default function App() {
   );
 
   async function startVM(vm: VM) {
-    const toastID = toast.loading(`Starting ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Starting ${vmName}…`);
     try {
       await api.runVM(vm.id);
-      toast.success(`${vm.name} started`, { id: toastID });
+      toast.success(`${vmName} started`, { id: toastID });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not start ${vm.name}`, {
+      toast.error(`Could not start ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -147,13 +247,14 @@ export default function App() {
   }
 
   async function stopVM(vm: VM) {
-    const toastID = toast.loading(`Stopping ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Stopping ${vmName}…`);
     try {
       await api.stopVM(vm.id);
-      toast.success(`${vm.name} stopped`, { id: toastID });
+      toast.success(`${vmName} stopped`, { id: toastID });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not stop ${vm.name}`, {
+      toast.error(`Could not stop ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -161,16 +262,17 @@ export default function App() {
   }
 
   async function snapshotVM(vm: VM) {
-    const toastID = toast.loading(`Snapshotting ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Snapshotting ${vmName}…`);
     try {
       await api.snapshotVM(vm.id);
-      toast.success(`${vm.name} snapshotted`, {
+      toast.success(`${vmName} snapshotted`, {
         id: toastID,
         description: 'Guest memory state was saved to disk.',
       });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not snapshot ${vm.name}`, {
+      toast.error(`Could not snapshot ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -178,13 +280,14 @@ export default function App() {
   }
 
   async function resumeVM(vm: VM) {
-    const toastID = toast.loading(`Resuming ${vm.name}…`);
+    const vmName = vm.name || vm.id;
+    const toastID = toast.loading(`Resuming ${vmName}…`);
     try {
       await api.resumeVM(vm.id);
-      toast.success(`${vm.name} resumed`, { id: toastID });
+      toast.success(`${vmName} resumed`, { id: toastID });
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not resume ${vm.name}`, {
+      toast.error(`Could not resume ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -196,24 +299,28 @@ export default function App() {
     autoStart: boolean,
     options?: { setupScript?: string },
   ) {
-    const toastID = toast.loading(`Provisioning ${payload.name}…`);
+    const targetName = payload.name?.trim() || 'sandbox';
+    const toastID = toast.loading(`Provisioning ${targetName}…`);
     try {
       const created = await api.createVM(payload);
-      toast.success(`${created.name} provisioned`, {
+      const createdName = created?.name || targetName;
+      toast.success(`${createdName} provisioned`, {
         id: toastID,
         description: created.ip_address
           ? `Address ${created.ip_address}`
           : 'Address assigned automatically.',
       });
+      void cluster.refresh(true);
 
       if (autoStart) {
-        const bootID = toast.loading(`Booting ${created.name}…`);
+        const bootID = toast.loading(`Booting ${createdName}…`);
         try {
           await api.runVM(created.id);
-          toast.success(`${created.name} is running`, { id: bootID });
+          toast.success(`${createdName} is running`, { id: bootID });
           setConsoleVMID(created.id);
+          void cluster.refresh(true);
         } catch (error) {
-          toast.error(`Could not boot ${created.name}`, {
+          toast.error(`Could not boot ${createdName}`, {
             id: bootID,
             description: errorMessage(error),
           });
@@ -222,7 +329,7 @@ export default function App() {
 
       const script = options?.setupScript?.trim();
       if (script && autoStart) {
-        const scriptID = toast.loading(`Running setup script in ${created.name}…`);
+        const scriptID = toast.loading(`Running setup script in ${createdName}…`);
         try {
           const res = await api.execVM(created.id, {
             command: script,
@@ -246,7 +353,7 @@ export default function App() {
 
       await cluster.refresh(true);
     } catch (error) {
-      toast.error(`Could not provision ${payload.name}`, {
+      toast.error(`Could not provision ${targetName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -254,11 +361,13 @@ export default function App() {
     }
   }
 
+
   async function deleteVM(id: string) {
-    const toastID = toast.loading(`Deleting ${id}…`);
+    const vmName = cluster.vms.find((v) => v.id === id)?.name || id;
+    const toastID = toast.loading(`Deleting ${vmName}…`);
     try {
       await api.deleteVM(id);
-      toast.success('Sandbox deleted', {
+      toast.success(`${vmName} deleted`, {
         id: toastID,
         description: 'Process, network lease, and overlay disk removed.',
       });
@@ -266,7 +375,7 @@ export default function App() {
       if (inspectTarget?.id === id) setInspectTarget(null);
       await cluster.refresh(true);
     } catch (error) {
-      toast.error('Could not delete sandbox', {
+      toast.error(`Could not delete ${vmName}`, {
         id: toastID,
         description: errorMessage(error),
       });
@@ -307,6 +416,7 @@ export default function App() {
         vcpus: cluster.config?.defaults?.vcpus || 2,
         memory_mb: cluster.config?.defaults?.memory_mb || 2048,
         public_ip_enabled: true,
+        network_isolation: 'account',
       },
       true,
     );
@@ -415,7 +525,7 @@ export default function App() {
           />
         );
       case 'access':
-        return <AccessPage />;
+        return <AccessPage currentUser={authUser} />;
       case 'events':
         return (
           <EventsPage
@@ -443,6 +553,60 @@ export default function App() {
         return null;
     }
   })();
+
+  if (!authChecked) {
+    return (
+      <TooltipProvider delayDuration={250}>
+        <div className="min-h-screen bg-background text-foreground flex flex-col items-center justify-center gap-3">
+          <div className="flex items-center gap-2">
+            <svg
+              viewBox="0 0 32 32"
+              className="h-6 w-6 text-foreground"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <polygon points="16,4 27,10.5 27,21.5 16,28 5,21.5 5,10.5" />
+              <polyline points="5,10.5 16,17 27,10.5" />
+              <line x1="16" y1="17" x2="16" y2="28" />
+            </svg>
+            <span className="font-display text-xl font-medium tracking-tight">
+              Compute
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>Verifying session…</span>
+          </div>
+        </div>
+        <Toaster position="bottom-right" richColors />
+      </TooltipProvider>
+    );
+  }
+
+  if (authEnabled && authUser === null) {
+    return (
+      <TooltipProvider delayDuration={250}>
+        <AuthPage
+          mode={route.page === 'signup' ? 'signup' : 'login'}
+          signupEnabled={signupEnabled}
+          theme={theme}
+          onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+          onModeChange={(nextMode) => {
+            window.location.hash = `#/${nextMode}`;
+          }}
+          onAuthenticated={(user) => {
+            setAuthUser(user);
+            setMobileNavOpen(false);
+            window.location.hash = '#/instances';
+            setPage('instances');
+          }}
+        />
+        <Toaster position="bottom-right" richColors />
+      </TooltipProvider>
+    );
+  }
 
   if (route.page === 'terminal' && route.vmId) {
     return (
@@ -472,6 +636,9 @@ export default function App() {
             onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
             onSetTheme={setTheme}
             onOpenCommandPalette={() => setCommandOpen(true)}
+            user={authUser}
+            onOpenLogin={() => setLoginOpen(true)}
+            onLogout={handleLogout}
           />
         </aside>
 
@@ -487,6 +654,9 @@ export default function App() {
               onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
               onSetTheme={setTheme}
               onOpenCommandPalette={() => setCommandOpen(true)}
+              user={authUser}
+              onOpenLogin={() => setLoginOpen(true)}
+              onLogout={handleLogout}
             />
           </SheetContent>
         </Sheet>
@@ -503,6 +673,9 @@ export default function App() {
               daemonOnline={cluster.daemonOnline}
               latency={cluster.latency}
               wsConnected={cluster.wsConnected}
+              user={authUser}
+              onOpenLogin={() => setLoginOpen(true)}
+              onLogout={handleLogout}
             />
           </div>
 
@@ -539,6 +712,7 @@ export default function App() {
           vm={inspectTarget}
           open={inspectTarget !== null}
           onOpenChange={(open) => !open && setInspectTarget(null)}
+          onUpdated={() => void cluster.refresh(true)}
         />
 
         <DeleteVMDialog
@@ -546,6 +720,15 @@ export default function App() {
           open={deleteTarget !== null}
           onOpenChange={(open) => !open && setDeleteTarget(null)}
           onConfirm={(id) => deleteVM(id)}
+        />
+
+        <LoginDialog
+          open={loginOpen}
+          onOpenChange={setLoginOpen}
+          onSuccess={() => {
+            setAuthUser(api.getAuthUser());
+            void cluster.refresh(true);
+          }}
         />
 
         <Toaster position="bottom-right" richColors />
