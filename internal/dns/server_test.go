@@ -91,7 +91,7 @@ func TestValidLabel(t *testing.T) {
 }
 
 func TestZoneAnswers(t *testing.T) {
-	zone := "compute-lab.tail123.ts.net"
+	zone := "compute.tail123.ts.net"
 	res := mapResolver{
 		"myvm.alice." + zone: {net.ParseIP("100.101.102.103"), net.ParseIP("172.16.5.9")},
 		"vm.dhcp." + zone:    {net.ParseIP("172.16.9.9")},

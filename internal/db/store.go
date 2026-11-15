@@ -297,6 +297,7 @@ func (s *Store) initSchema() error {
 		pid INTEGER DEFAULT 0,
 		socket_path TEXT DEFAULT '',
 		protected INTEGER NOT NULL DEFAULT 0,
+		description TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMP NOT NULL,
 		updated_at TIMESTAMP NOT NULL
 	);
@@ -478,6 +479,7 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE worker_tokens ADD COLUMN name TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN all_sandboxes INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE ssh_keys ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN description TEXT NOT NULL DEFAULT ''")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, network_isolation, and protected columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "network_isolation", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
@@ -625,7 +627,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		mac_address = ?, tap_device = ?, tailscale_enabled = ?, tailnet_ip = ?, tailnet_dns = ?, tailscale_device_id = ?,
 		rootfs_path = ?,
 		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
-		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, ssh_password_enabled = ?, pid = ?, socket_path = ?, protected = ?, owner_id = ?, updated_at = ?
+		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, ssh_password_enabled = ?, pid = ?, socket_path = ?, protected = ?, description = ?, owner_id = ?, updated_at = ?
 	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
 	`
 	res, err := s.db.ExecContext(ctx, updateQuery,
@@ -634,7 +636,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		vm.MACAddress, vm.TAPDevice, boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
 		vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.OwnerID, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.Description, vm.OwnerID, vm.UpdatedAt,
 		vm.InternalID, vm.OwnerID, vm.ID, vm.Name,
 	)
 	if err != nil {
@@ -652,8 +654,8 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 		rootfs_path, kernel_path,
 		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
-		pid, socket_path, protected, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		pid, socket_path, protected, description, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err = s.db.ExecContext(ctx, insertQuery,
 		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
@@ -661,7 +663,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
 		vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.CreatedAt, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.Description, vm.CreatedAt, vm.UpdatedAt,
 	)
 	return err
 }
@@ -679,7 +681,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	query := `
 	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
-	       pid, socket_path, protected, created_at, updated_at
+	       pid, socket_path, protected, description, created_at, updated_at
 	FROM vms
 	WHERE (internal_id = ? OR id = ? OR name = ? OR ip_address = ? OR public_ip = ?)
 	  AND (? = '' OR owner_id = ? OR owner_id = '')
@@ -709,7 +711,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.NetworkIsolation, &vm.MACAddress, &vm.TAPDevice,
 		&tsEnabledInt, &vm.TailnetIP, &vm.TailnetDNS, &vm.TailscaleDeviceID, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.CreatedAt, &vm.UpdatedAt,
+		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.Description, &vm.CreatedAt, &vm.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -747,7 +749,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	query := `
 	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
-	       pid, socket_path, protected, created_at, updated_at
+	       pid, socket_path, protected, description, created_at, updated_at
 	FROM vms
 	WHERE (? = '' OR owner_id = ?)
 	ORDER BY created_at DESC;
@@ -773,7 +775,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.NetworkIsolation, &vm.MACAddress, &vm.TAPDevice,
 			&tsEnabledInt, &vm.TailnetIP, &vm.TailnetDNS, &vm.TailscaleDeviceID, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.CreatedAt, &vm.UpdatedAt,
+			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.Description, &vm.CreatedAt, &vm.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -2253,7 +2255,7 @@ func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) erro
 	if e.SecretsEnabled {
 		secInt = 1
 	}
-	if e.BoatCredsEnabled {
+	if e.ComputeCredsEnabled || e.BoatCredsEnabled {
 		boatInt = 1
 	}
 	if e.AgentCredsEnabled {
@@ -2303,6 +2305,7 @@ func (s *Store) GetEnvironment(ctx context.Context, name string) (*EnvironmentPr
 	e.SafeForThirdParty = safeInt == 1
 	e.GitHubReposEnabled = ghInt == 1
 	e.SecretsEnabled = secInt == 1
+	e.ComputeCredsEnabled = boatInt == 1
 	e.BoatCredsEnabled = boatInt == 1
 	e.AgentCredsEnabled = agInt == 1
 	_ = json.Unmarshal([]byte(reposJSON), &e.GitHubRepos)
@@ -2335,6 +2338,7 @@ func (s *Store) ListEnvironments(ctx context.Context) ([]*EnvironmentProfile, er
 		e.SafeForThirdParty = safeInt == 1
 		e.GitHubReposEnabled = ghInt == 1
 		e.SecretsEnabled = secInt == 1
+		e.ComputeCredsEnabled = boatInt == 1
 		e.BoatCredsEnabled = boatInt == 1
 		e.AgentCredsEnabled = agInt == 1
 		_ = json.Unmarshal([]byte(reposJSON), &e.GitHubRepos)

@@ -68,7 +68,7 @@ func NewServer(publicURL string, keyMgr *auth.KeyManager, sessMgr *auth.SessionM
 		return map[string]string{"pong": "true"}, nil
 	})
 	s.Register("system.info", func(ctx context.Context, c *ClientConn, req *api.Req) (interface{}, *api.Error) {
-		return map[string]string{"version": "2.0.0", "user": c.user.Username, "role": c.user.Role}, nil
+		return map[string]string{"version": "1.0.0", "user": c.user.Username, "role": c.user.Role}, nil
 	})
 
 	return s
@@ -162,7 +162,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Send HelloMsg
 	hello := api.HelloMsg{
 		Type:          api.TypeHello,
-		ServerVersion: "2.0.0",
+		ServerVersion: "1.0.0",
 		Session: api.SessionInfo{
 			UserID:   user.ID,
 			Username: user.Username,

@@ -1,143 +1,187 @@
-# Compute v2: Distributed On-Demand MicroVM Platform
+# Compute v1.0.0 — Self-Hosted Firecracker MicroVM Sandbox Platform
 
-Compute is a distributed compute platform for orchestrating lightning-fast Firecracker microVMs across customer-owned host machines, private clusters, and local developer environments.
+Compute is an open-source, self-hosted platform for launching and managing hardware-isolated **Firecracker microVM sandboxes** and **distributed compute jobs** on your own Linux hardware.
 
----
+Launch sub-second microVMs, **replicate (clone)** fleets with custom resource overrides, **pause and resume** live memory/CPU state, capture reusable **snapshots and templates**, stream interactive terminals and live web previews, and dispatch ephemeral distributed jobs — all from a unified **Web Dashboard**, **`compute` CLI**, **REST/WebSocket API**, and **Python/TypeScript SDKs**.
 
-## Key Features
-
-1. **Boat.dev-Style Developer CLI (`compute`)**
-   - Manage sandboxes with clean subcommands: `compute sandbox create`, `compute sandbox list`, `compute sandbox ssh`, `compute sandbox exec`.
-   - Run distributed tasks with one command: `compute job run --image <img|env> --files <dir> -- <command>`.
-   - Real-time live log streaming and automated workspace synchronization.
-
-2. **Central Daemon Relay (`computed`)**
-   - Central control plane managing user state, worker registry, quotas, and scheduling.
-   - Workers establish **outbound-only** WebSocket/mTLS streams (`/api/v1/worker/connect`), traversing NATs and corporate firewalls with **zero open inbound ports**.
-   - Multiplexes job dispatch, log streaming, and relayed SSH/terminal tunnels into worker microVMs.
-
-3. **Autonomous Worker Client (`compute-worker`)**
-   - Lightweight host agent running on any Linux machine with `/dev/kvm`.
-   - Local admission control and capability reporting (vCPUs, RAM, disk, arch).
-   - Unpacks synced file archives directly into the workspace before executing job commands.
-
-4. **Self-Hosting with Docker & Docker Compose**
-   - Full cluster deployable with `docker compose up -d`.
-   - Production-ready multi-stage Dockerfiles for daemon (`Dockerfile.daemon`) and worker client (`Dockerfile.worker`).
+- **Documentation Site**: [docs/index.html](docs/index.html) (published via GitHub Pages)
+- **Configuration Reference**: [docs/configuration.md](docs/configuration.md)
+- **Host Installation Guide**: [docs/install.md](docs/install.md)
+- **Security Policy**: [SECURITY.md](SECURITY.md)
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
-## Quickstart
+## Architecture Overview
 
-### 1. Install on a fresh host with Docker Compose
+- **`computed` (Control Plane & Embedded Web UI)**: Manages users, sessions, API keys, microVM lifecycle, snapshots/templates, network bridges/NAT/iptables, authoritative DNS, HTTP ingress preview proxy, and outbound worker relays.
+- **`compute` (CLI & Standalone GUI)**: Ergonomic developer CLI (`compute sandbox`, `compute template`, `compute job`, `compute auth`, `compute keys`, `compute scp`) plus optional standalone GUI server (`compute gui`).
+- **`compute-worker` (Distributed Worker Agent)**: Connects outbound over WebSocket/mTLS to `computed` with zero open inbound ports required on worker hosts, executing distributed jobs inside Firecracker microVMs.
 
-Requirements: Linux with Docker Engine 24+ (rootful), Compose v2.20+, and
-`/dev/kvm`. See [docs/install.md](docs/install.md) for the full guide.
+---
+
+## Quickstart (Docker Compose)
+
+Requirements: Linux (`x86_64` or `arm64`), `/dev/kvm`, cgroup v2, Docker Engine 24+ (rootful), and Compose v2.20+.
+
+1. **Preflight & host preparation**:
+
+   ```bash
+   ./scripts/preflight.sh
+   sudo ./scripts/host-prepare.sh
+   ```
+
+2. **Configure `.env`**:
+
+   ```bash
+   cp .env.example .env
+   chmod 600 .env
+   ```
+
+   Edit `.env` to set strong administrator credentials and keep public signup disabled by default:
+
+   ```dotenv
+   COMPUTE_AUTH_ENABLED=true
+   COMPUTE_SIGNUP_ENABLED=false
+   COMPUTE_ADMIN_USERNAME=admin
+   COMPUTE_ADMIN_EMAIL=admin@compute.local
+   COMPUTE_ADMIN_PASSWORD=replace-with-a-strong-password
+   COMPUTE_ADMIN_SECRET=replace-with-a-strong-secret
+   ```
+
+3. **Build rootfs/kernel images** (if not using a prebuilt manifest):
+
+   ```bash
+   sudo ./scripts/build-rootfs.sh ./data/images 1024
+   ```
+
+4. **Start the stack**:
+
+   ```bash
+   docker compose up -d
+   ```
+
+5. **Verify health & readiness**:
+
+   ```bash
+   curl -fsS http://127.0.0.1:18080/api/v1/health
+   curl -fsS http://127.0.0.1:18080/api/v1/ready
+   ```
+
+   Open the Web Dashboard at `http://127.0.0.1:18080/` (or `:8080` when the `gui` profile is active).
+
+---
+
+## Building from Source
+
+Requires Go 1.24+ and Node.js 20+ (or Bun):
 
 ```bash
-cp .env.example .env
-chmod 600 .env
-# set COMPUTE_ADMIN_PASSWORD (and COMPUTE_DOMAIN if you want DNS names)
-./scripts/preflight.sh
-sudo ./scripts/host-prepare.sh
-docker compose up -d
+# Build Web Dashboard assets embedded into computed & compute gui
+cd web && npm ci && cd ..
+make build-ui
 
-# Liveness and readiness (readiness returns 503 with remediation when unready)
-curl -fsS http://127.0.0.1:18080/api/v1/health
-curl -fsS http://127.0.0.1:18080/api/v1/ready | python3 -m json.tool
-./bin/compute doctor
+# Build compute, computed, compute-worker, and compute-bench into ./bin/
+make build
+
+# Run tests and static checks
+make vet
+make test
+make test-web
 ```
 
-The default install starts only the daemon (API plus embedded GUI on
-`:18080`). Base images, the internal SSH key, DNS, a separate GUI container,
-Tailscale, and multi-host workers are configured through `.env` and optional
-profiles. Every variable is documented in
-[docs/configuration.md](docs/configuration.md).
+See `make help` for all build, validation, image, and systemd targets.
 
-### 2. Enroll a Remote Worker Node (experimental, optional)
+---
 
-The single-host install runs sandboxes on the control plane and does not need a
-worker. To add one:
+## Core Workflows
+
+### 1. Authentication & User Provisioning
+
+- **`.env` Admin Bootstrap**: On startup, `computed` seeds and syncs the administrator account defined by `COMPUTE_ADMIN_USERNAME`, `COMPUTE_ADMIN_EMAIL`, and `COMPUTE_ADMIN_PASSWORD` (or `COMPUTE_ADMIN_SECRET`).
+- **Closed Public Signup by Default**: `COMPUTE_SIGNUP_ENABLED=false` blocks unauthenticated public self-registration. The Web Login page adapts dynamically via `GET /api/v1/auth/status`, hiding or disabling public signup when closed.
+- **Admin User Provisioning**: Administrators can create and manage users from **Access & Users** in the Web Dashboard (or `POST /api/v1/users`) and issue scoped `cmp_...` API keys for CLI/SDK automation.
 
 ```bash
-# 1. On your machine with the compute CLI:
-compute worker token create --name node-1
-
-# 2. Put the printed token in .env as COMPUTE_WORKER_TOKEN, then:
-docker compose --profile worker up -d
+# Authenticate CLI against your Compute daemon
+export COMPUTE_DAEMON=127.0.0.1:18080
+./bin/compute auth login --username admin
+./bin/compute auth whoami
+./bin/compute auth keys create --name ci-pipeline
 ```
 
-A worker with the same `COMPUTE_WORKER_NAME` and token reconnects safely after
-a restart, including after the token expires; `--name` pins the token to one
-worker, while an unnamed token binds to the first worker that enrolls. Workers
-require their own `/dev/kvm`, host networking, and cgroups.
-
-### 3. Run Compute Tasks (Agent Workflow)
+### 2. Interactive Sandboxes & Live Previews
 
 ```bash
-# Kick off a task with input files and live log follow:
-compute job run --image alpine --files ./src --cwd /workspace -- python3 test.py
+# Create and boot a persistent microVM sandbox
+compute sandbox create --name dev-box --tier 2vcpu --image ubuntu-24 --start
 
-# List jobs
+# Open an interactive shell or execute commands with live streaming
+compute sandbox ssh dev-box
+compute sandbox exec dev-box -- uname -a
+
+# Copy files and directories
+compute scp -r ./app dev-box:/workspace/
+
+# Discover HTTP preview URL or SSH target
+compute url --port 3000 dev-box
+```
+
+### 3. Replicating (Cloning), Pausing, and Snapshotting Sandboxes
+
+Compute provides full microVM lifecycle controls from the **Web Dashboard**, **CLI**, and **REST API**:
+
+- **Replicate (Clone) Sandboxes**: Duplicate any existing sandbox into 1–5 replicas with independent overrides for **vCPUs** (`1, 2, 4, 8, 16`), **RAM**, **Disk**, **Network Isolation** (`account` vs `isolated`), and **Auto-Start** via the **Replicate** dialog in the Web UI or:
+
+  ```bash
+  curl -X POST http://127.0.0.1:18080/api/v1/vms/<sandbox-id>/clone \
+    -H "Authorization: Bearer $COMPUTE_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"dev-box-clone-1","vcpus":4,"memory_mb":4096,"network_isolated":true,"auto_start":true}'
+  ```
+
+- **Pause & Resume Live Memory/CPU State**: Freeze a running Firecracker microVM to disk (`PAUSED (STATE SAVED)`) and resume it instantaneously with memory and running processes intact:
+
+  ```bash
+  compute sandbox save-state dev-box
+  compute sandbox resume dev-box
+  ```
+
+- **Snapshots & Reusable Templates**: Capture a point-in-time disk snapshot from any sandbox and launch new sandboxes from it via the **Images & Templates** page or CLI:
+
+  ```bash
+  compute template create dev-golden --vm dev-box --desc "Pre-configured toolchain"
+  compute template launch dev-golden --name worker-1 --tier 2vcpu
+  ```
+
+### 4. Distributed Jobs
+
+Run isolated ephemeral jobs across enrolled worker pools (or locally on the control plane when `jobs.local_execution` is enabled):
+
+```bash
+# Enroll a remote worker node
+compute worker token create --name worker-1
+
+# Dispatch a job with automatic workspace sync and live log streaming
+compute job run --image ubuntu-24 --files ./src --cwd /workspace -- python3 test.py
 compute job list
-
-# Check job logs
 compute job logs <job_id>
 ```
 
-Jobs are dispatched to connected worker nodes. When no worker is connected,
-the daemon falls back to running the job in a local Firecracker sandbox on the
-control-plane host (`jobs.local_execution` in the daemon config), so
-`compute job run` never leaves submissions stuck in the queue.
+---
 
-### 4. Interactive Sandboxes (Boat.dev Style)
+## Documentation
 
-```bash
-# Create and start a persistent sandbox
-compute sandbox create --name dev-box --tier 2vcpu --image alpine
-compute sandbox start dev-box
+Browse the complete interactive documentation in [`docs/index.html`](docs/index.html) (or on GitHub Pages when enabled for your fork), covering:
 
-# Optional: allow SSH password login for compute/root (omit for public-key-only)
-compute sandbox create --name pw-box --ssh-password 'choose-a-strong-password'
-
-# Interactive terminal
-compute sandbox ssh dev-box
-
-# Execute command inside sandbox (stdout/stderr stream live)
-compute sandbox exec dev-box -- uname -a
-
-# Buffer the output and print it when the command finishes
-compute sandbox exec --no-stream dev-box -- uname -a
-
-# Delete sandbox
-compute sandbox delete dev-box
-```
+- Self-hosting, Docker Compose & bare-metal systemd setup
+- Full `.env` & authentication reference
+- Sandbox lifecycle: Replicate, Pause/Resume, Snapshots & Templates
+- Distributed jobs & worker enrollment
+- Complete `compute` CLI, REST API, and Python/TypeScript SDK references
 
 ---
 
-## Deployment & Testing on `compute-lab`
-```bash
-# Fast containerized deployment with Docker Compose (default)
-make deploy
+## License
 
-# Deploy including Web UI rebuild
-make deploy-ui
-
-# Check status of remote containers, services, and endpoints
-make remote-status
-
-# Deploy using legacy systemd host units
-./scripts/deploy.sh --systemd
-```
-
-See [AGENTS.md](file:///home/rashid/Projects/Repos/on-demand-vms/AGENTS.md) for automated workflows and agent guidance.
-
-A dedicated VM (`compute-lab`) serves the full stack on the LAN:
-
-- Web GUI: `http://compute-lab:8080`
-- Daemon API: `http://compute-lab:18080/api/v1/health`
-- Remote CLI: `COMPUTE_DAEMON=compute-lab:18080 ./bin/compute sandbox list`
-- SSH Access: `ssh compute-lab`
-
-The `compute-lab` host alias and its address are configured in `~/.ssh/config`;
-see [AGENTS.md](AGENTS.md) for deployment guidance.
+Compute is open-source software licensed under the [MIT License](LICENSE).

@@ -114,8 +114,7 @@ class ProcessManager:
 
 class Sandbox:
     """
-    Compute Sandbox representing an isolated microVM.
-    Provides complete parity with E2B and Boat.dev workflows.
+    Compute Sandbox representing an isolated Firecracker microVM.
     """
 
     def __init__(self, sandbox_id: str, host: str, api_key: Optional[str] = None):

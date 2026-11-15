@@ -256,7 +256,7 @@ func TestHandleRootPreviewModeServesGUI(t *testing.T) {
 func TestDeploymentsIndexListsDockerPreviews(t *testing.T) {
 	env := newMultiTenantServer(t)
 
-	manifest := `{"name":"pr-99","url":"http://192.168.1.70:19037/","port":19037,"branch":"feat/x","commit":"abc1234","created":"2026-11-14T00:00:00Z"}`
+	manifest := `{"name":"pr-99","url":"http://192.0.2.70:19037/","port":19037,"branch":"feat/x","commit":"abc1234","created":"2026-11-14T00:00:00Z"}`
 	tmpRoot := t.TempDir()
 	env.server.cfg.Server.DBPath = filepath.Join(tmpRoot, "db", "compute.db")
 	previewsDir := previewsDirFor(env.server.cfg.Server.DBPath)
@@ -279,7 +279,7 @@ func TestDeploymentsIndexListsDockerPreviews(t *testing.T) {
 	res.Body.Close()
 	out := string(body)
 	for _, want := range []string{
-		`href="http://192.168.1.70:19037/"`,
+		`href="http://192.0.2.70:19037/"`,
 		"pr-99",
 		"feat/x @ abc1234",
 	} {

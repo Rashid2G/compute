@@ -28,7 +28,10 @@ config explicitly.
 | `COMPUTE_DATA_DIR` | `/var/lib/compute` | Compatibility root for DB, images, VMs, and the SSH key. Explicit path variables win. |
 | `COMPUTE_FIRECRACKER_BIN` | `/usr/local/bin/firecracker` | Firecracker binary. |
 | `COMPUTE_AUTH_ENABLED` | `true` | Require authentication. |
-| `COMPUTE_ADMIN_PASSWORD` | — | Initial admin password. Required when auth is enabled unless a secret is set. |
+| `COMPUTE_SIGNUP_ENABLED` | `false` | Allow public self-registration via `POST /api/v1/auth/signup` and the login page. |
+| `COMPUTE_ADMIN_USERNAME` | `admin` | Seeded administrator username. |
+| `COMPUTE_ADMIN_EMAIL` | `admin@compute.local` | Seeded administrator email address. |
+| `COMPUTE_ADMIN_PASSWORD` | — | Initial/synced admin password. Required when auth is enabled unless a secret is set. |
 | `COMPUTE_ADMIN_SECRET` | — | Bootstrap admin secret alternative. |
 | `COMPUTE_TLS_CERT_FILE` | — | PEM certificate for native HTTPS. Must be paired with the key. |
 | `COMPUTE_TLS_KEY_FILE` | — | PEM private key for native HTTPS. |

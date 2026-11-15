@@ -16,6 +16,9 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/store/db"
 )
 
+// DefaultKeyPrefix is the standard prefix for newly issued Compute platform API keys.
+const DefaultKeyPrefix = "cmp_"
+
 var (
 	ErrInvalidAPIKeyFormat = errors.New("invalid API key format")
 	ErrAPIKeyExpired       = errors.New("API key has expired")
@@ -48,7 +51,7 @@ func (km *KeyManager) GenerateAPIKey(ctx context.Context, userID, name string, e
 	}
 	secretStr := base64.RawURLEncoding.EncodeToString(secretBytes)
 
-	token = fmt.Sprintf("mfk_%s_%s", ulidStr, secretStr)
+	token = fmt.Sprintf("%s%s_%s", DefaultKeyPrefix, ulidStr, secretStr)
 	prefix := token
 	if len(prefix) > 12 {
 		prefix = token[:12]
@@ -77,8 +80,12 @@ func (km *KeyManager) GenerateAPIKey(ctx context.Context, userID, name string, e
 
 // AuthenticateToken verifies the Bearer API key token and returns the corresponding User and APIKey records.
 func (km *KeyManager) AuthenticateToken(ctx context.Context, token string, clientIP string) (*db.User, *db.APIKey, error) {
-	parts := strings.SplitN(token, "_", 3)
-	if len(parts) != 3 || parts[0] != "mfk" {
+	normalized := token
+	if strings.HasPrefix(normalized, "cmp_live_") {
+		normalized = DefaultKeyPrefix + strings.TrimPrefix(normalized, "cmp_live_")
+	}
+	parts := strings.SplitN(normalized, "_", 3)
+	if len(parts) != 3 || (parts[0] != "cmp" && parts[0] != "mfk") {
 		return nil, nil, ErrInvalidAPIKeyFormat
 	}
 

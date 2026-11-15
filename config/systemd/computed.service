@@ -6,14 +6,14 @@ Wants=compute-net.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/rashid/on-demand-vms
+WorkingDirectory=/var/lib/compute
 # Tailscale admin API credentials live in an untracked, mode-600 file:
 #   COMPUTE_TAILSCALE_API_KEY=<key>
 # The leading '-' makes the file optional for hosts without the integration.
-EnvironmentFile=-/home/rashid/on-demand-vms/.env
-Environment=COMPUTE_TAILSCALE_ENABLED=true
+EnvironmentFile=-/etc/compute/compute.env
+Environment=COMPUTE_TAILSCALE_ENABLED=false
 Environment=COMPUTE_TAILSCALE_TAILNET=-
-ExecStart=/home/rashid/on-demand-vms/bin/computed -listen 0.0.0.0:18080
+ExecStart=/usr/local/bin/computed -listen 0.0.0.0:18080
 # Keep Firecracker microVM processes alive across daemon restarts/upgrades.
 # Reconciliation re-adopts them by PID when the daemon comes back.
 KillMode=process

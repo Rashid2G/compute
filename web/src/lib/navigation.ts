@@ -139,9 +139,9 @@ export const PAGES: PageMeta[] = [
   },
   {
     id: 'settings',
-    label: 'Organization & Billing',
+    label: 'Organization & Quotas',
     shortLabel: 'Organization',
-    description: 'Organization quotas, billing usage, alerts, and daemon runtime.',
+    description: 'Organization quotas, resource allocation, alerts, and daemon runtime.',
     icon: Settings,
     section: 'platform',
   },

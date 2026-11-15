@@ -3,6 +3,7 @@ import type {
   AgentProfileRecord,
   AuditEventRecord,
   BuildImageRequest,
+  CloneVMOptions,
   CreateTemplateRequest,
   CreateVMRequest,
   CustomImage,
@@ -35,8 +36,11 @@ import type {
   WorkerPoolRecord,
   WorkerTokenRecord,
   AuthMeResponse,
+  AuthStatusResponse,
   AuthUser,
+  CreateUserRequest,
   LoginResponse,
+  SignupRequest,
 } from './types';
 
 const BASE_PATH = '/api/v1';
@@ -140,14 +144,22 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     let message = `Request failed (${response.status})`;
     try {
       const body = (await response.json()) as { error?: string; message?: string };
-      if (body.error) {
-        message = body.message ? `${body.error}: ${body.message}` : body.error;
+      if (body.message) {
+        message = body.message;
+      } else if (body.error) {
+        message = body.error;
       }
     } catch {
       // Keep the status-based message when the body is not JSON.
     }
 
-    if (response.status === 401 && !path.startsWith('/auth/login')) {
+    if (
+      response.status === 401 &&
+      !path.startsWith('/auth/login') &&
+      !path.startsWith('/auth/signup') &&
+      !path.startsWith('/auth/me') &&
+      !path.startsWith('/auth/status')
+    ) {
       notifyUnauthorized();
     }
 
@@ -205,7 +217,9 @@ export const api = {
     });
   },
 
-  cloneVM(id: string, payload: CreateVMRequest): Promise<VM> {
+  cloneVM(id: string, nameOrOptions: string | CloneVMOptions | CreateVMRequest): Promise<VM> {
+    const payload =
+      typeof nameOrOptions === 'string' ? { name: nameOrOptions } : nameOrOptions;
     return request<VM>(`/vms/${encodeURIComponent(id)}/clone`, {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -221,6 +235,12 @@ export const api = {
   },
 
   snapshotVM(id: string): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/save-state`, {
+      method: 'POST',
+    });
+  },
+
+  pauseVM(id: string): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}/save-state`, {
       method: 'POST',
     });
@@ -408,6 +428,31 @@ export const api = {
     return request<VM>(`/templates/${encodeURIComponent(id)}/launch`, {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  },
+
+  createSnapshot(vmId: string, name: string, description = ''): Promise<Template> {
+    return request<Template>('/templates', {
+      method: 'POST',
+      body: JSON.stringify({
+        vm_id: vmId,
+        name,
+        description,
+      }),
+    });
+  },
+
+  restoreSnapshot(
+    snapshotId: string,
+    name: string,
+    options: Omit<LaunchTemplateRequest, 'name'> = {},
+  ): Promise<VM> {
+    return request<VM>(`/templates/${encodeURIComponent(snapshotId)}/launch`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        ...options,
+      }),
     });
   },
 
@@ -732,10 +777,28 @@ export const api = {
   },
 
   // Authentication & Identity
+  authStatus(): Promise<AuthStatusResponse> {
+    return request<AuthStatusResponse>('/auth/status');
+  },
+
   async login(username: string, password: string): Promise<LoginResponse> {
     const res = await request<LoginResponse>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
+    });
+    if (res.token) {
+      setStoredToken(res.token);
+    }
+    if (res.user) {
+      setStoredUser(res.user);
+    }
+    return res;
+  },
+
+  async signup(payload: SignupRequest): Promise<LoginResponse> {
+    const res = await request<LoginResponse>('/auth/signup', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
     if (res.token) {
       setStoredToken(res.token);
@@ -764,6 +827,23 @@ export const api = {
     return res;
   },
 
+  listUsers(): Promise<AuthUser[]> {
+    return request<AuthUser[]>('/users');
+  },
+
+  createUser(payload: CreateUserRequest): Promise<{ status: string; user: AuthUser }> {
+    return request<{ status: string; user: AuthUser }>('/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteUser(id: string): Promise<{ status: string; id: string }> {
+    return request<{ status: string; id: string }>(`/users/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
   getAuthToken(): string | null {
     return getStoredToken();
   },
@@ -778,18 +858,6 @@ export const api = {
 
   clearAuth(): void {
     clearAuth();
-  },
-
-  async ensureAuth(): Promise<boolean> {
-    const current = getStoredToken();
-    if (current) return true;
-    try {
-      // Graceful auto-login with default admin credentials
-      const res = await this.login('admin', 'admin');
-      return !!res.token;
-    } catch {
-      return false;
-    }
   },
 };
 
