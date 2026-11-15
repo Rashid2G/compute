@@ -1195,7 +1195,7 @@ func TestWorkerAndJobEndpoints(t *testing.T) {
 	}
 
 	// 4. Submit a Job
-	jobReq := `{"type":"command","pool_id":"default","priority":10,"spec":{"image_id":"alpine","architecture":"amd64","vcpus":2,"memory_mb":1024,"command":["echo","hello"]}}`
+	jobReq := `{"type":"command","pool_id":"default","priority":10,"spec":{"image_id":"ubuntu-24","architecture":"amd64","vcpus":2,"memory_mb":1024,"command":["echo","hello"]}}`
 	respJob, err := http.Post(server.URL+"/api/v1/jobs", "application/json", bytes.NewBufferString(jobReq))
 	if err != nil {
 		t.Fatalf("failed to create job: %v", err)

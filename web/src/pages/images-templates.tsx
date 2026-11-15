@@ -86,7 +86,6 @@ export function ImagesTemplatesPage({
   // Build Custom Rootfs Image modal/form state
   const [buildImgOpen, setBuildImgOpen] = useState(false);
   const [imgName, setImgName] = useState('');
-  const [imgBase, setImgBase] = useState('ubuntu');
   const [imgPackages, setImgPackages] = useState('curl, git, jq, htop');
 
   const applyProfile = useCallback((p: EnvironmentProfileRecord) => {
@@ -242,7 +241,7 @@ export function ImagesTemplatesPage({
       .filter(Boolean);
     const payload = {
       name,
-      base_image: imgBase,
+      base_image: 'ubuntu-24.04',
       packages: pkgs,
     };
     setBuildImgOpen(false);
@@ -776,15 +775,12 @@ export function ImagesTemplatesPage({
               <label className="block text-[11px] text-muted-foreground mb-1">
                 Base Distribution
               </label>
-              <select
+              <div
                 aria-label="Base distribution"
-                value={imgBase}
-                onChange={(e) => setImgBase(e.target.value)}
-                className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
+                className="flex h-8 w-full items-center border border-border bg-muted/30 px-2.5 font-mono text-[12px] text-muted-foreground"
               >
-                <option value="ubuntu">ubuntu</option>
-                <option value="debian">debian</option>
-              </select>
+                ubuntu 24.04
+              </div>
             </div>
             <div>
               <label className="block text-[11px] text-muted-foreground mb-1">

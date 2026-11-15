@@ -62,7 +62,7 @@ func TestEndToEndDistributedWorkerAndJob(t *testing.T) {
 	}
 
 	// 3. Submit Job to daemon
-	jobBody := `{"type":"command","pool_id":"default","priority":10,"spec":{"image_id":"alpine","architecture":"amd64","vcpus":1,"memory_mb":512,"command":["echo","hello from distributed worker"]}}`
+	jobBody := `{"type":"command","pool_id":"default","priority":10,"spec":{"image_id":"ubuntu-24","architecture":"amd64","vcpus":1,"memory_mb":512,"command":["echo","hello from distributed worker"]}}`
 	respJob, err := http.Post(server.URL+"/api/v1/jobs", "application/json", strings.NewReader(jobBody))
 	if err != nil {
 		t.Fatalf("failed to post job: %v", err)

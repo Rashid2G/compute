@@ -131,6 +131,10 @@ func TestTiersAndValidation(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for alpine, got nil")
 	}
+	_, err = ValidateImage("debian")
+	if err == nil {
+		t.Fatalf("expected error for debian, got nil")
+	}
 }
 
 func TestLoadGlobalConfigFile(t *testing.T) {
