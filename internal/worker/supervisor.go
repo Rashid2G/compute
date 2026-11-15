@@ -119,7 +119,7 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 	if cwd == "" {
 		cwd = "/workspace"
 	}
-	mkdirCmd := fmt.Sprintf("sudo mkdir -p %s && sudo chown compute:compute %s", cwd, cwd)
+	mkdirCmd := fmt.Sprintf("sudo mkdir -p %s && sudo chown compute:compute %s", shellQuoteSupervisor(cwd), shellQuoteSupervisor(cwd))
 	if _, err := s.vmMgr.ExecVM(ctx, created.ID, vm.ExecRequest{Command: mkdirCmd, User: "compute", Timeout: 10}); err != nil {
 		return 1, fmt.Errorf("failed to initialize workspace: %w", err)
 	}
@@ -130,7 +130,7 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 		if err != nil {
 			return 1, fmt.Errorf("invalid files archive: %w", err)
 		}
-		tarCmd := fmt.Sprintf("tar -xzf - -C %s", cwd)
+		tarCmd := fmt.Sprintf("tar -xzf - -C %s", shellQuoteSupervisor(cwd))
 		res, err := s.vmMgr.ExecVMInput(ctx, created.ID, vm.ExecRequest{Command: tarCmd, User: "compute", Timeout: 60}, bytes.NewReader(archive))
 		if err != nil || res.ExitCode != 0 {
 			return 1, fmt.Errorf("failed to extract input files: %w", err)
@@ -142,8 +142,15 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 	if len(cmdParts) == 0 {
 		return 0, nil
 	}
-	rawCmd := strings.Join(cmdParts, " ")
-	fullCmd := fmt.Sprintf("cd %s && %s", cwd, rawCmd)
+	rawCmd := shellJoinSupervisor(cmdParts)
+	envPrefix := ""
+	for k, v := range a.Spec.Env {
+		if !isValidEnvKeySupervisor(k) {
+			continue
+		}
+		envPrefix += fmt.Sprintf("export %s=%s; ", k, shellQuoteSupervisor(v))
+	}
+	fullCmd := fmt.Sprintf("%scd %s && %s", envPrefix, shellQuoteSupervisor(cwd), rawCmd)
 
 	streamLog("stdout", fmt.Sprintf("[compute-worker] sandbox ready; executing: %s", rawCmd))
 
@@ -164,6 +171,55 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 	})
 
 	return exitCode, err
+}
+
+func isValidEnvKeySupervisor(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i, r := range k {
+		if i == 0 {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+				return false
+			}
+			continue
+		}
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func shellQuoteSupervisor(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func shellJoinSupervisor(cmd []string) string {
+	if len(cmd) == 0 {
+		return "true"
+	}
+	if len(cmd) == 1 {
+		return cmd[0]
+	}
+	out := make([]string, 0, len(cmd))
+	for _, arg := range cmd {
+		safe := arg != ""
+		for _, r := range arg {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+				r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == '=' || r == '+' {
+				continue
+			}
+			safe = false
+			break
+		}
+		if safe {
+			out = append(out, arg)
+		} else {
+			out = append(out, shellQuoteSupervisor(arg))
+		}
+	}
+	return strings.Join(out, " ")
 }
 
 // LocalSandboxSupervisor provides sandbox execution for test environments without KVM.
@@ -214,6 +270,7 @@ func (s *LocalSandboxSupervisor) Execute(ctx context.Context, a api.WorkerAssign
 	}
 
 	var wg sync.WaitGroup
+	var logMu sync.Mutex
 	scanPipe := func(r io.Reader, streamName string) {
 		defer wg.Done()
 		if r == nil {
@@ -221,7 +278,10 @@ func (s *LocalSandboxSupervisor) Execute(ctx context.Context, a api.WorkerAssign
 		}
 		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
-			streamLog(streamName, scanner.Text())
+			line := scanner.Text()
+			logMu.Lock()
+			streamLog(streamName, line)
+			logMu.Unlock()
 		}
 	}
 

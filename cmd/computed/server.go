@@ -70,9 +70,11 @@ type Server struct {
 	tailnetDomain       string
 	tailnetDomainExpiry time.Time
 
-	eventMu       sync.RWMutex
-	eventSubs     map[chan *db.AuditEvent]struct{}
-	portForwardMu sync.Mutex
+	eventMu          sync.RWMutex
+	eventSubs        map[chan *db.AuditEvent]struct{}
+	portForwardMu    sync.Mutex
+	resourceSampleMu sync.Mutex
+	resourceSamples  resourceSampleState
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -678,6 +680,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/pools/", s.wrapAuth(s.handlePoolActions))
 	s.mux.HandleFunc("/api/v1/jobs", s.wrapAuth(s.handleJobs))
 	s.mux.HandleFunc("/api/v1/jobs/", s.wrapAuth(s.handleJobActions))
+	s.mux.HandleFunc("/api/v1/ci/repos", s.wrapAuth(s.handleCIRepos))
+	s.mux.HandleFunc("/api/v1/ci/repos/", s.wrapAuth(s.handleCIRepoActions))
+	s.mux.HandleFunc("/api/v1/ci/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
 	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
 	s.mux.HandleFunc("/", s.handleRoot)
@@ -702,13 +707,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/api-keys", s.wrapAuth(s.handleAccessAPIKeys))
 	s.mux.HandleFunc("/api/v1/api-keys/", s.wrapAuth(s.handleAccessAPIKeyActions))
 
-	// Agent Profiles
-	s.mux.HandleFunc("/api/v1/agent-profiles", s.wrapAuth(s.handleAgentProfiles))
-	s.mux.HandleFunc("/api/v1/agent-profiles/", s.wrapAuth(s.handleAgentProfileActions))
-
 	// Environments
 	s.mux.HandleFunc("/api/v1/environments", s.wrapAuth(s.handleEnvironments))
 	s.mux.HandleFunc("/api/v1/environments/", s.wrapAuth(s.handleEnvironmentActions))
+
+	// Admin Resource Monitoring
+	s.mux.HandleFunc("/api/v1/admin/resources", s.wrapAuth(s.handleAdminResources))
 
 	// Port Forwards
 	s.mux.HandleFunc("/api/v1/network/port-forwards", s.wrapAuth(s.handlePortForwards))
@@ -871,30 +875,44 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s.safeConfig(isAdmin))
 }
 
+func isJobQueueItem(q *vm.QueueItem) bool {
+	if q == nil {
+		return true
+	}
+	if q.OwnerID == "jobs" {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSpace(q.VMName))
+	id := strings.ToLower(strings.TrimSpace(q.VMID))
+	return strings.HasPrefix(name, "job-") || strings.HasPrefix(id, "job-")
+}
+
 func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	queue, err := s.vmMgr.GetQueue(r.Context())
+	rawQueue, err := s.vmMgr.GetQueue(r.Context())
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, isAdmin := s.currentOwnerID(r); !isAdmin {
-		owners := s.accessibleOwnerSet(r)
-		filtered := make([]*vm.QueueItem, 0, len(queue))
-		for _, q := range queue {
-			if q != nil && owners[q.OwnerID] {
-				filtered = append(filtered, q)
-			}
+	_, isAdmin := s.currentOwnerID(r)
+	var owners map[string]bool
+	if !isAdmin {
+		owners = s.accessibleOwnerSet(r)
+	}
+	queue := make([]*vm.QueueItem, 0, len(rawQueue))
+	for _, q := range rawQueue {
+		if isJobQueueItem(q) {
+			continue
 		}
-		queue = filtered
+		if !isAdmin && !owners[q.OwnerID] {
+			continue
+		}
+		queue = append(queue, q)
 	}
-	if queue == nil {
-		queue = []*vm.QueueItem{}
-	}
-	stats, _ := s.vmMgr.GetStats(r.Context())
+	stats := s.nonJobStats(r.Context(), r)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"queued_vms":      queue,
 		"count":           len(queue),
@@ -905,17 +923,37 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) nonJobStats(ctx context.Context, r *http.Request) *vm.StatsResult {
+	stats, err := s.vmMgr.GetStats(ctx)
+	if err != nil || stats == nil {
+		stats = &vm.StatsResult{}
+	}
+	if vms, vErr := s.listAccessibleVMs(ctx, r); vErr == nil {
+		sub := snapshotStats(vms, s.vmMgr.GetResourceLimits())
+		stats.TotalVMs = sub.TotalVMs
+		stats.RunningVMs = sub.RunningVMs
+		stats.StoppedVMs = sub.StoppedVMs
+		stats.CreatedVMs = sub.CreatedVMs
+		stats.QueuedVMs = sub.QueuedVMs
+		stats.SnapshottedVMs = sub.SnapshottedVMs
+		stats.TotalVCPUs = sub.TotalVCPUs
+		stats.TotalMemoryMB = sub.TotalMemoryMB
+		stats.RunningVCPUs = sub.RunningVCPUs
+		stats.RunningMemoryMB = sub.RunningMemoryMB
+	}
+	return stats
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	stats, err := s.vmMgr.GetStats(r.Context())
-	if err != nil {
+	if _, err := s.vmMgr.GetStats(r.Context()); err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(stats)
+	json.NewEncoder(w).Encode(s.nonJobStats(r.Context(), r))
 }
 
 func (s *Server) handleNetworkInfo(w http.ResponseWriter, r *http.Request) {
@@ -931,29 +969,42 @@ func (s *Server) handleNetworkInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
+func isJobNetworkAllocation(a *db.NetworkAllocation) bool {
+	if a == nil {
+		return true
+	}
+	if a.OwnerID == "jobs" {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSpace(a.VMName))
+	id := strings.ToLower(strings.TrimSpace(a.VMID))
+	return strings.HasPrefix(name, "job-") || strings.HasPrefix(id, "job-")
+}
+
 func (s *Server) handleNetworkAllocations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	allocs, err := s.vmMgr.GetStore().GetNetworkAllocations(r.Context())
+	rawAllocs, err := s.vmMgr.GetStore().GetNetworkAllocations(r.Context())
 	if err != nil {
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	_, isAdmin := s.currentOwnerID(r)
+	var owners map[string]bool
 	if !isAdmin {
-		owners := s.accessibleOwnerSet(r)
-		filtered := make([]*db.NetworkAllocation, 0, len(allocs))
-		for _, a := range allocs {
-			if a != nil && owners[a.OwnerID] {
-				filtered = append(filtered, a)
-			}
-		}
-		allocs = filtered
+		owners = s.accessibleOwnerSet(r)
 	}
-	if allocs == nil {
-		allocs = []*db.NetworkAllocation{}
+	allocs := make([]*db.NetworkAllocation, 0, len(rawAllocs))
+	for _, a := range rawAllocs {
+		if isJobNetworkAllocation(a) {
+			continue
+		}
+		if !isAdmin && !owners[a.OwnerID] {
+			continue
+		}
+		allocs = append(allocs, a)
 	}
 	json.NewEncoder(w).Encode(allocs)
 }
@@ -1057,6 +1108,10 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		var req vm.CreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
+			httpError(w, "name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
 		if ownerID, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
@@ -1278,6 +1333,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
+			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
+			return
 		}
 		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
@@ -1592,31 +1651,16 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 
 		var result []ImageListItem
 
-		defaultRootfs := s.vmMgr.GetStorageManager().GetConfig().DefaultRootfs
-		cleanBaseName := strings.TrimSuffix(defaultRootfs, ".ext4")
 		result = append(result, ImageListItem{
 			ID:          "img-base-ubuntu-24",
-			Name:        cleanBaseName,
+			Name:        "ubuntu-24",
 			Description: "Ubuntu 24.04 LTS (Noble Numbat) official MicroVM base image",
 			BaseImage:   "ubuntu-24.04",
-			Packages:    []string{"openssh-server", "sudo", "curl", "wget", "git", "python3", "nodejs", "npm", "jq"},
+			Packages:    []string{"openssh-server", "sudo", "curl", "wget", "git", "iputils-ping", "iproute2", "bind9-dnsutils", "netcat-openbsd", "python3", "nodejs", "npm", "jq", "tar", "unzip"},
 			SizeMB:      4096,
 			Status:      "ready",
 			Kind:        "base",
 		})
-
-		for _, av := range s.vmMgr.GetStorageManager().GetConfig().AvailableImages {
-			if strings.EqualFold(av.Rootfs, defaultRootfs) || strings.EqualFold(av.Name, cleanBaseName) {
-				continue
-			}
-			result = append(result, ImageListItem{
-				ID:          "img-base-" + av.Name,
-				Name:        av.Name,
-				Description: av.Description,
-				Status:      "ready",
-				Kind:        "base",
-			})
-		}
 
 		for _, c := range customImgs {
 			if !isAdmin && !s.canAccessOwner(r, c.OwnerID) {
@@ -1680,6 +1724,10 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "missing image name or id", http.StatusBadRequest)
 		return
 	}
+	if strings.EqualFold(nameOrID, "build") {
+		httpError(w, "not found", http.StatusNotFound)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -1691,11 +1739,17 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 		if img == nil {
 			defaultRootfs := s.vmMgr.GetStorageManager().GetConfig().DefaultRootfs
 			cleanBaseName := strings.TrimSuffix(defaultRootfs, ".ext4")
-			if strings.EqualFold(nameOrID, cleanBaseName) || strings.EqualFold(nameOrID, "ubuntu-24") || strings.EqualFold(nameOrID, "ubuntu") {
+			if strings.EqualFold(nameOrID, cleanBaseName) ||
+				strings.EqualFold(nameOrID, "ubuntu-24") ||
+				strings.EqualFold(nameOrID, "ubuntu-24.04") ||
+				strings.EqualFold(nameOrID, "ubuntu-2404") ||
+				strings.EqualFold(nameOrID, "ubuntu") ||
+				strings.EqualFold(nameOrID, "img-base-ubuntu-24") {
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"id":          "img-base-ubuntu-24",
 					"name":        cleanBaseName,
-					"description": "Ubuntu 24.04 LTS MicroVM base image",
+					"base_image":  "ubuntu-24.04",
+					"description": "Ubuntu 24.04 LTS (Noble Numbat) official MicroVM base image",
 					"status":      "ready",
 					"kind":        "base",
 				})
@@ -1865,6 +1919,10 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
+			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
+			return
+		}
 		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
 			return
 		}
@@ -1926,11 +1984,12 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 	var stats *vm.StatsResult
 	var vms []*db.VM
 	if scoped {
-		vms = s.listVMsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
+		vms = filterNonJobVMs(s.listVMsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...)))
 		stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
 	} else {
-		stats, _ = s.vmMgr.GetStats(ctx)
-		vms, _ = s.vmMgr.ListVMs(ctx)
+		rawVMs, _ := s.vmMgr.ListVMs(ctx)
+		vms = filterNonJobVMs(rawVMs)
+		stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
 	}
 	if vms == nil {
 		vms = []*db.VM{}
@@ -1945,35 +2004,31 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 		}
 	}
 
-	allocs, _ := store.GetNetworkAllocations(ctx)
-	if scoped {
-		filtered := make([]*db.NetworkAllocation, 0, len(allocs))
-		for _, a := range allocs {
-			if a != nil && owners[a.OwnerID] {
-				filtered = append(filtered, a)
-			}
+	rawAllocs, _ := store.GetNetworkAllocations(ctx)
+	allocs := make([]*db.NetworkAllocation, 0, len(rawAllocs))
+	for _, a := range rawAllocs {
+		if isJobNetworkAllocation(a) {
+			continue
 		}
-		allocs = filtered
-	}
-	if allocs == nil {
-		allocs = []*db.NetworkAllocation{}
+		if scoped && !owners[a.OwnerID] {
+			continue
+		}
+		allocs = append(allocs, a)
 	}
 	netCfg := s.vmMgr.GetNetworkManager().GetConfig()
 
 	cfg := s.safeConfig(!scoped)
 
-	queue, _ := s.vmMgr.GetQueue(ctx)
-	if scoped {
-		filtered := make([]*vm.QueueItem, 0, len(queue))
-		for _, q := range queue {
-			if q != nil && owners[q.OwnerID] {
-				filtered = append(filtered, q)
-			}
+	rawQueue, _ := s.vmMgr.GetQueue(ctx)
+	queue := make([]*vm.QueueItem, 0, len(rawQueue))
+	for _, q := range rawQueue {
+		if isJobQueueItem(q) {
+			continue
 		}
-		queue = filtered
-	}
-	if queue == nil {
-		queue = []*vm.QueueItem{}
+		if scoped && !owners[q.OwnerID] {
+			continue
+		}
+		queue = append(queue, q)
 	}
 	queueData := map[string]interface{}{
 		"queued_vms":      queue,
@@ -2001,7 +2056,7 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 		}
 		if scoped {
 			jobsList = s.listJobsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
-			vols = s.listVolumesForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
+			vols = filterNonJobVolumes(s.listVolumesForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...)))
 			allEvents, _ := store.ListAuditEvents(ctx, 100)
 			for _, evt := range allEvents {
 				if evt != nil && evt.Actor == authCtx.User.Username {
@@ -2013,7 +2068,8 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 			}
 		} else {
 			jobsList, _ = store.ListJobs(ctx, "")
-			vols, _ = store.ListVolumes(ctx)
+			rawVols, _ := store.ListVolumes(ctx)
+			vols = filterNonJobVolumes(rawVols)
 			eventsList, _ = store.ListAuditEvents(ctx, 50)
 		}
 	}
@@ -3266,6 +3322,9 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	workerObj := scheduler.NewWorker(workerID, "default", hello.Capabilities, conn)
+	if err := s.workers.Register(workerObj); err != nil {
+		return
+	}
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
 		now := time.Now().UTC()
 		capJSON, _ := json.Marshal(hello.Capabilities)
@@ -3286,6 +3345,11 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		s.enrichWorkerNodes([]*db.WorkerNode{node})
 		_ = s.vmMgr.GetStore().SaveWorkerNode(ctx, node)
+	}
+	if s.scheduler != nil {
+		go func() {
+			_, _ = s.scheduler.ScheduleNext(context.Background())
+		}()
 	}
 
 	var handler func(context.Context, *scheduler.Worker, api.WorkerMessage, json.RawMessage) error
@@ -3736,6 +3800,30 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+		// Normalize default image to Ubuntu 24.04 LTS (Item #14)
+		req.Spec.ImageID = normalizeCIImageID(req.Spec.ImageID)
+
+		// Verify caller ownership of any referenced GitHub connection so a tenant
+		// can never attach another tenant's RepoID and extract their GITHUB_TOKEN.
+		repoID := strings.TrimSpace(req.RepoID)
+		if repoID != "" {
+			conn, connErr := s.vmMgr.GetStore().GetGitHubConnection(ctx, repoID)
+			if connErr != nil {
+				httpError(w, connErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			if conn == nil || !s.canAccessOwner(r, conn.OwnerID) {
+				httpError(w, "connected repository not found", http.StatusNotFound)
+				return
+			}
+			if strings.TrimSpace(req.RepoURL) == "" && strings.TrimSpace(req.Spec.RepoURL) == "" {
+				req.RepoURL = conn.RepoURL
+			}
+			if strings.TrimSpace(req.RepoName) == "" && strings.TrimSpace(req.Spec.RepoName) == "" {
+				req.RepoName = conn.Name
+			}
+		}
+
 		// The job image is owner-scoped when it names a custom image or a
 		// template. Without this check a tenant could boot another tenant's
 		// private image through the worker/job pipeline.
@@ -3784,6 +3872,30 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		source := strings.TrimSpace(req.Source)
+		if source == "" {
+			source = strings.TrimSpace(req.Spec.Source)
+		}
+		if source == "" {
+			source = "cli"
+		}
+		repoURL := strings.TrimSpace(req.RepoURL)
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(req.Spec.RepoURL)
+		}
+		repoName := strings.TrimSpace(req.RepoName)
+		if repoName == "" {
+			repoName = strings.TrimSpace(req.Spec.RepoName)
+		}
+		branch := strings.TrimSpace(req.Branch)
+		if branch == "" {
+			branch = strings.TrimSpace(req.Spec.Branch)
+		}
+		commitSHA := strings.TrimSpace(req.CommitSHA)
+		if commitSHA == "" {
+			commitSHA = strings.TrimSpace(req.Spec.CommitSHA)
+		}
+
 		// Persist the control-plane authorization decision with the job so the
 		// worker can honour the same owner scope after a restart. Client-supplied
 		// values are always overwritten here.
@@ -3792,9 +3904,23 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		if !isAdmin {
 			req.Spec.AuthorizedOwnerIDs = s.ownerIDsFor(r)
 		}
+		req.Spec.Source = source
+		if repoURL != "" {
+			req.Spec.RepoURL = repoURL
+		}
+		if repoName != "" {
+			req.Spec.RepoName = repoName
+		}
+		if branch != "" {
+			req.Spec.Branch = branch
+		}
+		if commitSHA != "" {
+			req.Spec.CommitSHA = commitSHA
+		}
 
 		specJSON, _ := json.Marshal(req.Spec)
 		jobID := fmt.Sprintf("job_%s", uuid.NewString()[:8])
+		now := time.Now().UTC()
 		job := &db.Job{
 			ID:        jobID,
 			OwnerID:   ownerID,
@@ -3803,9 +3929,15 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			State:     "queued",
 			Priority:  req.Priority,
 			SpecJSON:  string(specJSON),
-			QueuedAt:  time.Now().UTC(),
-			CreatedAt: time.Now().UTC(),
-			UpdatedAt: time.Now().UTC(),
+			RepoID:    strings.TrimSpace(req.RepoID),
+			RepoURL:   repoURL,
+			RepoName:  repoName,
+			Branch:    branch,
+			CommitSHA: commitSHA,
+			Source:    source,
+			QueuedAt:  now,
+			CreatedAt: now,
+			UpdatedAt: now,
 		}
 		if job.Type == "" {
 			job.Type = "command"
@@ -3815,11 +3947,20 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.recordEvent("ci.job.queued", getActor(r), job.ID, "delivered", 15, map[string]interface{}{"type": job.Type, "priority": job.Priority})
+		s.recordEvent("ci.job.queued", getActor(r), job.ID, "delivered", 15, map[string]interface{}{
+			"type":     job.Type,
+			"priority": job.Priority,
+			"source":   job.Source,
+			"repo_url": job.RepoURL,
+		})
 
 		if s.scheduler != nil {
 			go func() {
 				_, _ = s.scheduler.ScheduleNext(context.Background())
+			}()
+		} else if s.jobRunner != nil {
+			go func() {
+				s.jobRunner.TryStart(context.Background(), job, req.Spec)
 			}()
 		}
 

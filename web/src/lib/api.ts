@@ -1,18 +1,16 @@
 import type {
   AccessAPIKeyRecord,
-  AgentProfileRecord,
+  AdminResourcesResponse,
   AuditEventRecord,
-  BuildImageRequest,
   CloneVMOptions,
+  CreateCIRepoRequest,
   CreateTemplateRequest,
   CreateVMRequest,
-  CustomImage,
   DaemonConfig,
   EnvironmentProfileRecord,
-  ExecRequest,
-  ExecResponse,
   FileEntry,
   FileReadResponse,
+  GitHubConnectionRecord,
   HealthResult,
   JobLogRecord,
   JobRecord,
@@ -28,6 +26,8 @@ import type {
   SSHKey,
   StatsResult,
   Template,
+  TriggerCIRepoRequest,
+  UpdateCIRepoRequest,
   VM,
   VMTier,
   VolumeRecord,
@@ -279,13 +279,6 @@ export const api = {
     return request<VM>(`/vms/${encodeURIComponent(id)}/unprotect`, { method: 'POST' });
   },
 
-  execVM(id: string, payload: ExecRequest): Promise<ExecResponse> {
-    return request<ExecResponse>(`/vms/${encodeURIComponent(id)}/exec`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  },
-
   async listVMFiles(id: string, path = '/'): Promise<FileEntry[]> {
     const res = await request<{ entries: FileEntry[]; path: string }>(
       `/vms/${encodeURIComponent(id)}/files/list?path=${encodeURIComponent(path)}`,
@@ -378,27 +371,6 @@ export const api = {
 
   deletePortForward(id: string): Promise<{ status: string }> {
     return request<{ status: string }>(`/network/port-forwards/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-  },
-
-  listImages(): Promise<CustomImage[]> {
-    return request<CustomImage[]>('/images');
-  },
-
-  getImage(id: string): Promise<CustomImage> {
-    return request<CustomImage>(`/images/${encodeURIComponent(id)}`);
-  },
-
-  buildImage(payload: BuildImageRequest): Promise<CustomImage> {
-    return request<CustomImage>('/images', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  },
-
-  deleteImage(id: string): Promise<{ status: string; id: string }> {
-    return request<{ status: string; id: string }>(`/images/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   },
@@ -575,6 +547,8 @@ export const api = {
     type?: string;
     pool_id?: string;
     priority?: number;
+    repo_id?: string;
+    source?: string;
     spec: Record<string, unknown>;
   }): Promise<JobRecord> {
     return request<JobRecord>('/jobs', {
@@ -591,6 +565,43 @@ export const api = {
 
   getJobLogs(id: string): Promise<JobLogRecord[]> {
     return request<JobLogRecord[]>(`/jobs/${encodeURIComponent(id)}/logs`);
+  },
+
+  // CI Connected GitHub Repositories
+  listCIRepos(): Promise<GitHubConnectionRecord[]> {
+    return request<GitHubConnectionRecord[]>('/ci/repos');
+  },
+
+  createCIRepo(payload: CreateCIRepoRequest): Promise<GitHubConnectionRecord> {
+    return request<GitHubConnectionRecord>('/ci/repos', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateCIRepo(id: string, payload: UpdateCIRepoRequest): Promise<GitHubConnectionRecord> {
+    return request<GitHubConnectionRecord>(`/ci/repos/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteCIRepo(id: string): Promise<{ status: string; id: string }> {
+    return request<{ status: string; id: string }>(`/ci/repos/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  triggerCIRepo(id: string, payload: TriggerCIRepoRequest = {}): Promise<JobRecord> {
+    return request<JobRecord>(`/ci/repos/${encodeURIComponent(id)}/trigger`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  // Admin Host & Platform Resource Telemetry
+  adminResources(): Promise<AdminResourcesResponse> {
+    return request<AdminResourcesResponse>('/admin/resources');
   },
 
   // Persistent Storage Volumes
@@ -703,7 +714,7 @@ export const api = {
     return request<AuditEventRecord[]>('/events');
   },
 
-  // API Keys & Agent Proxying
+  // API Keys
   listAPIKeys(): Promise<AccessAPIKeyRecord[]> {
     return request<AccessAPIKeyRecord[]>('/api-keys');
   },
@@ -721,39 +732,6 @@ export const api = {
 
   deleteAPIKey(id: string): Promise<{ status: string }> {
     return request<{ status: string }>(`/api-keys/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-    });
-  },
-
-  listAgentProfiles(): Promise<AgentProfileRecord[]> {
-    return request<AgentProfileRecord[]>('/agent-profiles');
-  },
-
-  createAgentProfile(payload: {
-    name: string;
-    provider: string;
-    upstream_url: string;
-    inject_header: string;
-    secret_ref: string;
-  }): Promise<AgentProfileRecord> {
-    return request<AgentProfileRecord>('/agent-profiles', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-  },
-
-  updateAgentProfile(
-    id: string,
-    payload: Partial<AgentProfileRecord>,
-  ): Promise<AgentProfileRecord> {
-    return request<AgentProfileRecord>(`/agent-profiles/${encodeURIComponent(id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-  },
-
-  deleteAgentProfile(id: string): Promise<{ status: string }> {
-    return request<{ status: string }>(`/agent-profiles/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
   },

@@ -46,10 +46,17 @@ deb ${MIRROR} ${SUITE} main universe
 deb ${MIRROR} ${SUITE}-updates main universe
 deb ${MIRROR} ${SUITE}-security main universe
 EOF
-chroot "${MNT}" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server sudo iproute2 procps curl ca-certificates jq less nano util-linux iputils-ping tzdata netbase git python3 nodejs npm && rm -rf /var/lib/apt/lists/*' >>/tmp/debootstrap-base.log 2>&1
+chroot "${MNT}" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends iputils-ping bind9-dnsutils netcat-openbsd traceroute iproute2 net-tools curl wget less nano vim-tiny htop lsof psmisc file unzip zip tar gzip xz-utils rsync openssh-server openssh-client jq git ca-certificates sudo procps util-linux bash coreutils findutils grep sed gawk hostname locales libcap2-bin tzdata netbase python3 nodejs npm && rm -rf /var/lib/apt/lists/*' >>/tmp/debootstrap-base.log 2>&1
 
-log "Configuring users and SSH"
+log "Configuring users, ping permissions, and SSH"
 chroot "${MNT}" /bin/bash -c '
+    chmod u+s /bin/ping /usr/bin/ping 2>/dev/null || true
+    setcap cap_net_raw+ep /bin/ping 2>/dev/null || setcap cap_net_raw+ep /usr/bin/ping 2>/dev/null || true
+    mkdir -p /etc/sysctl.d
+    echo "net.ipv4.ping_group_range = 0 2147483647" > /etc/sysctl.d/99-compute.conf
+    if [ -f /etc/sysctl.conf ]; then
+        grep -q "^net.ipv4.ping_group_range" /etc/sysctl.conf || echo "net.ipv4.ping_group_range = 0 2147483647" >> /etc/sysctl.conf
+    fi
     if ! id compute >/dev/null 2>&1; then useradd -m -s /bin/bash -u 1000 compute; fi
     usermod -aG sudo compute
     mkdir -p /etc/sudoers.d
@@ -83,6 +90,7 @@ mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /run/sshd /run/lock
 chmod 1777 /dev/shm /run/lock 2>/dev/null || true
+sysctl -w net.ipv4.ping_group_range="0 2147483647" >/dev/null 2>&1 || echo "0 2147483647" > /proc/sys/net/ipv4/ping_group_range 2>/dev/null || true
 ip link set lo up 2>/dev/null || true
 ip link set eth0 up 2>/dev/null || true
 IP_SPEC=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^ip=//p' | head -n1)
