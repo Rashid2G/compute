@@ -59,6 +59,31 @@ Launch sub-second microVMs, **replicate (clone)** fleets with custom resource ov
 
 ---
 
+## Pre-Built Binaries (GitHub Releases)
+
+Pre-compiled, standalone release binaries for Linux (`amd64` and `arm64`) with SHA-256 checksums are published with every tagged release on [GitHub Releases](https://github.com/Rashid2G/compute/releases).
+
+### Direct Download Links
+
+| Component | Architecture | Latest Download URL |
+| :--- | :--- | :--- |
+| **`compute` CLI** | `linux/amd64` | [`compute_1.0.0_linux_amd64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz) |
+| **`compute` CLI** | `linux/arm64` | [`compute_1.0.0_linux_arm64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_arm64.tar.gz) |
+| **`computed` Daemon** | `linux/amd64` | [`computed_1.0.0_linux_amd64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_amd64.tar.gz) |
+| **`computed` Daemon** | `linux/arm64` | [`computed_1.0.0_linux_arm64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_arm64.tar.gz) |
+| **Full Suite** | `linux/amd64` | [`compute-suite_1.0.0_linux_amd64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz) |
+| **Full Suite** | `linux/arm64` | [`compute-suite_1.0.0_linux_arm64.tar.gz`](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_arm64.tar.gz) |
+
+### Quick CLI Install
+
+```bash
+# Download and install compute CLI to /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+compute --version
+```
+
+---
+
 ## Building from Source
 
 Requires Go 1.24+ and Node.js 20+ (or Bun):

@@ -69,7 +69,7 @@ func CloneFileCOW(srcPath, dstPath string) error {
 			// and link count > 1
 			var nlink uint64 = 1
 			if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
-				nlink = stat.Nlink
+				nlink = uint64(stat.Nlink)
 			}
 			if nlink > 1 {
 				if err := os.Remove(dstPath); err != nil {
@@ -131,7 +131,7 @@ func ReflinkStrict(srcPath, dstPath string) error {
 		if os.SameFile(srcStat, dstStat) {
 			var nlink uint64 = 1
 			if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
-				nlink = stat.Nlink
+				nlink = uint64(stat.Nlink)
 			}
 			if nlink > 1 {
 				if err := os.Remove(dstPath); err != nil {
