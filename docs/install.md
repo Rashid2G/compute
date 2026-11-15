@@ -211,6 +211,37 @@ Leave `COMPUTE_TLS_CERT_FILE`/`COMPUTE_TLS_KEY_FILE` empty and terminate TLS in
 a reverse proxy (Caddy, nginx, Traefik) or Tailscale, or set both paths and
 mount the certificate files into the container to serve HTTPS directly.
 
+## Standalone Pre-Built Binaries
+
+If you prefer to run the `compute` CLI or `computed` daemon directly without building from source or running inside Docker, download standalone pre-compiled binaries from [GitHub Releases](https://github.com/Rashid2G/compute/releases).
+
+Every release publishes static Linux binaries for both `x86_64` (`amd64`) and `aarch64` (`arm64`), along with a cryptographic `checksums.txt` file.
+
+### Direct Download Links
+
+| Component | Linux `amd64` (`x86_64`) | Linux `arm64` (`aarch64`) |
+| :--- | :--- | :--- |
+| **`compute` CLI** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_arm64.tar.gz) |
+| **`computed` Daemon** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.0.0_linux_arm64.tar.gz) |
+| **`compute-worker`** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_1.0.0_linux_arm64.tar.gz) |
+| **Complete Suite** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_arm64.tar.gz) |
+
+### Install the `compute` CLI
+
+```bash
+# Download and unpack CLI to /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+compute --version
+```
+
+### Verifying Checksums
+
+```bash
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz
+sha256sum --check --ignore-missing checksums.txt
+```
+
 ## Upgrade
 
 Source installs build the image locally:
