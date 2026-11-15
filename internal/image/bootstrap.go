@@ -14,8 +14,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +26,11 @@ import (
 
 // Bootstrap modes accepted by COMPUTE_IMAGES_MODE.
 const (
+	// ModeAuto installs missing base images automatically: if
+	// COMPUTE_IMAGE_MANIFEST_URL is set it downloads the verified manifest,
+	// otherwise it installs the pinned Firecracker CI kernel and builds the
+	// Ubuntu 24.04 rootfs via chroot. Existing valid artifacts are reused.
+	ModeAuto = "auto"
 	// ModeDownload fetches the versioned manifest and verifies every artifact.
 	ModeDownload = "download"
 	// ModePrebuilt validates images that are already present (for example from
@@ -38,6 +45,14 @@ const (
 const (
 	stateFileName    = ".installed.json"
 	manifestMaxBytes = 1 << 20
+
+	defaultKernelVersion     = "6.1.155"
+	defaultKernelURLAMD64    = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/x86_64/vmlinux-" + defaultKernelVersion
+	defaultKernelSHA256AMD64 = "e20e46d0c36c55c0d1014eb20576171b3f3d922260d9f792017aeff53af3d4f2"
+	defaultKernelURLARM64    = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.15/aarch64/vmlinux-" + defaultKernelVersion
+	defaultKernelSHA256ARM64 = "e3544b10603acbf3db492cb52e000d22ba202cb4b63b9add027565683e11c591"
+
+	defaultRootfsSizeMB = 2048
 )
 
 // Manifest is the versioned image bundle descriptor published alongside the
@@ -66,6 +81,11 @@ type BootstrapOptions struct {
 	KernelName     string
 	RootfsName     string
 	SSHKeyPath     string
+	KernelSrc      string
+	KernelURL      string
+	KernelSHA256   string
+	RootfsSizeMB   int
+	BuildRootfs    func(ctx context.Context, opts BootstrapOptions, dstPath string) error
 	HTTPClient     *http.Client
 	Logf           func(format string, args ...any)
 	CurrentArch    string
@@ -101,10 +121,14 @@ type Result struct {
 }
 
 func (o *BootstrapOptions) normalize() {
-	if o.Mode == "" {
-		o.Mode = ModeDownload
-	}
 	o.Mode = strings.ToLower(strings.TrimSpace(o.Mode))
+	if o.Mode == "" {
+		if strings.TrimSpace(o.ManifestURL) != "" {
+			o.Mode = ModeDownload
+		} else {
+			o.Mode = ModeAuto
+		}
+	}
 	if o.ImagesDir == "" {
 		o.ImagesDir = "/var/lib/compute/images"
 	}
@@ -116,6 +140,12 @@ func (o *BootstrapOptions) normalize() {
 	}
 	if o.SSHKeyPath == "" {
 		o.SSHKeyPath = filepath.Join(o.ImagesDir, "ssh", "id_ed25519")
+	}
+	if o.RootfsSizeMB <= 0 {
+		o.RootfsSizeMB = defaultRootfsSizeMB
+	}
+	if o.BuildRootfs == nil {
+		o.BuildRootfs = buildRootfsChroot
 	}
 	if o.CurrentArch == "" {
 		o.CurrentArch = runtime.GOARCH
@@ -135,9 +165,9 @@ func (o *BootstrapOptions) normalize() {
 func Bootstrap(ctx context.Context, opts BootstrapOptions) (*Result, error) {
 	opts.normalize()
 	switch opts.Mode {
-	case ModeDownload, ModePrebuilt, ModeBuild, ModeNone:
+	case ModeAuto, ModeDownload, ModePrebuilt, ModeBuild, ModeNone:
 	default:
-		return nil, fmt.Errorf("invalid COMPUTE_IMAGES_MODE=%q: expected download, prebuilt, build, or none", opts.Mode)
+		return nil, fmt.Errorf("invalid COMPUTE_IMAGES_MODE=%q: expected auto, download, prebuilt, build, or none", opts.Mode)
 	}
 
 	if err := os.MkdirAll(opts.ImagesDir, 0755); err != nil {
@@ -148,9 +178,11 @@ func Bootstrap(ctx context.Context, opts BootstrapOptions) (*Result, error) {
 	kernelPath := filepath.Join(opts.ImagesDir, opts.KernelName)
 	rootfsPath := filepath.Join(opts.ImagesDir, opts.RootfsName)
 
+	useManifest := opts.Mode == ModeDownload || (opts.Mode == ModeAuto && strings.TrimSpace(opts.ManifestURL) != "")
+
 	var manifest *Manifest
 	var err error
-	if opts.Mode == ModeDownload {
+	if useManifest {
 		manifest, err = fetchManifest(ctx, opts)
 		if err != nil {
 			return nil, err
@@ -161,15 +193,76 @@ func Bootstrap(ctx context.Context, opts BootstrapOptions) (*Result, error) {
 		opts.Logf("[images] manifest %s (%s): kernel=%s rootfs=%s", manifest.Version, manifest.Arch, opts.KernelName, opts.RootfsName)
 	}
 
-	if opts.Mode != ModeNone {
-		kernelState, downloaded, err := ensureArtifact(ctx, opts, manifestArtifact(manifest, true), kernelPath, "kernel")
+	sshKeyEnsured := false
+	if opts.Mode == ModeAuto && !opts.SkipSSHKeyGen {
+		generated, err := ensureSSHKey(opts.SSHKeyPath)
+		if err != nil {
+			return nil, err
+		}
+		result.GeneratedKey = generated
+		sshKeyEnsured = true
+	}
+
+	switch {
+	case useManifest:
+		manifestOpts := opts
+		manifestOpts.Mode = ModeDownload
+		kernelState, downloaded, err := ensureArtifact(ctx, manifestOpts, manifestArtifact(manifest, true), kernelPath, "kernel")
+		if err != nil {
+			return nil, err
+		}
+		if downloaded {
+			result.Downloaded = append(result.Downloaded, kernelPath)
+		}
+		rootfsState, downloaded, err := ensureArtifact(ctx, manifestOpts, manifestArtifact(manifest, false), rootfsPath, "rootfs")
+		if err != nil {
+			return nil, err
+		}
+		if downloaded {
+			result.Downloaded = append(result.Downloaded, rootfsPath)
+		}
+		result.State.Kernel = kernelState
+		result.State.Rootfs = rootfsState
+		if err := validateKernel(kernelPath); err != nil {
+			return nil, fmt.Errorf("kernel validation failed: %w", err)
+		}
+		if err := validateRootfs(rootfsPath); err != nil {
+			return nil, fmt.Errorf("rootfs validation failed: %w", err)
+		}
+		ensureRootfsAliasSymlink(opts.ImagesDir, rootfsPath)
+	case opts.Mode == ModeAuto:
+		kernelState, downloaded, err := ensureAutoKernel(ctx, opts, kernelPath)
+		if err != nil {
+			return nil, err
+		}
+		if downloaded {
+			result.Downloaded = append(result.Downloaded, kernelPath)
+		}
+		rootfsState, built, err := ensureAutoRootfs(ctx, opts, rootfsPath)
+		if err != nil {
+			return nil, err
+		}
+		if built {
+			result.Downloaded = append(result.Downloaded, rootfsPath)
+		}
+		result.State.Kernel = kernelState
+		result.State.Rootfs = rootfsState
+		if err := validateKernel(kernelPath); err != nil {
+			return nil, fmt.Errorf("kernel validation failed: %w", err)
+		}
+		if err := validateRootfs(rootfsPath); err != nil {
+			return nil, fmt.Errorf("rootfs validation failed: %w", err)
+		}
+		ensureRootfsAliasSymlink(opts.ImagesDir, rootfsPath)
+	case opts.Mode != ModeNone:
+		kernelState, downloaded, err := ensureArtifact(ctx, opts, nil, kernelPath, "kernel")
 		if err != nil {
 			return nil, annotateModeError(opts.Mode, err)
 		}
 		if downloaded {
 			result.Downloaded = append(result.Downloaded, kernelPath)
 		}
-		rootfsState, downloaded, err := ensureArtifact(ctx, opts, manifestArtifact(manifest, false), rootfsPath, "rootfs")
+		rootfsState, downloaded, err := ensureArtifact(ctx, opts, nil, rootfsPath, "rootfs")
 		if err != nil {
 			return nil, annotateModeError(opts.Mode, err)
 		}
@@ -187,7 +280,7 @@ func Bootstrap(ctx context.Context, opts BootstrapOptions) (*Result, error) {
 		}
 	}
 
-	if !opts.SkipSSHKeyGen {
+	if !opts.SkipSSHKeyGen && !sshKeyEnsured {
 		generated, err := ensureSSHKey(opts.SSHKeyPath)
 		if err != nil {
 			return nil, err
@@ -223,12 +316,227 @@ func manifestArtifact(m *Manifest, kernel bool) *ManifestArtifact {
 
 func annotateModeError(mode string, err error) error {
 	if mode == ModeBuild {
-		return fmt.Errorf("%w (COMPUTE_IMAGES_MODE=build expects images installed by 'make build-images' or scripts/build-kernel.sh + scripts/build-rootfs.sh under COMPUTE_HOST_DATA_DIR/images, or set COMPUTE_IMAGES_MODE=download with a published manifest)", err)
+		return fmt.Errorf("%w (COMPUTE_IMAGES_MODE=build expects images installed by 'make build-images' or scripts/build-kernel.sh + scripts/build-rootfs.sh under COMPUTE_HOST_DATA_DIR/images, or set COMPUTE_IMAGES_MODE=auto/download)", err)
 	}
 	if mode == ModePrebuilt {
 		return fmt.Errorf("%w (COMPUTE_IMAGES_MODE=prebuilt expects the kernel/rootfs under COMPUTE_HOST_DATA_DIR/images)", err)
 	}
 	return err
+}
+
+func ensureAutoKernel(ctx context.Context, opts BootstrapOptions, path string) (ArtifactState, bool, error) {
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if err := validateKernel(path); err != nil {
+			return ArtifactState{}, false, fmt.Errorf("existing kernel at %s is invalid: %w (remove it to re-download)", path, err)
+		}
+		sum, err := fileSHA256(path)
+		if err != nil {
+			return ArtifactState{}, false, fmt.Errorf("checksum %s: %w", path, err)
+		}
+		opts.Logf("[images] kernel already present: %s", path)
+		return ArtifactState{File: filepath.Base(path), SHA256: sum, Size: info.Size()}, false, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ArtifactState{}, false, fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	if src := strings.TrimSpace(opts.KernelSrc); src != "" {
+		opts.Logf("[images] installing kernel from %s -> %s", src, path)
+		if err := installLocalKernel(src, path, opts.KernelSHA256); err != nil {
+			return ArtifactState{}, false, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return ArtifactState{}, false, err
+		}
+		sum, err := fileSHA256(path)
+		if err != nil {
+			return ArtifactState{}, false, err
+		}
+		return ArtifactState{File: filepath.Base(path), SHA256: sum, Size: info.Size()}, true, nil
+	}
+
+	var artifact ManifestArtifact
+	if customURL := strings.TrimSpace(opts.KernelURL); customURL != "" {
+		if err := validateArtifactURL(customURL, "COMPUTE_KERNEL_URL", opts.AllowPlainHTTP); err != nil {
+			return ArtifactState{}, false, err
+		}
+		if strings.TrimSpace(opts.KernelSHA256) == "" {
+			return ArtifactState{}, false, errors.New("COMPUTE_KERNEL_URL requires COMPUTE_KERNEL_SHA256 so the download can be verified")
+		}
+		if err := validateChecksum(opts.KernelSHA256); err != nil {
+			return ArtifactState{}, false, fmt.Errorf("COMPUTE_KERNEL_SHA256: %w", err)
+		}
+		artifact = ManifestArtifact{URL: customURL, SHA256: strings.ToLower(strings.TrimSpace(opts.KernelSHA256))}
+		opts.Logf("[images] downloading custom kernel -> %s", path)
+	} else {
+		var err error
+		artifact, err = defaultKernelArtifact(opts.CurrentArch)
+		if err != nil {
+			return ArtifactState{}, false, err
+		}
+		opts.Logf("[images] downloading Firecracker CI kernel %s (%s) -> %s", defaultKernelVersion, opts.CurrentArch, path)
+	}
+
+	if err := downloadVerified(ctx, opts.HTTPClient, &artifact, path); err != nil {
+		return ArtifactState{}, false, err
+	}
+	if err := validateKernel(path); err != nil {
+		_ = os.Remove(path)
+		return ArtifactState{}, false, fmt.Errorf("downloaded kernel validation failed: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ArtifactState{}, false, err
+	}
+	return ArtifactState{File: filepath.Base(path), SHA256: artifact.SHA256, Size: info.Size()}, true, nil
+}
+
+func defaultKernelArtifact(arch string) (ManifestArtifact, error) {
+	switch strings.ToLower(strings.TrimSpace(arch)) {
+	case "amd64", "x86_64", "x64":
+		return ManifestArtifact{URL: defaultKernelURLAMD64, SHA256: defaultKernelSHA256AMD64}, nil
+	case "arm64", "aarch64":
+		return ManifestArtifact{URL: defaultKernelURLARM64, SHA256: defaultKernelSHA256ARM64}, nil
+	default:
+		return ManifestArtifact{}, fmt.Errorf("unsupported host architecture %q for automatic kernel download (expected amd64 or arm64)", arch)
+	}
+}
+
+func installLocalKernel(src, dst, expectedSHA256 string) error {
+	if expectedSHA256 != "" {
+		if err := validateChecksum(expectedSHA256); err != nil {
+			return fmt.Errorf("COMPUTE_KERNEL_SHA256: %w", err)
+		}
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open COMPUTE_KERNEL_SRC %s: %w", src, err)
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	tmp := dst + ".part"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", tmp, err)
+	}
+	hasher := sha256.New()
+	_, copyErr := io.Copy(io.MultiWriter(out, hasher), in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("copy %s: %w", src, copyErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close %s: %w", tmp, closeErr)
+	}
+	if expectedSHA256 != "" {
+		got := hex.EncodeToString(hasher.Sum(nil))
+		if !strings.EqualFold(got, expectedSHA256) {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("kernel checksum mismatch for %s: got %s, expected %s", src, got, expectedSHA256)
+		}
+	}
+	if err := validateKernel(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("COMPUTE_KERNEL_SRC %s is not an ELF kernel: %w", src, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("install %s: %w", dst, err)
+	}
+	return nil
+}
+
+func ensureAutoRootfs(ctx context.Context, opts BootstrapOptions, path string) (ArtifactState, bool, error) {
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		if err := validateRootfs(path); err != nil {
+			return ArtifactState{}, false, fmt.Errorf("existing rootfs at %s is invalid: %w (remove it to rebuild)", path, err)
+		}
+		opts.Logf("[images] rootfs already present: %s", path)
+		return ArtifactState{File: filepath.Base(path), Size: info.Size()}, false, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ArtifactState{}, false, fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	opts.Logf("[images] building Ubuntu 24.04 rootfs (%d MB sparse) -> %s", opts.RootfsSizeMB, path)
+	if err := opts.BuildRootfs(ctx, opts, path); err != nil {
+		return ArtifactState{}, false, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ArtifactState{}, false, fmt.Errorf("stat built rootfs %s: %w", path, err)
+	}
+	return ArtifactState{File: filepath.Base(path), Size: info.Size()}, true, nil
+}
+
+func ensureRootfsAliasSymlink(imagesDir, rootfsPath string) {
+	if filepath.Base(rootfsPath) != "ubuntu-24.04.ext4" {
+		return
+	}
+	alias := filepath.Join(imagesDir, "ubuntu-24.ext4")
+	if _, err := os.Lstat(alias); errors.Is(err, os.ErrNotExist) {
+		_ = os.Symlink("ubuntu-24.04.ext4", alias)
+	}
+}
+
+func buildRootfsChroot(ctx context.Context, opts BootstrapOptions, dstPath string) error {
+	scriptPath, err := findRootfsBuilderScript()
+	if err != nil {
+		return err
+	}
+	args := []string{scriptPath, dstPath, strconv.Itoa(opts.RootfsSizeMB)}
+	if strings.TrimSpace(opts.SSHKeyPath) != "" {
+		args = append(args, opts.SSHKeyPath+".pub")
+	}
+	cmd := exec.CommandContext(ctx, "bash", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("build rootfs via %s: %w", scriptPath, err)
+	}
+	return nil
+}
+
+func findRootfsBuilderScript() (string, error) {
+	var candidates []string
+	if custom := strings.TrimSpace(os.Getenv("COMPUTE_ROOTFS_BUILDER")); custom != "" {
+		candidates = append(candidates, custom)
+	}
+	candidates = append(candidates,
+		"/usr/local/share/compute/build-rootfs-chroot.sh",
+		filepath.Join("scripts", "build-rootfs-chroot.sh"),
+	)
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "..", "share", "compute", "build-rootfs-chroot.sh"),
+			filepath.Join(exeDir, "..", "scripts", "build-rootfs-chroot.sh"),
+		)
+	}
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("rootfs builder script build-rootfs-chroot.sh not found (checked %s); set COMPUTE_ROOTFS_BUILDER or use COMPUTE_IMAGES_MODE=download/build", strings.Join(candidates, ", "))
+}
+
+func validateArtifactURL(raw, envName string, allowPlainHTTP bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", envName, err)
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("invalid %s scheme %q: expected https", envName, u.Scheme)
+	}
+	if u.Scheme == "http" && !allowPlainHTTP && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("%s must use https (got %q); set COMPUTE_IMAGE_ALLOW_HTTP=true only for local testing", envName, raw)
+	}
+	return nil
 }
 
 func fetchManifest(ctx context.Context, opts BootstrapOptions) (*Manifest, error) {

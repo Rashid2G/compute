@@ -220,3 +220,100 @@ func TestLoadState(t *testing.T) {
 	}
 	_ = fmt.Sprintf("%v", st)
 }
+
+func TestBootstrapAutoInstallsKernelRootfsAndIsIdempotent(t *testing.T) {
+	kernel := fakeKernel()
+	rootfs := fakeRootfs()
+	var kernelRequests, rootfsBuilds int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/vmlinux" {
+			kernelRequests++
+			_, _ = w.Write(kernel)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	opts := BootstrapOptions{
+		ImagesDir:    dir,
+		KernelURL:    srv.URL + "/vmlinux",
+		KernelSHA256: sum(kernel),
+		CurrentArch:  "amd64",
+		BuildRootfs: func(ctx context.Context, o BootstrapOptions, dstPath string) error {
+			rootfsBuilds++
+			return os.WriteFile(dstPath, rootfs, 0644)
+		},
+	}
+
+	res, err := Bootstrap(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Bootstrap(auto): %v", err)
+	}
+	if res.State.Mode != ModeAuto {
+		t.Fatalf("mode = %q, want %q", res.State.Mode, ModeAuto)
+	}
+	if len(res.Downloaded) != 2 || kernelRequests != 1 || rootfsBuilds != 1 {
+		t.Fatalf("downloaded=%v kernelRequests=%d rootfsBuilds=%d", res.Downloaded, kernelRequests, rootfsBuilds)
+	}
+	if !res.GeneratedKey {
+		t.Fatal("expected generated SSH key")
+	}
+	aliasTarget, err := os.Readlink(filepath.Join(dir, "ubuntu-24.ext4"))
+	if err != nil || aliasTarget != "ubuntu-24.04.ext4" {
+		t.Fatalf("alias symlink = %q, err=%v", aliasTarget, err)
+	}
+
+	res2, err := Bootstrap(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second Bootstrap(auto): %v", err)
+	}
+	if len(res2.Downloaded) != 0 || kernelRequests != 1 || rootfsBuilds != 1 {
+		t.Fatalf("second run was not idempotent: downloaded=%v kernelRequests=%d rootfsBuilds=%d", res2.Downloaded, kernelRequests, rootfsBuilds)
+	}
+	if res2.GeneratedKey {
+		t.Fatal("second run regenerated SSH key")
+	}
+}
+
+func TestBootstrapAutoKernelSrcAndValidation(t *testing.T) {
+	kernel := fakeKernel()
+	srcDir := t.TempDir()
+	srcKernel := filepath.Join(srcDir, "vmlinux-custom")
+	if err := os.WriteFile(srcKernel, kernel, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	res, err := Bootstrap(context.Background(), BootstrapOptions{
+		Mode:         ModeAuto,
+		ImagesDir:    dir,
+		KernelSrc:    srcKernel,
+		KernelSHA256: sum(kernel),
+		CurrentArch:  "amd64",
+		BuildRootfs: func(ctx context.Context, o BootstrapOptions, dstPath string) error {
+			return os.WriteFile(dstPath, fakeRootfs(), 0644)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bootstrap(auto, KernelSrc): %v", err)
+	}
+	if len(res.Downloaded) != 2 {
+		t.Fatalf("downloaded = %v", res.Downloaded)
+	}
+
+	// Custom KernelURL requires KernelSHA256.
+	_, err = Bootstrap(context.Background(), BootstrapOptions{
+		Mode:        ModeAuto,
+		ImagesDir:   t.TempDir(),
+		KernelURL:   "https://example.com/vmlinux",
+		CurrentArch: "amd64",
+		BuildRootfs: func(ctx context.Context, o BootstrapOptions, dstPath string) error {
+			return os.WriteFile(dstPath, fakeRootfs(), 0644)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "COMPUTE_KERNEL_SHA256") {
+		t.Fatalf("expected COMPUTE_KERNEL_SHA256 error, got %v", err)
+	}
+}
