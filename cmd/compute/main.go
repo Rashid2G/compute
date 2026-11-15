@@ -195,7 +195,7 @@ func printUsage() {
 func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "Usage: compute <command> [subcommand] [options]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Core Commands (Boat.dev Style):")
+	fmt.Fprintln(w, "Core Commands:")
 	fmt.Fprintln(w, "  auth               User accounts, authentication and API keys (login, signup, whoami, keys, logout)")
 	fmt.Fprintln(w, "  sandbox, vm        Manage isolated compute sandboxes (list, create, start, stop, exec, ssh, delete, info)")
 	fmt.Fprintln(w, "  job, jobs          Run and monitor distributed compute jobs (run, list, info, logs, cancel)")

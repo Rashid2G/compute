@@ -39,16 +39,18 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
 - Go build: `make build`
 - Go tests: `make test` (or focused `go test ./path/...` while iterating)
 - Web typecheck/build: `cd web && ( [ -d node_modules ] || npm ci ) && npm run typecheck && npm run build` (Bun is also supported by the Makefile)
-- Full integration suite: `make test-features` (requires running daemon + Linux/KVM host); lab suite: `ssh compute-lab "cd ~/on-demand-vms && sudo ./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080"` (runs against the shared lab daemon — run only when testing lab integration explicitly).
-- Distinguish checks actually run from checks not run (including if `compute-lab` / SSH is unreachable).
+- Web tests: `make test-web`
+- Compose validation: `make validate-compose`
+- Full integration suite: `make test-features` (requires running daemon + Linux `/dev/kvm` host).
+- Distinguish checks actually run from checks not run (including when `/dev/kvm` or a running daemon is unavailable).
 
 ## Standard development workflow
 
 **Delivery modes**:
-- **PR delivery flow (default)** — Use for all standard implementation, bugfix, and config tasks. Follow all 6 steps below.
-- **Local-only edits** — Only when the user explicitly asks for local-only changes (or explicitly says not to commit/open a PR): still inspect `git status --short`, verify tests locally, and stop without committing, pushing, preview-deploying, or opening a PR.
+- **PR delivery flow (default)** — Use for all standard implementation, bugfix, and config tasks. Follow all 5 steps below.
+- **Local-only edits** — Only when the user explicitly asks for local-only changes (or explicitly says not to commit/open a PR): still inspect `git status --short`, verify tests locally, and stop without committing, pushing, or opening a PR.
 
-**6-step PR delivery flow**:
+**5-step PR delivery flow**:
 
 1. **Plan**: Inspect relevant packages, tests, config, and `git status --short`; formulate a minimal plan before editing.
 2. **Implement in a `dev` worktree**:
@@ -59,22 +61,16 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
      ```
      Use prefixes `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` (include the issue number when applicable, e.g. `fix/42-queue-starvation`).
    - Use scoped commits (`feat: ...`, `fix: ...`, `docs: ...`); do not amend or force-push without explicit direction. Clean up the worktree (`git worktree remove`) after merge.
-3. **Test & verify**: Add/update focused tests and run `make test` (for Go/GUI changes) and/or `cd web && npm run typecheck && npm run build` (installing `node_modules` via `npm ci` in a fresh worktree if absent, and staging rebuilt `internal/gui/assets/`). Run `git diff --check`.
+3. **Test & verify**: Add/update focused tests and run `make vet`, `make test`, `make test-web`, and `cd web && npm run typecheck && npm run build` (installing `node_modules` via `npm ci` in a fresh worktree if absent, and staging rebuilt `internal/gui/assets/`). Run `git diff --check`.
 4. **Capture evidence**: Record verified command output or UI screenshots (keep screenshots out of commits unless requested).
 5. **Open PR targeting `dev`**: Commit your verified changes, push (`git push -u origin <branch>`), and open the PR (`gh pr create --base dev`).
    - **Issue linking**: Use `Closes #<n>` when the PR fully satisfies the issue's acceptance criteria; otherwise use `Refs #<n>` and post a progress comment on the issue (`gh issue comment <n> ...`) keeping it open. Never close an issue without a linked commit/PR or written reason.
    - Persist any out-of-scope bug or follow-up as a GitHub issue (see the `github-issues` skill).
-6. **Deploy & verify PR preview (mandatory)**: Run `make deploy-current` from the PR's worktree after opening the PR (so the Docker preview stack is named `pr-<n>`; see the `deploy` skill). Verify the deployments homepage (`http://192.168.1.70:18080/`) and preview URL (`http://192.168.1.70:<port>/`), and add both to the PR description/comment and your final report. If `compute-lab` is unreachable from your environment, report that explicitly instead of skipping silently.
 
-## Deployment targets
+## Local deployment & verification
 
-The primary deployment host is `compute-lab` (`192.168.1.70`, reachable via `ssh compute-lab` with non-interactive SSH key / `BatchMode=yes`), serving GUI on `:8080` and daemon API on `:18080` (deployed checkout `/home/rashid/on-demand-vms`).
-
-- **PR previews**: `make deploy-current` / `make preview-stop PR=<n>` / `make deploy-current ARGS="--stop --name pr-<n>"`
-- **Main lab deploys** (restarts live shared services — run only when explicitly requested or required by the task, and verify with `make remote-status`): `make deploy` (Go/config/scripts) or `make deploy-ui` (`web/` changes)
-- **DNS/edge (docker-compose)**: authoritative DNS responder for `compute-lab.tailb1be99.ts.net` on port 53 (UDP+TCP) and HTTP edge listener on port 80, published on `192.168.1.70` and `100.78.129.96`. Sandbox hostnames are `<sandbox>.<username>.compute-lab.tailb1be99.ts.net`; `api`/`gui`/`www` and the zone apex route to the daemon (see `docs/dns-ssh.md`).
-
-See the `deploy` skill for full preview, auth/verification, troubleshooting, and main/local deployment details.
+- **Docker Compose**: configure `.env` from `.env.example`, run `./scripts/preflight.sh` and `sudo ./scripts/host-prepare.sh`, then `make up` (`docker compose up -d`). Verify `GET /api/v1/health` and `GET /api/v1/ready`.
+- **DNS/edge (optional)**: authoritative DNS responder on port 53 (UDP+TCP) and HTTP edge listener on port 80 when `COMPUTE_DNS_ENABLED=true` and `COMPUTE_DOMAIN` is set. Sandbox hostnames are `<sandbox>.<username>.<domain>`; `api`/`gui`/`www` and the zone apex route to the daemon (see `docs/dns-ssh.md`).
 
 ## Agent delegation
 
@@ -84,7 +80,6 @@ Work independently unless the user or task explicitly requests delegation, or in
 
 - **Precedence**: Explicit user instructions > `AGENTS.md` > `.agents/skills/<name>/SKILL.md`. If a skill conflicts with `AGENTS.md`, follow `AGENTS.md`.
 - **Available skills** (load only when the task needs their deeper procedures, CLI references, or templates):
-  - `deploy` — PR preview Docker stacks (`make deploy-current`, `make preview-stop`, teardown), `compute-lab` deployments, auth/health checks, container logs, and local/lab test suites.
   - `github-issues` — Issue templates, triage labels, resuming work, and PR/issue linking details.
   - `compute` — Operating the `compute` CLI & REST API for Firecracker sandboxes, distributed jobs, ingress routing, and dogfooding (do not load for routine codebase edits just because files mention `compute` or `sandbox`).
   - `leader-evaluator-refinement` — Multi-agent Leader + dual zero-context adversarial Evaluator orchestration (when requested or invoked for high-stakes multi-agent review).

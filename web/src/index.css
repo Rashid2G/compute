@@ -236,20 +236,20 @@
     font-feature-settings: 'tnum';
   }
 
-  .boat-selected {
+  .compute-selected {
     background-color: var(--selected);
     color: var(--selected-foreground);
   }
 
-  .boat-surface-tonal {
+  .compute-surface-tonal {
     background-color: var(--surface-tonal);
   }
 
-  .boat-surface-tinted {
+  .compute-surface-tinted {
     background-color: var(--surface-tinted);
   }
 
-  .boat-dither-bg {
+  .compute-dither-bg {
     background-image: radial-gradient(var(--background-3) 1px, transparent 1px);
     background-size: 8px 8px;
   }

@@ -555,7 +555,10 @@ func TestControlPlane_Environments(t *testing.T) {
 	}
 
 	// 3. Verify base is no longer default
-	respList, _ := http.Get(server.URL + "/api/v1/environments")
+	respList, err := http.Get(server.URL + "/api/v1/environments")
+	if err != nil {
+		t.Fatalf("GET /environments failed: %v", err)
+	}
 	defer respList.Body.Close()
 	var allEnvs []*db.EnvironmentProfile
 	_ = json.NewDecoder(respList.Body).Decode(&allEnvs)
@@ -642,7 +645,10 @@ func TestControlPlane_WorkerActionsAndTokens(t *testing.T) {
 	}
 
 	// 2. Drain worker
-	respDrain, _ := http.Post(server.URL+"/api/v1/workers/nod_host_local/drain", "application/json", nil)
+	respDrain, err := http.Post(server.URL+"/api/v1/workers/nod_host_local/drain", "application/json", nil)
+	if err != nil {
+		t.Fatalf("drain failed: %v", err)
+	}
 	defer respDrain.Body.Close()
 	_ = json.NewDecoder(respDrain.Body).Decode(&resMap)
 	if resMap["status"] != "draining" {
@@ -650,7 +656,10 @@ func TestControlPlane_WorkerActionsAndTokens(t *testing.T) {
 	}
 
 	// 3. Uncordon worker
-	respUncordon, _ := http.Post(server.URL+"/api/v1/workers/nod_host_local/uncordon", "application/json", nil)
+	respUncordon, err := http.Post(server.URL+"/api/v1/workers/nod_host_local/uncordon", "application/json", nil)
+	if err != nil {
+		t.Fatalf("uncordon failed: %v", err)
+	}
 	defer respUncordon.Body.Close()
 	_ = json.NewDecoder(respUncordon.Body).Decode(&resMap)
 	if resMap["status"] != "ready" {
@@ -738,5 +747,135 @@ func TestControlPlane_ClusterSnapshot(t *testing.T) {
 	if snap.Workers == nil || snap.Jobs == nil || snap.Volumes == nil || snap.Events == nil {
 		t.Fatalf("expected snapshot to include Workers, Jobs, Volumes, and Events slices; got: workers=%v, jobs=%v, volumes=%v, events=%v",
 			snap.Workers, snap.Jobs, snap.Volumes, snap.Events)
+	}
+}
+
+func TestControlPlane_VMCloneOverrides(t *testing.T) {
+	server, vmMgr := newTestServerWithVMManager(t)
+	vmMgr.SetLauncher(func(ctx context.Context, v *db.VM) error { return nil })
+
+	// 1. Create source VM
+	createBody, _ := json.Marshal(map[string]interface{}{
+		"name":      "clone-src",
+		"vcpus":     1,
+		"memory_mb": 512,
+	})
+	resp, err := http.Post(server.URL+"/api/v1/vms", "application/json", bytes.NewReader(createBody))
+	if err != nil {
+		t.Fatalf("POST /api/v1/vms failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d", resp.StatusCode)
+	}
+
+	// 2. Clone with resource, network_isolated, description, and auto_start overrides
+	cloneBody, _ := json.Marshal(map[string]interface{}{
+		"name":             "clone-overridden",
+		"vcpus":            4,
+		"memory_mb":        256,
+		"disk_gb":          20,
+		"network_isolated": true,
+		"description":      "replicated compute worker",
+		"auto_start":       true,
+	})
+	respClone, err := http.Post(server.URL+"/api/v1/vms/clone-src/clone", "application/json", bytes.NewReader(cloneBody))
+	if err != nil {
+		t.Fatalf("POST /api/v1/vms/clone-src/clone failed: %v", err)
+	}
+	defer respClone.Body.Close()
+	if respClone.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created from clone, got %d", respClone.StatusCode)
+	}
+	var cloned db.VM
+	if err := json.NewDecoder(respClone.Body).Decode(&cloned); err != nil {
+		t.Fatalf("decode cloned VM failed: %v", err)
+	}
+	if cloned.Name != "clone-overridden" {
+		t.Fatalf("expected cloned name clone-overridden, got %q", cloned.Name)
+	}
+	if cloned.VCPUs != 4 || cloned.MemoryMB != 256 || cloned.DiskMB != 20*1024 {
+		t.Fatalf("expected overridden resources 4c/256MB/20480MB, got %dc/%dMB/%dMB", cloned.VCPUs, cloned.MemoryMB, cloned.DiskMB)
+	}
+	if cloned.NetworkIsolation != "isolated" {
+		t.Fatalf("expected network_isolation=isolated, got %q", cloned.NetworkIsolation)
+	}
+	if cloned.Description != "replicated compute worker" {
+		t.Fatalf("expected description to persist, got %q", cloned.Description)
+	}
+	if cloned.Status != db.StatusRunning || !cloned.DesiredRunning {
+		t.Fatalf("expected auto_start=true to transition cloned VM to running with desired_running=true, got status=%q desired_running=%v", cloned.Status, cloned.DesiredRunning)
+	}
+
+	// 3. Clone with 8 vCPUs override (matching CloneVMDialog options)
+	clone8Body, _ := json.Marshal(map[string]interface{}{
+		"name":       "clone-8vcpu",
+		"vcpus":      8,
+		"memory_mb":  16384,
+		"auto_start": false,
+	})
+	respClone8, err := http.Post(server.URL+"/api/v1/vms/clone-src/clone", "application/json", bytes.NewReader(clone8Body))
+	if err != nil {
+		t.Fatalf("POST /api/v1/vms/clone-src/clone (8 vcpus) failed: %v", err)
+	}
+	defer respClone8.Body.Close()
+	if respClone8.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 Created from 8-vCPU clone, got %d", respClone8.StatusCode)
+	}
+	var cloned8 db.VM
+	if err := json.NewDecoder(respClone8.Body).Decode(&cloned8); err != nil {
+		t.Fatalf("decode 8-vCPU cloned VM failed: %v", err)
+	}
+	if cloned8.Name != "clone-8vcpu" || cloned8.VCPUs != 8 || cloned8.MemoryMB != 16384 {
+		t.Fatalf("expected 8c/16384MB cloned VM, got %+v", cloned8)
+	}
+	if cloned8.Status != db.StatusCreated || cloned8.DesiredRunning {
+		t.Fatalf("expected auto_start=false cloned VM to remain created with desired_running=false, got status=%q desired_running=%v", cloned8.Status, cloned8.DesiredRunning)
+	}
+}
+
+func TestControlPlane_EnvironmentComputeCredentialsCompat(t *testing.T) {
+	server := newTestServer(t)
+
+	// 1. Save using new compute_credentials_enabled field
+	newPayload, _ := json.Marshal(map[string]interface{}{
+		"name":                        "compute-env",
+		"compute_credentials_enabled": true,
+	})
+	resp, err := http.Post(server.URL+"/api/v1/environments", "application/json", bytes.NewReader(newPayload))
+	if err != nil {
+		t.Fatalf("POST /api/v1/environments failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+	var saved db.EnvironmentProfile
+	if err := json.NewDecoder(resp.Body).Decode(&saved); err != nil {
+		t.Fatalf("decode env failed: %v", err)
+	}
+	if !saved.ComputeCredsEnabled || !saved.BoatCredsEnabled {
+		t.Fatalf("expected compute & legacy credential flags enabled, got %+v", saved)
+	}
+
+	// 2. Save using legacy boat_credentials_enabled field
+	legacyPayload, _ := json.Marshal(map[string]interface{}{
+		"name":                     "legacy-env",
+		"boat_credentials_enabled": true,
+	})
+	respLegacy, err := http.Post(server.URL+"/api/v1/environments", "application/json", bytes.NewReader(legacyPayload))
+	if err != nil {
+		t.Fatalf("POST legacy /api/v1/environments failed: %v", err)
+	}
+	defer respLegacy.Body.Close()
+	if respLegacy.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK for legacy env, got %d", respLegacy.StatusCode)
+	}
+	var savedLegacy db.EnvironmentProfile
+	if err := json.NewDecoder(respLegacy.Body).Decode(&savedLegacy); err != nil {
+		t.Fatalf("decode legacy env failed: %v", err)
+	}
+	if !savedLegacy.ComputeCredsEnabled {
+		t.Fatalf("expected legacy boat_credentials_enabled to populate ComputeCredsEnabled, got %+v", savedLegacy)
 	}
 }

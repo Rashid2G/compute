@@ -1,6 +1,6 @@
 # @compute/sdk
 
-Official TypeScript & JavaScript client for launching and interacting with Compute Sandboxes with full E2B and Boat.dev parity.
+Official TypeScript & JavaScript client for launching and interacting with Compute Firecracker microVM sandboxes.
 
 ## Installation
 

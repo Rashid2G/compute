@@ -245,7 +245,7 @@ docker compose start computed
 
 The archive contains the SQLite database, base images, VM disks, and the
 internal SSH key. Store it encrypted; the SSH key grants access to sandboxes.
-On the lab host a full archive of a small install is roughly 500 MB and takes
+On a typical host, a full archive of a small install is roughly 500 MB and takes
 several minutes, mostly gzip on the multi-gigabyte images.
 
 If you only need the control-plane state (no VM disks), back up

@@ -11,10 +11,10 @@ var (
 	ProjectName = "Compute"
 
 	// Version is the current semantic version.
-	Version = "2.0.0"
+	Version = "1.0.0"
 
 	// ReleaseName is the release codename / name.
-	ReleaseName = "Vulcan"
+	ReleaseName = "Compute"
 
 	// GitCommit is set at build time via ldflags.
 	GitCommit = "dev"
@@ -28,8 +28,8 @@ type Info struct {
 	Name        string `json:"name"`                   // e.g. "Compute CLI" or "Compute Daemon"
 	Service     string `json:"service"`                // e.g. "compute" or "computed"
 	Project     string `json:"project"`                // e.g. "Compute"
-	Version     string `json:"version"`                // e.g. "2.0.0"
-	ReleaseName string `json:"release_name,omitempty"` // e.g. "Vulcan"
+	Version     string `json:"version"`                // e.g. "1.0.0"
+	ReleaseName string `json:"release_name,omitempty"` // e.g. "Compute"
 	GitCommit   string `json:"git_commit,omitempty"`   // git commit sha
 	BuildDate   string `json:"build_date,omitempty"`   // RFC3339 build date
 	GoVersion   string `json:"go_version"`             // runtime.Version()

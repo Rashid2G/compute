@@ -13,13 +13,13 @@ x-logging: &default-logging
     max-file: "3"
 
 x-daemon-image: &daemon-image
-  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:?set COMPUTE_VERSION in .env}
+  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-1.0.0}
   build:
     context: .
     dockerfile: Dockerfile.daemon
 
 x-worker-image: &worker-image
-  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:?set COMPUTE_VERSION in .env}
+  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-1.0.0}
   build:
     context: .
     dockerfile: Dockerfile.worker
@@ -72,6 +72,9 @@ services:
       COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-0.0.0.0}
       COMPUTE_API_PORT: ${COMPUTE_API_PORT:-18080}
       COMPUTE_AUTH_ENABLED: ${COMPUTE_AUTH_ENABLED:-true}
+      COMPUTE_SIGNUP_ENABLED: ${COMPUTE_SIGNUP_ENABLED:-false}
+      COMPUTE_ADMIN_USERNAME: ${COMPUTE_ADMIN_USERNAME:-admin}
+      COMPUTE_ADMIN_EMAIL: ${COMPUTE_ADMIN_EMAIL:-admin@compute.local}
       COMPUTE_ADMIN_PASSWORD: ${COMPUTE_ADMIN_PASSWORD:-}
       COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
       COMPUTE_TLS_CERT_FILE: ${COMPUTE_TLS_CERT_FILE:-}

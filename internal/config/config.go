@@ -10,11 +10,15 @@ import (
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 )
 
-// Supported fixed VM tiers and limits (inspired by boat.dev)
+// Supported fixed VM tiers and limits
 const (
-	Tier1VCPU = "1vcpu"
-	Tier2VCPU = "2vcpu"
-	Tier4VCPU = "4vcpu"
+	Tier1VCPU  = "1vcpu"
+	Tier2VCPU  = "2vcpu"
+	Tier4VCPU  = "4vcpu"
+	Tier8VCPU  = "8vcpu"
+	Tier16VCPU = "16vcpu"
+
+	MaxVCPUsPerVM = 16
 
 	DiskSize50GB  = 51200  // 50 GB in MB
 	DiskSize100GB = 102400 // 100 GB in MB
@@ -63,15 +67,15 @@ func GetSupportedTiers() []VMTier {
 	}
 }
 
-// ValidateAndNormalizeSpecs validates that vCPUs is in fixed tiers {1, 2, 4},
-// sets default RAM if omitted, and ensures disk is limited to 50GB or 100GB.
+// ValidateAndNormalizeSpecs validates that vCPUs is in supported tiers {1, 2, 4, 8, 16}
+// (up to MaxVCPUsPerVM), sets default RAM if omitted, and normalizes disk size.
 func ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB int) (int, int, int, error) {
-	// vCPUs check (fixed tiers 1, 2, 4)
+	// vCPUs check (supported tiers 1, 2, 4, 8, 16 up to MaxVCPUsPerVM)
 	if vcpus <= 0 {
 		vcpus = 1
 	}
-	if vcpus != 1 && vcpus != 2 && vcpus != 4 {
-		return 0, 0, 0, fmt.Errorf("invalid vcpus '%d': compute only supports fixed tiers of 1vcpu, 2vcpu, or 4vcpu (inspired by boat.dev)", vcpus)
+	if vcpus > MaxVCPUsPerVM || (vcpus != 1 && vcpus != 2 && vcpus != 4 && vcpus != 8 && vcpus != 16) {
+		return 0, 0, 0, fmt.Errorf("invalid vcpus '%d': compute supports 1, 2, 4, 8, or 16 vcpus (max %d)", vcpus, MaxVCPUsPerVM)
 	}
 
 	// RAM is optional: if omitted or 0, default according to tier
@@ -83,6 +87,10 @@ func ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB int) (int, int, int, erro
 			memoryMB = 4096
 		case 4:
 			memoryMB = 8192
+		case 8:
+			memoryMB = 16384
+		case 16:
+			memoryMB = 32768
 		}
 	} else if memoryMB < 128 {
 		return 0, 0, 0, fmt.Errorf("invalid memory '%d MB': minimum memory is 128 MB", memoryMB)
@@ -127,7 +135,7 @@ type DNSConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 	// Listen is the UDP/TCP listen address (default ":53").
 	Listen string `json:"listen,omitempty"`
-	// BaseDomain is the primary zone, e.g. "compute-lab.tail1234.ts.net".
+	// BaseDomain is the primary zone, e.g. "compute.example.internal".
 	// Empty falls back to network.base_domain.
 	BaseDomain string `json:"base_domain,omitempty"`
 	// ExtraBaseDomains optionally serves additional zones.
@@ -146,8 +154,11 @@ type ServerConfig struct {
 	DBPath         string `json:"db_path"`
 	FirecrackerBin string `json:"firecracker_bin"`
 	AuthEnabled    bool   `json:"auth_enabled"`
+	SignupEnabled  bool   `json:"signup_enabled"`
 	AuthDBPath     string `json:"auth_db_path,omitempty"`
 	AdminSecret    string `json:"admin_secret,omitempty"`
+	AdminUsername  string `json:"admin_username,omitempty"`
+	AdminEmail     string `json:"admin_email,omitempty"`
 	AdminPassword  string `json:"admin_password,omitempty"`
 	JailerEnabled  bool   `json:"jailer_enabled,omitempty"`
 	JailerBinary   string `json:"jailer_binary,omitempty"`
@@ -213,14 +224,14 @@ type ResourceLimits struct {
 
 // GlobalConfig is the master configuration for the Compute daemon
 type GlobalConfig struct {
-	ConfigPath string          `json:"config_path,omitempty"`
-	Server     ServerConfig    `json:"server"`
-	Network    network.Config  `json:"network"`
-	Defaults   DefaultsConfig  `json:"defaults"`
-	Images     ImagesConfig    `json:"images"`
-	Resources  ResourceLimits  `json:"resources"`
-	Jobs       JobsConfig      `json:"jobs"`
-	DNS        DNSConfig       `json:"dns,omitempty"`
+	ConfigPath string         `json:"config_path,omitempty"`
+	Server     ServerConfig   `json:"server"`
+	Network    network.Config `json:"network"`
+	Defaults   DefaultsConfig `json:"defaults"`
+	Images     ImagesConfig   `json:"images"`
+	Resources  ResourceLimits `json:"resources"`
+	Jobs       JobsConfig     `json:"jobs"`
+	DNS        DNSConfig      `json:"dns,omitempty"`
 }
 
 // Config is an alias for GlobalConfig for backward compatibility and package consistency.
@@ -281,6 +292,9 @@ func DefaultConfig() GlobalConfig {
 			ListenAddr:     "127.0.0.1:18080",
 			DBPath:         "/var/lib/compute/data/compute.db",
 			FirecrackerBin: "/usr/local/bin/firecracker",
+			SignupEnabled:  false,
+			AdminUsername:  "admin",
+			AdminEmail:     "admin@compute.local",
 			JailerEnabled:  false,
 			JailerBinary:   "/usr/local/bin/jailer",
 			JailerBaseDir:  "/srv/jailer",
@@ -374,6 +388,12 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 	}
 	if cfg.Server.FirecrackerBin == "" {
 		cfg.Server.FirecrackerBin = "/usr/local/bin/firecracker"
+	}
+	if strings.TrimSpace(cfg.Server.AdminUsername) == "" {
+		cfg.Server.AdminUsername = "admin"
+	}
+	if strings.TrimSpace(cfg.Server.AdminEmail) == "" {
+		cfg.Server.AdminEmail = "admin@compute.local"
 	}
 	if cfg.Defaults.VCPUs <= 0 {
 		cfg.Defaults.VCPUs = 1

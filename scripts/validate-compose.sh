@@ -27,7 +27,7 @@ if grep -RnE '(^|[^0-9])(192\.168\.1\.70|100\.78\.129\.96)([^0-9]|$)' \
     "${COMPOSE_FILE}" .env.example config/daemon.json config/daemon.example.json "${ENV_FILE}" 2>/dev/null; then
     say_fail "lab-specific addresses must not be committed; use .env or config)"
 else
-    say_ok "no hardcoded compute-lab addresses"
+    say_ok "no hardcoded lab-specific addresses"
 fi
 
 if [ ! -f "${ENV_FILE}" ]; then
