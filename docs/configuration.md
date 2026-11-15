@@ -31,7 +31,7 @@ config explicitly.
 | `COMPUTE_SIGNUP_ENABLED` | `false` | Allow public self-registration via `POST /api/v1/auth/signup` and the login page. |
 | `COMPUTE_ADMIN_USERNAME` | `admin` | Seeded administrator username. |
 | `COMPUTE_ADMIN_EMAIL` | `admin@compute.local` | Seeded administrator email address. |
-| `COMPUTE_ADMIN_PASSWORD` | `admin` in Compose | Initial/synced admin password. Required when auth is enabled unless a secret is set; replace `admin` before exposing beyond loopback. |
+| `COMPUTE_ADMIN_PASSWORD` | `admin` in Compose | Initial/synced admin password. Required when auth is enabled unless `COMPUTE_ADMIN_SECRET` is set (clear with `COMPUTE_ADMIN_PASSWORD=` in `.env`); the daemon refuses to start with `admin` on non-loopback addresses. |
 | `COMPUTE_ADMIN_SECRET` | — | Bootstrap admin secret alternative. |
 | `COMPUTE_TLS_CERT_FILE` | — | PEM certificate for native HTTPS. Must be paired with the key. |
 | `COMPUTE_TLS_KEY_FILE` | — | PEM private key for native HTTPS. |
@@ -42,7 +42,8 @@ config explicitly.
 | `COMPUTE_JAILER_DIR` | `/srv/jailer` | Jailer base directory. |
 
 Authentication is on by default. The daemon refuses to start when auth is
-enabled and both `COMPUTE_ADMIN_PASSWORD` and `COMPUTE_ADMIN_SECRET` are empty.
+enabled and both `COMPUTE_ADMIN_PASSWORD` and `COMPUTE_ADMIN_SECRET` are empty,
+or when `COMPUTE_ADMIN_PASSWORD=admin` is used on a non-loopback listen address.
 It never logs a generated password; if no credential is configured for an
 existing install, a one-time credential may be written to
 `<master>/admin-password` with mode `0600`.

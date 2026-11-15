@@ -74,12 +74,14 @@ chmod 600 .env
 
 For production or non-loopback deployments (`COMPUTE_BIND_ADDRESS=0.0.0.0`),
 always override the default credentials with strong random values
-(`openssl rand -base64 32`):
+(`openssl rand -base64 32`) — the daemon refuses to start with password
+`admin` on a non-loopback address:
 
 ```dotenv
 COMPUTE_BIND_ADDRESS=0.0.0.0
 COMPUTE_ADMIN_PASSWORD=replace-with-a-long-random-password
-# or a bootstrap secret instead of a password:
+# or a bootstrap secret instead of a password (leave COMPUTE_ADMIN_PASSWORD= empty):
+# COMPUTE_ADMIN_PASSWORD=
 # COMPUTE_ADMIN_SECRET=...
 ```
 
