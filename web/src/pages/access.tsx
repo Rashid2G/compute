@@ -8,6 +8,7 @@ import {
   Shield,
   Terminal,
   Trash2,
+  Users,
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -17,21 +18,49 @@ import { formatRelativeTime } from '@/lib/format';
 import type {
   AccessAPIKeyRecord,
   AgentProfileRecord,
+  AuthStatusResponse,
+  AuthUser,
   SSHKey,
   WorkerTokenRecord,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
-type AccessTab = 'api-keys' | 'ssh-keys' | 'agents' | 'worker-tokens';
+type AccessTab =
+  | 'api-keys'
+  | 'ssh-keys'
+  | 'agents'
+  | 'worker-tokens'
+  | 'users';
 
-export function AccessPage() {
+interface AccessPageProps {
+  currentUser?: AuthUser | null;
+}
+
+export function AccessPage({ currentUser: currentUserProp }: AccessPageProps = {}) {
   const [tab, setTab] = useState<AccessTab>('api-keys');
 
   const [apiKeys, setApiKeys] = useState<AccessAPIKeyRecord[]>([]);
   const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
   const [agentProfiles, setAgentProfiles] = useState<AgentProfileRecord[]>([]);
   const [workerTokens, setWorkerTokens] = useState<WorkerTokenRecord[]>([]);
+  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
+  const [meUser, setMeUser] = useState<AuthUser | null>(
+    () => currentUserProp ?? api.getAuthUser(),
+  );
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (currentUserProp !== undefined) {
+      setMeUser(currentUserProp);
+    }
+  }, [currentUserProp]);
+
+  const effectiveUser = meUser ?? currentUserProp ?? api.getAuthUser();
+  const isAdmin = Boolean(
+    (authStatus !== null && authStatus.auth_enabled === false) ||
+      effectiveUser?.role === 'admin',
+  );
 
   // Create API Key state
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
@@ -64,23 +93,62 @@ export function AccessPage() {
     null,
   );
 
+  // Create User state
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [userUsername, setUserUsername] = useState('');
+  const [userEmail, setUserEmail] = useState('');
+  const [userDisplayName, setUserDisplayName] = useState('');
+  const [userPassword, setUserPassword] = useState('');
+  const [userRole, setUserRole] = useState<'user' | 'admin'>('user');
+
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [akRes, skRes, apRes, wtRes] = await Promise.allSettled([
+      const [akRes, skRes, apRes, wtRes, authRes] = await Promise.allSettled([
         api.listAPIKeys(),
         api.listKeys(),
         api.listAgentProfiles(),
         api.listWorkerTokens(),
+        api.authStatus(),
       ]);
       if (akRes.status === 'fulfilled') setApiKeys(akRes.value || []);
       if (skRes.status === 'fulfilled') setSshKeys(skRes.value || []);
       if (apRes.status === 'fulfilled') setAgentProfiles(apRes.value || []);
       if (wtRes.status === 'fulfilled') setWorkerTokens(wtRes.value || []);
+
+      const statusVal = authRes.status === 'fulfilled' ? authRes.value : null;
+      if (statusVal) {
+        setAuthStatus(statusVal);
+      }
+
+      const authEnabled = statusVal ? statusVal.auth_enabled : true;
+      let resolvedUser = currentUserProp ?? api.getAuthUser();
+      if (authEnabled) {
+        try {
+          const meRes = await api.me();
+          if (meRes?.user) {
+            resolvedUser = meRes.user;
+            setMeUser(meRes.user);
+          }
+        } catch {
+          // Keep fallback stored user if /auth/me fails
+        }
+      }
+
+      if (!authEnabled || resolvedUser?.role === 'admin') {
+        try {
+          const usersVal = await api.listUsers();
+          setUsers(usersVal || []);
+        } catch {
+          // Non-admin or unavailable
+        }
+      } else {
+        setUsers([]);
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [currentUserProp]);
 
   useEffect(() => {
     void loadAll();
@@ -93,61 +161,84 @@ export function AccessPage() {
     setTimeout(() => setCopiedText(null), 1500);
   }
 
-  async function handleCreateAPIKey(e: React.FormEvent) {
+  function handleCreateAPIKey(e: React.FormEvent) {
     e.preventDefault();
-    if (!newKeyName.trim()) return;
-    try {
-      const created = await api.createAPIKey({
-        name: newKeyName.trim(),
-        scope: newKeyScope,
-        expires_at: newKeyExpiry,
+    const keyName = newKeyName.trim();
+    if (!keyName) return;
+    const payload = {
+      name: keyName,
+      scope: newKeyScope,
+      expires_at: newKeyExpiry,
+    };
+    setNewKeyName('');
+    setCreateKeyOpen(false);
+
+    const toastID = toast.loading(`Creating API key "${keyName}"…`);
+    void api
+      .createAPIKey(payload)
+      .then(async (created) => {
+        if (created.token) setCreatedPlainToken(created.token);
+        toast.success(`Created API key "${created.name}"`, { id: toastID });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      if (created.token) setCreatedPlainToken(created.token);
-      setNewKeyName('');
-      setCreateKeyOpen(false);
-      toast.success(`Created API key "${created.name}"`);
-      await loadAll();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
-  async function handleCreateSSHKey(e: React.FormEvent) {
+  function handleCreateSSHKey(e: React.FormEvent) {
     e.preventDefault();
-    if (!sshName.trim() || !sshPub.trim()) return;
-    try {
-      const created = await api.createKey({
-        name: sshName.trim(),
-        public_key: sshPub.trim(),
+    const keyName = sshName.trim();
+    const publicKey = sshPub.trim();
+    if (!keyName || !publicKey) return;
+    const payload = {
+      name: keyName,
+      public_key: publicKey,
+    };
+    setSshName('');
+    setSshPub('');
+    setAddSshOpen(false);
+
+    const toastID = toast.loading(`Adding SSH key "${keyName}"…`);
+    void api
+      .createKey(payload)
+      .then(async (created) => {
+        toast.success(`Added SSH key "${created.name}"`, { id: toastID });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      setSshName('');
-      setSshPub('');
-      setAddSshOpen(false);
-      toast.success(`Added SSH key "${created.name}"`);
-      await loadAll();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
-  async function handleCreateAgentProfile(e: React.FormEvent) {
+  function handleCreateAgentProfile(e: React.FormEvent) {
     e.preventDefault();
-    if (!agentName.trim()) return;
-    try {
-      await api.createAgentProfile({
-        name: agentName.trim(),
-        provider: agentProvider,
-        upstream_url: agentUpstream,
-        inject_header: agentHeader,
-        secret_ref: agentSecretRef,
+    const profileName = agentName.trim();
+    if (!profileName) return;
+    const payload = {
+      name: profileName,
+      provider: agentProvider,
+      upstream_url: agentUpstream,
+      inject_header: agentHeader,
+      secret_ref: agentSecretRef,
+    };
+    setAgentName('');
+    setAddAgentOpen(false);
+
+    const toastID = toast.loading(
+      `Creating agent proxy profile "${profileName}"…`,
+    );
+    void api
+      .createAgentProfile(payload)
+      .then(async () => {
+        toast.success('Created agent credential proxy profile', {
+          id: toastID,
+        });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      setAgentName('');
-      setAddAgentOpen(false);
-      toast.success('Created agent credential proxy profile');
-      await loadAll();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   async function handleCreateWorkerToken() {
@@ -164,17 +255,52 @@ export function AccessPage() {
     }
   }
 
+  function handleCreateUser(e: React.FormEvent) {
+    e.preventDefault();
+    const username = userUsername.trim();
+    const email = userEmail.trim();
+    const password = userPassword;
+    if (!username || !email || !password) return;
+
+    const payload = {
+      username,
+      email,
+      display_name: userDisplayName.trim() || undefined,
+      password,
+      role: userRole,
+    };
+    setUserUsername('');
+    setUserEmail('');
+    setUserDisplayName('');
+    setUserPassword('');
+    setUserRole('user');
+    setCreateUserOpen(false);
+
+    const toastID = toast.loading(`Creating user "${username}"…`);
+    void api
+      .createUser(payload)
+      .then(async (res) => {
+        toast.success(`Created user "${res.user?.username || username}"`, {
+          id: toastID,
+        });
+        await loadAll();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
+      });
+  }
+
   return (
     <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
-            API keys
+            Access &amp; Identity
           </h1>
           <p className="text-[12px] text-muted-foreground">
             Scoped programmatic API keys, guest SSH public keys, zero-trust
-            agent proxy profiles, and worker tokens.
+            agent proxy profiles, worker tokens, and user accounts.
           </p>
         </div>
 
@@ -227,16 +353,33 @@ export function AccessPage() {
               <span>Generate Worker Token</span>
             </button>
           )}
+          {tab === 'users' && isAdmin && (
+            <button
+              type="button"
+              onClick={() => setCreateUserOpen((v) => !v)}
+              className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Create User</span>
+            </button>
+          )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center border-b border-border">
+      <div
+        role="tablist"
+        aria-label="Access & Identity sections"
+        className="flex items-center overflow-x-auto border-b border-border"
+      >
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === 'api-keys'}
+          data-testid="access-tab-api-keys"
           onClick={() => setTab('api-keys')}
           className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+            'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'api-keys'
               ? 'border-[#263fa9] text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
@@ -246,9 +389,12 @@ export function AccessPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === 'ssh-keys'}
+          data-testid="access-tab-ssh-keys"
           onClick={() => setTab('ssh-keys')}
           className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+            'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'ssh-keys'
               ? 'border-[#263fa9] text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
@@ -258,9 +404,12 @@ export function AccessPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === 'agents'}
+          data-testid="access-tab-agents"
           onClick={() => setTab('agents')}
           className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+            'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'agents'
               ? 'border-[#263fa9] text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
@@ -270,15 +419,33 @@ export function AccessPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          aria-selected={tab === 'worker-tokens'}
+          data-testid="access-tab-worker-tokens"
           onClick={() => setTab('worker-tokens')}
           className={cn(
-            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+            'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
             tab === 'worker-tokens'
               ? 'border-[#263fa9] text-foreground font-medium'
               : 'border-transparent text-muted-foreground hover:text-foreground',
           )}
         >
           Worker Tokens ({workerTokens.length})
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'users'}
+          data-testid="access-tab-users"
+          onClick={() => setTab('users')}
+          className={cn(
+            'border-b-2 px-4 py-2 text-[12.5px] transition-colors whitespace-nowrap',
+            tab === 'users'
+              ? 'border-[#263fa9] text-foreground font-medium'
+              : 'border-transparent text-muted-foreground hover:text-foreground',
+          )}
+        >
+          Users ({users.length})
         </button>
       </div>
 
@@ -809,6 +976,280 @@ export function AccessPage() {
               )}
             </table>
           </div>
+        </div>
+      )}
+
+      {/* TAB 5: Users */}
+      {tab === 'users' && (
+        <div className="space-y-4">
+          {!isAdmin ? (
+            <div className="border border-border bg-muted/20 p-6 space-y-2">
+              <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+                <Shield className="h-4 w-4 text-[#5e7ff5]" />
+                <span>Admin privileges required to manage users</span>
+              </div>
+              <p className="text-[12px] text-muted-foreground">
+                Your current account ({effectiveUser?.username || 'user'}) does
+                not have administrator permissions to list, provision, or
+                delete user accounts.
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Public Signup Policy Status Banner */}
+              <div className="flex flex-wrap items-center justify-between gap-2 border border-border bg-muted/20 px-3.5 py-2.5 text-[12px]">
+                <div className="flex items-center gap-2">
+                  <Users className="h-3.5 w-3.5 text-[#5e7ff5]" />
+                  <span className="font-medium text-foreground">
+                    Public Signup:
+                  </span>
+                  <span
+                    className={cn(
+                      'border px-1.5 py-0.5 font-mono text-[10.5px] uppercase',
+                      authStatus?.signup_enabled
+                        ? 'border-success/40 bg-success/10 text-success'
+                        : 'border-border bg-background text-muted-foreground',
+                    )}
+                  >
+                    {authStatus?.signup_enabled
+                      ? 'Enabled'
+                      : 'Disabled (Admin-Only Provisioning)'}
+                  </span>
+                </div>
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  Controlled by COMPUTE_SIGNUP_ENABLED
+                </span>
+              </div>
+
+              {createUserOpen && (
+                <form
+                  onSubmit={handleCreateUser}
+                  className="border border-border bg-muted/15 p-4 space-y-3"
+                >
+                  <div className="text-[13px] font-medium text-foreground">
+                    Provision User Account
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    <div>
+                      <label className="block text-[11px] text-muted-foreground mb-1">
+                        Username
+                      </label>
+                      <input
+                        type="text"
+                        aria-label="New username"
+                        value={userUsername}
+                        onChange={(e) => setUserUsername(e.target.value)}
+                        placeholder="alice"
+                        required
+                        className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-muted-foreground mb-1">
+                        Email
+                      </label>
+                      <input
+                        type="email"
+                        aria-label="New email"
+                        value={userEmail}
+                        onChange={(e) => setUserEmail(e.target.value)}
+                        placeholder="alice@example.local"
+                        required
+                        className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-muted-foreground mb-1">
+                        Display Name (optional)
+                      </label>
+                      <input
+                        type="text"
+                        aria-label="New display name"
+                        value={userDisplayName}
+                        onChange={(e) => setUserDisplayName(e.target.value)}
+                        placeholder="Alice Dev"
+                        className="h-8 w-full border border-border bg-background px-2.5 text-[12px] text-foreground"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-muted-foreground mb-1">
+                        Password
+                      </label>
+                      <input
+                        type="password"
+                        aria-label="New password"
+                        value={userPassword}
+                        onChange={(e) => setUserPassword(e.target.value)}
+                        placeholder="••••••••"
+                        required
+                        minLength={6}
+                        className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-muted-foreground mb-1">
+                        Role
+                      </label>
+                      <select
+                        aria-label="New user role"
+                        value={userRole}
+                        onChange={(e) =>
+                          setUserRole(
+                            e.target.value === 'admin' ? 'admin' : 'user',
+                          )
+                        }
+                        className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
+                      >
+                        <option value="user">user</option>
+                        <option value="admin">admin</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCreateUserOpen(false)}
+                      className="h-8 border border-border px-3 text-[12px] text-muted-foreground"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+                    >
+                      Provision User
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              <div className="border border-border bg-background overflow-x-auto">
+                <table className="w-full border-collapse text-left text-[12px]">
+                  <thead>
+                    <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
+                      <th className="py-2.5 px-3 font-normal">Username</th>
+                      <th className="py-2.5 px-3 font-normal">Email</th>
+                      <th className="py-2.5 px-3 font-normal">Role</th>
+                      <th className="py-2.5 px-3 font-normal">Status</th>
+                      <th className="py-2.5 px-3 font-normal">Created</th>
+                      <th className="py-2.5 px-3 text-right font-normal">
+                        Actions
+                      </th>
+                    </tr>
+                  </thead>
+                  {users.length === 0 ? (
+                    <tbody>
+                      <tr>
+                        <td
+                          colSpan={6}
+                          className="py-16 text-center text-muted-foreground"
+                        >
+                          <Users className="mx-auto h-7 w-7 text-muted-foreground/50 mb-2" />
+                          <div className="text-[12.5px]">
+                            {loading
+                              ? 'Loading users…'
+                              : 'No user accounts found.'}
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  ) : (
+                    <tbody className="divide-y divide-border font-mono text-[11.5px]">
+                      {users.map((u) => {
+                        const configuredAdminUsername =
+                          authStatus?.admin_username?.trim().toLowerCase();
+                        const isProtectedUser =
+                          u.id === effectiveUser?.id ||
+                          u.id === 'usr_system_admin' ||
+                          u.id === 'usr_admin' ||
+                          (configuredAdminUsername
+                            ? u.username.toLowerCase() === configuredAdminUsername
+                            : u.username.toLowerCase() === 'admin');
+                        return (
+                          <tr key={u.id} className="hover:bg-muted/30">
+                            <td className="py-2.5 px-3 font-sans">
+                              <div className="font-medium text-foreground">
+                                {u.username}
+                                {u.id === effectiveUser?.id && (
+                                  <span className="ml-1.5 border border-[#5e7ff5]/40 bg-[#5e7ff5]/10 px-1 py-0.2 font-mono text-[9.5px] text-[#5e7ff5] uppercase">
+                                    you
+                                  </span>
+                                )}
+                              </div>
+                              {u.display_name &&
+                                u.display_name !== u.username && (
+                                  <div className="text-[11px] text-muted-foreground">
+                                    {u.display_name}
+                                  </div>
+                                )}
+                            </td>
+                            <td className="py-2.5 px-3 text-muted-foreground">
+                              {u.email}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={cn(
+                                  'border px-1.5 py-0.5 text-[10.5px] uppercase',
+                                  u.role === 'admin'
+                                    ? 'border-[#5e7ff5]/40 bg-[#5e7ff5]/10 text-[#5e7ff5]'
+                                    : 'border-border bg-muted/30 text-muted-foreground',
+                                )}
+                              >
+                                {u.role}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-success">
+                              {u.status || 'active'}
+                            </td>
+                            <td className="py-2.5 px-3 text-muted-foreground">
+                              {u.created_at
+                                ? formatRelativeTime(
+                                    new Date(
+                                      u.created_at > 1e12
+                                        ? u.created_at
+                                        : u.created_at * 1000,
+                                    ).toISOString(),
+                                  )
+                                : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              {isAdmin && !isProtectedUser ? (
+                                <button
+                                  type="button"
+                                  aria-label={`Delete user ${u.username}`}
+                                  onClick={() => {
+                                    void api
+                                      .deleteUser(u.id)
+                                      .then(() => {
+                                        toast.success(
+                                          `Deleted user ${u.username}`,
+                                        );
+                                        void loadAll();
+                                      })
+                                      .catch((err) =>
+                                        toast.error(errorMessage(err)),
+                                      );
+                                  }}
+                                  className="inline-flex items-center gap-1 border border-border px-2 py-0.5 text-[11px] text-destructive hover:border-destructive"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                  <span>Delete</span>
+                                </button>
+                              ) : (
+                                <span className="text-[10.5px] text-muted-foreground">
+                                  Protected
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  )}
+                </table>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

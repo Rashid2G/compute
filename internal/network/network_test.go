@@ -163,7 +163,7 @@ func TestWiredDedicatedIP(t *testing.T) {
 func TestNetworkManagerTAPAndPrune(t *testing.T) {
 	runner := &mockRunner{
 		output: map[string]string{
-			"link show": "1: lo: <LOOPBACK>\n150: mftap-active: <BROADCAST>\n151: mftap-orphan: <BROADCAST>\n",
+			"link show": "1: lo: <LOOPBACK>\n150: mftap-active: <BROADCAST>\n151: mftap-orphan: <BROADCAST>\n152: mftap-foreign: <BROADCAST>\n",
 		},
 	}
 	cfg := DefaultNATConfig()
@@ -183,12 +183,22 @@ func TestNetworkManagerTAPAndPrune(t *testing.T) {
 	activeTAPs := map[string]bool{
 		"mftap-active": true,
 	}
-	pruned, err := mgr.PruneOrphanTAPs(ctx, activeTAPs)
+	knownTAPs := map[string]bool{
+		"mftap-active": true,
+		"mftap-orphan": true,
+	}
+	pruned, err := mgr.PruneOrphanTAPs(ctx, activeTAPs, knownTAPs)
 	if err != nil {
 		t.Fatalf("PruneOrphanTAPs failed: %v", err)
 	}
 	if len(pruned) != 1 || pruned[0] != "mftap-orphan" {
 		t.Fatalf("expected pruned [mftap-orphan], got %v", pruned)
+	}
+	for _, call := range runner.commands {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "mftap-foreign") && strings.Contains(joined, "del") {
+			t.Fatalf("pruned a TAP not recorded in this store: %s", joined)
+		}
 	}
 }
 
@@ -201,6 +211,8 @@ func TestLinkOtherBridgesAndDHCP(t *testing.T) {
 		},
 	}
 	cfg := DefaultNATConfig()
+	// Linking is explicit: name the bridges instead of sweeping the host.
+	cfg.LinkedBridges = []string{"br0", "virbr0"}
 	mgr, err := NewManager(cfg, runner)
 	if err != nil {
 		t.Fatalf("failed to create manager: %v", err)
@@ -229,6 +241,54 @@ func TestLinkOtherBridgesAndDHCP(t *testing.T) {
 
 	if mgr.GetGatewayIP() != "172.16.0.1" {
 		t.Fatalf("expected gateway 172.16.0.1, got %s", mgr.GetGatewayIP())
+	}
+}
+
+// A shared host can have Docker, libvirt, or another Compute bridge. Unless
+// linking is explicitly requested, EnsureNetwork must not create veth pairs
+// into those bridges: doing so creates L2 loops and steals MAC learning from
+// unrelated sandboxes.
+func TestEnsureNetworkDoesNotLinkUnrelatedBridges(t *testing.T) {
+	runner := &mockRunner{
+		output: map[string]string{
+			"link show type bridge": "1: docker0: <BROADCAST>\n2: mft3br0: <BROADCAST>\n3: mftestbr0: <BROADCAST>\n",
+		},
+	}
+	cfg := DefaultNATConfig()
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+	if err := mgr.EnsureNetwork(context.Background()); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+	for _, cmd := range runner.commands {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "veth") || strings.Contains(joined, "vbp-") || strings.Contains(joined, "vbm-") {
+			t.Fatalf("unexpected bridge linking command: %s", joined)
+		}
+	}
+
+	// The opt-in restores the sweep for deployments that need it.
+	runner.commands = nil
+	cfg.LinkAllBridges = true
+	optIn, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("failed to create opt-in manager: %v", err)
+	}
+	if err := optIn.EnsureNetwork(context.Background()); err != nil {
+		t.Fatalf("EnsureNetwork opt-in failed: %v", err)
+	}
+	var sawVeth bool
+	for _, cmd := range runner.commands {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "vbm-") || strings.Contains(joined, "vbp-") {
+			sawVeth = true
+			break
+		}
+	}
+	if !sawVeth {
+		t.Fatal("expected opt-in EnsureNetwork to link host bridges")
 	}
 }
 

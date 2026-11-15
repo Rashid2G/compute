@@ -30,12 +30,6 @@
         "kernel": "vmlinux",
         "rootfs": "ubuntu-24.04.ext4",
         "description": "Standard Ubuntu 24.04 LTS (Noble Numbat) with Node.js, Python 3, and SSH"
-      },
-      {
-        "name": "alpine",
-        "kernel": "vmlinux",
-        "rootfs": "alpine-3.20.ext4",
-        "description": "Alpine Linux 3.20 (minimal, SSH enabled)"
       }
     ]
   },

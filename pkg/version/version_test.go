@@ -17,23 +17,23 @@ func TestVersionGet(t *testing.T) {
 	if info.Project != "Compute" {
 		t.Errorf("expected Project 'Compute', got %q", info.Project)
 	}
-	if info.Version != "2.0.0" {
-		t.Errorf("expected Version '2.0.0', got %q", info.Version)
+	if info.Version != "1.0.0" {
+		t.Errorf("expected Version '1.0.0', got %q", info.Version)
 	}
-	if info.ReleaseName != "Vulcan" {
-		t.Errorf("expected ReleaseName 'Vulcan', got %q", info.ReleaseName)
+	if info.ReleaseName != "Compute" {
+		t.Errorf("expected ReleaseName 'Compute', got %q", info.ReleaseName)
 	}
 	if info.GoVersion == "" || info.OS == "" || info.Arch == "" {
 		t.Errorf("expected runtime info populated, got %+v", info)
 	}
 
 	str := info.String()
-	if !strings.Contains(str, "Compute CLI (compute) v2.0.0") {
+	if !strings.Contains(str, "Compute CLI (compute) v1.0.0") {
 		t.Errorf("unexpected String output: %s", str)
 	}
 
 	detailed := info.Detailed("  ")
-	if !strings.Contains(detailed, "Name:        Compute CLI (compute)") || !strings.Contains(detailed, "Version:     2.0.0") {
+	if !strings.Contains(detailed, "Name:        Compute CLI (compute)") || !strings.Contains(detailed, "Version:     1.0.0") {
 		t.Errorf("unexpected Detailed output: %s", detailed)
 	}
 

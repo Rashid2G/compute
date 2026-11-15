@@ -3,6 +3,7 @@ import type {
   AgentProfileRecord,
   AuditEventRecord,
   BuildImageRequest,
+  CloneVMOptions,
   CreateTemplateRequest,
   CreateVMRequest,
   CustomImage,
@@ -19,6 +20,7 @@ import type {
   NetworkAllocation,
   NetworkConfig,
   NetworkInspectResult,
+  NetworkIsolationMode,
   OTelConfigRecord,
   PortForwardRecord,
   ProcessInfo,
@@ -33,9 +35,17 @@ import type {
   WorkerNodeRecord,
   WorkerPoolRecord,
   WorkerTokenRecord,
+  AuthMeResponse,
+  AuthStatusResponse,
+  AuthUser,
+  CreateUserRequest,
+  LoginResponse,
+  SignupRequest,
 } from './types';
 
 const BASE_PATH = '/api/v1';
+const AUTH_TOKEN_KEY = 'compute_auth_token';
+const AUTH_USER_KEY = 'compute_auth_user';
 
 export class ApiError extends Error {
   status: number;
@@ -47,11 +57,85 @@ export class ApiError extends Error {
   }
 }
 
+type UnauthorizedListener = () => void;
+const unauthorizedListeners: Set<UnauthorizedListener> = new Set();
+
+export function onUnauthorized(fn: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(fn);
+  return () => {
+    unauthorizedListeners.delete(fn);
+  };
+}
+
+function notifyUnauthorized() {
+  for (const listener of unauthorizedListeners) {
+    try {
+      listener();
+    } catch {
+      // Ignore listener errors
+    }
+  }
+}
+
+export function getStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredToken(token: string | null) {
+  try {
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function getStoredUser(): AuthUser | null {
+  try {
+    const raw = window.localStorage.getItem(AUTH_USER_KEY);
+    return raw ? (JSON.parse(raw) as AuthUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredUser(user: AuthUser | null) {
+  try {
+    if (user) {
+      window.localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+    } else {
+      window.localStorage.removeItem(AUTH_USER_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function clearAuth() {
+  setStoredToken(null);
+  setStoredUser(null);
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getStoredToken();
+  const authHeaders: Record<string, string> = {};
+  if (token) {
+    authHeaders['Authorization'] = `Bearer ${token}`;
+  }
+
   const response = await fetch(`${BASE_PATH}${path}`, {
+    credentials: 'include',
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders,
       ...options.headers,
     },
   });
@@ -59,11 +143,26 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
-      const body = (await response.json()) as { error?: string };
-      if (body.error) message = body.error;
+      const body = (await response.json()) as { error?: string; message?: string };
+      if (body.message) {
+        message = body.message;
+      } else if (body.error) {
+        message = body.error;
+      }
     } catch {
       // Keep the status-based message when the body is not JSON.
     }
+
+    if (
+      response.status === 401 &&
+      !path.startsWith('/auth/login') &&
+      !path.startsWith('/auth/signup') &&
+      !path.startsWith('/auth/me') &&
+      !path.startsWith('/auth/status')
+    ) {
+      notifyUnauthorized();
+    }
+
     throw new ApiError(message, response.status);
   }
 
@@ -73,6 +172,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   return (await response.json()) as T;
 }
+
 
 export const api = {
   async health(): Promise<HealthResult> {
@@ -117,7 +217,9 @@ export const api = {
     });
   },
 
-  cloneVM(id: string, payload: CreateVMRequest): Promise<VM> {
+  cloneVM(id: string, nameOrOptions: string | CloneVMOptions | CreateVMRequest): Promise<VM> {
+    const payload =
+      typeof nameOrOptions === 'string' ? { name: nameOrOptions } : nameOrOptions;
     return request<VM>(`/vms/${encodeURIComponent(id)}/clone`, {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -138,6 +240,12 @@ export const api = {
     });
   },
 
+  pauseVM(id: string): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/save-state`, {
+      method: 'POST',
+    });
+  },
+
   resumeVM(id: string): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}/resume`, { method: 'POST' });
   },
@@ -148,7 +256,15 @@ export const api = {
     });
   },
 
-  updateVMConfig(id: string, payload: { public_ip?: boolean; protected?: boolean }): Promise<VM> {
+  updateVMConfig(
+    id: string,
+    payload: {
+      public_ip?: boolean;
+      protected?: boolean;
+      network_isolation?: NetworkIsolationMode;
+      isolated?: boolean;
+    },
+  ): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
@@ -235,6 +351,13 @@ export const api = {
     });
   },
 
+  setVMNetworkIsolation(id: string, mode: NetworkIsolationMode): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/network-isolation`, {
+      method: 'POST',
+      body: JSON.stringify({ network_isolation: mode }),
+    });
+  },
+
   listPortForwards(): Promise<PortForwardRecord[]> {
     return request<PortForwardRecord[]>('/network/port-forwards');
   },
@@ -308,16 +431,59 @@ export const api = {
     });
   },
 
+  createSnapshot(vmId: string, name: string, description = ''): Promise<Template> {
+    return request<Template>('/templates', {
+      method: 'POST',
+      body: JSON.stringify({
+        vm_id: vmId,
+        name,
+        description,
+      }),
+    });
+  },
+
+  restoreSnapshot(
+    snapshotId: string,
+    name: string,
+    options: Omit<LaunchTemplateRequest, 'name'> = {},
+  ): Promise<VM> {
+    return request<VM>(`/templates/${encodeURIComponent(snapshotId)}/launch`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        ...options,
+      }),
+    });
+  },
+
   async listKeys(): Promise<SSHKey[]> {
     const res = await request<{ keys: SSHKey[] } | SSHKey[]>('/keys');
     if (Array.isArray(res)) return res;
     return (res as { keys: SSHKey[] }).keys || [];
   },
 
-  createKey(payload: { name: string; public_key: string }): Promise<SSHKey> {
+  createKey(payload: { name: string; public_key: string; all_sandboxes?: boolean }): Promise<SSHKey> {
     return request<SSHKey>('/keys', {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  },
+
+  updateKey(
+    id: string,
+    payload: { name?: string; public_key?: string; all_sandboxes?: boolean; is_default?: boolean },
+  ): Promise<SSHKey> {
+    return request<SSHKey>(`/keys/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  applyKey(
+    id: string,
+  ): Promise<{ key: SSHKey; sync?: { applied: string[]; failed: { vm_id: string; name?: string; error: string }[] } }> {
+    return request(`/keys/${encodeURIComponent(id)}/apply`, {
+      method: 'POST',
     });
   },
 
@@ -609,7 +775,92 @@ export const api = {
       method: 'DELETE',
     });
   },
+
+  // Authentication & Identity
+  authStatus(): Promise<AuthStatusResponse> {
+    return request<AuthStatusResponse>('/auth/status');
+  },
+
+  async login(username: string, password: string): Promise<LoginResponse> {
+    const res = await request<LoginResponse>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    if (res.token) {
+      setStoredToken(res.token);
+    }
+    if (res.user) {
+      setStoredUser(res.user);
+    }
+    return res;
+  },
+
+  async signup(payload: SignupRequest): Promise<LoginResponse> {
+    const res = await request<LoginResponse>('/auth/signup', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.token) {
+      setStoredToken(res.token);
+    }
+    if (res.user) {
+      setStoredUser(res.user);
+    }
+    return res;
+  },
+
+  async logout(): Promise<void> {
+    try {
+      await request<{ status: string }>('/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      clearAuth();
+    }
+  },
+
+  async me(): Promise<AuthMeResponse> {
+    const res = await request<AuthMeResponse>('/auth/me');
+    if (res.user) {
+      setStoredUser(res.user);
+    }
+    return res;
+  },
+
+  listUsers(): Promise<AuthUser[]> {
+    return request<AuthUser[]>('/users');
+  },
+
+  createUser(payload: CreateUserRequest): Promise<{ status: string; user: AuthUser }> {
+    return request<{ status: string; user: AuthUser }>('/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteUser(id: string): Promise<{ status: string; id: string }> {
+    return request<{ status: string; id: string }>(`/users/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  getAuthToken(): string | null {
+    return getStoredToken();
+  },
+
+  getAuthUser(): AuthUser | null {
+    return getStoredUser();
+  },
+
+  setAuthToken(token: string | null): void {
+    setStoredToken(token);
+  },
+
+  clearAuth(): void {
+    clearAuth();
+  },
 };
+
 
 export function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;

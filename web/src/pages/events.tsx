@@ -140,26 +140,34 @@ export function EventsPage({ events: propEvents, onRefresh }: EventsPageProps) {
     );
   }, [auditEvents, auditSearch]);
 
-  async function handleCreateWebhook(e: React.FormEvent) {
+  function handleCreateWebhook(e: React.FormEvent) {
     e.preventDefault();
-    if (!whUrl.trim()) return;
-    try {
-      const created = await api.createWebhook({
-        url: whUrl.trim(),
-        description: whDesc.trim(),
-        secret: whSecret.trim() || undefined,
-        events: whEvents,
+    const url = whUrl.trim();
+    if (!url) return;
+    const payload = {
+      url,
+      description: whDesc.trim(),
+      secret: whSecret.trim() || undefined,
+      events: whEvents,
+    };
+    setAddWhOpen(false);
+    setWhUrl('');
+    setWhDesc('');
+    setWhSecret('');
+
+    const toastID = toast.loading('Registering webhook endpoint…');
+    void api
+      .createWebhook(payload)
+      .then(async (created) => {
+        toast.success(`Registered webhook endpoint ${created.id}`, {
+          id: toastID,
+        });
+        await loadAll();
+        onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(errorMessage(err), { id: toastID });
       });
-      toast.success(`Registered webhook endpoint ${created.id}`);
-      setAddWhOpen(false);
-      setWhUrl('');
-      setWhDesc('');
-      setWhSecret('');
-      await loadAll();
-      onRefresh?.();
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   async function handleTestWebhook(wh: WebhookEndpointRecord) {

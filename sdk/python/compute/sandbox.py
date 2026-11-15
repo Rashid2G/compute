@@ -114,8 +114,7 @@ class ProcessManager:
 
 class Sandbox:
     """
-    Compute Sandbox representing an isolated microVM.
-    Provides complete parity with E2B and Boat.dev workflows.
+    Compute Sandbox representing an isolated Firecracker microVM.
     """
 
     def __init__(self, sandbox_id: str, host: str, api_key: Optional[str] = None):
@@ -138,6 +137,9 @@ class Sandbox:
         api_key: Optional[str] = None,
         host: Optional[str] = None,
         timeout: Optional[int] = None,
+        ssh_password: Optional[str] = None,
+        network_isolation: Optional[str] = None,
+        isolated: Optional[bool] = None,
     ) -> "Sandbox":
         """Provision and launch a new isolated compute sandbox in milliseconds."""
         resolved_host = host or os.getenv("COMPUTE_HOST") or os.getenv("COMPUTE_DAEMON") or "http://127.0.0.1:18080"
@@ -159,6 +161,12 @@ class Sandbox:
             payload["disk_mb"] = disk_mb
         if name:
             payload["name"] = name
+        if ssh_password:
+            payload["ssh_password"] = ssh_password
+        if network_isolation is not None:
+            payload["network_isolation"] = network_isolation
+        if isolated is not None:
+            payload["isolated"] = isolated
 
         headers = {"Content-Type": "application/json"}
         if resolved_key:
@@ -193,6 +201,15 @@ class Sandbox:
     def get_preview_url(self, port: int) -> str:
         """Return the public preview URL to access an HTTP/WebSocket server running on a port inside the sandbox."""
         return f"{self._host}/preview/{self.id}/{port}/"
+
+    def set_network_isolation(self, mode: str) -> Dict[str, Any]:
+        """Set sandbox network isolation mode ('account' or 'isolated')."""
+        resp = self._request(
+            "POST",
+            f"/api/v1/sandboxes/{self.id}/network-isolation",
+            json={"network_isolation": mode},
+        )
+        return resp.json()
 
     def kill(self) -> None:
         """Stop and terminate the microVM sandbox and free all associated resources."""

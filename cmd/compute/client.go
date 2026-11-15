@@ -19,6 +19,7 @@ import (
 
 	"github.com/Rashid2G/on-demand-vms/internal/config"
 	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/on-demand-vms/internal/doctor"
 	"github.com/Rashid2G/on-demand-vms/internal/network"
 	"github.com/Rashid2G/on-demand-vms/internal/vm"
 	"github.com/Rashid2G/on-demand-vms/pkg/api"
@@ -212,6 +213,14 @@ func (c *DaemonClient) UnprotectVM(ctx context.Context, id string) (*db.VM, erro
 	return &vm, err
 }
 
+func (c *DaemonClient) SetVMNetworkIsolation(ctx context.Context, id, mode string) (*db.VM, error) {
+	var vm db.VM
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/vms/"+id+"/network-isolation", map[string]string{
+		"network_isolation": mode,
+	}, &vm)
+	return &vm, err
+}
+
 func (c *DaemonClient) GetNetworkInfo(ctx context.Context) (*network.NetworkInfo, error) {
 	var info network.NetworkInfo
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network", nil, &info)
@@ -237,41 +246,6 @@ func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, e
 	var cfg network.Config
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/network/config", nil, &cfg)
 	return &cfg, err
-}
-
-// TailscaleStatus mirrors GET /api/v1/tailscale/status.
-type TailscaleStatus struct {
-	Enabled               bool   `json:"enabled"`
-	APIKeyConfigured      bool   `json:"api_key_configured"`
-	Tailnet               string `json:"tailnet,omitempty"`
-	NodeTag               string `json:"node_tag,omitempty"`
-	SandboxTag            string `json:"sandbox_tag,omitempty"`
-	DefaultSandboxes      bool   `json:"default_sandboxes"`
-	WorkerControlPlaneURL string `json:"worker_control_plane_url,omitempty"`
-	RecommendedPolicy     string `json:"recommended_policy,omitempty"`
-	Host                  *struct {
-		Installed bool     `json:"installed"`
-		Running   bool     `json:"running"`
-		Hostname  string   `json:"hostname"`
-		DNSName   string   `json:"dns_name"`
-		TailnetIP string   `json:"tailnet_ip"`
-		Tailnet   string   `json:"tailnet_name"`
-		Tags      []string `json:"tags"`
-		Version   string   `json:"version"`
-	} `json:"host,omitempty"`
-	Sandboxes []struct {
-		ID         string `json:"id"`
-		Name       string `json:"name"`
-		Status     string `json:"status"`
-		TailnetIP  string `json:"tailnet_ip,omitempty"`
-		TailnetDNS string `json:"tailnet_dns,omitempty"`
-	} `json:"sandboxes,omitempty"`
-}
-
-func (c *DaemonClient) GetTailscaleStatus(ctx context.Context) (*TailscaleStatus, error) {
-	var st TailscaleStatus
-	err := c.doRequest(ctx, http.MethodGet, "/api/v1/tailscale/status", nil, &st)
-	return &st, err
 }
 
 func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {
@@ -429,8 +403,23 @@ func (c *DaemonClient) LaunchTemplate(ctx context.Context, idOrName string, req 
 }
 
 type CreateKeyRequest struct {
-	Name      string `json:"name"`
-	PublicKey string `json:"public_key"`
+	Name         string `json:"name"`
+	PublicKey    string `json:"public_key"`
+	AllSandboxes bool   `json:"all_sandboxes,omitempty"`
+	IsDefault    bool   `json:"is_default,omitempty"`
+}
+
+type UpdateKeyRequest struct {
+	Name         *string `json:"name,omitempty"`
+	PublicKey    *string `json:"public_key,omitempty"`
+	AllSandboxes *bool   `json:"all_sandboxes,omitempty"`
+	IsDefault    *bool   `json:"is_default,omitempty"`
+}
+
+// KeyApplyResult reports an account-wide key reconciliation pass.
+type KeyApplyResult struct {
+	Key  *db.SSHKey           `json:"key"`
+	Sync *vm.SSHKeySyncResult `json:"sync,omitempty"`
 }
 
 type KeysResponse struct {
@@ -457,13 +446,44 @@ func (c *DaemonClient) ListKeys(ctx context.Context) ([]*db.SSHKey, error) {
 	return resp.Keys, nil
 }
 
-func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string) (*db.SSHKey, error) {
-	req := CreateKeyRequest{Name: name, PublicKey: pubKey}
+func (c *DaemonClient) CreateKey(ctx context.Context, name, pubKey string, allSandboxes, isDefault bool) (*db.SSHKey, error) {
+	req := CreateKeyRequest{Name: name, PublicKey: pubKey, AllSandboxes: allSandboxes, IsDefault: isDefault}
 	var key db.SSHKey
 	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys", req, &key); err != nil {
 		return nil, err
 	}
 	return &key, nil
+}
+
+func (c *DaemonClient) UpdateKey(ctx context.Context, idOrName string, req UpdateKeyRequest) (*db.SSHKey, error) {
+	var key db.SSHKey
+	if err := c.doRequest(ctx, http.MethodPatch, "/api/v1/keys/"+url.PathEscape(idOrName), req, &key); err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
+func (c *DaemonClient) ApplyKey(ctx context.Context, idOrName string) (*KeyApplyResult, error) {
+	var res KeyApplyResult
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys/"+url.PathEscape(idOrName)+"/apply", nil, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+func (c *DaemonClient) ReconcileKeys(ctx context.Context) (*KeyApplyResult, error) {
+	var res struct {
+		Status string               `json:"status"`
+		Sync   *vm.SSHKeySyncResult `json:"sync"`
+	}
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/keys/reconcile", nil, &res); err != nil {
+		return nil, err
+	}
+	return &KeyApplyResult{Sync: res.Sync}, nil
+}
+
+func (c *DaemonClient) ReconcileSandboxSSH(ctx context.Context, idOrName string) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(idOrName)+"/reconcile-ssh", nil, nil)
 }
 
 func (c *DaemonClient) GetKey(ctx context.Context, idOrName string) (*db.SSHKey, error) {
@@ -584,6 +604,36 @@ func (c *DaemonClient) GetJobLogs(ctx context.Context, id string) ([]*db.JobLog,
 		return nil, err
 	}
 	return logs, nil
+}
+
+// GetReadiness fetches the daemon readiness report. A 503 response is a valid
+// report, not a transport error, so `compute doctor` can print remediation.
+func (c *DaemonClient) GetReadiness(ctx context.Context) (*doctor.Report, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/v1/ready", nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("connection to daemon failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return nil, fmt.Errorf("daemon error (status %d): %s", resp.StatusCode, string(body))
+	}
+	var report doctor.Report
+	if err := json.Unmarshal(body, &report); err != nil {
+		return nil, fmt.Errorf("invalid readiness response: %w", err)
+	}
+	return &report, nil
 }
 
 func (c *DaemonClient) GetVersion(ctx context.Context) (*version.Info, error) {
@@ -732,7 +782,32 @@ func (c *DaemonClient) CreateOrg(ctx context.Context, name, slug string) (map[st
 	return res, err
 }
 
-// Filesystem API methods
+// Filesystem API types & methods
+
+type SandboxFileEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"is_dir"`
+	Size  int64  `json:"size"`
+}
+
+type SandboxFileReadResult struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+	Format  string `json:"format"`
+	Size    int    `json:"size"`
+}
+
+type SandboxProcessInfo struct {
+	PID     int     `json:"pid"`
+	PPID    int     `json:"ppid"`
+	User    string  `json:"user"`
+	CPU     float64 `json:"cpu"`
+	Memory  float64 `json:"memory"`
+	Status  string  `json:"status"`
+	Command string  `json:"command"`
+	Args    string  `json:"args"`
+}
 
 func (c *DaemonClient) WriteFile(ctx context.Context, sandboxID, path, content, format string) error {
 	req := map[string]string{
@@ -743,20 +818,33 @@ func (c *DaemonClient) WriteFile(ctx context.Context, sandboxID, path, content, 
 	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/files/write", req, nil)
 }
 
+func (c *DaemonClient) MkdirFile(ctx context.Context, sandboxID, path string) error {
+	req := map[string]string{
+		"path": path,
+	}
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+sandboxID+"/files/mkdir", req, nil)
+}
+
 func (c *DaemonClient) ReadFile(ctx context.Context, sandboxID, path, format string) (string, error) {
+	res, err := c.ReadFileDetails(ctx, sandboxID, path, format)
+	if err != nil {
+		return "", err
+	}
+	return res.Content, nil
+}
+
+func (c *DaemonClient) ReadFileDetails(ctx context.Context, sandboxID, path, format string) (*SandboxFileReadResult, error) {
 	q := url.Values{}
 	q.Set("path", path)
 	if format != "" {
 		q.Set("format", format)
 	}
-	var res struct {
-		Content string `json:"content"`
-	}
+	var res SandboxFileReadResult
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/read?"+q.Encode(), nil, &res)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return res.Content, nil
+	return &res, nil
 }
 
 func (c *DaemonClient) ListFiles(ctx context.Context, sandboxID, path string) ([]map[string]interface{}, error) {
@@ -766,6 +854,21 @@ func (c *DaemonClient) ListFiles(ctx context.Context, sandboxID, path string) ([
 	}
 	var res struct {
 		Entries []map[string]interface{} `json:"entries"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/list?"+q.Encode(), nil, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Entries, nil
+}
+
+func (c *DaemonClient) ListFilesDetails(ctx context.Context, sandboxID, path string) ([]SandboxFileEntry, error) {
+	q := url.Values{}
+	if path != "" {
+		q.Set("path", path)
+	}
+	var res struct {
+		Entries []SandboxFileEntry `json:"entries"`
 	}
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/files/list?"+q.Encode(), nil, &res)
 	if err != nil {
@@ -785,6 +888,17 @@ func (c *DaemonClient) RemoveFile(ctx context.Context, sandboxID, path string) e
 func (c *DaemonClient) ListProcesses(ctx context.Context, sandboxID string) ([]map[string]interface{}, error) {
 	var res struct {
 		Processes []map[string]interface{} `json:"processes"`
+	}
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/processes", nil, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Processes, nil
+}
+
+func (c *DaemonClient) ListProcessesDetails(ctx context.Context, sandboxID string) ([]SandboxProcessInfo, error) {
+	var res struct {
+		Processes []SandboxProcessInfo `json:"processes"`
 	}
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/sandboxes/"+sandboxID+"/processes", nil, &res)
 	if err != nil {

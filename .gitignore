@@ -4,6 +4,11 @@ bin/
 /computed
 /compute-bench
 
+# Local secrets (never commit; Tailscale API key lives here on the lab)
+.env
+.env.*
+!.env.example
+
 # Temporary files & sockets
 *.sock
 *.pid

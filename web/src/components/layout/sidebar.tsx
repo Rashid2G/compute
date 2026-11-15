@@ -19,11 +19,13 @@ import {
   Sun,
   Terminal,
   Zap,
+  Lock,
+  LogOut,
   type LucideIcon,
 } from 'lucide-react';
 
 import type { PageId } from '@/lib/navigation';
-import type { StatsResult, WorkerNodeRecord } from '@/lib/types';
+import type { AuthUser, StatsResult, WorkerNodeRecord } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
@@ -36,20 +38,23 @@ interface SidebarProps {
   onToggleTheme: () => void;
   onSetTheme?: (theme: 'light' | 'dark') => void;
   onOpenCommandPalette?: () => void;
+  user?: AuthUser | null;
+  onOpenLogin?: () => void;
+  onLogout?: () => void;
 }
 
 const ORG_CONTEXTS = [
   {
     id: 'personal',
     label: 'Personal',
-    sandboxBill: 'Personal',
-    cliBill: 'Personal',
+    scopeText: 'Personal workspace',
+    quotaText: 'Local daemon limits',
   },
   {
     id: 'default-cluster',
     label: 'Default KVM Cluster',
-    sandboxBill: 'Default KVM Cluster',
-    cliBill: 'Default KVM Cluster',
+    scopeText: 'Default KVM Cluster',
+    quotaText: 'Cluster worker pools',
   },
 ];
 
@@ -62,6 +67,9 @@ export function Sidebar({
   theme,
   onToggleTheme,
   onSetTheme,
+  user,
+  onOpenLogin,
+  onLogout,
 }: SidebarProps) {
   const [selectedOrgId, setSelectedOrgId] = useState('personal');
   const currentOrg =
@@ -159,7 +167,7 @@ export function Sidebar({
   return (
     <div className="flex h-full flex-col justify-between bg-background text-foreground select-none px-3.5 py-4">
       <div className="space-y-3.5 overflow-y-auto">
-        {/* Top Brand Header matching boat.dev/dashboard */}
+        {/* Top Brand Header */}
         <div className="flex items-center justify-between px-0.5">
           <button
             type="button"
@@ -170,10 +178,14 @@ export function Sidebar({
             <svg
               viewBox="0 0 32 32"
               className="h-6 w-6 shrink-0 text-foreground"
-              fill="currentColor"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
               aria-hidden="true"
             >
-              <path d="M15 5L6 21h9V5zm2 4v12h8L17 9zM5 23l3 4h16l3-4H5z" />
+              <polygon points="16,4 27,10.5 27,21.5 16,28 5,21.5 5,10.5" />
+              <polyline points="5,10.5 16,17 27,10.5" />
+              <line x1="16" y1="17" x2="16" y2="28" />
             </svg>
             <span className="font-display text-[21px] font-medium tracking-tight text-foreground leading-none">
               Compute
@@ -181,7 +193,7 @@ export function Sidebar({
           </button>
         </div>
 
-        {/* Organization / Cluster Selector matching boat.dev/dashboard */}
+        {/* Organization / Cluster Selector */}
         <div className="space-y-2 border-b border-border pb-3">
           <div className="relative">
             <select
@@ -205,16 +217,16 @@ export function Sidebar({
 
           <div className="space-y-0.5 px-0.5 text-[11px] leading-[1.4] text-muted-foreground">
             <p>
-              Sandboxes you create here bill{' '}
+              Sandboxes run on{' '}
               <span className="text-foreground font-medium">
-                {currentOrg.sandboxBill}
+                {currentOrg.scopeText}
               </span>
               .
             </p>
             <p>
-              CLI and API keys bill{' '}
+              Quotas scoped to{' '}
               <span className="text-foreground font-medium">
-                {currentOrg.cliBill}
+                {currentOrg.quotaText}
               </span>
               .{' '}
               <button
@@ -222,13 +234,13 @@ export function Sidebar({
                 onClick={() => onNavigate('settings')}
                 className="underline underline-offset-2 text-muted-foreground hover:text-foreground"
               >
-                Change
+                Configure
               </button>
             </p>
           </div>
         </div>
 
-        {/* Primary Navigation List matching boat.dev/dashboard */}
+        {/* Primary Navigation List */}
         <nav className="space-y-0.5" aria-label="Main Navigation">
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -241,7 +253,7 @@ export function Sidebar({
                 className={cn(
                   'flex h-7 w-full items-center justify-between px-2 text-[12.5px] font-normal transition-colors',
                   active
-                    ? 'boat-selected text-foreground font-medium'
+                    ? 'compute-selected text-foreground font-medium'
                     : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground',
                 )}
               >
@@ -295,7 +307,40 @@ export function Sidebar({
         </nav>
       </div>
 
-      {/* Bottom Segmented [ ☼ Light | ☾ Dark ] Switcher matching boat.dev/dashboard */}
+      {/* User Session & Authentication Status */}
+      <div className="pt-2 border-t border-border mt-2">
+        {user ? (
+          <div className="flex items-center justify-between px-2 py-1.5 text-xs text-foreground bg-muted/40 border border-border">
+            <span className="flex items-center gap-2 truncate">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+              <span className="truncate font-medium">{user.display_name || user.username}</span>
+            </span>
+            {onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign out"
+                className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        ) : (
+          onOpenLogin && (
+            <button
+              type="button"
+              onClick={onOpenLogin}
+              className="flex h-8 w-full items-center justify-center gap-2 border border-border bg-background px-2 text-xs font-medium text-foreground hover:bg-muted transition-colors"
+            >
+              <Lock className="h-3.5 w-3.5 text-muted-foreground" />
+              <span>Sign in</span>
+            </button>
+          )
+        )}
+      </div>
+
+      {/* Bottom Segmented [ ☼ Light | ☾ Dark ] Switcher */}
       <div className="pt-3">
         <div className="grid grid-cols-2 border border-border bg-background h-8">
           <button

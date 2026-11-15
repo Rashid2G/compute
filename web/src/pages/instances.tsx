@@ -10,6 +10,7 @@ import {
   HardDrive,
   HelpCircle,
   MoreHorizontal,
+  Pause,
   Play,
   RefreshCw,
   RotateCcw,
@@ -34,6 +35,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { BulkDeleteVMDialog } from '@/components/bulk-delete-vm-dialog';
+import { CloneVMDialog } from '@/components/clone-vm-dialog';
+import { CopyButton } from '@/components/copy-button';
+import { CreateSnapshotDialog } from '@/components/create-snapshot-dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +47,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
+import { primarySandboxAddress, sandboxAccess } from '@/lib/sandbox-access';
 import {
   formatMemory,
   formatRelativeTime,
@@ -53,6 +58,7 @@ import type {
   FileEntry,
   NetworkInspectResult,
   ProcessInfo,
+  Template,
   VM,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
@@ -71,7 +77,7 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole: (vm: VM) => void;
-  onRefresh?: () => void;
+  onRefresh?: () => void | Promise<void>;
 }
 
 type DeepDiveTab =
@@ -97,22 +103,6 @@ function deriveTierLabel(vcpus: number, memoryMb: number): string {
       ? `${Number.isInteger(memoryMb / 1024) ? memoryMb / 1024 : (memoryMb / 1024).toFixed(1)}G`
       : `${memoryMb}M`;
   return `${tier} (${vcpus}c/${ram})`;
-}
-
-function deriveHourlyRate(vcpus: number): number {
-  if (vcpus <= 2) return 0.018;
-  if (vcpus <= 4) return 0.036;
-  if (vcpus <= 8) return 0.072;
-  return 0.144;
-}
-
-function computeAccruedCost(vm: VM): string {
-  const rate = deriveHourlyRate(vm.vcpus);
-  const createdMs = new Date(vm.created_at).getTime();
-  if (Number.isNaN(createdMs)) return `$${rate.toFixed(3)}/h`;
-  const elapsedHours = Math.max(0.05, (Date.now() - createdMs) / 3_600_000);
-  const accrued = vm.status === 'running' ? elapsedHours * rate : rate * 0.1;
-  return `$${accrued.toFixed(3)}`;
 }
 
 export function InstancesPage({
@@ -141,9 +131,10 @@ export function InstancesPage({
   const [unprotectTargets, setUnprotectTargets] = useState<VM[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [splitMenuOpen, setSplitMenuOpen] = useState(false);
+  const [cloneTarget, setCloneTarget] = useState<VM | null>(null);
+  const [snapshotTarget, setSnapshotTarget] = useState<VM | null>(null);
   // Critical-action confirmation: list of VMs pending a stop confirmation.
   const [stopConfirmTargets, setStopConfirmTargets] = useState<VM[] | null>(null);
-  const [stopping, setStopping] = useState(false);
 
   const selectedVMs = useMemo(
     () => vms.filter((v) => selectedIds.includes(v.id)),
@@ -176,21 +167,34 @@ export function InstancesPage({
   const [netInspect, setNetInspect] = useState<NetworkInspectResult | null>(null);
   const [netInspectLoading, setNetInspectLoading] = useState(false);
 
+  // Sandbox snapshots (templates) state
+  const [vmTemplates, setVmTemplates] = useState<Template[]>([]);
+  const [vmTemplatesLoading, setVmTemplatesLoading] = useState(false);
+
   const selectedVM = useMemo(
     () => vms.find((v) => v.id === selectedVMId) ?? null,
     [vms, selectedVMId],
   );
 
+  const selectedAccess = useMemo(() => sandboxAccess(selectedVM), [selectedVM]);
+
   const filteredVMs = useMemo(() => {
     return vms.filter((vm) => {
       const q = search.trim().toLowerCase();
-      const subdomain = `${vm.name}.sbx.compute.dev`.toLowerCase();
-      const matchesSearch =
-        !q ||
-        vm.name.toLowerCase().includes(q) ||
-        subdomain.includes(q) ||
-        vm.id.toLowerCase().includes(q) ||
-        (vm.ip_address && vm.ip_address.toLowerCase().includes(q));
+      const access = sandboxAccess(vm);
+      const matchable = [
+        vm.name,
+        vm.id,
+        vm.internal_id,
+        vm.ip_address,
+        vm.hostname,
+        access.url,
+        access.sshHost,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      const matchesSearch = !q || matchable.includes(q);
 
       const matchesState =
         stateFilter === 'all' || vm.status.toLowerCase() === stateFilter;
@@ -249,33 +253,35 @@ export function InstancesPage({
     );
   }
 
-  async function cloneOne(vm: VM) {
-    const toastID = toast.loading(`Cloning ${vm.name}…`);
-    try {
-      await api.cloneVM(vm.id, {
-        name: `${vm.name}-clone`,
-        vcpus: vm.vcpus,
-        memory_mb: vm.memory_mb,
+  function handleSpawnFromSnapshot(tpl: Template) {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const spawnName = `${tpl.name}-${suffix}`;
+    const toastID = toast.loading(`Spawning sandbox ${spawnName} from ${tpl.name}…`);
+    void api
+      .restoreSnapshot(tpl.id, spawnName, {
+        vcpus: tpl.vcpus,
+        memory_mb: tpl.memory_mb,
+        auto_start: true,
+      })
+      .then(() => {
+        toast.success(`Spawned sandbox ${spawnName}`, { id: toastID });
+        onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(`Spawn failed: ${errorMessage(err)}`, { id: toastID });
       });
-      toast.success(`Cloned ${vm.name}`, { id: toastID });
-    } catch (err) {
-      toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
-    }
   }
 
-  async function confirmStop() {
+  function confirmStop() {
     const targets = stopConfirmTargets ?? [];
-    if (targets.length === 0 || stopping) return;
-    setStopping(true);
-    try {
-      await Promise.all(targets.map((vm) => onStop(vm)));
-      setSelectedIds((prev) =>
-        prev.filter((id) => !targets.some((vm) => vm.id === id)),
-      );
-    } finally {
-      setStopping(false);
-      setStopConfirmTargets(null);
-    }
+    if (targets.length === 0) return;
+    setStopConfirmTargets(null);
+    setSelectedIds((prev) =>
+      prev.filter((id) => !targets.some((vm) => vm.id === id)),
+    );
+    void Promise.allSettled(
+      targets.map((vm) => Promise.resolve(onStop(vm))),
+    );
   }
 
   // Load tab-specific real telemetry when the selected sandbox or tab changes.
@@ -316,7 +322,23 @@ export function InstancesPage({
       .finally(() => setNetInspectLoading(false));
   }, []);
 
+  const fetchTemplates = useCallback(() => {
+    setVmTemplatesLoading(true);
+    return api
+      .listTemplates()
+      .then((res) => setVmTemplates(res || []))
+      .catch(() => setVmTemplates([]))
+      .finally(() => setVmTemplatesLoading(false));
+  }, []);
+
   const prevVMIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedVMKey) return;
+    if (deepDiveTab === 'snapshots') {
+      void fetchTemplates();
+    }
+  }, [selectedVMKey, deepDiveTab, fetchTemplates]);
 
   useEffect(() => {
     if (!selectedVMKey || selectedVMStatus !== 'running') return;
@@ -422,8 +444,10 @@ export function InstancesPage({
         id: toastID,
       });
       setSelectedIds([]);
+      await onRefresh?.();
     } catch (err) {
       toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
+      await onRefresh?.();
     }
   }
 
@@ -493,6 +517,7 @@ export function InstancesPage({
         return;
       }
     }
+    setSelectedIds([]);
     if (onBulkDelete) {
       await onBulkDelete(ids);
     } else {
@@ -505,19 +530,18 @@ export function InstancesPage({
         throw err;
       }
     }
-    setSelectedIds([]);
   }
 
   return (
     <div className="space-y-4">
-      {/* Top Page Title & Split Cobalt Action Button matching boat.dev/dashboard 1:1 */}
+      {/* Top Page Title & Split Cobalt Action Button */}
       <div className="flex items-center justify-between">
         <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">
           Sandboxes
         </h1>
 
         <div className="relative flex items-center">
-          {/* Split Cobalt [ ▷ New | ⌄ ] Button matching boat.dev/dashboard */}
+          {/* Split Cobalt [ ▷ New | ⌄ ] Button */}
           <div className="inline-flex items-stretch">
             <button
               type="button"
@@ -575,14 +599,14 @@ export function InstancesPage({
         </div>
       </div>
 
-      {/* Filter Bar matching boat.dev/dashboard 1:1 */}
+      {/* Filter Bar */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-full sm:w-64">
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, subdomain, id"
+            placeholder="Search name, URL, hostname, id"
             className="h-8 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
           />
         </div>
@@ -597,7 +621,7 @@ export function InstancesPage({
           >
             <option value="all">State</option>
             <option value="running">Running</option>
-            <option value="paused">Paused (Snap)</option>
+            <option value="paused">Paused (State Saved)</option>
             <option value="stopped">Stopped</option>
             <option value="queued">Queued</option>
             <option value="failed">Failed</option>
@@ -666,20 +690,20 @@ export function InstancesPage({
             <button
               type="button"
               onClick={() => void handleBatchSnapshot()}
-              title="Snapshot all selected running sandboxes"
+              title="Pause & save state for selected running sandboxes"
               className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
             >
-              <Camera className="h-3 w-3" />
-              <span>Snapshot</span>
+              <Pause className="h-3 w-3" />
+              <span>Pause</span>
             </button>
             <button
               type="button"
               onClick={() => void handleBatchClone()}
-              title="Clone all selected sandboxes"
+              title="Replicate all selected sandboxes"
               className="inline-flex h-6.5 items-center gap-1.5 border border-border bg-background px-2.5 text-[11px] font-medium text-foreground hover:border-[#263fa9] hover:text-[#5e7ff5] transition-colors cursor-pointer"
             >
               <Copy className="h-3 w-3" />
-              <span>Clone</span>
+              <span>Replicate</span>
             </button>
             {selectedVMs.some((vm) => vm.protected) && (
               <button
@@ -716,7 +740,7 @@ export function InstancesPage({
         )}
       </div>
 
-      {/* Sandboxes 10-Column Table matching boat.dev/dashboard 1:1 */}
+      {/* Sandboxes Table */}
       <div className="border border-border bg-background">
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-left">
@@ -731,7 +755,7 @@ export function InstancesPage({
                     className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
                   />
                 </th>
-                <th className="py-2 px-1 font-normal">Name / Subdomain</th>
+                <th className="py-2 px-1 font-normal">Name / URL</th>
                 <th className="py-2 px-1 font-normal">Sandbox ID</th>
                 <th className="py-2 px-1 font-normal">State</th>
                 <th className="py-2 px-1 font-normal">Created</th>
@@ -745,13 +769,19 @@ export function InstancesPage({
                 <th className="py-2 px-1 font-normal">Snapshot</th>
                 <th className="py-2 px-1 font-normal">
                   <span className="inline-flex items-center gap-0.5">
-                    Cost
+                    Resources
                     <HelpCircle className="h-3 w-3 text-muted-foreground/70" />
                   </span>
                 </th>
                 <th className="py-2 px-1 font-normal">
                   <span className="inline-flex items-center gap-0.5">
                     IP Address
+                    <HelpCircle className="h-3 w-3 text-muted-foreground/70" />
+                  </span>
+                </th>
+                <th className="py-2 px-1 font-normal">
+                  <span className="inline-flex items-center gap-0.5">
+                    URL / SSH
                     <HelpCircle className="h-3 w-3 text-muted-foreground/70" />
                   </span>
                 </th>
@@ -764,9 +794,9 @@ export function InstancesPage({
             {filteredVMs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={11} className="py-20 text-center">
+                  <td colSpan={12} className="py-20 text-center">
                     <div className="mx-auto flex max-w-xs flex-col items-center justify-center space-y-3.5">
-                      {/* Cobalt Blue Dithered Dot-Matrix Sailboat matching boat.dev/dashboard 1:1 */}
+                      {/* Cobalt Blue Dithered Dot-Matrix Isometric Compute Cube */}
                       <svg
                         viewBox="0 0 120 110"
                         className="h-28 w-32 text-[#263fa9]"
@@ -776,22 +806,22 @@ export function InstancesPage({
                       >
                         <defs>
                           <pattern
-                            id="boat-dots"
+                            id="compute-dots"
                             x="0"
                             y="0"
                             width="4"
                             height="4"
                             patternUnits="userSpaceOnUse"
                           >
-                            <rect x="0" y="0" width="2.2" height="2.2" fill="currentColor" opacity="0.65" />
+                            <rect x="0" y="0" width="2.2" height="2.2" fill="currentColor" opacity="0.7" />
                           </pattern>
                         </defs>
-                        {/* Left Main Sail */}
-                        <polygon points="56,6 14,76 56,76" fill="url(#boat-dots)" />
-                        {/* Right Jib Sail */}
-                        <polygon points="62,24 62,76 104,76" fill="url(#boat-dots)" />
-                        {/* Hull */}
-                        <polygon points="6,82 114,82 102,98 18,98" fill="url(#boat-dots)" />
+                        {/* Top face */}
+                        <polygon points="60,12 104,34 60,56 16,34" fill="url(#compute-dots)" />
+                        {/* Left face */}
+                        <polygon points="16,38 58,59 58,98 16,77" fill="url(#compute-dots)" />
+                        {/* Right face */}
+                        <polygon points="104,38 62,59 62,98 104,77" fill="url(#compute-dots)" />
                       </svg>
 
                       <p className="text-[12.5px] text-foreground/90">
@@ -817,12 +847,18 @@ export function InstancesPage({
                 {filteredVMs.map((vm) => {
                   const isChecked = selectedIds.includes(vm.id);
                   const isSelected = selectedVM?.id === vm.id;
-                  const subdomain = `${vm.name}.sbx.compute.dev`;
+                  const access = sandboxAccess(vm);
+                  const addressLabel = access.urlHost || access.sshHost || '—';
+                  const addressHint = access.urlResolvable
+                    ? access.urlNote
+                    : access.sshNote || access.urlNote;
+                  const primaryAddress = primarySandboxAddress(access);
                   const snapTag = vm.snapshot_path
                     ? vm.snapshot_path.split('/').pop() || 'snapshot'
                     : 'base:v1';
                   const tierLabel = deriveTierLabel(vm.vcpus, vm.memory_mb);
-                  const costStr = computeAccruedCost(vm);
+                  const diskGb = Math.max(1, Math.round((vm.disk_mb || 51200) / 1024));
+                  const resourcesStr = `${vm.vcpus} vCPU · ${formatMemory(vm.memory_mb)} · ${diskGb} GB`;
                   const shortId = (vm.internal_id || vm.id).slice(0, 12);
 
                   return (
@@ -849,7 +885,7 @@ export function InstancesPage({
                         />
                       </td>
 
-                      {/* Name / Subdomain */}
+                      {/* Name / URL */}
                       <td className="py-2 px-1.5">
                         <div className="flex items-center gap-1.5 font-medium text-foreground">
                           <span>{vm.name}</span>
@@ -863,8 +899,23 @@ export function InstancesPage({
                             </span>
                           )}
                         </div>
-                        <div className="font-mono text-[10px] text-muted-foreground">
-                          {subdomain}
+                        <div
+                          className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground"
+                          title={addressHint}
+                        >
+                          <span className="max-w-[220px] truncate">{addressLabel}</span>
+                          {primaryAddress ? (
+                            <CopyButton
+                              value={primaryAddress}
+                              label={access.url ? 'Copy URL' : 'Copy SSH name'}
+                              className="h-4 w-4"
+                            />
+                          ) : null}
+                          {access.sshHost && !access.sshResolvable ? (
+                            <span className="text-warning" aria-label="DNS delegation required">
+                              DNS
+                            </span>
+                          ) : null}
                         </div>
                       </td>
 
@@ -915,7 +966,7 @@ export function InstancesPage({
                               vm.status === 'failed' && 'bg-destructive',
                             )}
                           />
-                          {vm.status}
+                          {vm.status === 'paused' ? 'PAUSED (STATE SAVED)' : vm.status}
                         </span>
                       </td>
 
@@ -929,7 +980,7 @@ export function InstancesPage({
                         {tierLabel}
                       </td>
 
-                      {/* Stops in */}
+                      {/* Auto-stop */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-muted-foreground tabular">
                         {vm.status === 'running'
                           ? 'Manual'
@@ -945,9 +996,9 @@ export function InstancesPage({
                         </span>
                       </td>
 
-                      {/* Cost */}
+                      {/* Resources */}
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-foreground tabular">
-                        {costStr}
+                        {resourcesStr}
                       </td>
 
                       {/* IP Address */}
@@ -955,27 +1006,70 @@ export function InstancesPage({
                         {vm.ip_address || '—'}
                       </td>
 
-                      {/* Actions: primary lifecycle button + overflow menu */}
+                      {/* URL / SSH */}
+                      <td
+                        className="py-2 px-1.5"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex items-center gap-1" title={addressHint}>
+                          {access.url ? (
+                            <a
+                              href={access.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="max-w-[220px] truncate font-mono text-[10.5px] text-[color:var(--link)] hover:underline"
+                            >
+                              {access.url}
+                            </a>
+                          ) : (
+                            <span className="max-w-[220px] truncate font-mono text-[10.5px] text-muted-foreground">
+                              {access.ssh || '—'}
+                            </span>
+                          )}
+                          {primaryAddress ? (
+                            <CopyButton
+                              value={primaryAddress}
+                              label={access.url ? 'Copy URL' : 'Copy SSH command'}
+                              className="h-5 w-5 shrink-0"
+                            />
+                          ) : null}
+                        </div>
+                      </td>
+
+                      {/* Actions: 1-click Start/Stop, Pause/Resume, Snapshot, Replicate + overflow menu */}
                       <td
                         className="py-2 pl-1.5 pr-2.5 text-right"
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="inline-flex items-center gap-1">
                           {vm.status === 'running' ? (
-                            <button
-                              type="button"
-                              onClick={() => setStopConfirmTargets([vm])}
-                              title="Stop Sandbox"
-                              className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-warning hover:text-warning transition-colors"
-                            >
-                              <Square className="h-2.5 w-2.5" />
-                              <span>Stop</span>
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => setStopConfirmTargets([vm])}
+                                title="Stop Sandbox"
+                                className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-warning hover:text-warning transition-colors"
+                              >
+                                <Square className="h-2.5 w-2.5" />
+                                <span>Stop</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onSnapshot(vm)}
+                                title="Pause Sandbox (Save State)"
+                                aria-label={`Pause ${vm.name}`}
+                                className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-warning hover:text-warning transition-colors"
+                              >
+                                <Pause className="h-2.5 w-2.5" />
+                                <span>Pause</span>
+                              </button>
+                            </>
                           ) : vm.status === 'paused' ? (
                             <button
                               type="button"
                               onClick={() => onResume(vm)}
                               title="Resume from Snapshot"
+                              aria-label={`Resume ${vm.name}`}
                               className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-success hover:border-success transition-colors"
                             >
                               <RotateCcw className="h-2.5 w-2.5" />
@@ -992,6 +1086,28 @@ export function InstancesPage({
                               <span>Start</span>
                             </button>
                           )}
+
+                          <button
+                            type="button"
+                            onClick={() => setSnapshotTarget(vm)}
+                            title="Create Snapshot"
+                            aria-label={`Snapshot ${vm.name}`}
+                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors"
+                          >
+                            <Camera className="h-2.5 w-2.5" />
+                            <span>Snapshot</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setCloneTarget(vm)}
+                            title="Replicate Sandbox"
+                            aria-label={`Replicate ${vm.name}`}
+                            className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-[#263fa9] hover:text-foreground transition-colors"
+                          >
+                            <Copy className="h-2.5 w-2.5" />
+                            <span>Replicate</span>
+                          </button>
 
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
@@ -1010,15 +1126,33 @@ export function InstancesPage({
                                 SSH Terminal
                               </DropdownMenuItem>
                               <DropdownMenuItem
+                                onSelect={() => access.ssh && copyText(access.ssh)}
+                                disabled={!access.ssh}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                                Copy SSH command
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => access.url && copyText(access.url)}
+                                disabled={!access.url}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
+                                Copy URL
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
                                 onSelect={() => onSnapshot(vm)}
                                 disabled={vm.status !== 'running'}
                               >
-                                <Camera className="h-3.5 w-3.5" />
-                                Snapshot
+                                <Pause className="h-3.5 w-3.5" />
+                                Pause &amp; Save State
                               </DropdownMenuItem>
-                              <DropdownMenuItem onSelect={() => void cloneOne(vm)}>
+                              <DropdownMenuItem onSelect={() => setSnapshotTarget(vm)}>
+                                <Camera className="h-3.5 w-3.5" />
+                                Create Snapshot
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => setCloneTarget(vm)}>
                                 <Copy className="h-3.5 w-3.5" />
-                                Clone
+                                Replicate / Clone
                               </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => void toggleProtection(vm)}>
                                 <Shield className="h-3.5 w-3.5" />
@@ -1050,12 +1184,30 @@ export function InstancesPage({
       {selectedVM && (
         <div className="border border-border bg-background">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/20 px-4 py-2.5">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
               <span className="font-mono text-[11px] uppercase tracking-wider text-[color:var(--link)]">
                 SANDBOX INSPECTOR
               </span>
               <span className="font-display text-[14px] font-medium text-foreground">
                 {selectedVM.name}
+              </span>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider',
+                  selectedVM.status === 'running' &&
+                    'border-success/40 bg-success/10 text-success',
+                  selectedVM.status === 'paused' &&
+                    'border-warning/40 bg-warning/10 text-warning',
+                  (selectedVM.status === 'stopped' ||
+                    selectedVM.status === 'created') &&
+                    'border-border bg-muted/40 text-muted-foreground',
+                  selectedVM.status === 'failed' &&
+                    'border-destructive/40 bg-destructive/10 text-destructive',
+                )}
+              >
+                {selectedVM.status === 'paused'
+                  ? 'PAUSED (STATE SAVED)'
+                  : selectedVM.status}
               </span>
               <span className="font-mono text-[11px] text-muted-foreground">
                 ({selectedVM.id})
@@ -1066,7 +1218,77 @@ export function InstancesPage({
               </span>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* Lifecycle Toolbar */}
+              {selectedVM.status === 'running' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onSnapshot(selectedVM)}
+                    className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-warning hover:text-warning transition-colors"
+                  >
+                    <Pause className="h-3 w-3" />
+                    <span>Pause</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStopConfirmTargets([selectedVM])}
+                    className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-warning hover:text-warning transition-colors"
+                  >
+                    <Square className="h-3 w-3" />
+                    <span>Stop</span>
+                  </button>
+                </>
+              ) : selectedVM.status === 'paused' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onResume(selectedVM)}
+                    className="flex h-7 items-center gap-1 border border-success/40 bg-success/10 px-2.5 text-[11px] font-medium text-success hover:bg-success/20 transition-colors"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    <span>Resume</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStopConfirmTargets([selectedVM])}
+                    className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-warning hover:text-warning transition-colors"
+                  >
+                    <Square className="h-3 w-3" />
+                    <span>Stop</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onRun(selectedVM)}
+                  className="flex h-7 items-center gap-1 border border-success/40 bg-success/10 px-2.5 text-[11px] font-medium text-success hover:bg-success/20 transition-colors"
+                >
+                  <Play className="h-3 w-3" />
+                  <span>Start</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setSnapshotTarget(selectedVM)}
+                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-[#263fa9] transition-colors"
+              >
+                <Camera className="h-3 w-3" />
+                <span>Snapshot</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setCloneTarget(selectedVM)}
+                className="flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11px] text-foreground hover:border-[#263fa9] transition-colors"
+              >
+                <Copy className="h-3 w-3" />
+                <span>Replicate</span>
+              </button>
+
+              <span className="mx-0.5 h-4 w-px bg-border" />
+
               <button
                 type="button"
                 onClick={() => onConsole(selectedVM)}
@@ -1187,7 +1409,50 @@ export function InstancesPage({
                     Created {formatTimestamp(selectedVM.created_at)}
                   </div>
                   <div className="font-mono text-[11px] text-muted-foreground">
-                    SSH Command: ssh compute@{selectedVM.ip_address}
+                    Status: {selectedVM.status}
+                  </div>
+                </div>
+
+                <div className="border border-border p-3 space-y-1">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>Access</span>
+                    <Terminal className="h-3.5 w-3.5" />
+                  </div>
+                  <div className="flex items-center gap-1 font-mono text-[12px] font-medium text-foreground">
+                    <span className="min-w-0 flex-1 truncate" title={selectedAccess.ssh}>
+                      {selectedAccess.ssh || 'No SSH target yet'}
+                    </span>
+                    {selectedAccess.ssh ? (
+                      <CopyButton
+                        value={selectedAccess.ssh}
+                        label="Copy SSH command"
+                        className="h-5 w-5 shrink-0"
+                      />
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
+                    {selectedAccess.url ? (
+                      <>
+                        <a
+                          href={selectedAccess.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="min-w-0 flex-1 truncate text-[color:var(--link)] hover:underline"
+                          title={selectedAccess.url}
+                        >
+                          {selectedAccess.url}
+                        </a>
+                        <CopyButton
+                          value={selectedAccess.url}
+                          label="Copy URL"
+                          className="h-5 w-5 shrink-0"
+                        />
+                      </>
+                    ) : (
+                      <span className="min-w-0 flex-1 truncate" title={selectedAccess.urlNote}>
+                        No HTTP URL — see JSON Spec for the reason
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1361,7 +1626,7 @@ export function InstancesPage({
             )}
 
             {deepDiveTab === 'network' && (
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-3 font-mono text-[12px]">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4 font-mono text-[12px]">
                 <div className="border border-border p-3 space-y-1">
                   <div className="text-[11px] text-muted-foreground">
                     Internal Bridge IP
@@ -1418,41 +1683,169 @@ export function InstancesPage({
                     </button>
                   </div>
                 </div>
+                <div className="border border-border p-3 space-y-1">
+                  <div className="text-[11px] text-muted-foreground">
+                    Sandbox-to-Sandbox Network
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-foreground">
+                      {(selectedVM.network_isolation || 'account') === 'isolated'
+                        ? 'Isolated (own sandbox only)'
+                        : 'Account (all account sandboxes)'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextMode =
+                          (selectedVM.network_isolation || 'account') === 'isolated'
+                            ? 'account'
+                            : 'isolated';
+                        void api
+                          .setVMNetworkIsolation(selectedVM.id, nextMode)
+                          .then(() =>
+                            toast.success(
+                              nextMode === 'isolated'
+                                ? 'Sandbox isolated on its own network'
+                                : 'Sandbox can communicate with account sandboxes',
+                            ),
+                          )
+                          .catch((err) => toast.error(errorMessage(err)));
+                      }}
+                      className="border border-border px-2 py-0.5 text-[11px] text-foreground hover:border-[#263fa9] shrink-0"
+                    >
+                      {(selectedVM.network_isolation || 'account') === 'isolated'
+                        ? 'Allow Account'
+                        : 'Isolate'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
             {deepDiveTab === 'snapshots' && (
-              <div className="flex flex-wrap items-center justify-between gap-4 border border-border p-3">
-                <div className="space-y-1">
-                  <div className="text-[12.5px] font-medium text-foreground">
-                    Memory & Disk State Snapshot
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-4 border border-border p-3">
+                  <div className="space-y-1">
+                    <div className="text-[12.5px] font-medium text-foreground">
+                      Memory &amp; Disk State Snapshot
+                    </div>
+                    <div className="font-mono text-[11px] text-muted-foreground">
+                      {selectedVM.snapshot_path
+                        ? `Snapshot file: ${selectedVM.snapshot_path}`
+                        : 'No memory state checkpoint saved yet.'}
+                    </div>
                   </div>
-                  <div className="font-mono text-[11px] text-muted-foreground">
-                    {selectedVM.snapshot_path
-                      ? `Snapshot file: ${selectedVM.snapshot_path}`
-                      : 'No memory state snapshot saved yet.'}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  {selectedVM.status === 'running' && (
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => onSnapshot(selectedVM)}
-                      className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
+                      onClick={() => setSnapshotTarget(selectedVM)}
+                      className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-[#fefefe] hover:bg-[#1e3180]"
                     >
-                      Save Memory State
+                      <Camera className="h-3.5 w-3.5" />
+                      <span>Create Snapshot</span>
                     </button>
-                  )}
-                  {selectedVM.status === 'paused' && (
-                    <button
-                      type="button"
-                      onClick={() => onResume(selectedVM)}
-                      className="h-8 bg-success px-3 text-[12px] font-medium text-[#fefefe]"
-                    >
-                      Resume MicroVM
-                    </button>
-                  )}
+                    {selectedVM.status === 'running' && (
+                      <button
+                        type="button"
+                        onClick={() => onSnapshot(selectedVM)}
+                        className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-warning hover:text-warning"
+                      >
+                        <Pause className="h-3.5 w-3.5" />
+                        <span>Pause &amp; Save State</span>
+                      </button>
+                    )}
+                    {selectedVM.status === 'paused' && (
+                      <button
+                        type="button"
+                        onClick={() => onResume(selectedVM)}
+                        className="inline-flex h-8 items-center gap-1.5 bg-success px-3 text-[12px] font-medium text-[#fefefe]"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>Resume MicroVM</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
+
+                {(() => {
+                  const matchingSnapshots = vmTemplates.filter(
+                    (tpl) =>
+                      tpl.source_vm_id === selectedVM.id ||
+                      (selectedVM.internal_id &&
+                        tpl.source_vm_id === selectedVM.internal_id) ||
+                      tpl.source_vm_id === selectedVM.name,
+                  );
+
+                  if (vmTemplatesLoading && matchingSnapshots.length === 0) {
+                    return (
+                      <div className="border border-border p-3 font-mono text-[11.5px] text-muted-foreground">
+                        Loading saved snapshots for {selectedVM.name}…
+                      </div>
+                    );
+                  }
+
+                  if (matchingSnapshots.length === 0) {
+                    return (
+                      <div className="border border-border p-3 text-[12px] text-muted-foreground">
+                        No reusable snapshots created from {selectedVM.name} yet. Click
+                        &ldquo;Create Snapshot&rdquo; to capture a reusable template.
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="border border-border">
+                      <div className="border-b border-border bg-muted/20 px-3 py-2 text-[11px] font-medium text-muted-foreground">
+                        Saved Snapshots ({matchingSnapshots.length})
+                      </div>
+                      <div className="divide-y divide-border">
+                        {matchingSnapshots.map((tpl) => (
+                          <div
+                            key={tpl.id}
+                            className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 text-[12px]"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-mono font-medium text-foreground">
+                                {tpl.name}
+                              </div>
+                              <div className="font-mono text-[10.5px] text-muted-foreground truncate">
+                                {tpl.vcpus} vCPU · {formatMemory(tpl.memory_mb)} · Created{' '}
+                                {formatRelativeTime(tpl.created_at)}
+                                {tpl.description ? ` · ${tpl.description}` : ''}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleSpawnFromSnapshot(tpl)}
+                                className="inline-flex h-7 items-center gap-1 bg-[#263fa9] px-2.5 text-[11px] font-medium text-white hover:bg-[#1e3180]"
+                              >
+                                <Play className="h-3 w-3 fill-current" />
+                                <span>Spawn Sandbox</span>
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`Delete snapshot ${tpl.name}`}
+                                onClick={() => {
+                                  void api
+                                    .deleteTemplate(tpl.id)
+                                    .then(() => {
+                                      toast.success(`Deleted snapshot ${tpl.name}`);
+                                      void fetchTemplates();
+                                    })
+                                    .catch((err) => toast.error(errorMessage(err)));
+                                }}
+                                className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-destructive"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
@@ -1528,26 +1921,20 @@ export function InstancesPage({
           )}
 
           <AlertDialogFooter className="mt-3 flex flex-row justify-end gap-2">
-            <AlertDialogCancel
-              disabled={stopping}
-              className="border-border bg-background hover:bg-muted text-foreground px-4"
-            >
+            <AlertDialogCancel className="border-border bg-background hover:bg-muted text-foreground px-4">
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={(e) => {
                 e.preventDefault();
-                void confirmStop();
+                confirmStop();
               }}
-              disabled={stopping}
               className="bg-warning text-[#1c1400] hover:bg-warning/90 font-medium px-4 inline-flex items-center"
             >
-              {stopping ? (
-                <span className="mr-1.5 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              ) : (
-                <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
-              )}
-              {stopping ? 'Stopping…' : 'Stop sandbox'}
+              <Square className="mr-1.5 h-3.5 w-3.5 fill-current" />
+              {stopConfirmTargets && stopConfirmTargets.length > 1
+                ? `Stop ${stopConfirmTargets.length} sandboxes`
+                : 'Stop sandbox'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1565,6 +1952,23 @@ export function InstancesPage({
         open={unprotectOpen}
         onOpenChange={setUnprotectOpen}
         onConfirm={confirmUnprotect}
+      />
+
+      <CloneVMDialog
+        vm={cloneTarget}
+        open={cloneTarget !== null}
+        onOpenChange={(open) => !open && setCloneTarget(null)}
+        onCloned={() => onRefresh?.()}
+      />
+
+      <CreateSnapshotDialog
+        vm={snapshotTarget}
+        open={snapshotTarget !== null}
+        onOpenChange={(open) => !open && setSnapshotTarget(null)}
+        onCreated={() => {
+          void fetchTemplates();
+          onRefresh?.();
+        }}
       />
     </div>
   );

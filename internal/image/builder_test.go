@@ -81,6 +81,14 @@ func TestBuilder_BuildImage(t *testing.T) {
 		t.Fatalf("expected error on duplicate image name, got nil")
 	}
 
+	// 2b. Reject any non-Ubuntu 24.04 base distribution
+	for _, base := range []string{"debian", "alpine", "ubuntu-22.04", "fedora"} {
+		_, err = builder.BuildImage(ctx, BuildRequest{Name: "other-os-" + base, BaseImage: base})
+		if err == nil {
+			t.Fatalf("expected error for unsupported base image %q, got nil", base)
+		}
+	}
+
 	// 3. Failed build test
 	builder.SetBuildFunc(func(ctx context.Context, req BuildRequest, outputPath string, sshPubKey string) error {
 		return errors.New("apt failed to locate package nonexistent-pkg")

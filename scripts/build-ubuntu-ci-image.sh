@@ -46,8 +46,8 @@ chroot "${MNT}" /bin/bash -c '
     fi
     getent group sudo >/dev/null || groupadd -g 27 sudo
     usermod -aG sudo compute
-    echo "compute:compute" | chpasswd
-    echo "root:root" | chpasswd
+    usermod -p '!' compute
+    usermod -p '!' root
     mkdir -p /etc/sudoers.d
     echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute
     chmod 0440 /etc/sudoers.d/compute
@@ -68,10 +68,11 @@ chroot "${MNT}" /bin/bash -c '
     chmod 700 /root/.ssh /home/compute/.ssh
     chown -R compute:compute /home/compute
     sed -i "s/^#\?PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
-    sed -i "s/^#\?PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
+    sed -i "s/^#\?PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config
     sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/" /etc/ssh/sshd_config
     sed -i "s/^#\?UsePAM.*/UsePAM no/" /etc/ssh/sshd_config
     grep -q "^UsePAM no" /etc/ssh/sshd_config || echo "UsePAM no" >> /etc/ssh/sshd_config
+    grep -q "^KbdInteractiveAuthentication no" /etc/ssh/sshd_config || echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config
     ssh-keygen -A
     rm -f /sbin/init
 '

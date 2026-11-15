@@ -1,29 +1,18 @@
 #!/usr/bin/env bash
-# build-base-image.sh — Build a bootable Firecracker base rootfs (Ubuntu or Debian)
+# build-base-image.sh — Build a bootable Firecracker base rootfs (Ubuntu 24.04)
 # with SSH enabled and the Compute guest init.
 #
-# Usage: sudo ./scripts/build-base-image.sh <ubuntu|debian> <output.ext4> [size_mb]
+# Usage: sudo ./scripts/build-base-image.sh [output.ext4] [size_mb]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DISTRO="${1:-ubuntu}"
-OUT_IMG="${2:-${REPO_ROOT}/data/images/ubuntu-24.04.ext4}"
-SIZE_MB="${3:-2048}"
+OUT_IMG="${1:-${REPO_ROOT}/data/images/ubuntu-24.04.ext4}"
+SIZE_MB="${2:-2048}"
 MNT="$(mktemp -d /tmp/compute-base-mnt-XXXXXX)"
 
-case "${DISTRO}" in
-  ubuntu)
-    SUITE="${UBUNTU_SUITE:-noble}"
-    MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
-    KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
-    ;;
-  debian)
-    SUITE="${DEBIAN_SUITE:-trixie}"
-    MIRROR="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
-    KEYRING="/usr/share/keyrings/debian-archive-keyring.gpg"
-    ;;
-  *) echo "unknown distro: ${DISTRO}" >&2; exit 2 ;;
-esac
+SUITE="${UBUNTU_SUITE:-noble}"
+MIRROR="${UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 cleanup() {
@@ -44,7 +33,7 @@ truncate -s "${SIZE_MB}M" "${OUT_IMG}"
 mkfs.ext4 -F -q -L compute-rootfs "${OUT_IMG}"
 mount -o loop "${OUT_IMG}" "${MNT}"
 
-log "Bootstrapping ${DISTRO} ${SUITE}"
+log "Bootstrapping ubuntu ${SUITE}"
 debootstrap --variant=minbase --arch=amd64 --keyring="${KEYRING}" "${SUITE}" "${MNT}" "${MIRROR}" >/tmp/debootstrap-base.log 2>&1
 mount -t proc proc "${MNT}/proc"
 mount -t sysfs sysfs "${MNT}/sys"
@@ -52,19 +41,11 @@ mount --bind /dev "${MNT}/dev"
 mount --bind /dev/pts "${MNT}/dev/pts"
 
 log "Installing guest packages"
-if [[ "${DISTRO}" == "ubuntu" ]]; then
-  cat >"${MNT}/etc/apt/sources.list" <<EOF
+cat >"${MNT}/etc/apt/sources.list" <<EOF
 deb ${MIRROR} ${SUITE} main universe
 deb ${MIRROR} ${SUITE}-updates main universe
 deb ${MIRROR} ${SUITE}-security main universe
 EOF
-else
-  cat >"${MNT}/etc/apt/sources.list" <<EOF
-deb ${MIRROR} ${SUITE} main
-deb ${MIRROR} ${SUITE}-updates main
-deb ${MIRROR}-security ${SUITE}-security main
-EOF
-fi
 chroot "${MNT}" /bin/bash -c 'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server sudo iproute2 procps curl ca-certificates jq less nano util-linux iputils-ping tzdata netbase git python3 nodejs npm && rm -rf /var/lib/apt/lists/*' >>/tmp/debootstrap-base.log 2>&1
 
 log "Configuring users and SSH"
@@ -74,18 +55,19 @@ chroot "${MNT}" /bin/bash -c '
     mkdir -p /etc/sudoers.d
     echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute
     chmod 0440 /etc/sudoers.d/compute
-    echo "root:root" | chpasswd
-    echo "compute:compute" | chpasswd
+    usermod -p '!' root
+    usermod -p '!' compute
     mkdir -p /root/.ssh /home/compute/.ssh /run/sshd
     chmod 700 /root/.ssh /home/compute/.ssh
     chmod 1777 /tmp /var/tmp
     chmod 1777 /run/lock /dev/shm 2>/dev/null || true
     chown -R compute:compute /home/compute
     sed -i "s/^#\?PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
-    sed -i "s/^#\?PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
+    sed -i "s/^#\?PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config
     sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/" /etc/ssh/sshd_config
     sed -i "s/^#\?UsePAM.*/UsePAM no/" /etc/ssh/sshd_config
     grep -q "^UsePAM no" /etc/ssh/sshd_config || echo "UsePAM no" >> /etc/ssh/sshd_config
+    grep -q "^KbdInteractiveAuthentication no" /etc/ssh/sshd_config || echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config
     ssh-keygen -A
 '
 

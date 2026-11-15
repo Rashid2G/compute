@@ -6,6 +6,8 @@ export type VMStatus =
   | 'stopped'
   | 'failed';
 
+export type NetworkIsolationMode = 'account' | 'isolated';
+
 export interface HealthResult {
   status: string;
   version?: string;
@@ -17,16 +19,15 @@ export interface VM {
   id: string;
   internal_id?: string;
   name: string;
+  description?: string;
   status: VMStatus;
   vcpus: number;
   memory_mb: number;
+  disk_mb?: number;
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
-  tailscale_enabled?: boolean;
-  tailnet_ip?: string;
-  tailnet_dns?: string;
-  tailscale_device_id?: string;
+  network_isolation?: NetworkIsolationMode;
   mac_address: string;
   tap_device: string;
   rootfs_path: string;
@@ -37,6 +38,8 @@ export interface VM {
   ssh_key_path?: string;
   ssh_key_name?: string;
   ssh_public_key?: string;
+  ssh_password_enabled?: boolean;
+  hostname?: string;
   pid?: number;
   socket_path?: string;
   protected?: boolean;
@@ -80,10 +83,12 @@ export interface VMTier {
 
 export interface CreateVMRequest {
   name?: string;
+  description?: string;
   tier?: string;
   vcpus: number;
   memory_mb?: number;
   disk_mb?: number;
+  disk_gb?: number;
   clone_from?: string;
   image?: string;
   template?: string;
@@ -92,10 +97,29 @@ export interface CreateVMRequest {
   public_ip?: boolean;
   public_ip_enabled?: boolean;
   dedicated_ip?: boolean;
+  network_isolation?: NetworkIsolationMode;
+  isolated?: boolean;
+  network_isolated?: boolean;
+  auto_start?: boolean;
   protected?: boolean;
-  tailscale?: boolean;
   ssh_key_id?: string;
   ssh_public_key?: string;
+  ssh_password?: string;
+  /** Opts out of embedding the account's default key when no ssh_key_id is set. */
+  ssh_no_default_key?: boolean;
+}
+
+export interface CloneVMOptions {
+  name?: string;
+  description?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  disk_mb?: number;
+  disk_gb?: number;
+  network_isolation?: NetworkIsolationMode;
+  network_isolated?: boolean;
+  auto_start?: boolean;
+  protected?: boolean;
 }
 
 export interface ExecRequest {
@@ -144,6 +168,7 @@ export interface NetworkAllocation {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
+  network_isolation?: NetworkIsolationMode;
   mac_address: string;
   tap_device: string;
   updated_at: string;
@@ -156,6 +181,7 @@ export interface NetworkInspectResult {
   ip_address: string;
   public_ip?: string;
   public_ip_enabled?: boolean;
+  network_isolation?: NetworkIsolationMode;
   mac_address: string;
   tap_device: string;
   bridge_name: string;
@@ -233,6 +259,9 @@ export interface LaunchTemplateRequest {
   name: string;
   vcpus?: number;
   memory_mb?: number;
+  network_isolation?: NetworkIsolationMode;
+  isolated?: boolean;
+  auto_start?: boolean;
 }
 
 export interface DaemonConfig {
@@ -283,6 +312,8 @@ export interface SSHKey {
   name: string;
   public_key: string;
   fingerprint: string;
+  all_sandboxes?: boolean;
+  is_default?: boolean;
   created_at: string;
 }
 
@@ -445,7 +476,8 @@ export interface EnvironmentProfileRecord {
   github_repos: string[];
   secrets_enabled: boolean;
   secrets: string;
-  boat_credentials_enabled: boolean;
+  compute_credentials_enabled?: boolean;
+  boat_credentials_enabled?: boolean;
   agent_credentials_enabled: boolean;
   credential_profile: string;
   version: number;
@@ -463,4 +495,51 @@ export interface PortForwardRecord {
   public_url: string;
   status: 'active' | 'inactive' | string;
   created_at: string;
+}
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  username: string;
+  display_name: string;
+  role: string;
+  status: string;
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface AuthStatusResponse {
+  auth_enabled: boolean;
+  signup_enabled: boolean;
+  admin_username?: string;
+}
+
+export interface SignupRequest {
+  email: string;
+  username: string;
+  display_name?: string;
+  password: string;
+}
+
+export interface CreateUserRequest {
+  email: string;
+  username: string;
+  display_name?: string;
+  password: string;
+  role?: 'user' | 'admin';
+}
+
+export interface LoginResponse {
+  status: string;
+  token?: string;
+  csrf?: string;
+  user: AuthUser;
+}
+
+export interface AuthMeResponse {
+  user: AuthUser;
+  org_id?: string;
+  role?: string;
+  auth_type?: string;
+  scopes?: string[];
 }

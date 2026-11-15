@@ -9,7 +9,10 @@ BRIDGE_NAME="${1:-mft3br0}"
 BRIDGE_IP="${2:-172.16.0.1/16}"
 SUBNET="${3:-172.16.0.0/16}"
 GATEWAY="${4:-172.16.0.1}"
-PHYSICAL_NIC="${5:-}"
+# Only attach a NIC when the caller explicitly selects one or uses nic/wired
+# mode. NAT mode must keep the host's default route intact.
+PHYSICAL_NIC="${5:-${COMPUTE_PHYSICAL_NIC:-}}"
+NETWORK_MODE="${COMPUTE_NETWORK_MODE:-nat}"
 
 # Check for dry-run or check-only mode
 DRY_RUN="${DRY_RUN:-0}"
@@ -114,9 +117,12 @@ fi
 echo ""
 echo "==> Initializing Platform Directories..."
 COMPUTE_DIRS=(
+    "/var/lib/compute/data"
     "/var/lib/compute/images"
+    "/var/lib/compute/images/ssh"
     "/var/lib/compute/sandboxes"
-    "/var/lib/compute/ssh"
+    "/var/lib/compute/templates"
+    "/var/lib/compute/vms"
     "/etc/compute"
 )
 
@@ -129,8 +135,22 @@ for dir in "${COMPUTE_DIRS[@]}"; do
     fi
 done
 
-# Enforce secure permissions on SSH directory
-$SUDO chmod 700 /var/lib/compute/ssh 2>/dev/null || true
+# Enforce secure permissions on the internal SSH key directory (the daemon and
+# image bootstrap both use /var/lib/compute/images/ssh, not /var/lib/compute/ssh).
+$SUDO chmod 700 /var/lib/compute/images/ssh 2>/dev/null || true
+
+if [ ! -f /var/lib/compute/images/ssh/id_ed25519 ]; then
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        $SUDO ssh-keygen -q -t ed25519 -N "" -f /var/lib/compute/images/ssh/id_ed25519 -C "compute@internal"
+        $SUDO chmod 600 /var/lib/compute/images/ssh/id_ed25519
+        $SUDO chmod 644 /var/lib/compute/images/ssh/id_ed25519.pub
+        echo "  Generated internal SSH key: /var/lib/compute/images/ssh/id_ed25519"
+    else
+        echo "  [WARN] ssh-keygen missing; run 'computed init --images' to generate the internal key" >&2
+    fi
+else
+    echo "  Internal SSH key exists: /var/lib/compute/images/ssh/id_ed25519"
+fi
 
 # -------------------------------------------------------------------
 # Host Network Configuration
@@ -151,35 +171,48 @@ fi
 $SUDO ip addr add "${BRIDGE_IP}" dev "${BRIDGE_NAME}" 2>/dev/null || true
 $SUDO ip link set "${BRIDGE_NAME}" up
 
-# 3. Detect and link physical NIC to the bridge
-if [ -z "${PHYSICAL_NIC}" ]; then
-    PHYSICAL_NIC=$(ip route show default | awk '/default/ {print $5}' | head -n1 || true)
-fi
-
-if [ "${PHYSICAL_NIC}" = "none" ]; then
-    echo "==> Skipping physical NIC attachment (requested with 'none')."
-elif [ -n "${PHYSICAL_NIC}" ] && [ "${PHYSICAL_NIC}" != "${BRIDGE_NAME}" ]; then
-    echo "==> Linking physical NIC ${PHYSICAL_NIC} to bridge ${BRIDGE_NAME}..."
-    $SUDO ip link set dev "${PHYSICAL_NIC}" master "${BRIDGE_NAME}" 2>/dev/null || true
-    $SUDO ip link set dev "${PHYSICAL_NIC}" up 2>/dev/null || true
-fi
-
-# 4. Link all other bridges on the host VM to the main bridge via veth pairs
-for br in $(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 || true); do
-    if [ -n "${br}" ] && [ "${br}" != "${BRIDGE_NAME}" ]; then
-        SAFE_NAME="${br:0:10}"
-        VETH_M="vbm-${SAFE_NAME}"
-        VETH_P="vbp-${SAFE_NAME}"
-        if ! ip link show "${VETH_M}" >/dev/null 2>&1; then
-            $SUDO ip link add "${VETH_M}" type veth peer name "${VETH_P}" 2>/dev/null || true
-        fi
-        $SUDO ip link set dev "${VETH_M}" master "${BRIDGE_NAME}" 2>/dev/null || true
-        $SUDO ip link set dev "${VETH_P}" master "${br}" 2>/dev/null || true
-        $SUDO ip link set dev "${VETH_M}" up 2>/dev/null || true
-        $SUDO ip link set dev "${VETH_P}" up 2>/dev/null || true
-        $SUDO ip link set dev "${br}" up 2>/dev/null || true
+# 3. Attach a physical NIC only in nic/wired mode. In NAT mode the bridge is
+#    internal and the host keeps its default route and NIC.
+if [ "${NETWORK_MODE}" != "nic" ] && [ "${NETWORK_MODE}" != "wired" ]; then
+    if [ -n "${PHYSICAL_NIC}" ] && [ "${PHYSICAL_NIC}" != "none" ]; then
+        echo "  [WARN] ignoring PHYSICAL_NIC=${PHYSICAL_NIC} in ${NETWORK_MODE} mode; NAT keeps the host NIC untouched" >&2
     fi
-done
+    echo "==> NAT mode: leaving the default network interface untouched."
+else
+    if [ -z "${PHYSICAL_NIC}" ]; then
+        PHYSICAL_NIC=$(ip route show default | awk '/default/ {print $5}' | head -n1 || true)
+    fi
+
+    if [ "${PHYSICAL_NIC}" = "none" ]; then
+        echo "==> Skipping physical NIC attachment (requested with 'none')."
+    elif [ -n "${PHYSICAL_NIC}" ] && [ "${PHYSICAL_NIC}" != "${BRIDGE_NAME}" ]; then
+        echo "==> Linking physical NIC ${PHYSICAL_NIC} to bridge ${BRIDGE_NAME}..."
+        $SUDO ip link set dev "${PHYSICAL_NIC}" master "${BRIDGE_NAME}" 2>/dev/null || true
+        $SUDO ip link set dev "${PHYSICAL_NIC}" up 2>/dev/null || true
+    fi
+fi
+
+# 4. Optionally link other host bridges to the main bridge via veth pairs.
+#    Disabled by default: this is only useful for multi-bridge lab topologies.
+if [ "${LINK_BRIDGES:-0}" = "1" ]; then
+    for br in $(ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 || true); do
+        if [ -n "${br}" ] && [ "${br}" != "${BRIDGE_NAME}" ]; then
+            SAFE_NAME="${br:0:10}"
+            VETH_M="vbm-${SAFE_NAME}"
+            VETH_P="vbp-${SAFE_NAME}"
+            if ! ip link show "${VETH_M}" >/dev/null 2>&1; then
+                $SUDO ip link add "${VETH_M}" type veth peer name "${VETH_P}" 2>/dev/null || true
+            fi
+            $SUDO ip link set dev "${VETH_M}" master "${BRIDGE_NAME}" 2>/dev/null || true
+            $SUDO ip link set dev "${VETH_P}" master "${br}" 2>/dev/null || true
+            $SUDO ip link set dev "${VETH_M}" up 2>/dev/null || true
+            $SUDO ip link set dev "${VETH_P}" up 2>/dev/null || true
+            $SUDO ip link set dev "${br}" up 2>/dev/null || true
+        fi
+    done
+else
+    echo "==> Multi-bridge linking disabled (set LINK_BRIDGES=1 to opt in)."
+fi
 
 # 5. Enable IPv4 forwarding and bridge bypass
 echo "==> Enabling IPv4 forwarding & netfilter bypass..."
@@ -206,7 +239,8 @@ echo "==================================================================="
 echo "  Compute Host Readiness Complete!"
 echo "==================================================================="
 echo "  Bridge:           ${BRIDGE_NAME} (${BRIDGE_IP}, Gateway: ${GATEWAY})"
-echo "  Data Directories: /var/lib/compute/images, /var/lib/compute/sandboxes, /var/lib/compute/ssh"
+echo "  Network mode:     ${NETWORK_MODE}"
+echo "  Data Directories: /var/lib/compute/images, /var/lib/compute/vms, /var/lib/compute/images/ssh"
 echo "  Configuration:    /etc/compute"
 echo ""
 echo "  Next Steps:"

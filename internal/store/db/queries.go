@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -66,6 +67,40 @@ func (q *Queries) ResetUserFailedLogins(ctx context.Context, id string) error {
 	query := `UPDATE users SET failed_logins = 0, locked_until = NULL, updated_at = ? WHERE id = ?`
 	_, err := q.db.ExecContext(ctx, query, NowMillis(), id)
 	return err
+}
+
+func (q *Queries) UpdateUserAdminBootstrap(ctx context.Context, id, email, username, displayName, passwordHash, role, status string) error {
+	if passwordHash != "" {
+		query := `UPDATE users SET email = ?, username = ?, display_name = ?, password_hash = ?, role = ?, status = ?, failed_logins = 0, locked_until = NULL, updated_at = ?, revision = revision + 1 WHERE id = ?`
+		_, err := q.db.ExecContext(ctx, query, email, username, displayName, passwordHash, role, status, NowMillis(), id)
+		return err
+	}
+	query := `UPDATE users SET email = ?, username = ?, display_name = ?, role = ?, status = ?, failed_logins = 0, locked_until = NULL, updated_at = ?, revision = revision + 1 WHERE id = ?`
+	_, err := q.db.ExecContext(ctx, query, email, username, displayName, role, status, NowMillis(), id)
+	return err
+}
+
+func (q *Queries) DeleteUser(ctx context.Context, id string) error {
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM api_keys WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM organization_members WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	res, err := q.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	personalOrgID := "org_" + strings.TrimPrefix(id, "usr_")
+	_, _ = q.db.ExecContext(ctx, `DELETE FROM organizations WHERE id = ? AND NOT EXISTS (SELECT 1 FROM organization_members WHERE organization_id = ?)`, personalOrgID, personalOrgID)
+	return nil
 }
 
 func scanUser(row *sql.Row) (*User, error) {
@@ -180,6 +215,12 @@ func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash []byte) (
 func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 	query := `DELETE FROM sessions WHERE id = ?`
 	_, err := q.db.ExecContext(ctx, query, id)
+	return err
+}
+
+func (q *Queries) DeleteUserSessions(ctx context.Context, userID string) error {
+	query := `DELETE FROM sessions WHERE user_id = ?`
+	_, err := q.db.ExecContext(ctx, query, userID)
 	return err
 }
 
@@ -808,6 +849,12 @@ func (q *Queries) CreateOrganization(ctx context.Context, org *Organization) err
 	_, err := q.db.ExecContext(ctx, query,
 		org.ID, org.Name, org.Slug, org.Status, org.QuotaJSON, org.CreatedAt, org.UpdatedAt,
 	)
+	return err
+}
+
+func (q *Queries) UpdateOrganizationIdentity(ctx context.Context, id, name, slug string) error {
+	query := `UPDATE organizations SET name = ?, slug = ?, updated_at = ? WHERE id = ?;`
+	_, err := q.db.ExecContext(ctx, query, name, slug, NowMillis(), id)
 	return err
 }
 

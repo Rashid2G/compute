@@ -69,7 +69,7 @@ export function DashboardPage({
 
   return (
     <div className="space-y-6">
-      {/* Header matching boat.dev/dashboard */}
+      {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
           <h1 className="font-display text-[22px] font-medium tracking-tight text-foreground">

@@ -153,8 +153,7 @@ func (m *Manager) ResolveImage(imageName string) (kernelPath, rootfsPath string,
 		}
 	}
 
-	// Prefix with "disk space issue:" so API handlers and existing tests correctly map to Bad Request
-	return "", "", fmt.Errorf("disk space issue: unsupported image '%s': only 'ubuntu-24' (Ubuntu 24.04 LTS), custom images, or saved templates are supported", imageName)
+	return "", "", fmt.Errorf("unsupported image '%s': only 'ubuntu-24' (Ubuntu 24.04 LTS), custom images, or saved templates are supported", imageName)
 }
 
 // InitVMDisk creates the VM directory and creates a persistent copy-on-write / sparse disk for the VM using default rootfs
@@ -475,146 +474,9 @@ func copySparseFile(src, dst string) error {
 	return CloneFileCOW(src, dst)
 }
 
-// EmbedSSHKey injects an SSH public key into the target ext4 disk image.
-// It writes to /root/.ssh/authorized_keys and /home/compute/.ssh/authorized_keys.
+// EmbedSSHKey injects an SSH public key into the target ext4 disk image and
+// disables password authentication. It writes to /root/.ssh/authorized_keys and
+// /home/compute/.ssh/authorized_keys.
 func (m *Manager) EmbedSSHKey(diskPath string, pubKey string) error {
-	pubKey = strings.TrimSpace(pubKey)
-
-	// Read daemon internal public key if available so internal automation continues to work
-	var internalPubKey string
-	candidates := []string{}
-	if privKey := m.GetSSHKeyPath(); privKey != "" {
-		candidates = append(candidates, privKey+".pub")
-	}
-	candidates = append(candidates,
-		filepath.Join(m.cfg.BaseImagesDir, "ssh", "id_ed25519.pub"),
-		"/var/lib/compute/images/ssh/id_ed25519.pub",
-		filepath.Join(os.TempDir(), "compute-ssh", "id_ed25519.pub"),
-	)
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".ssh", "id_ed25519.pub"))
-	}
-
-	for _, cand := range candidates {
-		if data, err := os.ReadFile(cand); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-			internalPubKey = strings.TrimSpace(string(data))
-			break
-		}
-	}
-
-	if pubKey == "" && internalPubKey == "" {
-		return nil
-	}
-
-	// Combine keys avoiding duplicates
-	var combinedKeys []string
-	seen := make(map[string]bool)
-	if internalPubKey != "" {
-		combinedKeys = append(combinedKeys, internalPubKey)
-		seen[internalPubKey] = true
-	}
-	if pubKey != "" && !seen[pubKey] {
-		combinedKeys = append(combinedKeys, pubKey)
-		seen[pubKey] = true
-	}
-	if len(combinedKeys) == 0 {
-		return nil
-	}
-	keysContent := strings.Join(combinedKeys, "\n") + "\n"
-
-	// 1. Try loop mount if running as root
-	if os.Geteuid() == 0 {
-		if err := embedSSHKeyViaMount(diskPath, keysContent); err == nil {
-			return nil
-		}
-	}
-
-	// 2. Try debugfs (userspace ext4 tool, works with and without root)
-	if err := embedSSHKeyViaDebugfs(diskPath, keysContent); err == nil {
-		return nil
-	}
-
-	return nil
-}
-
-func embedSSHKeyViaMount(diskPath string, keysContent string) error {
-	tmpMount, err := os.MkdirTemp("", "mft3-embed-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmpMount)
-
-	mountCmd := exec.Command("mount", "-o", "loop", diskPath, tmpMount)
-	if err := mountCmd.Run(); err != nil {
-		return err
-	}
-	defer func() {
-		_ = exec.Command("umount", tmpMount).Run()
-	}()
-
-	// Inject into /root/.ssh/authorized_keys
-	rootSSH := filepath.Join(tmpMount, "root", ".ssh")
-	_ = os.MkdirAll(rootSSH, 0700)
-	_ = os.WriteFile(filepath.Join(rootSSH, "authorized_keys"), []byte(keysContent), 0600)
-
-	// Inject into /home/compute/.ssh/authorized_keys
-	computeSSH := filepath.Join(tmpMount, "home", "compute", ".ssh")
-	_ = os.MkdirAll(computeSSH, 0700)
-	computeAuthKeys := filepath.Join(computeSSH, "authorized_keys")
-	_ = os.WriteFile(computeAuthKeys, []byte(keysContent), 0600)
-
-	// Chown to UID 1000 GID 1000 (compute)
-	_ = os.Chown(computeSSH, 1000, 1000)
-	_ = os.Chown(computeAuthKeys, 1000, 1000)
-
-	return nil
-}
-
-func embedSSHKeyViaDebugfs(diskPath string, keysContent string) error {
-	tmpKeyFile, err := os.CreateTemp("", "mft3-key-*.pub")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpKeyFile.Name())
-
-	if _, err := tmpKeyFile.WriteString(keysContent); err != nil {
-		tmpKeyFile.Close()
-		return err
-	}
-	tmpKeyFile.Close()
-
-	cmdScript := fmt.Sprintf(`mkdir /root
-mkdir /root/.ssh
-cd /root/.ssh
-rm authorized_keys
-write %s authorized_keys
-set_inode_field authorized_keys mode 0100600
-mkdir /home
-mkdir /home/compute
-mkdir /home/compute/.ssh
-cd /home/compute/.ssh
-rm authorized_keys
-write %s authorized_keys
-set_inode_field authorized_keys uid 1000
-set_inode_field authorized_keys gid 1000
-set_inode_field authorized_keys mode 0100600
-set_inode_field /home/compute/.ssh uid 1000
-set_inode_field /home/compute/.ssh gid 1000
-set_inode_field /home/compute/.ssh mode 040700
-`, tmpKeyFile.Name(), tmpKeyFile.Name())
-
-	tmpCmdFile, err := os.CreateTemp("", "mft3-cmds-*.txt")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpCmdFile.Name())
-
-	if _, err := tmpCmdFile.WriteString(cmdScript); err != nil {
-		tmpCmdFile.Close()
-		return err
-	}
-	tmpCmdFile.Close()
-
-	cmd := exec.Command("debugfs", "-w", "-f", tmpCmdFile.Name(), diskPath)
-	return cmd.Run()
+	return m.ConfigureSSHAccess(diskPath, SSHAccess{PublicKey: pubKey})
 }

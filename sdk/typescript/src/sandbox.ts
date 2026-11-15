@@ -1,4 +1,4 @@
-import { ExecutionResult, FileEntry, ProcessInfo, SandboxCreateOptions } from './types';
+import { ExecutionResult, FileEntry, NetworkIsolationMode, ProcessInfo, SandboxCreateOptions } from './types';
 
 export class Commands {
   constructor(private readonly sandbox: Sandbox) {}
@@ -127,6 +127,9 @@ export class Sandbox {
         memory_mb: options.memoryMb,
         disk_mb: options.diskMb,
         name: options.name,
+        ssh_password: options.sshPassword,
+        network_isolation: options.networkIsolation,
+        isolated: options.isolated,
       }),
     });
 
@@ -161,6 +164,13 @@ export class Sandbox {
 
   getPreviewURL(port: number): string {
     return `${this.host}/preview/${this.id}/${port}/`;
+  }
+
+  async setNetworkIsolation(mode: NetworkIsolationMode): Promise<any> {
+    const res = await this.request('POST', `/api/v1/sandboxes/${this.id}/network-isolation`, {
+      network_isolation: mode,
+    });
+    return res.json();
   }
 
   async kill(): Promise<void> {

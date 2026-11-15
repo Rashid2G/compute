@@ -1,6 +1,7 @@
 package network
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,10 @@ type TargetInfo struct {
 // TargetResolver resolves a VM ID or name to its target information and port exposure.
 type TargetResolver interface {
 	ResolveTarget(ctx context.Context, idOrName string) (*TargetInfo, error)
+	// ResolveTargetForOwner resolves a sandbox within a specific owner's
+	// namespace (the "<sandbox>.<username>.<zone>" wildcard form). The owner
+	// is the username DNS label.
+	ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel string) (*TargetInfo, error)
 	IsPortPublic(ctx context.Context, idOrName string, port int) bool
 }
 
@@ -85,11 +91,25 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 type RouteMatch struct {
 	Target  string // VM ID or VM Name
 	Port    int    // Upstream guest port
+	Owner   string // Username DNS label for "<sandbox>.<username>.<zone>" routes
 	SubPath string // Rewritten path to forward upstream
+	// Prefix is the URL path prefix the request was matched under, for
+	// path-based preview routes (e.g. "/preview/pr-42/8080"). Empty for
+	// subdomain routes and the /api/v1/*/preview forms, which are already
+	// API-scoped and need no HTML rewriting.
+	Prefix  string
 	IsMatch bool
 }
 
 // ParseRoute extracts target microVM ID/name, port, and subpath from either subdomain or URL path.
+//
+// Subdomain formats supported (for a base domain like sandbox.example.com):
+//
+//	<port>-<vm_id_or_name>.<domain>        e.g. 8080-myvm.sandbox.example.com
+//	<vm_name>-<port>.<domain>              e.g. myvm-8080.sandbox.example.com
+//	<vm>.<username>.<domain>               e.g. myvm.alice.sandbox.example.com (guest port 80)
+//	<port>-<vm>.<username>.<domain>        e.g. 8080-myvm.alice.sandbox.example.com
+//	<vm>-<port>.<username>.<domain>        e.g. myvm-8080.alice.sandbox.example.com
 func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	if r == nil {
 		return RouteMatch{}
@@ -113,7 +133,7 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 		suffix := "." + domain
 		if strings.HasSuffix(host, suffix) {
 			subdomain := strings.TrimSuffix(host, suffix)
-			if m, ok := parseSubdomainPrefix(subdomain, r.URL.Path); ok {
+			if m, ok := parseSubdomain(subdomain, r.URL.Path); ok {
 				return m
 			}
 		}
@@ -130,6 +150,84 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	}
 
 	return RouteMatch{IsMatch: false}
+}
+
+// parseSubdomain parses the labels preceding a base domain. A single label is
+// the legacy "<port>-<vm>" / "<vm>-<port>" form; two labels are the tenant
+// wildcard form "<vm>[.<port>].<username>" (guest port 80 when no port is
+// given).
+func parseSubdomain(subdomain, rawPath string) (RouteMatch, bool) {
+	if subdomain == "" {
+		return RouteMatch{}, false
+	}
+	// Apex and reserved host-service labels are served by the daemon/edge, not
+	// by sandbox ingress.
+	if len(strings.Split(subdomain, ".")) == 1 && networkReservedLabels[strings.ToLower(subdomain)] {
+		return RouteMatch{}, false
+	}
+
+	labels := strings.Split(subdomain, ".")
+	if len(labels) == 2 && labels[0] != "" && labels[1] != "" {
+		head := labels[0]
+		owner := strings.ToLower(labels[1])
+		if m, ok := parseHeadLabel(head, rawPath); ok {
+			m.Owner = owner
+			return m, true
+		}
+		// Plain "<vm>.<username>" → guest port 80.
+		if m, ok := plainRoute(head, 80, rawPath); ok {
+			m.Owner = owner
+			return m, true
+		}
+		return RouteMatch{}, false
+	}
+	return parseSubdomainPrefix(subdomain, rawPath)
+}
+
+// networkReservedLabels are zone-root labels that belong to the host itself
+// (GUI, API) and never resolve to a sandbox.
+var networkReservedLabels = map[string]bool{"api": true, "gui": true, "www": true}
+
+// parseHeadLabel parses the sandbox-side label, supporting the port-prefixed
+// and port-suffixed variants ("<port>-<vm>", "<vm>-<port>") and falling back
+// to the plain name when the label parses as neither.
+func parseHeadLabel(head, rawPath string) (RouteMatch, bool) {
+	dashIdx := strings.Index(head, "-")
+	if dashIdx > 0 {
+		portCandidate, err := strconv.Atoi(head[:dashIdx])
+		if err == nil && portCandidate > 0 && portCandidate <= 65535 {
+			target := head[dashIdx+1:]
+			if target != "" {
+				return portRoute(target, portCandidate, rawPath), true
+			}
+		}
+	}
+	lastDashIdx := strings.LastIndex(head, "-")
+	if lastDashIdx > 0 && lastDashIdx < len(head)-1 {
+		portCandidate, err := strconv.Atoi(head[lastDashIdx+1:])
+		if err == nil && portCandidate > 0 && portCandidate <= 65535 {
+			target := head[:lastDashIdx]
+			if target != "" {
+				return portRoute(target, portCandidate, rawPath), true
+			}
+		}
+	}
+	return RouteMatch{}, false
+}
+
+func portRoute(target string, port int, rawPath string) RouteMatch {
+	subPath := rawPath
+	if subPath == "" {
+		subPath = "/"
+	}
+	return RouteMatch{Target: target, Port: port, SubPath: subPath, IsMatch: true}
+}
+
+func plainRoute(target string, port int, rawPath string) (RouteMatch, bool) {
+	if target == "" {
+		return RouteMatch{}, false
+	}
+	return portRoute(target, port, rawPath), true
 }
 
 func parseSubdomainPrefix(subdomain, rawPath string) (RouteMatch, bool) {
@@ -252,12 +350,19 @@ func parsePathRoute(path string) (RouteMatch, bool) {
 	if len(parts) == 3 && parts[2] != "" {
 		subPath = "/" + parts[2]
 	}
-	return RouteMatch{
+	match := RouteMatch{
 		Target:  target,
 		Port:    port,
 		SubPath: subPath,
 		IsMatch: true,
-	}, true
+	}
+	// Public /preview/<target>/<port> URLs serve full web apps under a path
+	// prefix; the proxy rewrites their HTML so absolute asset/API paths keep
+	// working (see rewriteHTMLForPrefix).
+	if strings.HasPrefix(path, "/preview/") {
+		match.Prefix = "/preview/" + target + "/" + strconv.Itoa(port)
+	}
+	return match, true
 }
 
 // ShouldHandle returns whether the request matches any ingress subdomain or preview path.
@@ -280,7 +385,13 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	targetInfo, err := p.resolver.ResolveTarget(ctx, match.Target)
+	var targetInfo *TargetInfo
+	var err error
+	if match.Owner != "" {
+		targetInfo, err = p.resolver.ResolveTargetForOwner(ctx, match.Target, match.Owner)
+	} else {
+		targetInfo, err = p.resolver.ResolveTarget(ctx, match.Target)
+	}
 	if err != nil || targetInfo == nil {
 		http.Error(w, fmt.Sprintf("sandbox %q not found", match.Target), http.StatusNotFound)
 		return
@@ -315,7 +426,146 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle standard HTTP/1.1, HTTP/2, and Server-Sent Events (SSE)
+	if match.Prefix != "" && previewPrefixIsValid(match.Prefix) {
+		w = newHTMLPrefixWriter(w, match.Prefix+"/")
+	}
 	p.serveHTTP(w, r, targetInfo.IPAddress, match.Port, match.SubPath)
+	if hw, ok := w.(*htmlPrefixWriter); ok {
+		hw.finalize()
+	}
+}
+
+// previewPrefixIsValid guards against untrusted URL segments being embedded in
+// rewritten HTML. Real sandbox names are DNS labels; anything else is left
+// un-rewritten rather than injected into a document.
+func previewPrefixIsValid(prefix string) bool {
+	for _, part := range strings.Split(strings.Trim(prefix, "/"), "/") {
+		if part == "" {
+			return false
+		}
+		for i := 0; i < len(part); i++ {
+			c := part[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// rewriteHTMLForPrefix makes an upstream document work under a path prefix:
+//   - absolute src=/href= attributes are rewritten to the prefix,
+//   - a <base href> is injected after <head> so relative URLs resolve,
+//   - a small runtime patch redirects fetch/XHR/EventSource/WebSocket calls
+//     that use absolute paths (e.g. "/api/v1/...") to the prefix.
+//
+// The rewrite runs on already-decoded response bodies (the transport handles
+// gzip), so no Content-Encoding negotiation is involved.
+func rewriteHTMLForPrefix(body []byte, prefix string) []byte {
+	html := string(body)
+	base := strings.TrimSuffix(prefix, "/")
+	attrRe := regexp.MustCompile(`(?i)\b(src|href)\s*=\s*"(/[^/"][^"]*)"`)
+	html = attrRe.ReplaceAllString(html, `$1="`+base+`$2"`)
+	attrSingleRe := regexp.MustCompile(`(?i)\b(src|href)\s*=\s*'(/[^/'][^']*)'`)
+	html = attrSingleRe.ReplaceAllString(html, `$1='`+base+`$2'`)
+
+	inject := `<base href="` + prefix + `">` + previewRuntimePatch(prefix)
+	lower := strings.ToLower(html)
+	if idx := strings.Index(lower, "<head"); idx >= 0 {
+		if gt := strings.Index(html[idx:], ">"); gt >= 0 {
+			at := idx + gt + 1
+			return []byte(html[:at] + inject + html[at:])
+		}
+	}
+	return []byte(inject + html)
+}
+
+// previewRuntimePatch returns the inline script that patches browser APIs to
+// honor the preview prefix for runtime-issued requests (SPA code typically
+// fetches "/api/v1/..." with absolute paths that bypass <base>).
+func previewRuntimePatch(prefix string) string {
+	return `<script>(function(){
+var P="` + prefix + `";
+function A(u){return typeof u==="string"&&u.charAt(0)==="/"&&u.charAt(1)!=="/";}
+var F=window.fetch;
+if(F)window.fetch=function(){if(A(arguments[0]))arguments[0]=P+arguments[0].slice(1);return F.apply(this,arguments);};
+var O=XMLHttpRequest&&XMLHttpRequest.prototype.open;
+if(O)XMLHttpRequest.prototype.open=function(){if(A(arguments[1]))arguments[1]=P+arguments[1].slice(1);return O.apply(this,arguments);};
+var E=window.EventSource;
+if(E){window.EventSource=function(u){if(A(u))u=P+u.slice(1);return new E(u);};window.EventSource.prototype=E.prototype;}
+var W=window.WebSocket;
+if(W){window.WebSocket=function(u,p){if(A(u))u=(location.protocol==="https:"?"wss://":"ws://")+location.host+P+u.slice(1);return p!==undefined?new W(u,p):new W(u);};window.WebSocket.prototype=W.prototype;window.WebSocket.CONNECTING=W.CONNECTING;window.WebSocket.OPEN=W.OPEN;window.WebSocket.CLOSING=W.CLOSING;window.WebSocket.CLOSED=W.CLOSED;}
+})();</script>`
+}
+
+// htmlPrefixWriter buffers HTML responses so they can be rewritten for the
+// preview path prefix. Non-HTML responses (including SSE streams) pass
+// through untouched.
+type htmlPrefixWriter struct {
+	w           http.ResponseWriter
+	prefix      string // ends with "/"
+	wroteHeader bool
+	buffering   bool
+	status      int
+	buf         bytes.Buffer
+	finalized   bool
+}
+
+func newHTMLPrefixWriter(w http.ResponseWriter, prefix string) *htmlPrefixWriter {
+	return &htmlPrefixWriter{w: w, prefix: prefix}
+}
+
+func (h *htmlPrefixWriter) Header() http.Header { return h.w.Header() }
+
+func (h *htmlPrefixWriter) WriteHeader(code int) {
+	if h.wroteHeader {
+		return
+	}
+	h.wroteHeader = true
+	h.status = code
+	if strings.Contains(h.w.Header().Get("Content-Type"), "text/html") {
+		h.buffering = true
+		return
+	}
+	h.w.WriteHeader(code)
+}
+
+func (h *htmlPrefixWriter) Write(p []byte) (int, error) {
+	if !h.wroteHeader {
+		h.WriteHeader(http.StatusOK)
+	}
+	if h.buffering {
+		if h.finalized {
+			return h.w.Write(p)
+		}
+		return h.buf.Write(p)
+	}
+	return h.w.Write(p)
+}
+
+// Flush is a no-op while an HTML response is being buffered; the full body is
+// written by finalize once the upstream handler returns. Reverse proxying
+// (FlushInterval -1) flushes immediately after WriteHeader, which would
+// otherwise cut the buffered rewrite short. Non-HTML responses flush through.
+func (h *htmlPrefixWriter) Flush() {
+	if !h.buffering || h.finalized {
+		if f, ok := h.w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+}
+
+func (h *htmlPrefixWriter) finalize() {
+	if !h.buffering || h.finalized {
+		return
+	}
+	h.finalized = true
+	rewritten := rewriteHTMLForPrefix(h.buf.Bytes(), h.prefix)
+	header := h.w.Header()
+	header.Del("Content-Encoding") // upstream body is decoded; no encoding to declare
+	header.Set("Content-Length", strconv.Itoa(len(rewritten)))
+	h.w.WriteHeader(h.status)
+	_, _ = h.w.Write(rewritten)
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {

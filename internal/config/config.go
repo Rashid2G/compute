@@ -5,18 +5,20 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/tailscale"
 )
 
-// Supported fixed VM tiers and limits (inspired by boat.dev)
+// Supported fixed VM tiers and limits
 const (
-	Tier1VCPU = "1vcpu"
-	Tier2VCPU = "2vcpu"
-	Tier4VCPU = "4vcpu"
+	Tier1VCPU  = "1vcpu"
+	Tier2VCPU  = "2vcpu"
+	Tier4VCPU  = "4vcpu"
+	Tier8VCPU  = "8vcpu"
+	Tier16VCPU = "16vcpu"
+
+	MaxVCPUsPerVM = 16
 
 	DiskSize50GB  = 51200  // 50 GB in MB
 	DiskSize100GB = 102400 // 100 GB in MB
@@ -65,15 +67,15 @@ func GetSupportedTiers() []VMTier {
 	}
 }
 
-// ValidateAndNormalizeSpecs validates that vCPUs is in fixed tiers {1, 2, 4},
-// sets default RAM if omitted, and ensures disk is limited to 50GB or 100GB.
+// ValidateAndNormalizeSpecs validates that vCPUs is in supported tiers {1, 2, 4, 8, 16}
+// (up to MaxVCPUsPerVM), sets default RAM if omitted, and normalizes disk size.
 func ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB int) (int, int, int, error) {
-	// vCPUs check (fixed tiers 1, 2, 4)
+	// vCPUs check (supported tiers 1, 2, 4, 8, 16 up to MaxVCPUsPerVM)
 	if vcpus <= 0 {
 		vcpus = 1
 	}
-	if vcpus != 1 && vcpus != 2 && vcpus != 4 {
-		return 0, 0, 0, fmt.Errorf("invalid vcpus '%d': compute only supports fixed tiers of 1vcpu, 2vcpu, or 4vcpu (inspired by boat.dev)", vcpus)
+	if vcpus > MaxVCPUsPerVM || (vcpus != 1 && vcpus != 2 && vcpus != 4 && vcpus != 8 && vcpus != 16) {
+		return 0, 0, 0, fmt.Errorf("invalid vcpus '%d': compute supports 1, 2, 4, 8, or 16 vcpus (max %d)", vcpus, MaxVCPUsPerVM)
 	}
 
 	// RAM is optional: if omitted or 0, default according to tier
@@ -85,6 +87,10 @@ func ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB int) (int, int, int, erro
 			memoryMB = 4096
 		case 4:
 			memoryMB = 8192
+		case 8:
+			memoryMB = 16384
+		case 16:
+			memoryMB = 32768
 		}
 	} else if memoryMB < 128 {
 		return 0, 0, 0, fmt.Errorf("invalid memory '%d MB': minimum memory is 128 MB", memoryMB)
@@ -113,19 +119,61 @@ func ValidateImage(image string) (string, error) {
 	return "", fmt.Errorf("unsupported image '%s': only 'ubuntu-24' (Ubuntu 24.04 LTS) is supported; users can clone disks to run other VMs from their existing images", image)
 }
 
+// DNSConfig configures the built-in authoritative DNS responder that gives
+// every sandbox a stable hostname of the form
+//
+//	<sandbox>.<username>.<base-domain>
+//
+// SSH connections carry no hostname, so the wildcard dispatch for SSH happens
+// at the DNS layer: each sandbox name resolves to the sandbox's own address
+// (tailnet IP first, guest IP second) and the network does the routing. The
+// zone works for any base domain — Tailscale split DNS, any DNS provider's
+// delegation, or a LAN resolver — as long as queries for the zone reach the
+// daemon. Queries outside the zone are forwarded upstream.
+type DNSConfig struct {
+	// Enabled turns the responder on.
+	Enabled bool `json:"enabled,omitempty"`
+	// Listen is the UDP/TCP listen address (default ":53").
+	Listen string `json:"listen,omitempty"`
+	// BaseDomain is the primary zone, e.g. "compute.example.internal".
+	// Empty falls back to network.base_domain.
+	BaseDomain string `json:"base_domain,omitempty"`
+	// ExtraBaseDomains optionally serves additional zones.
+	ExtraBaseDomains []string `json:"extra_base_domains,omitempty"`
+	// HostAddresses overrides the addresses the zone apex and reserved
+	// service labels (api/gui/www) resolve to — the host running the GUI/API.
+	// Useful when the daemon runs in a container where auto-detection (the
+	// outbound route, or the host's tailnet IP) yields a non-routable address.
+	// Empty falls back to the host's tailnet IP, else the primary outbound IP.
+	HostAddresses []string `json:"host_addresses,omitempty"`
+}
+
 // ServerConfig holds daemon server settings
 type ServerConfig struct {
 	ListenAddr     string `json:"listen"`
 	DBPath         string `json:"db_path"`
 	FirecrackerBin string `json:"firecracker_bin"`
 	AuthEnabled    bool   `json:"auth_enabled"`
+	SignupEnabled  bool   `json:"signup_enabled"`
 	AuthDBPath     string `json:"auth_db_path,omitempty"`
 	AdminSecret    string `json:"admin_secret,omitempty"`
+	AdminUsername  string `json:"admin_username,omitempty"`
+	AdminEmail     string `json:"admin_email,omitempty"`
 	AdminPassword  string `json:"admin_password,omitempty"`
 	JailerEnabled  bool   `json:"jailer_enabled,omitempty"`
 	JailerBinary   string `json:"jailer_binary,omitempty"`
 	JailerBaseDir  string `json:"jailer_base_dir,omitempty"`
 	CgroupEnforce  bool   `json:"cgroup_enforce,omitempty"`
+	// EdgeListen optionally starts an HTTP edge listener (default ":80" when
+	// DNS is enabled) that dispatches by Host header: the reserved "api" and
+	// apex/gui/www subdomains of the base domain are served by the daemon
+	// itself, every other subdomain goes to the sandbox ingress wildcard.
+	// Set to "" (or "-") to disable.
+	EdgeListen string `json:"edge_listen,omitempty"`
+	// TLSCertFile and TLSKeyFile optionally enable native HTTPS on the API
+	// listener. Leave empty to terminate TLS in a reverse proxy or Tailscale.
+	TLSCertFile string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `json:"tls_key_file,omitempty"`
 }
 
 // DefaultsConfig holds default microVM specifications
@@ -154,60 +202,6 @@ type ImagesConfig struct {
 	Available     []AvailableImage `json:"available,omitempty"`
 }
 
-// TailscaleConfig controls the tailnet integration on the control-plane host.
-// When enabled, the daemon can assign tailnet addresses to sandboxes and
-// report its own MagicDNS identity. Every device Compute joins is tagged
-// (tag:compute:*) and named with the "compute-" prefix; the operator's
-// existing devices, routes and policy file are never modified.
-type TailscaleConfig struct {
-	// Enabled turns the integration on.
-	Enabled bool `json:"enabled,omitempty"`
-	// APIKey is a Tailscale admin API access token, required to mint
-	// sandbox auth keys and manage cleanup. Prefer the
-	// COMPUTE_TAILSCALE_API_KEY environment variable over committing it here.
-	APIKey string `json:"api_key,omitempty"`
-	// Tailnet selects the tailnet ("-" = the API key's default).
-	Tailnet string `json:"tailnet,omitempty"`
-	// NodeTag is the tag applied to the control plane device itself.
-	NodeTag string `json:"node_tag,omitempty"`
-	// SandboxTag is the tag applied to sandbox auth keys/devices.
-	SandboxTag string `json:"sandbox_tag,omitempty"`
-	// HostnamePrefix prepends to every hostname Compute assigns.
-	HostnamePrefix string `json:"hostname_prefix,omitempty"`
-	// KeyExpirySeconds is the lifetime of minted sandbox keys (default 90 days).
-	KeyExpirySeconds int `json:"key_expiry_seconds,omitempty"`
-	// AutoInstallGuest installs the tailscale binary inside sandboxes that
-	// lack it (via the SSH control channel). Default true.
-	AutoInstallGuest *bool `json:"auto_install_guest,omitempty"`
-	// DefaultSandboxes gives every new sandbox tailnet addressing unless the
-	// request explicitly opts out.
-	DefaultSandboxes bool `json:"default_sandboxes,omitempty"`
-}
-
-// ResolvedSandboxTag returns the sandbox tag with the Compute default applied.
-func (c TailscaleConfig) ResolvedSandboxTag() string {
-	if c.SandboxTag != "" {
-		return c.SandboxTag
-	}
-	return tailscale.TagSandbox
-}
-
-// ResolvedNodeTag returns the control-plane tag with the Compute default applied.
-func (c TailscaleConfig) ResolvedNodeTag() string {
-	if c.NodeTag != "" {
-		return c.NodeTag
-	}
-	return tailscale.TagMaster
-}
-
-// AutoInstallResolved defaults to true when unset.
-func (c TailscaleConfig) AutoInstallResolved() bool {
-	if c.AutoInstallGuest != nil {
-		return *c.AutoInstallGuest
-	}
-	return true
-}
-
 // JobsConfig controls local job execution on the control-plane host.
 type JobsConfig struct {
 	// LocalExecution runs queued jobs in local microVMs when no worker node is
@@ -230,26 +224,77 @@ type ResourceLimits struct {
 
 // GlobalConfig is the master configuration for the Compute daemon
 type GlobalConfig struct {
-	ConfigPath string          `json:"config_path,omitempty"`
-	Server     ServerConfig    `json:"server"`
-	Network    network.Config  `json:"network"`
-	Defaults   DefaultsConfig  `json:"defaults"`
-	Images     ImagesConfig    `json:"images"`
-	Resources  ResourceLimits  `json:"resources"`
-	Jobs       JobsConfig      `json:"jobs"`
-	Tailscale  TailscaleConfig `json:"tailscale,omitempty"`
+	ConfigPath string         `json:"config_path,omitempty"`
+	Server     ServerConfig   `json:"server"`
+	Network    network.Config `json:"network"`
+	Defaults   DefaultsConfig `json:"defaults"`
+	Images     ImagesConfig   `json:"images"`
+	Resources  ResourceLimits `json:"resources"`
+	Jobs       JobsConfig     `json:"jobs"`
+	DNS        DNSConfig      `json:"dns,omitempty"`
 }
 
 // Config is an alias for GlobalConfig for backward compatibility and package consistency.
 type Config = GlobalConfig
 
+// DNSBaseDomains returns the effective DNS zones in priority order (primary
+// first, longest-suffix matching is applied by the DNS server). An empty
+// result means DNS naming is not configured.
+func (c GlobalConfig) DNSBaseDomains() []string {
+	var zones []string
+	primary := c.DNS.BaseDomain
+	if primary == "" {
+		primary = c.Network.BaseDomain
+	}
+	if primary = strings.ToLower(strings.TrimSpace(primary)); primary != "" {
+		zones = append(zones, primary)
+	}
+	for _, z := range c.DNS.ExtraBaseDomains {
+		if z = strings.ToLower(strings.TrimSpace(z)); z != "" && z != primary {
+			zones = append(zones, z)
+		}
+	}
+	return zones
+}
+
+// PrimaryDNSBaseDomain returns the first configured DNS zone ("" when none).
+func (c GlobalConfig) PrimaryDNSBaseDomain() string {
+	zones := c.DNSBaseDomains()
+	if len(zones) == 0 {
+		return ""
+	}
+	return zones[0]
+}
+
+// EdgeListenResolved returns the edge listener address, or "" when the edge
+// should not start. Default ":80" while DNS is enabled; "-" explicitly
+// disables.
+func (c GlobalConfig) EdgeListenResolved() string {
+	v := strings.TrimSpace(c.Server.EdgeListen)
+	if v == "-" {
+		return ""
+	}
+	if v != "" {
+		return v
+	}
+	if c.DNS.Enabled && c.PrimaryDNSBaseDomain() != "" {
+		return ":80"
+	}
+	return ""
+}
+
 // DefaultConfig returns standard out-of-the-box configuration
 func DefaultConfig() GlobalConfig {
 	return GlobalConfig{
 		Server: ServerConfig{
-			ListenAddr:     "0.0.0.0:18080",
+			// Bind loopback by default: a fresh install must not expose the
+			// API/GUI to the network until the operator sets COMPUTE_BIND_ADDRESS.
+			ListenAddr:     "127.0.0.1:18080",
 			DBPath:         "/var/lib/compute/data/compute.db",
 			FirecrackerBin: "/usr/local/bin/firecracker",
+			SignupEnabled:  false,
+			AdminUsername:  "admin",
+			AdminEmail:     "admin@compute.local",
 			JailerEnabled:  false,
 			JailerBinary:   "/usr/local/bin/jailer",
 			JailerBaseDir:  "/srv/jailer",
@@ -321,6 +366,9 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		}
 		cfg.Network = netCfg
 		cfg.ConfigPath = path
+		if err := ApplyEnvOverrides(&cfg); err != nil {
+			return cfg, err
+		}
 		return cfg, nil
 	}
 
@@ -333,13 +381,19 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 
 	// Normalize defaults if omitted in custom config
 	if cfg.Server.ListenAddr == "" {
-		cfg.Server.ListenAddr = "0.0.0.0:18080"
+		cfg.Server.ListenAddr = DefaultConfig().Server.ListenAddr
 	}
 	if cfg.Server.DBPath == "" {
 		cfg.Server.DBPath = "/var/lib/compute/data/compute.db"
 	}
 	if cfg.Server.FirecrackerBin == "" {
 		cfg.Server.FirecrackerBin = "/usr/local/bin/firecracker"
+	}
+	if strings.TrimSpace(cfg.Server.AdminUsername) == "" {
+		cfg.Server.AdminUsername = "admin"
+	}
+	if strings.TrimSpace(cfg.Server.AdminEmail) == "" {
+		cfg.Server.AdminEmail = "admin@compute.local"
 	}
 	if cfg.Defaults.VCPUs <= 0 {
 		cfg.Defaults.VCPUs = 1
@@ -366,35 +420,11 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		cfg.Images.DefaultRootfs = DefaultRootfsName
 	}
 
-	// Apply COMPUTE_DATA_DIR environment variable if specified
-	if dataDir := os.Getenv("COMPUTE_DATA_DIR"); dataDir != "" {
-		if cfg.Server.DBPath == "/var/lib/compute/data/compute.db" || strings.HasPrefix(cfg.Server.DBPath, "/home/") {
-			cfg.Server.DBPath = filepath.Join(dataDir, "data", "compute.db")
-		}
-		if cfg.Images.ImagesDir == "/var/lib/compute/images" || strings.HasPrefix(cfg.Images.ImagesDir, "/home/") {
-			cfg.Images.ImagesDir = filepath.Join(dataDir, "images")
-		}
-		if cfg.Images.VMsDir == "/var/lib/compute/vms" || strings.HasPrefix(cfg.Images.VMsDir, "/home/") {
-			cfg.Images.VMsDir = filepath.Join(dataDir, "vms")
-		}
-		if cfg.Images.SSHKeyPath == "/var/lib/compute/images/ssh/id_ed25519" || strings.HasPrefix(cfg.Images.SSHKeyPath, "/home/") {
-			cfg.Images.SSHKeyPath = filepath.Join(dataDir, "images", "ssh", "id_ed25519")
-		}
-	}
-
-	// Apply Tailscale environment overrides
-	if v := os.Getenv("COMPUTE_TAILSCALE_ENABLED"); v != "" {
-		cfg.Tailscale.Enabled = v == "true" || v == "1" || v == "on" || v == "yes"
-	}
-	if v := os.Getenv("COMPUTE_TAILSCALE_API_KEY"); v != "" {
-		cfg.Tailscale.APIKey = v
-	}
-	if v := os.Getenv("COMPUTE_TAILSCALE_TAILNET"); v != "" {
-		cfg.Tailscale.Tailnet = v
-	}
-	if cfg.Tailscale.Enabled && cfg.Tailscale.APIKey == "" && os.Getenv("COMPUTE_TAILSCALE_API_KEY") == "" {
-		// Enabling the integration without credentials still works for local
-		// status reporting; sandbox provisioning reports the missing key.
+	// Environment overrides are applied for every resolve path, including the
+	// no-config-file fallback, so `docker compose` can configure the daemon
+	// entirely from .env variables.
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		return cfg, err
 	}
 
 	// Auto-locate Firecracker and Jailer if configured path doesn't exist
@@ -441,12 +471,17 @@ func ResolveConfig(explicitPath string) (GlobalConfig, string, error) {
 	for _, p := range candidatePaths {
 		if _, err := os.Stat(p); err == nil {
 			cfg, err := LoadConfigFile(p)
-			if err == nil {
-				cfg.ConfigPath = p
-				return cfg, p, nil
+			if err != nil {
+				return cfg, p, err
 			}
+			cfg.ConfigPath = p
+			return cfg, p, nil
 		}
 	}
 
-	return DefaultConfig(), "", nil
+	cfg := DefaultConfig()
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		return cfg, "", err
+	}
+	return cfg, "", nil
 }

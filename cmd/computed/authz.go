@@ -16,15 +16,16 @@ import (
 )
 
 // safeConfig returns the daemon configuration as it may be exposed to the
-// caller. Non-admin callers never receive bootstrap secrets or local paths.
+// caller. Bootstrap secrets are always redacted; non-admin callers also never
+// receive local paths.
 func (s *Server) safeConfig(isAdmin bool) config.GlobalConfig {
 	cfg := s.cfg
 	cfg.Resources = s.vmMgr.GetResourceLimits()
 	cfg.Network = s.vmMgr.GetNetworkManager().GetConfig()
 	cfg.Defaults = s.vmMgr.GetDefaults()
+	cfg.Server.AdminSecret = ""
+	cfg.Server.AdminPassword = ""
 	if !isAdmin {
-		cfg.Server.AdminSecret = ""
-		cfg.Server.AdminPassword = ""
 		cfg.Server.AuthDBPath = ""
 		cfg.Server.DBPath = ""
 	}
@@ -627,17 +628,37 @@ func (s *Server) authenticateAccessAPIKey(ctx context.Context, token, clientIP s
 	}
 
 	queries := storeDB.New(s.metaStore.Reader())
+	adminUsername := strings.TrimSpace(strings.ToLower(s.cfg.Server.AdminUsername))
+	if adminUsername == "" {
+		adminUsername = "admin"
+	}
+	adminEmail := strings.TrimSpace(s.cfg.Server.AdminEmail)
+	if adminEmail == "" {
+		adminEmail = "admin@compute.local"
+	}
+
 	user, err := queries.GetUserByEmailOrUsername(ctx, key.CreatedBy)
-	if (err != nil || user == nil) && (key.CreatedBy == "admin" || key.CreatedBy == "usr_system_admin") {
-		user = &storeDB.User{
-			ID:          "usr_system_admin",
-			Email:       "admin@compute.local",
-			Username:    "admin",
-			DisplayName: "System Administrator",
-			Role:        "admin",
-			Status:      "active",
+	if (err != nil || user == nil) && (key.CreatedBy == "admin" || key.CreatedBy == "usr_system_admin" || strings.EqualFold(key.CreatedBy, adminUsername)) {
+		for _, candidate := range []string{adminUsername, adminEmail, "admin"} {
+			if u, lookupErr := queries.GetUserByEmailOrUsername(ctx, candidate); lookupErr == nil && u != nil && u.Role == "admin" {
+				user = u
+				err = nil
+				break
+			}
 		}
-	} else if err != nil || user == nil {
+		if err != nil || user == nil {
+			user = &storeDB.User{
+				ID:          "usr_system_admin",
+				Email:       adminEmail,
+				Username:    adminUsername,
+				DisplayName: "System Administrator",
+				Role:        "admin",
+				Status:      "active",
+			}
+			err = nil
+		}
+	}
+	if err != nil || user == nil {
 		return nil, fmt.Errorf("access key owner not found")
 	}
 
@@ -900,6 +921,7 @@ func (s *Server) scopePermits(authCtx *auth.AuthContext, action, resource string
 		"pools":          true,
 		"agent-profiles": true,
 		"environments":   true,
+		"users":          true,
 	}
 
 	// If this is an admin-only resource, only admin keys can access it.

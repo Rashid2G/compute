@@ -10,8 +10,8 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Server.ListenAddr != "0.0.0.0:18080" {
-		t.Fatalf("expected 0.0.0.0:18080, got %s", cfg.Server.ListenAddr)
+	if cfg.Server.ListenAddr != "127.0.0.1:18080" {
+		t.Fatalf("expected 127.0.0.1:18080, got %s", cfg.Server.ListenAddr)
 	}
 	if cfg.Network.Mode != network.ModeNAT {
 		t.Fatalf("expected mode nat, got %s", cfg.Network.Mode)
@@ -40,6 +40,15 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Server.JailerBaseDir != "/srv/jailer" {
 		t.Fatalf("expected default JailerBaseDir /srv/jailer, got %s", cfg.Server.JailerBaseDir)
 	}
+	if cfg.Server.AdminUsername != "admin" {
+		t.Fatalf("expected default AdminUsername admin, got %s", cfg.Server.AdminUsername)
+	}
+	if cfg.Server.AdminEmail != "admin@compute.local" {
+		t.Fatalf("expected default AdminEmail admin@compute.local, got %s", cfg.Server.AdminEmail)
+	}
+	if cfg.Server.SignupEnabled {
+		t.Fatalf("expected SignupEnabled to be false by default")
+	}
 }
 
 func TestTiersAndValidation(t *testing.T) {
@@ -48,7 +57,7 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("expected 3 fixed tiers, got %d", len(tiers))
 	}
 
-	// Valid tiers: 1, 2, 4
+	// Valid tiers: 1, 2, 4, 8, 16
 	v, m, d, err := ValidateAndNormalizeSpecs(1, 0, 0)
 	if err != nil || v != 1 || m != 2048 || d != DiskSize50GB {
 		t.Fatalf("tier 1 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
@@ -64,6 +73,16 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("tier 4 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
 	}
 
+	v, m, d, err = ValidateAndNormalizeSpecs(8, 0, 0)
+	if err != nil || v != 8 || m != 16384 || d != DiskSize50GB {
+		t.Fatalf("tier 8 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
+	}
+
+	v, m, d, err = ValidateAndNormalizeSpecs(16, 0, 0)
+	if err != nil || v != 16 || m != 32768 || d != DiskSize50GB {
+		t.Fatalf("tier 16 normalization failed: v=%d m=%d d=%d err=%v", v, m, d, err)
+	}
+
 	// 100GB via 100
 	v, m, d, err = ValidateAndNormalizeSpecs(2, 2048, 100)
 	if err != nil || v != 2 || m != 2048 || d != DiskSize100GB {
@@ -76,9 +95,9 @@ func TestTiersAndValidation(t *testing.T) {
 		t.Fatalf("expected error for 3 vcpus, got nil")
 	}
 
-	_, _, _, err = ValidateAndNormalizeSpecs(8, 0, 0)
+	_, _, _, err = ValidateAndNormalizeSpecs(32, 0, 0)
 	if err == nil {
-		t.Fatalf("expected error for 8 vcpus, got nil")
+		t.Fatalf("expected error for 32 vcpus, got nil")
 	}
 
 	// Custom disk sizes: 2048 MB, 20 GB, 100 GB
@@ -111,6 +130,10 @@ func TestTiersAndValidation(t *testing.T) {
 	_, err = ValidateImage("alpine")
 	if err == nil {
 		t.Fatalf("expected error for alpine, got nil")
+	}
+	_, err = ValidateImage("debian")
+	if err == nil {
+		t.Fatalf("expected error for debian, got nil")
 	}
 }
 
@@ -228,74 +251,5 @@ func TestResolveConfigPath(t *testing.T) {
 	}
 	if cfg.ConfigPath != customPath {
 		t.Fatalf("expected cfg.ConfigPath %s, got %s", customPath, cfg.ConfigPath)
-	}
-}
-
-func TestTailscaleConfigParsing(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "daemon.json")
-	if err := os.WriteFile(path, []byte(`{
-		"tailscale": {
-			"enabled": true,
-			"api_key": "tskey-api-test",
-			"tailnet": "mytailnet",
-			"default_sandboxes": true,
-			"auto_install_guest": false
-		}
-	}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("COMPUTE_TAILSCALE_ENABLED", "")
-	t.Setenv("COMPUTE_TAILSCALE_API_KEY", "")
-	cfg, err := LoadConfigFile(path)
-	if err != nil {
-		t.Fatalf("LoadConfigFile error = %v", err)
-	}
-	if !cfg.Tailscale.Enabled {
-		t.Error("expected tailscale.enabled=true")
-	}
-	if cfg.Tailscale.APIKey != "tskey-api-test" {
-		t.Errorf("api key = %q", cfg.Tailscale.APIKey)
-	}
-	if cfg.Tailscale.Tailnet != "mytailnet" {
-		t.Errorf("tailnet = %q", cfg.Tailscale.Tailnet)
-	}
-	if !cfg.Tailscale.DefaultSandboxes {
-		t.Error("expected default_sandboxes=true")
-	}
-	if cfg.Tailscale.AutoInstallResolved() {
-		t.Error("expected auto_install_guest=false honored")
-	}
-	if cfg.Tailscale.ResolvedSandboxTag() != "tag:compute:sandbox" {
-		t.Errorf("sandbox tag = %q", cfg.Tailscale.ResolvedSandboxTag())
-	}
-}
-
-func TestTailscaleEnvOverrides(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "daemon.json")
-	if err := os.WriteFile(path, []byte(`{"tailscale": {"enabled": false}}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Setenv("COMPUTE_TAILSCALE_ENABLED", "true")
-	t.Setenv("COMPUTE_TAILSCALE_API_KEY", "tskey-api-env")
-	t.Setenv("COMPUTE_TAILSCALE_TAILNET", "envtailnet")
-	cfg, err := LoadConfigFile(path)
-	if err != nil {
-		t.Fatalf("LoadConfigFile error = %v", err)
-	}
-	if !cfg.Tailscale.Enabled {
-		t.Error("expected env to enable tailscale")
-	}
-	if cfg.Tailscale.APIKey != "tskey-api-env" {
-		t.Errorf("api key from env = %q", cfg.Tailscale.APIKey)
-	}
-	if cfg.Tailscale.Tailnet != "envtailnet" {
-		t.Errorf("tailnet from env = %q", cfg.Tailscale.Tailnet)
-	}
-	if !cfg.Tailscale.AutoInstallResolved() {
-		t.Error("auto_install_guest should default to true")
 	}
 }

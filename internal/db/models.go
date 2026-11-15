@@ -1,8 +1,43 @@
 package db
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 )
+
+// Network isolation modes control whether a sandbox can reach other non-isolated
+// sandboxes in the same user account or is completely isolated on its own.
+const (
+	NetworkIsolationAccount  = "account"
+	NetworkIsolationIsolated = "isolated"
+)
+
+// NormalizeNetworkIsolation canonicalizes a sandbox network isolation mode.
+// Empty string defaults to NetworkIsolationAccount. Returns ("", false) for
+// unrecognized non-empty values.
+func NormalizeNetworkIsolation(mode string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", NetworkIsolationAccount, "shared", "all", "same-account", "same_account", "peers":
+		return NetworkIsolationAccount, true
+	case NetworkIsolationIsolated, "self", "private", "none", "standalone":
+		return NetworkIsolationIsolated, true
+	default:
+		return "", false
+	}
+}
+
+// IsNetworkIsolated reports whether the VM is configured to be isolated on its own.
+func IsNetworkIsolated(vm *VM) bool {
+	if vm == nil {
+		return false
+	}
+	mode, ok := NormalizeNetworkIsolation(vm.NetworkIsolation)
+	if !ok {
+		return false
+	}
+	return mode == NetworkIsolationIsolated
+}
 
 // VMStatus represents the state of a VM
 type VMStatus string
@@ -27,37 +62,44 @@ const (
 
 // VM represents a managed microVM
 type VM struct {
-	ID                string    `json:"id"`                    // External ID (identical to Name, or user-assigned ID)
-	InternalID        string    `json:"internal_id,omitempty"` // Distinct internal ID in the global store
-	OwnerID           string    `json:"owner_id,omitempty"`    // Owner / user ID for tenant isolation
-	Name              string    `json:"name"`                  // VM Name (also serves as the external VM ID)
-	Status            VMStatus  `json:"status"`
-	DesiredRunning    bool      `json:"desired_running"`
-	VCPUs             int       `json:"vcpus"`
-	MemoryMB          int       `json:"memory_mb"`
-	DiskMB            int       `json:"disk_mb"`
-	IPAddress         string    `json:"ip_address"`
-	PublicIP          string    `json:"public_ip"`
-	PublicIPEnabled   bool      `json:"public_ip_enabled"`
-	MACAddress        string    `json:"mac_address"`
-	TAPDevice         string    `json:"tap_device"`
-	TailscaleEnabled  bool      `json:"tailscale_enabled"`
-	TailnetIP         string    `json:"tailnet_ip"`
-	TailnetDNS        string    `json:"tailnet_dns,omitempty"`
-	TailscaleDeviceID string    `json:"tailscale_device_id,omitempty"`
-	RootfsPath        string    `json:"rootfs_path"`
-	KernelPath        string    `json:"kernel_path"`
-	DiskPath          string    `json:"disk_path"`
-	SnapshotPath      string    `json:"snapshot_path,omitempty"`
-	MemFilePath       string    `json:"mem_file_path,omitempty"`
-	SSHKeyPath        string    `json:"ssh_key_path,omitempty"`
-	SSHKeyName        string    `json:"ssh_key_name,omitempty"`
-	SSHPublicKey      string    `json:"ssh_public_key,omitempty"`
-	PID               int       `json:"pid,omitempty"`
-	SocketPath        string    `json:"socket_path,omitempty"`
-	Protected         bool      `json:"protected"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                 string   `json:"id"`                    // External ID (identical to Name, or user-assigned ID)
+	InternalID         string   `json:"internal_id,omitempty"` // Distinct internal ID in the global store
+	OwnerID            string   `json:"owner_id,omitempty"`    // Owner / user ID for tenant isolation
+	Name               string   `json:"name"`                  // VM Name (also serves as the external VM ID)
+	Status             VMStatus `json:"status"`
+	DesiredRunning     bool     `json:"desired_running"`
+	VCPUs              int      `json:"vcpus"`
+	MemoryMB           int      `json:"memory_mb"`
+	DiskMB             int      `json:"disk_mb"`
+	IPAddress          string   `json:"ip_address"`
+	PublicIP           string   `json:"public_ip"`
+	PublicIPEnabled    bool     `json:"public_ip_enabled"`
+	NetworkIsolation   string   `json:"network_isolation"`
+	MACAddress         string   `json:"mac_address"`
+	TAPDevice          string   `json:"tap_device"`
+	TailscaleEnabled   bool     `json:"tailscale_enabled"`
+	TailnetIP          string   `json:"tailnet_ip"`
+	TailnetDNS         string   `json:"tailnet_dns,omitempty"`
+	TailscaleDeviceID  string   `json:"tailscale_device_id,omitempty"`
+	RootfsPath         string   `json:"rootfs_path"`
+	KernelPath         string   `json:"kernel_path"`
+	DiskPath           string   `json:"disk_path"`
+	SnapshotPath       string   `json:"snapshot_path,omitempty"`
+	MemFilePath        string   `json:"mem_file_path,omitempty"`
+	SSHKeyPath         string   `json:"ssh_key_path,omitempty"`
+	SSHKeyName         string   `json:"ssh_key_name,omitempty"`
+	SSHPublicKey       string   `json:"ssh_public_key,omitempty"`
+	SSHPasswordEnabled bool     `json:"ssh_password_enabled"`
+	PID                int      `json:"pid,omitempty"`
+	SocketPath         string   `json:"socket_path,omitempty"`
+	Protected          bool     `json:"protected"`
+	Description        string   `json:"description,omitempty"`
+	// Hostname is transient and response-only: the DNS-safe fully qualified
+	// sandbox name "<sandbox>.<username>.<base-domain>" populated by the API
+	// layer when DNS naming is configured. It is never persisted.
+	Hostname  string    `json:"hostname,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // CustomImage represents a user-created OS image with pre-installed packages
@@ -97,26 +139,35 @@ type Template struct {
 
 // NetworkAllocation represents an assigned network lease
 type NetworkAllocation struct {
-	VMID            string    `json:"vm_id"`
-	VMName          string    `json:"vm_name"`
-	OwnerID         string    `json:"-"`
-	Status          VMStatus  `json:"status"`
-	IPAddress       string    `json:"ip_address"`
-	PublicIP        string    `json:"public_ip,omitempty"`
-	PublicIPEnabled bool      `json:"public_ip_enabled"`
-	MACAddress      string    `json:"mac_address"`
-	TAPDevice       string    `json:"tap_device"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	VMID             string    `json:"vm_id"`
+	VMName           string    `json:"vm_name"`
+	OwnerID          string    `json:"-"`
+	Status           VMStatus  `json:"status"`
+	IPAddress        string    `json:"ip_address"`
+	PublicIP         string    `json:"public_ip,omitempty"`
+	PublicIPEnabled  bool      `json:"public_ip_enabled"`
+	NetworkIsolation string    `json:"network_isolation"`
+	MACAddress       string    `json:"mac_address"`
+	TAPDevice        string    `json:"tap_device"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // SSHKey represents a stored user public SSH key
 type SSHKey struct {
-	ID          string    `json:"id"`
-	OwnerID     string    `json:"owner_id"`
-	Name        string    `json:"name"`
-	PublicKey   string    `json:"public_key"`
-	Fingerprint string    `json:"fingerprint"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	OwnerID     string `json:"owner_id"`
+	Name        string `json:"name"`
+	PublicKey   string `json:"public_key"`
+	Fingerprint string `json:"fingerprint"`
+	// AllSandboxes marks the key as account-wide: it is embedded into every
+	// sandbox owned by the key's owner, including existing and future ones.
+	AllSandboxes bool `json:"all_sandboxes"`
+	// IsDefault marks the key that is embedded automatically into a new
+	// sandbox when its creation request does not choose a key. The creator
+	// can override the choice per sandbox. At most one key per owner carries
+	// the flag.
+	IsDefault bool      `json:"is_default"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // WorkerPool groups remote workers with shared placement policy.
@@ -291,18 +342,42 @@ type AgentProfile struct {
 
 // EnvironmentProfile represents reusable environment configurations
 type EnvironmentProfile struct {
-	Name               string    `json:"name"`
-	IsDefault          bool      `json:"is_default"`
-	SafeForThirdParty  bool      `json:"safe_for_third_parties"`
-	GitHubReposEnabled bool      `json:"github_repos_enabled"`
-	GitHubRepos        []string  `json:"github_repos"`
-	SecretsEnabled     bool      `json:"secrets_enabled"`
-	Secrets            string    `json:"secrets"`
-	BoatCredsEnabled   bool      `json:"boat_credentials_enabled"`
-	AgentCredsEnabled  bool      `json:"agent_credentials_enabled"`
-	CredentialProfile  string    `json:"credential_profile"`
-	Version            int       `json:"version"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	Name                string    `json:"name"`
+	IsDefault           bool      `json:"is_default"`
+	SafeForThirdParty   bool      `json:"safe_for_third_parties"`
+	GitHubReposEnabled  bool      `json:"github_repos_enabled"`
+	GitHubRepos         []string  `json:"github_repos"`
+	SecretsEnabled      bool      `json:"secrets_enabled"`
+	Secrets             string    `json:"secrets"`
+	ComputeCredsEnabled bool      `json:"compute_credentials_enabled"`
+	BoatCredsEnabled    bool      `json:"boat_credentials_enabled,omitempty"`
+	AgentCredsEnabled   bool      `json:"agent_credentials_enabled"`
+	CredentialProfile   string    `json:"credential_profile"`
+	Version             int       `json:"version"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// UnmarshalJSON accepts both compute_credentials_enabled and legacy boat_credentials_enabled.
+func (e *EnvironmentProfile) UnmarshalJSON(data []byte) error {
+	type Alias EnvironmentProfile
+	aux := struct {
+		*Alias
+		HasComputeCreds *bool `json:"compute_credentials_enabled"`
+		HasBoatCreds    *bool `json:"boat_credentials_enabled"`
+	}{
+		Alias: (*Alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.HasComputeCreds != nil {
+		e.ComputeCredsEnabled = *aux.HasComputeCreds
+		e.BoatCredsEnabled = *aux.HasComputeCreds
+	} else if aux.HasBoatCreds != nil {
+		e.ComputeCredsEnabled = *aux.HasBoatCreds
+		e.BoatCredsEnabled = *aux.HasBoatCreds
+	}
+	return nil
 }
 
 // PortForward represents a port forwarding mapping
