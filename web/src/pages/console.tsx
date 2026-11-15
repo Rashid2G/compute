@@ -82,7 +82,7 @@ export function ConsolePage({
               aria-label="Target sandbox"
               value={selectedVM?.id ?? ''}
               onChange={(e) => onSelectVM(e.target.value)}
-              className="h-8 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-8 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
             >
               {vms.map((vm) => (
                 <option key={vm.id} value={vm.id}>
@@ -97,7 +97,7 @@ export function ConsolePage({
               href={`#/terminal/${encodeURIComponent(selectedVM.id)}`}
               target="_blank"
               rel="noreferrer"
-              className="flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-[12px] text-foreground hover:border-[#263fa9]"
+              className="flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-[12px] text-foreground hover:border-primary"
             >
               <span>Popout</span>
               <ExternalLink className="h-3 w-3" />
@@ -107,7 +107,7 @@ export function ConsolePage({
           <button
             type="button"
             onClick={onNew}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-[12px] font-medium text-white"
+            className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
             <Play className="h-3 w-3 fill-current" />
             <span>New Sandbox</span>
@@ -125,7 +125,7 @@ export function ConsolePage({
           <button
             type="button"
             onClick={onNew}
-            className="inline-flex h-8 items-center gap-1.5 bg-[#263fa9] px-3.5 text-[12px] font-medium text-white"
+            className="inline-flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3.5 text-[12px] font-medium text-primary-foreground"
           >
             <Play className="h-3 w-3 fill-current" />
             <span>New Sandbox</span>
@@ -141,7 +141,7 @@ export function ConsolePage({
                 className={cn(
                   'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
                   mode === 'pty'
-                    ? 'border-[#263fa9] text-foreground font-medium'
+                    ? 'border-primary text-foreground font-medium'
                     : 'border-transparent text-muted-foreground hover:text-foreground',
                 )}
               >
@@ -153,7 +153,7 @@ export function ConsolePage({
                 className={cn(
                   'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
                   mode === 'exec'
-                    ? 'border-[#263fa9] text-foreground font-medium'
+                    ? 'border-primary text-foreground font-medium'
                     : 'border-transparent text-muted-foreground hover:text-foreground',
                 )}
               >
@@ -167,7 +167,7 @@ export function ConsolePage({
           </div>
 
           {mode === 'pty' ? (
-            <div className="h-[460px] border border-border bg-[#060606]">
+            <div className="h-[460px] border border-border bg-[#0a0a0b]">
               <SSHTerminal
                 vmId={selectedVM.id}
                 user="compute"
@@ -176,10 +176,10 @@ export function ConsolePage({
               />
             </div>
           ) : (
-            <div className="border border-border bg-[#060606] text-[#fefefe]">
+            <div className="border border-border bg-[#0a0a0b] text-[#f5f5f4]">
               <form
                 onSubmit={handleRunExec}
-                className="flex items-center border-b border-[#2e2e2e] bg-[#141414] px-3 py-2 gap-2 font-mono text-[12px]"
+                className="flex items-center border-b border-[#27272a] bg-[#131315] px-3 py-2 gap-2 font-mono text-[12px]"
               >
                 <span className="text-[color:var(--link)] shrink-0">
                   compute@{selectedVM.name}:~$
@@ -189,12 +189,12 @@ export function ConsolePage({
                   value={commandInput}
                   onChange={(e) => setCommandInput(e.target.value)}
                   placeholder="Enter command to execute via SSH…"
-                  className="flex-1 bg-transparent text-[#fefefe] focus:outline-none"
+                  className="flex-1 bg-transparent text-[#f5f5f4] focus:outline-none"
                 />
                 <button
                   type="submit"
                   disabled={running || selectedVM.status !== 'running'}
-                  className="bg-[#263fa9] hover:bg-[#1e3180] px-3 py-1 text-[11px] text-white disabled:opacity-50"
+                  className="bg-primary hover:bg-primary-hover px-3 py-1 text-[11px] text-primary-foreground disabled:opacity-50"
                 >
                   {running ? 'Running…' : 'Execute'}
                 </button>
@@ -211,16 +211,16 @@ export function ConsolePage({
                   execLog.map((entry, idx) => (
                     <div
                       key={idx}
-                      className="space-y-1 border-b border-[#2e2e2e] pb-2"
+                      className="space-y-1 border-b border-[#27272a] pb-2"
                     >
-                      <div className="flex items-center justify-between text-[#929fd3]">
+                      <div className="flex items-center justify-between text-[#fb923c]">
                         <span>$ {entry.cmd}</span>
                         <span className="text-[10.5px]">
                           exit={entry.exitCode} · {entry.durationMs}ms
                         </span>
                       </div>
                       {entry.stdout && (
-                        <pre className="whitespace-pre-wrap text-[#fefefe]">
+                        <pre className="whitespace-pre-wrap text-[#f5f5f4]">
                           {entry.stdout}
                         </pre>
                       )}

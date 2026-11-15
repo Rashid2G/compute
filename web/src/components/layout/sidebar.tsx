@@ -200,7 +200,7 @@ export function Sidebar({
               aria-label="Organization Context"
               value={selectedOrgId}
               onChange={(e) => setSelectedOrgId(e.target.value)}
-              className="h-8 w-full appearance-none border border-border bg-background px-2.5 pr-7 text-[12px] font-normal text-foreground focus:border-[#263fa9] focus:outline-none cursor-pointer"
+              className="h-8 w-full appearance-none border border-border bg-background px-2.5 pr-7 text-[12px] font-normal text-foreground focus:border-primary focus:outline-none cursor-pointer"
             >
               {ORG_CONTEXTS.map((org) => (
                 <option
@@ -349,7 +349,7 @@ export function Sidebar({
             className={cn(
               'flex items-center justify-center gap-1.5 text-[12px] transition-colors',
               theme === 'light'
-                ? 'bg-[#f1f3f9] text-[#263fa9] font-medium'
+                ? 'bg-selected text-selected-foreground font-medium'
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >
@@ -362,7 +362,7 @@ export function Sidebar({
             className={cn(
               'flex items-center justify-center gap-1.5 text-[12px] transition-colors border-l border-border',
               theme === 'dark'
-                ? 'bg-[#0f1634] text-[#fefefe] font-medium'
+                ? 'bg-selected text-selected-foreground font-medium'
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >

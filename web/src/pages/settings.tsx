@@ -115,8 +115,8 @@ export function SettingsPage({
               Dashboard Theme Polarity
             </h2>
             <p className="text-xs text-muted-foreground">
-              High-contrast pitch-black (#060606) or daylight crisp paper
-              (#fefefe) with Maritime Cobalt (#263fa9).
+              Obsidian dark (#0a0a0b) or crisp warm paper (#fafaf9) with Ember
+              Copper (#d94e1f / #c2410c).
             </p>
           </div>
 
@@ -127,11 +127,11 @@ export function SettingsPage({
               className={cn(
                 'text-xs font-medium transition-colors',
                 theme === 'light'
-                  ? 'bg-[#f1f3f9] text-[#263fa9]'
+                  ? 'bg-selected text-selected-foreground'
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              ☼ Light (#fefefe)
+              ☼ Light (#fafaf9)
             </button>
             <button
               type="button"
@@ -139,11 +139,11 @@ export function SettingsPage({
               className={cn(
                 'border-l border-border text-xs font-medium transition-colors',
                 theme === 'dark'
-                  ? 'bg-[#0f1634] text-white'
+                  ? 'bg-selected text-selected-foreground'
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              ☾ Dark (#060606)
+              ☾ Dark (#0a0a0b)
             </button>
           </div>
         </div>

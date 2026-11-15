@@ -137,7 +137,7 @@ export function ApiPage({ config }: ApiPageProps) {
           <button
             type="button"
             onClick={() => setAddOpen((v) => !v)}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+            className="flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>New Proxy Profile</span>
@@ -223,7 +223,7 @@ export function ApiPage({ config }: ApiPageProps) {
             </button>
             <button
               type="submit"
-              className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+              className="h-8 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
             >
               Save Proxy Profile
             </button>
@@ -338,7 +338,7 @@ export function ApiPage({ config }: ApiPageProps) {
               className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5"
             >
               <div className="flex items-center gap-3">
-                <span className="border border-[#263fa9] bg-[#0f1634] px-2 py-0.5 text-[10px] text-white">
+                <span className="border border-primary/50 bg-selected px-2 py-0.5 text-[10px] font-medium text-selected-foreground dark:text-[var(--accent-bright)]">
                   {ep.method}
                 </span>
                 <span className="text-foreground">{ep.path}</span>

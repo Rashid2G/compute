@@ -93,7 +93,7 @@ export function DashboardPage({
             <button
               type="button"
               onClick={onNew}
-              className="flex h-8 items-center gap-1.5 bg-[#263fa9] hover:bg-[#1e3180] px-3 text-[12px] font-medium text-white transition-colors"
+              className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground transition-colors"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>New</span>
@@ -102,7 +102,7 @@ export function DashboardPage({
               type="button"
               onClick={onNew}
               aria-label="Advanced create"
-              className="flex h-8 w-7 items-center justify-center border-l border-white/20 bg-[#263fa9] hover:bg-[#1e3180] text-white"
+              className="flex h-8 w-7 items-center justify-center border-l border-primary-foreground/20 bg-primary hover:bg-primary-hover text-primary-foreground"
             >
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
@@ -115,7 +115,7 @@ export function DashboardPage({
         <div className="p-4 space-y-2">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>Active Sandboxes</span>
-            <Server className="h-3.5 w-3.5 text-[#263fa9]" />
+            <Server className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
           </div>
           <div className="flex items-baseline justify-between">
             <span className="font-display text-2xl font-medium text-foreground tabular">
@@ -130,7 +130,7 @@ export function DashboardPage({
           </div>
           <div className="h-1.5 w-full bg-muted overflow-hidden">
             <div
-              className="h-full bg-[#263fa9]"
+              className="h-full bg-primary"
               style={{
                 width: `${totalVMs > 0 ? Math.min(100, (runningVMs / totalVMs) * 100) : 0}%`,
               }}
@@ -141,7 +141,7 @@ export function DashboardPage({
         <div className="p-4 space-y-2">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>Cluster vCPU Allocation</span>
-            <Cpu className="h-3.5 w-3.5 text-[#263fa9]" />
+            <Cpu className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
           </div>
           <div className="flex items-baseline justify-between">
             <span className="font-display text-2xl font-medium text-foreground tabular">
@@ -156,7 +156,7 @@ export function DashboardPage({
           </div>
           <div className="h-1.5 w-full bg-muted overflow-hidden">
             <div
-              className="h-full bg-[#263fa9]"
+              className="h-full bg-primary"
               style={{
                 width: `${Math.min(100, (usedVcpus / Math.max(1, maxVcpus)) * 100)}%`,
               }}
@@ -167,7 +167,7 @@ export function DashboardPage({
         <div className="p-4 space-y-2">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>Cluster Memory (KVM RSS)</span>
-            <Layers className="h-3.5 w-3.5 text-[#263fa9]" />
+            <Layers className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
           </div>
           <div className="flex items-baseline justify-between">
             <span className="font-display text-2xl font-medium text-foreground tabular">
@@ -182,7 +182,7 @@ export function DashboardPage({
           </div>
           <div className="h-1.5 w-full bg-muted overflow-hidden">
             <div
-              className="h-full bg-[#263fa9]"
+              className="h-full bg-primary"
               style={{
                 width: `${Math.min(100, (usedRamMb / Math.max(1, maxRamMb)) * 100)}%`,
               }}
@@ -193,7 +193,7 @@ export function DashboardPage({
         <div className="p-4 space-y-2">
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>Admission Queue &amp; Bridge</span>
-            <Zap className="h-3.5 w-3.5 text-[#263fa9]" />
+            <Zap className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
           </div>
           <div className="flex items-baseline justify-between">
             <span className="font-display text-2xl font-medium text-foreground tabular">
@@ -375,7 +375,7 @@ export function DashboardPage({
       <div className="border border-border bg-background">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
-            <Activity className="h-3.5 w-3.5 text-[#263fa9]" />
+            <Activity className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
             <h2 className="text-[13px] font-medium text-foreground">
               Recent Control-Plane Audit Events ({events.length})
             </h2>

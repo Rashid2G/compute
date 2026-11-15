@@ -156,7 +156,7 @@ export default function App() {
     window.localStorage.setItem('compute-theme', theme);
     document
       .querySelector('meta[name="theme-color"]')
-      ?.setAttribute('content', theme === 'dark' ? '#060606' : '#fefefe');
+      ?.setAttribute('content', theme === 'dark' ? '#0a0a0b' : '#fafaf9');
   }, [theme]);
 
   useEffect(() => {

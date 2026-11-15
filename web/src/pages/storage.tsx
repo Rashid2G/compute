@@ -234,7 +234,7 @@ export function StoragePage({
           <button
             type="button"
             onClick={() => setCreateOpen((v) => !v)}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+            className="flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>New Volume</span>
@@ -406,7 +406,7 @@ export function StoragePage({
             </button>
             <button
               type="submit"
-              className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+              className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
             >
               Create Volume
             </button>
@@ -418,7 +418,7 @@ export function StoragePage({
       {attachModalVol && (
         <form
           onSubmit={handleAttach}
-          className="flex flex-wrap items-center gap-3 border border-[#263fa9] bg-[#0f1634]/40 p-3.5"
+          className="flex flex-wrap items-center gap-3 border border-primary bg-selected/60 p-3.5"
         >
           <span className="text-[12px] text-foreground">
             Attach <strong>{attachModalVol.name}</strong> to sandbox:
@@ -440,7 +440,7 @@ export function StoragePage({
           </select>
           <button
             type="submit"
-            className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+            className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
             Confirm Attach
           </button>
@@ -463,7 +463,7 @@ export function StoragePage({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Filter by volume name, ID, VM…"
-            className="h-8 w-full border border-border bg-background pl-8 pr-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            className="h-8 w-full border border-border bg-background pl-8 pr-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
         </div>
 
@@ -590,7 +590,7 @@ export function StoragePage({
                           type="button"
                           onClick={() => void handleDetach(vol)}
                           title="Detach Volume"
-                          className="inline-flex items-center gap-1 border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-[#263fa9]"
+                          className="inline-flex items-center gap-1 border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-primary"
                         >
                           <Unlink className="h-3 w-3" />
                           <span>Detach</span>
@@ -603,7 +603,7 @@ export function StoragePage({
                             setSelectedVMForAttach(vms[0]?.name || '');
                           }}
                           title="Attach to Sandbox"
-                          className="inline-flex items-center gap-1 border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-[#263fa9]"
+                          className="inline-flex items-center gap-1 border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-primary"
                         >
                           <Link2 className="h-3 w-3" />
                           <span>Attach</span>

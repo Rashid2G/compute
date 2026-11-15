@@ -223,7 +223,7 @@ export function CreateVMDialog({
               value={sandboxName}
               onChange={(e) => setSandboxName(e.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').slice(0, 63))}
               placeholder="sbx-prod-api-01"
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
             />
           </div>
 
@@ -241,7 +241,7 @@ export function CreateVMDialog({
                     className={cn(
                       'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                       count === qty
-                        ? 'border-[#263fa9] bg-[#0f1634] text-white'
+                        ? 'border-primary bg-selected text-selected-foreground font-medium'
                         : 'border-border text-muted-foreground hover:text-foreground',
                     )}
                   >
@@ -257,7 +257,7 @@ export function CreateVMDialog({
               max={20}
               value={count}
               onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
             />
           </div>
 
@@ -283,7 +283,7 @@ export function CreateVMDialog({
                     className={cn(
                       'flex flex-col items-center justify-center border py-2.5 px-1.5 text-center transition-colors',
                       selected
-                        ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                        ? 'border-primary bg-selected text-selected-foreground'
                         : 'border-border bg-background text-foreground hover:border-foreground/40',
                     )}
                   >
@@ -311,7 +311,7 @@ export function CreateVMDialog({
                 step={128}
                 value={memoryMb}
                 onChange={(e) => setMemoryMb(Math.max(128, Number(e.target.value) || 128))}
-                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>
             <div className="space-y-1.5">
@@ -328,7 +328,7 @@ export function CreateVMDialog({
                       className={cn(
                         'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                         diskGb === preset
-                          ? 'border-[#263fa9] bg-[#0f1634] text-white'
+                          ? 'border-primary bg-selected text-selected-foreground font-medium'
                           : 'border-border text-muted-foreground hover:text-foreground',
                       )}
                     >
@@ -345,7 +345,7 @@ export function CreateVMDialog({
                   max={2048}
                   value={diskGb}
                   onChange={(e) => setDiskGb(Math.max(1, Number(e.target.value) || 1))}
-                  className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                  className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
                 />
                 <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">
                   GB
@@ -363,7 +363,7 @@ export function CreateVMDialog({
                 aria-label="Sandbox source"
                 value={fromSource}
                 onChange={(e) => setFromSource(e.target.value)}
-                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-primary focus:outline-none"
               >
                 <option value="fresh">Fresh sandbox (ubuntu-24)</option>
                 {availableImages
@@ -399,7 +399,7 @@ export function CreateVMDialog({
                 aria-label="SSH key"
                 value={sshKeyId}
                 onChange={(e) => setSshKeyId(e.target.value)}
-                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-primary focus:outline-none"
               >
                 <option value="">
                   {defaultKey
@@ -436,7 +436,7 @@ export function CreateVMDialog({
               value={sshPassword}
               onChange={(e) => setSshPassword(e.target.value)}
               placeholder="Leave blank for public-key-only access"
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
             />
             <p className="text-[10.5px] text-muted-foreground">
               Minimum 8 characters. Applied to the compute and root accounts. If
@@ -454,7 +454,7 @@ export function CreateVMDialog({
               value={setupScript}
               onChange={(e) => setSetupScript(e.target.value)}
               placeholder="#!/bin/bash&#10;apt-get update && apt-get install -y nginx"
-              className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
             />
           </div>
 
@@ -469,7 +469,7 @@ export function CreateVMDialog({
                 className={cn(
                   'flex flex-col items-start border px-3 py-2 text-left transition-colors',
                   networkIsolation === 'account'
-                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    ? 'border-primary bg-selected text-selected-foreground'
                     : 'border-border bg-background text-foreground hover:border-foreground/40',
                 )}
               >
@@ -486,7 +486,7 @@ export function CreateVMDialog({
                 className={cn(
                   'flex flex-col items-start border px-3 py-2 text-left transition-colors',
                   networkIsolation === 'isolated'
-                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
+                    ? 'border-primary bg-selected text-selected-foreground'
                     : 'border-border bg-background text-foreground hover:border-foreground/40',
                 )}
               >
@@ -506,13 +506,13 @@ export function CreateVMDialog({
               type="checkbox"
               checked={protectedVM}
               onChange={(e) => setProtectedVM(e.target.checked)}
-              className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
+              className="h-3.5 w-3.5 accent-primary cursor-pointer"
             />
             <label
               htmlFor="enable-protection"
               className="text-[12px] text-foreground cursor-pointer select-none flex items-center gap-1.5"
             >
-              <Shield className="h-3.5 w-3.5 text-[#5e7ff5]" />
+              <Shield className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
               <span>Enable deletion protection</span>
             </label>
           </div>
@@ -536,7 +536,7 @@ export function CreateVMDialog({
           <div className="flex justify-end pt-2">
             <button
               type="submit"
-              className="flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
+              className="flex h-9 items-center gap-2 bg-primary hover:bg-primary-hover px-4 text-[13px] font-medium text-primary-foreground transition-colors disabled:opacity-50"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>
