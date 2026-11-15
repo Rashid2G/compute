@@ -13,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/doctor"
-	"github.com/Rashid2G/on-demand-vms/internal/gui"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/version"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/doctor"
+	"github.com/Rashid2G/compute/internal/gui"
+	"github.com/Rashid2G/compute/internal/network"
+	"github.com/Rashid2G/compute/internal/storage"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/version"
 )
 
 func main() {

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 // Quota defines platform resource limits.

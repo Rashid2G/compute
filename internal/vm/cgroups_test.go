@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/compute/internal/db"
 )
 
 func TestFormatCPUMax(t *testing.T) {

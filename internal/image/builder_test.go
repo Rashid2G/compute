@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/storage"
 )
 
 func TestBuilder_BuildImage(t *testing.T) {

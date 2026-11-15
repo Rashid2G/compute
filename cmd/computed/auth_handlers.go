@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth/quota"
-	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/master/auth/quota"
+	storeDB "github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 type SignupRequest struct {

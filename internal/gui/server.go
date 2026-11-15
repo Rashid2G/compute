@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/pkg/version"
+	"github.com/Rashid2G/compute/pkg/version"
 )
 
 //go:embed assets

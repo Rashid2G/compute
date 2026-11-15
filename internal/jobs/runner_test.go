@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 func TestBuildJobCommand(t *testing.T) {
