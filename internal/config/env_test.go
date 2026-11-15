@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/network"
+	"github.com/Rashid2G/compute/internal/network"
 )
 
 func clearEnv(t *testing.T) {

@@ -244,7 +244,7 @@ export function SSHKeysDialog({
                           </span>
                         )}
                         {k.is_default && (
-                          <span className="rounded bg-[#263fa9]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#263fa9] dark:text-[#8ea4ff]">
+                          <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary dark:text-[var(--accent-bright)]">
                             default
                           </span>
                         )}

@@ -39,7 +39,8 @@ export function CreateSnapshotDialog({
     setSnapName(`${prefix}-snap-${shortTimestamp()}`);
     setNameTouched(false);
     setDescription('');
-  }, [open, vm, vms]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, vm?.id]);
 
   if (!open) return null;
 
@@ -87,7 +88,7 @@ export function CreateSnapshotDialog({
       >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <Camera className="h-4 w-4 text-[#5e7ff5]" />
+            <Camera className="h-4 w-4 text-primary dark:text-[var(--accent-bright)]" />
             <h2
               id="create-snapshot-title"
               className="text-[15px] font-medium text-foreground"
@@ -130,7 +131,7 @@ export function CreateSnapshotDialog({
                   }
                 }}
                 required
-                className="h-9 w-full border border-border bg-background px-2.5 text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                className="h-9 w-full border border-border bg-background px-2.5 text-[12px] text-foreground focus:border-primary focus:outline-none"
               >
                 <option value="">Select a sandbox…</option>
                 {vms.map((item) => (
@@ -161,7 +162,7 @@ export function CreateSnapshotDialog({
                   : 'ubuntu-24.04-warm-snap'
               }
               required
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
             />
             {nameTouched && nameEmpty && (
               <p role="alert" className="text-[11px] text-destructive">
@@ -180,7 +181,7 @@ export function CreateSnapshotDialog({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Pre-seeded runtime checkpoint"
-              className="h-9 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
             />
           </div>
 
@@ -195,7 +196,7 @@ export function CreateSnapshotDialog({
             <button
               type="submit"
               disabled={submitDisabled}
-              className="inline-flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[12.5px] font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex h-9 items-center gap-2 bg-primary hover:bg-primary-hover px-4 text-[12.5px] font-medium text-primary-foreground transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Camera className="h-3.5 w-3.5" />
               <span>Create Snapshot</span>

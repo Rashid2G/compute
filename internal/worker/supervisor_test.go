@@ -7,11 +7,12 @@ import (
 	"context"
 	"encoding/base64"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/worker"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/worker"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 func TestLocalSandboxSupervisor_Execution(t *testing.T) {
@@ -19,9 +20,12 @@ func TestLocalSandboxSupervisor_Execution(t *testing.T) {
 	supervisor := worker.NewLocalSandboxSupervisor(tmpDir)
 
 	ctx := context.Background()
+	var mu sync.Mutex
 	var logs []string
 	streamLog := func(stream, data string) {
+		mu.Lock()
 		logs = append(logs, stream+":"+data)
+		mu.Unlock()
 	}
 
 	assignment := api.WorkerAssignment{

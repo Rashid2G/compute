@@ -1,20 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowRight,
-  Cpu,
   Database,
-  HardDrive,
   KeyRound,
-  LayoutDashboard,
-  Network,
   Play,
-  Plus,
-  Radio,
   RefreshCw,
   Search,
   Server,
-  Settings,
-  Terminal,
   X,
   Zap,
 } from 'lucide-react';
@@ -32,6 +23,7 @@ interface CommandPaletteProps {
   onRefresh: () => void;
   vms: VM[];
   onSelectVM?: (vm: VM) => void;
+  isAdmin?: boolean;
 }
 
 export function CommandPalette({
@@ -43,6 +35,7 @@ export function CommandPalette({
   onRefresh,
   vms,
   onSelectVM,
+  isAdmin = true,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
@@ -83,7 +76,7 @@ export function CommandPalette({
       {
         id: 'act-env',
         group: 'Quick Actions',
-        label: 'Configure Base Environment, Secrets & Snapshots',
+        label: 'Manage Snapshots & Sandbox Templates',
         shortcut: 'E',
         icon: Database,
         run: () => {
@@ -113,7 +106,7 @@ export function CommandPalette({
           onRefresh();
         },
       },
-      ...PAGES.map((p) => ({
+      ...PAGES.filter((p) => !p.adminOnly || isAdmin).map((p) => ({
         id: `nav-${p.id}`,
         group: 'Navigation',
         label: `Go to ${p.label} — ${p.description}`,
@@ -137,7 +130,7 @@ export function CommandPalette({
         },
       })),
     ],
-    [onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onRefresh, onSelectVM, vms],
+    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onRefresh, onSelectVM, vms],
   );
 
   const filtered = useMemo(() => {

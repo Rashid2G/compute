@@ -1,10 +1,10 @@
-.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build up down clean preflight host-prepare setup-host build-images validate-compose benchmark install systemd
+.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build up down clean preflight host-prepare setup-host build-images validate-compose benchmark install systemd release-tarballs
 
 VERSION ?= 1.0.0
 RELEASE_NAME ?= Compute
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-PKG_VERSION = github.com/Rashid2G/on-demand-vms/pkg/version
+PKG_VERSION = github.com/Rashid2G/compute/pkg/version
 LDFLAGS = -ldflags "-X '$(PKG_VERSION).Version=$(VERSION)' -X '$(PKG_VERSION).ReleaseName=$(RELEASE_NAME)' -X '$(PKG_VERSION).GitCommit=$(GIT_COMMIT)' -X '$(PKG_VERSION).BuildDate=$(BUILD_DATE)'"
 IMAGES_DIR ?= ./data/images
 
@@ -18,6 +18,7 @@ help: ## Show available Make targets
 all: build ## Build Go binaries
 
 build: ## Build compute, computed, compute-worker, and compute-bench binaries
+	@command -v go >/dev/null 2>&1 || { echo "Error: 'go' is not installed or not in PATH (Go 1.26+ required)" >&2; exit 127; }
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/compute ./cmd/compute
 	go build $(LDFLAGS) -o bin/computed ./cmd/computed
@@ -61,7 +62,7 @@ down: ## Stop Compute Docker Compose stack
 	docker compose --profile gui --profile worker down
 
 clean: ## Remove build artifacts and temporary coverage/benchmark outputs
-	rm -rf bin/ coverage.out benchmark-results.json
+	rm -rf bin/ dist/ coverage.out benchmark-results.json
 
 preflight: ## Run read-only host readiness checks for KVM, Docker, and cgroups
 	./scripts/preflight.sh
@@ -78,7 +79,7 @@ build-images: ## Install the Firecracker kernel and build the rootfs into IMAGES
 		COMPUTE_KERNEL_URL="$(COMPUTE_KERNEL_URL)" \
 		COMPUTE_KERNEL_SHA256="$(COMPUTE_KERNEL_SHA256)" \
 		./scripts/build-kernel.sh $(IMAGES_DIR)
-	sudo ./scripts/build-rootfs.sh $(IMAGES_DIR) 1024
+	sudo ./scripts/build-rootfs.sh $(IMAGES_DIR) 2048
 
 validate-compose: ## Validate docker-compose.yml and .env.example contract
 	./scripts/validate-compose.sh
@@ -97,3 +98,21 @@ systemd: ## Install systemd unit files to /etc/systemd/system
 	sudo install -m 644 config/systemd/computed.service /etc/systemd/system/computed.service
 	sudo install -m 644 config/systemd/user/compute-worker.service /etc/systemd/system/compute-worker.service
 	-sudo systemctl daemon-reload
+
+release-tarballs: ## Build cross-platform release tarballs and SHA-256 checksums in dist/
+	mkdir -p dist
+	@for arch in amd64 arm64; do \
+		echo "Building linux/$${arch}..."; \
+		mkdir -p dist/linux-$${arch}; \
+		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/compute ./cmd/compute; \
+		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/computed ./cmd/computed; \
+		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/compute-worker ./cmd/compute-worker; \
+		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/compute-bench ./cmd/compute-bench; \
+		tar -czf dist/compute_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute; \
+		tar -czf dist/computed_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} computed; \
+		tar -czf dist/compute-worker_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute-worker; \
+		tar -czf dist/compute-bench_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute-bench; \
+		tar -czf dist/compute-suite_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute computed compute-worker compute-bench; \
+	done
+	cd dist && sha256sum *.tar.gz > checksums.txt
+

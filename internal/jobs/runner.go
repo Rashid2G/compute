@@ -15,14 +15,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 // DefaultWorkspace is where job commands run inside the sandbox when the job
 // does not specify a working directory.
-const DefaultWorkspace = "/workspace"
+const (
+	DefaultWorkspace = "/workspace"
+	DefaultImageID   = "ubuntu-24"
+)
 
 // Runner executes jobs inside local microVMs. It implements
 // scheduler.LocalExecutor.
@@ -122,6 +125,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		}
 	}()
 
+	spec.ImageID = normalizeRunnerImageID(spec.ImageID)
 	logs.append("stdout", fmt.Sprintf("[compute] creating sandbox from image %q", spec.ImageID))
 	ownerID := job.OwnerID
 	if ownerID == "" {
@@ -144,17 +148,22 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		return
 	}
 	vmID = created.ID
+	job.VMID = created.ID
+	if job.WorkerID == "" {
+		job.WorkerID = "local"
+	}
+	_ = r.store.UpdateJobExecution(ctx, job.ID, vmID, job.WorkerID)
 
 	if err := r.mgr.RunVM(ctx, created.ID); err != nil {
 		failure := "failed to start sandbox: " + err.Error()
 		logs.append("stderr", "[compute] "+failure)
-		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID})
+		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
 		return
 	}
 
 	if err := r.waitReady(ctx, created.ID); err != nil {
 		logs.append("stderr", "[compute] "+err.Error())
-		r.finish(job.ID, "failed", map[string]interface{}{"error": err.Error(), "sandbox_id": vmID})
+		r.finish(job.ID, "failed", map[string]interface{}{"error": err.Error(), "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
 		return
 	}
 	logs.append("stdout", "[compute] sandbox ready, running command")
@@ -172,7 +181,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 			failure += ": " + strings.TrimSpace(res.Stderr)
 		}
 		logs.append("stderr", "[compute] "+failure)
-		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID})
+		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
 		return
 	}
 
@@ -181,7 +190,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		if err != nil {
 			failure := "invalid file archive: " + err.Error()
 			logs.append("stderr", "[compute] "+failure)
-			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID})
+			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
 			return
 		}
 		cmd := fmt.Sprintf("tar -xzf - -C %s", shellQuote(cwd))
@@ -194,12 +203,36 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 				failure += ": " + strings.TrimSpace(res.Stderr)
 			}
 			logs.append("stderr", "[compute] "+failure)
-			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID})
+			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
 			return
 		}
 	}
 
-	command := buildJobCommand(cwd, spec)
+	// Copy spec env so we can inject the stored GitHub token at execution time
+	// without ever persisting raw tokens inside jobs.spec_json.
+	execSpec := spec
+	execSpec.Env = make(map[string]string, len(spec.Env)+1)
+	for k, v := range spec.Env {
+		execSpec.Env[k] = v
+	}
+	if job.RepoID != "" && execSpec.Env["GITHUB_TOKEN"] == "" {
+		if conn, err := r.store.GetGitHubConnection(ctx, job.RepoID); err == nil && conn != nil && conn.GitHubToken != "" {
+			authorized := spec.AllowCrossOwner || conn.OwnerID == job.OwnerID || (conn.OwnerID == "default" && job.OwnerID == "default")
+			if !authorized {
+				for _, oid := range spec.AuthorizedOwnerIDs {
+					if oid != "" && oid == conn.OwnerID {
+						authorized = true
+						break
+					}
+				}
+			}
+			if authorized {
+				execSpec.Env["GITHUB_TOKEN"] = conn.GitHubToken
+			}
+		}
+	}
+
+	command := buildJobCommand(cwd, execSpec)
 	pending := map[string]string{}
 	flush := func(stream string) {
 		if rest := pending[stream]; rest != "" {
@@ -240,7 +273,24 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		"exit_code":   exitCode,
 		"duration_ms": time.Since(started).Milliseconds(),
 		"sandbox_id":  vmID,
+		"vm_id":       vmID,
+		"worker_id":   job.WorkerID,
 		"image":       spec.ImageID,
+	}
+	if job.Source != "" {
+		result["source"] = job.Source
+	}
+	if job.RepoURL != "" {
+		result["repo_url"] = job.RepoURL
+	}
+	if job.RepoName != "" {
+		result["repo_name"] = job.RepoName
+	}
+	if job.Branch != "" {
+		result["branch"] = job.Branch
+	}
+	if job.CommitSHA != "" {
+		result["commit_sha"] = job.CommitSHA
 	}
 	state := "succeeded"
 	if err != nil {
@@ -304,10 +354,72 @@ func (l *jobLogger) append(stream, data string) {
 func buildJobCommand(cwd string, spec api.JobSpec) string {
 	parts := make([]string, 0, len(spec.Env)+1)
 	for k, v := range spec.Env {
+		if !isValidEnvKey(k) {
+			continue
+		}
 		parts = append(parts, fmt.Sprintf("export %s=%s;", k, shellQuote(v)))
 	}
-	parts = append(parts, fmt.Sprintf("cd %s && %s", shellQuote(cwd), strings.Join(spec.Command, " ")))
+	parts = append(parts, fmt.Sprintf("cd %s && %s", shellQuote(cwd), shellJoinCommand(spec.Command)))
 	return strings.Join(parts, " ")
+}
+
+func isValidEnvKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i, r := range k {
+		if i == 0 {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
+				return false
+			}
+			continue
+		}
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeRunnerImageID(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "default", "ubuntu", "ubuntu-24", "ubuntu-24.04", "ubuntu-2404", "img-base-ubuntu-24":
+		return DefaultImageID
+	default:
+		return strings.TrimSpace(raw)
+	}
+}
+
+func shellJoinCommand(cmd []string) string {
+	if len(cmd) == 0 {
+		return "true"
+	}
+	if len(cmd) == 1 {
+		return cmd[0]
+	}
+	quoted := make([]string, 0, len(cmd))
+	for _, arg := range cmd {
+		if isSafeShellWord(arg) {
+			quoted = append(quoted, arg)
+		} else {
+			quoted = append(quoted, shellQuote(arg))
+		}
+	}
+	return strings.Join(quoted, " ")
+}
+
+func isSafeShellWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == '=' || r == '+' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func jobSandboxName(jobID string) string {

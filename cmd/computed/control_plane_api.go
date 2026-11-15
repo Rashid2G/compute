@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/master/auth"
 	"github.com/google/uuid"
 )
 
@@ -151,10 +151,14 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if vols == nil {
-			vols = []*db.Volume{}
+		filteredVols := make([]*db.Volume, 0, len(vols))
+		for _, vol := range vols {
+			if vol == nil || vol.OwnerID == "jobs" || strings.HasPrefix(vol.Name, "job-") || strings.HasPrefix(vol.AttachedVM, "job-") {
+				continue
+			}
+			filteredVols = append(filteredVols, vol)
 		}
-		json.NewEncoder(w).Encode(vols)
+		json.NewEncoder(w).Encode(filteredVols)
 
 	case http.MethodPost:
 		var req struct {
@@ -173,8 +177,12 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if req.Name == "" {
+		if strings.TrimSpace(req.Name) == "" {
 			httpError(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
+			httpError(w, "name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
 		if req.SizeGB <= 0 {
@@ -1022,167 +1030,6 @@ func (s *Server) handleAccessAPIKeyActions(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// ===== Agent Profiles API =====
-
-func (s *Server) handleAgentProfiles(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminAccess(w, r) {
-		return
-	}
-	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
-		httpError(w, "store not available", http.StatusInternalServerError)
-		return
-	}
-	ctx := r.Context()
-	st := s.vmMgr.GetStore()
-
-	switch r.Method {
-	case http.MethodGet:
-		profs, err := st.ListAgentProfiles(ctx)
-		if err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if profs == nil {
-			profs = []*db.AgentProfile{}
-		}
-		json.NewEncoder(w).Encode(profs)
-
-	case http.MethodPost:
-		var req struct {
-			Name         string `json:"name"`
-			Provider     string `json:"provider"`
-			UpstreamURL  string `json:"upstream_url"`
-			InjectHeader string `json:"inject_header"`
-			SecretRef    string `json:"secret_ref"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if req.Name == "" {
-			httpError(w, "name is required", http.StatusBadRequest)
-			return
-		}
-		if req.Provider == "" {
-			req.Provider = "Anthropic"
-		}
-		if req.UpstreamURL == "" {
-			req.UpstreamURL = "https://api.anthropic.com/v1"
-		}
-
-		prof := &db.AgentProfile{
-			ID:              "prof_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
-			Name:            req.Name,
-			Provider:        req.Provider,
-			UpstreamURL:     req.UpstreamURL,
-			InjectHeader:    req.InjectHeader,
-			SecretRef:       req.SecretRef,
-			SandboxesLinked: 0,
-			Status:          "active",
-			CreatedAt:       time.Now().UTC(),
-			UpdatedAt:       time.Now().UTC(),
-		}
-		if err := st.SaveAgentProfile(ctx, prof); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		s.recordEvent("agent_profile.created", getActor(r), prof.Name, "delivered", 20, prof)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(prof)
-
-	default:
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *Server) handleAgentProfileActions(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminAccess(w, r) {
-		return
-	}
-	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
-		httpError(w, "store not available", http.StatusInternalServerError)
-		return
-	}
-	ctx := r.Context()
-	st := s.vmMgr.GetStore()
-
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/agent-profiles/")
-	id = strings.TrimSpace(id)
-	if id == "" {
-		httpError(w, "profile id required", http.StatusBadRequest)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		prof, err := st.GetAgentProfile(ctx, id)
-		if err != nil || prof == nil {
-			httpError(w, "profile not found", http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode(prof)
-
-	case http.MethodPatch, http.MethodPut:
-		prof, err := st.GetAgentProfile(ctx, id)
-		if err != nil || prof == nil {
-			httpError(w, "profile not found", http.StatusNotFound)
-			return
-		}
-		var update struct {
-			Name            *string `json:"name"`
-			Provider        *string `json:"provider"`
-			UpstreamURL     *string `json:"upstream_url"`
-			InjectHeader    *string `json:"inject_header"`
-			SecretRef       *string `json:"secret_ref"`
-			SandboxesLinked *int    `json:"sandboxes_linked"`
-			Status          *string `json:"status"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if update.Name != nil {
-			prof.Name = *update.Name
-		}
-		if update.Provider != nil {
-			prof.Provider = *update.Provider
-		}
-		if update.UpstreamURL != nil {
-			prof.UpstreamURL = *update.UpstreamURL
-		}
-		if update.InjectHeader != nil {
-			prof.InjectHeader = *update.InjectHeader
-		}
-		if update.SecretRef != nil {
-			prof.SecretRef = *update.SecretRef
-		}
-		if update.SandboxesLinked != nil {
-			prof.SandboxesLinked = *update.SandboxesLinked
-		}
-		if update.Status != nil {
-			prof.Status = *update.Status
-		}
-		if err := st.SaveAgentProfile(ctx, prof); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.recordEvent("agent_profile.updated", getActor(r), prof.ID, "delivered", 15, prof)
-		json.NewEncoder(w).Encode(prof)
-
-	case http.MethodDelete:
-		if err := st.DeleteAgentProfile(ctx, id); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.recordEvent("agent_profile.deleted", getActor(r), id, "delivered", 15, nil)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-
-	default:
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
 // ===== Environments API =====
 
 func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
@@ -1205,18 +1052,18 @@ func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(envs) == 0 {
 			base := &db.EnvironmentProfile{
-				Name:               "base",
-				IsDefault:          true,
-				Version:            1,
+				Name:                "base",
+				IsDefault:           true,
+				Version:             1,
 				SecretsEnabled:      true,
 				ComputeCredsEnabled: true,
 				BoatCredsEnabled:    true,
 				AgentCredsEnabled:   true,
-				CredentialProfile:  "Owner's default",
-				GitHubReposEnabled: true,
-				GitHubRepos:        []string{},
-				Secrets:            "",
-				UpdatedAt:          time.Now().UTC(),
+				CredentialProfile:   "Owner's default",
+				GitHubReposEnabled:  true,
+				GitHubRepos:         []string{},
+				Secrets:             "",
+				UpdatedAt:           time.Now().UTC(),
 			}
 			_ = st.SaveEnvironment(ctx, base)
 			envs = []*db.EnvironmentProfile{base}

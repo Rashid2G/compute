@@ -36,22 +36,56 @@ cat << 'DOCKERFILE' > "${BUILD_DIR}/Dockerfile"
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server \
-    sudo \
+    iputils-ping \
+    bind9-dnsutils \
+    netcat-openbsd \
+    traceroute \
+    iproute2 \
+    net-tools \
     curl \
     wget \
-    git \
+    less \
+    nano \
+    vim-tiny \
+    htop \
+    lsof \
+    psmisc \
+    file \
+    unzip \
+    zip \
+    tar \
+    gzip \
+    xz-utils \
+    rsync \
+    openssh-server \
+    openssh-client \
     jq \
-    iproute2 \
-    procps \
+    git \
     ca-certificates \
+    sudo \
+    procps \
+    util-linux \
+    bash \
+    coreutils \
+    findutils \
+    grep \
+    sed \
+    gawk \
+    hostname \
+    locales \
+    libcap2-bin \
     python3 \
     nodejs \
     npm \
-    util-linux \
-    net-tools \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# Ensure ping works for non-root users inside Firecracker microVMs
+RUN chmod u+s /bin/ping /usr/bin/ping 2>/dev/null || true && \
+    (setcap cap_net_raw+ep /bin/ping 2>/dev/null || setcap cap_net_raw+ep /usr/bin/ping 2>/dev/null || true) && \
+    mkdir -p /etc/sysctl.d && \
+    echo "net.ipv4.ping_group_range = 0 2147483647" > /etc/sysctl.d/99-compute.conf && \
+    if [ -f /etc/sysctl.conf ]; then grep -q "^net.ipv4.ping_group_range" /etc/sysctl.conf || echo "net.ipv4.ping_group_range = 0 2147483647" >> /etc/sysctl.conf; fi
 
 # Compile instant poweroff / reboot binaries
 RUN echo '#include <unistd.h>\n#include <sys/reboot.h>\nint main(){ sync(); reboot(RB_POWER_OFF); return 0; }' > /tmp/poweroff.c && \
@@ -154,6 +188,9 @@ mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /run/sshd /run/lock
 chmod 0755 /run/sshd
 mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
+
+# Allow non-root users (including compute) to send ICMP echo requests
+sysctl -w net.ipv4.ping_group_range="0 2147483647" >/dev/null 2>&1 || echo "0 2147483647" > /proc/sys/net/ipv4/ping_group_range 2>/dev/null || true
 
 ip link set lo up 2>/dev/null || true
 

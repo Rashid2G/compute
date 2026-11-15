@@ -19,10 +19,11 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute
 # Final minimal runtime image with Firecracker & network tooling
 FROM alpine:3.20
 
-# e2fsprogs-extra provides debugfs, and mount/losetup provide the loop mount
-# fallback; both are used to configure SSH keys, passwords, and sshd policy
+# e2fsprogs provides mkfs.ext4/e2fsck/resize2fs, e2fsprogs-extra provides
+# debugfs, and mount/losetup provide the loop mount fallback; together they
+# bootstrap the Ubuntu rootfs and configure SSH keys, passwords, and sshd policy
 # inside guest disk images.
-RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables openssh-client bash socat tar gzip e2fsprogs-extra mount losetup
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables openssh-client bash socat tar gzip e2fsprogs e2fsprogs-extra mount losetup
 
 # Install Firecracker & Jailer static binaries
 ARG FIRECRACKER_VERSION=v1.17.0
@@ -44,12 +45,14 @@ RUN set -eux; \
 WORKDIR /var/lib/compute
 
 # Pre-create data and image directories
-RUN mkdir -p /var/lib/compute/data /var/lib/compute/images/ssh /var/lib/compute/vms /etc/compute
+RUN mkdir -p /var/lib/compute/data /var/lib/compute/images/ssh /var/lib/compute/vms /etc/compute /usr/local/share/compute
 
 COPY --from=builder /bin/computed /usr/local/bin/computed
 COPY --from=builder /bin/compute /usr/local/bin/compute
 COPY --from=builder /bin/compute-worker /usr/local/bin/compute-worker
 COPY config/daemon.json /etc/compute/daemon.json
+COPY scripts/build-rootfs-chroot.sh /usr/local/share/compute/build-rootfs-chroot.sh
+RUN chmod +x /usr/local/share/compute/build-rootfs-chroot.sh
 
 # Expose Central REST API (18080) and Web GUI (8080)
 EXPOSE 18080 8080

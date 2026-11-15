@@ -5,10 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/storage"
 )
 
 func TestBuilder_BuildImage(t *testing.T) {
@@ -107,5 +108,61 @@ func TestBuilder_BuildImage(t *testing.T) {
 	}
 	if failedImg.ErrorMessage == "" {
 		t.Fatalf("expected error message in failed image")
+	}
+}
+
+func TestRootfsPackagesAndPingConfig(t *testing.T) {
+	requiredPkgs := []string{
+		"iputils-ping", "bind9-dnsutils", "netcat-openbsd", "traceroute", "iproute2",
+		"net-tools", "curl", "wget", "less", "nano", "vim-tiny", "htop", "lsof",
+		"psmisc", "file", "unzip", "zip", "tar", "gzip", "xz-utils", "rsync",
+		"openssh-server", "openssh-client", "jq", "git", "ca-certificates", "sudo",
+		"procps", "util-linux", "bash", "coreutils", "findutils", "grep", "sed",
+		"gawk", "hostname", "locales", "libcap2-bin",
+	}
+
+	dockerfile := buildDockerfile(BuildRequest{Name: "test-img", Packages: []string{"redis-server"}})
+	for _, pkg := range requiredPkgs {
+		if !strings.Contains(dockerfile, pkg) {
+			t.Fatalf("builder Dockerfile missing required package %q", pkg)
+		}
+	}
+	if !strings.Contains(dockerfile, "redis-server") {
+		t.Fatal("builder Dockerfile missing custom package redis-server")
+	}
+	if !strings.Contains(dockerfile, "chmod u+s /bin/ping") || !strings.Contains(dockerfile, "cap_net_raw+ep") {
+		t.Fatal("builder Dockerfile missing SUID/capability configuration for ping")
+	}
+	if !strings.Contains(dockerfile, "net.ipv4.ping_group_range = 0 2147483647") {
+		t.Fatal("builder Dockerfile missing sysctl ping_group_range configuration")
+	}
+
+	initScript := defaultInitScript()
+	if !strings.Contains(initScript, "ping_group_range") || !strings.Contains(initScript, "0 2147483647") {
+		t.Fatal("builder /sbin/init missing ping_group_range configuration")
+	}
+
+	repoRoot := filepath.Join("..", "..")
+	for _, rel := range []string{
+		"scripts/build-rootfs-chroot.sh",
+		"scripts/build-rootfs.sh",
+		"scripts/build-base-image.sh",
+	} {
+		contentBytes, err := os.ReadFile(filepath.Join(repoRoot, rel))
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", rel, err)
+		}
+		content := string(contentBytes)
+		for _, pkg := range requiredPkgs {
+			if !strings.Contains(content, pkg) {
+				t.Fatalf("%s missing required package %q", rel, pkg)
+			}
+		}
+		if !strings.Contains(content, "ping_group_range") {
+			t.Fatalf("%s missing ping_group_range configuration", rel)
+		}
+		if !strings.Contains(content, "chmod u+s /bin/ping") {
+			t.Fatalf("%s missing chmod u+s /bin/ping", rel)
+		}
 	}
 }

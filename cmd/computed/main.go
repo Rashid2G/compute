@@ -13,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/doctor"
-	"github.com/Rashid2G/on-demand-vms/internal/gui"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/version"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/doctor"
+	"github.com/Rashid2G/compute/internal/gui"
+	"github.com/Rashid2G/compute/internal/network"
+	"github.com/Rashid2G/compute/internal/storage"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/version"
 )
 
 func main() {
@@ -143,12 +143,10 @@ func main() {
 	})
 
 	// Authentication is on by default. Refuse to start without a credential
-	// instead of falling back to a generated password that nobody can read.
-	if globalCfg.Server.AuthEnabled && globalCfg.Server.AdminPassword == "" && globalCfg.Server.AdminSecret == "" {
-		log.Fatalf("Authentication is enabled but no admin credential is configured. Set COMPUTE_ADMIN_PASSWORD (recommended) or COMPUTE_ADMIN_SECRET in .env, or set COMPUTE_AUTH_ENABLED=false for a loopback-only development host.")
-	}
-	if (globalCfg.Server.TLSCertFile == "") != (globalCfg.Server.TLSKeyFile == "") {
-		log.Fatalf("COMPUTE_TLS_CERT_FILE and COMPUTE_TLS_KEY_FILE must both be set (or both be empty).")
+	// instead of falling back to a generated password that nobody can read, and
+	// refuse to expose the quickstart default "admin" password beyond loopback.
+	if err := validateStartupConfig(globalCfg); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	// Fail before creating any host state if KVM, firecracker, images or the
@@ -230,14 +228,14 @@ func main() {
 
 	// 5. Initialize VM Manager with Defaults, Resource Limits, Jailer, and Cgroups
 	vmMgr := vm.NewManager(vm.Config{
-		FirecrackerBinary:         globalCfg.Server.FirecrackerBin,
-		JailerBinary:              globalCfg.Server.JailerBinary,
-		JailerEnabled:             globalCfg.Server.JailerEnabled,
-		JailerBaseDir:             globalCfg.Server.JailerBaseDir,
-		CgroupEnforce:             globalCfg.Server.CgroupEnforce,
-		CgroupDevOverride:         !globalCfg.Server.CgroupEnforce,
-		Defaults:                  globalCfg.Defaults,
-		Resources:                 globalCfg.Resources,
+		FirecrackerBinary: globalCfg.Server.FirecrackerBin,
+		JailerBinary:      globalCfg.Server.JailerBinary,
+		JailerEnabled:     globalCfg.Server.JailerEnabled,
+		JailerBaseDir:     globalCfg.Server.JailerBaseDir,
+		CgroupEnforce:     globalCfg.Server.CgroupEnforce,
+		CgroupDevOverride: !globalCfg.Server.CgroupEnforce,
+		Defaults:          globalCfg.Defaults,
+		Resources:         globalCfg.Resources,
 	}, store, netMgr, storMgr)
 
 	// Reconcile and prune any leftover orphan TAPs from previous runs
@@ -340,4 +338,33 @@ func main() {
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 	log.Printf("[computed] Stopped.")
+}
+
+func validateStartupConfig(cfg config.GlobalConfig) error {
+	if cfg.Server.AuthEnabled && cfg.Server.AdminPassword == "" && cfg.Server.AdminSecret == "" {
+		return fmt.Errorf("Authentication is enabled but no admin credential is configured. Set COMPUTE_ADMIN_PASSWORD (recommended) or COMPUTE_ADMIN_SECRET in .env, or set COMPUTE_AUTH_ENABLED=false for a loopback-only development host.")
+	}
+	if cfg.Server.AuthEnabled && cfg.Server.AdminPassword == "admin" && !isLoopbackListen(cfg.Server.ListenAddr) {
+		return fmt.Errorf("Refusing to start on non-loopback address %s with default admin password \"admin\". Set COMPUTE_ADMIN_PASSWORD to a strong random value in .env, or leave COMPUTE_ADMIN_PASSWORD= empty when authenticating with COMPUTE_ADMIN_SECRET.", cfg.Server.ListenAddr)
+	}
+	if (cfg.Server.TLSCertFile == "") != (cfg.Server.TLSKeyFile == "") {
+		return fmt.Errorf("COMPUTE_TLS_CERT_FILE and COMPUTE_TLS_KEY_FILE must both be set (or both be empty).")
+	}
+	return nil
+}
+
+func isLoopbackListen(addr string) bool {
+	if strings.HasPrefix(addr, "unix://") {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

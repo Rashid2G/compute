@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/storage"
 	"github.com/google/uuid"
 )
 
@@ -182,52 +182,7 @@ func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outp
 	const baseDockerImage = "ubuntu:24.04"
 
 	// Build package list for apt-get
-	pkgsArg := strings.Join(req.Packages, " ")
-
-	dockerfileContent := fmt.Sprintf(`FROM %s
-ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssh-server \
-    sudo \
-    curl \
-    wget \
-    git \
-    jq \
-    iproute2 \
-    procps \
-    ca-certificates \
-    python3 \
-    util-linux \
-    net-tools \
-    build-essential \
-    %s \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN echo '#include <unistd.h>\n#include <sys/reboot.h>\nint main(){ sync(); reboot(RB_POWER_OFF); return 0; }' > /tmp/poweroff.c && \
-    gcc -O2 /tmp/poweroff.c -o /sbin/poweroff && \
-    echo '#include <unistd.h>\n#include <sys/reboot.h>\nint main(){ sync(); reboot(RB_AUTOBOOT); return 0; }' > /tmp/reboot.c && \
-    gcc -O2 /tmp/reboot.c -o /sbin/reboot && \
-    rm -f /tmp/poweroff.c /tmp/reboot.c
-
-RUN (userdel -r ubuntu 2>/dev/null || true) && \
-    useradd -m -s /bin/bash -u 1000 compute && \
-    usermod -aG sudo compute && \
-    mkdir -p /etc/sudoers.d && \
-    echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute && \
-    chmod 0440 /etc/sudoers.d/compute && \
-    usermod -p '!' root && \
-    usermod -p '!' compute
-
-RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
-    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true && \
-    sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true && \
-    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
-    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
-    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
-    echo "UsePAM no" >> /etc/ssh/sshd_config && \
-    echo "StrictModes no" >> /etc/ssh/sshd_config
-`, baseDockerImage, pkgsArg)
+	dockerfileContent := buildDockerfile(req)
 
 	if strings.TrimSpace(req.Dockerfile) != "" {
 		dockerfileContent = req.Dockerfile
@@ -301,7 +256,122 @@ RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
 	}
 
 	// Write Firecracker /sbin/init
-	initScript := `#!/bin/bash
+	initScript := defaultInitScript()
+	initPath := filepath.Join(workDir, "sbin", "init")
+	_ = os.WriteFile(initPath, []byte(initScript), 0755)
+
+	// Format ext4 filesystem directly from directory using mkfs.ext4 -d
+	sizeMB := req.SizeMB
+	if sizeMB <= 0 {
+		sizeMB = 2048
+	}
+	sizeArg := fmt.Sprintf("%dM", sizeMB)
+
+	_ = os.Remove(outputPath)
+	mkfsCmd := exec.CommandContext(ctx, "mkfs.ext4", "-F", "-q", "-d", workDir, "-L", "rootfs", outputPath, sizeArg)
+	var mkfsErrBuf bytes.Buffer
+	mkfsCmd.Stderr = &mkfsErrBuf
+	if err := mkfsCmd.Run(); err != nil {
+		return fmt.Errorf("mkfs.ext4 failed: %w (%s)", err, mkfsErrBuf.String())
+	}
+
+	return nil
+}
+
+// DefaultBasePackages returns the standard CLI, networking, and runtime packages
+// installed in every Ubuntu 24.04 sandbox rootfs image.
+func DefaultBasePackages() []string {
+	return []string{
+		"iputils-ping",
+		"bind9-dnsutils",
+		"netcat-openbsd",
+		"traceroute",
+		"iproute2",
+		"net-tools",
+		"curl",
+		"wget",
+		"less",
+		"nano",
+		"vim-tiny",
+		"htop",
+		"lsof",
+		"psmisc",
+		"file",
+		"unzip",
+		"zip",
+		"tar",
+		"gzip",
+		"xz-utils",
+		"rsync",
+		"openssh-server",
+		"openssh-client",
+		"jq",
+		"git",
+		"ca-certificates",
+		"sudo",
+		"procps",
+		"util-linux",
+		"bash",
+		"coreutils",
+		"findutils",
+		"grep",
+		"sed",
+		"gawk",
+		"hostname",
+		"locales",
+		"libcap2-bin",
+		"python3",
+		"build-essential",
+	}
+}
+
+func buildDockerfile(req BuildRequest) string {
+	const baseDockerImage = "ubuntu:24.04"
+	allPkgs := append([]string{}, DefaultBasePackages()...)
+	allPkgs = append(allPkgs, req.Packages...)
+	pkgsArg := strings.Join(allPkgs, " \\\n    ")
+
+	return fmt.Sprintf(`FROM %s
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    %s \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN chmod u+s /bin/ping /usr/bin/ping 2>/dev/null || true && \
+    (setcap cap_net_raw+ep /bin/ping 2>/dev/null || setcap cap_net_raw+ep /usr/bin/ping 2>/dev/null || true) && \
+    mkdir -p /etc/sysctl.d && \
+    echo "net.ipv4.ping_group_range = 0 2147483647" > /etc/sysctl.d/99-compute.conf && \
+    if [ -f /etc/sysctl.conf ]; then grep -q "^net.ipv4.ping_group_range" /etc/sysctl.conf || echo "net.ipv4.ping_group_range = 0 2147483647" >> /etc/sysctl.conf; fi
+
+RUN echo '#include <unistd.h>\n#include <sys/reboot.h>\nint main(){ sync(); reboot(RB_POWER_OFF); return 0; }' > /tmp/poweroff.c && \
+    gcc -O2 /tmp/poweroff.c -o /sbin/poweroff && \
+    echo '#include <unistd.h>\n#include <sys/reboot.h>\nint main(){ sync(); reboot(RB_AUTOBOOT); return 0; }' > /tmp/reboot.c && \
+    gcc -O2 /tmp/reboot.c -o /sbin/reboot && \
+    rm -f /tmp/poweroff.c /tmp/reboot.c
+
+RUN (userdel -r ubuntu 2>/dev/null || true) && \
+    useradd -m -s /bin/bash -u 1000 compute && \
+    usermod -aG sudo compute && \
+    mkdir -p /etc/sudoers.d && \
+    echo "compute ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/compute && \
+    chmod 0440 /etc/sudoers.d/compute && \
+    usermod -p '!' root && \
+    usermod -p '!' compute
+
+RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true && \
+    sed -i 's/UsePAM yes/UsePAM no/' /etc/ssh/sshd_config 2>/dev/null || true && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "KbdInteractiveAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "UsePAM no" >> /etc/ssh/sshd_config && \
+    echo "StrictModes no" >> /etc/ssh/sshd_config
+`, baseDockerImage, pkgsArg)
+}
+
+func defaultInitScript() string {
+	return `#!/bin/bash
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
@@ -311,6 +381,9 @@ mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /run/sshd /run/lock
 chmod 0755 /run/sshd
 mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
+
+# Allow non-root users (including compute) to send ICMP echo requests
+sysctl -w net.ipv4.ping_group_range="0 2147483647" >/dev/null 2>&1 || echo "0 2147483647" > /proc/sys/net/ipv4/ping_group_range 2>/dev/null || true
 
 ip link set lo up 2>/dev/null || true
 
@@ -359,23 +432,4 @@ while true; do
     /sbin/getty -L 115200 ttyS0 vt100 || sleep 1
 done
 `
-	initPath := filepath.Join(workDir, "sbin", "init")
-	_ = os.WriteFile(initPath, []byte(initScript), 0755)
-
-	// Format ext4 filesystem directly from directory using mkfs.ext4 -d
-	sizeMB := req.SizeMB
-	if sizeMB <= 0 {
-		sizeMB = 2048
-	}
-	sizeArg := fmt.Sprintf("%dM", sizeMB)
-
-	_ = os.Remove(outputPath)
-	mkfsCmd := exec.CommandContext(ctx, "mkfs.ext4", "-F", "-q", "-d", workDir, "-L", "rootfs", outputPath, sizeArg)
-	var mkfsErrBuf bytes.Buffer
-	mkfsCmd.Stderr = &mkfsErrBuf
-	if err := mkfsCmd.Run(); err != nil {
-		return fmt.Errorf("mkfs.ext4 failed: %w (%s)", err, mkfsErrBuf.String())
-	}
-
-	return nil
 }
