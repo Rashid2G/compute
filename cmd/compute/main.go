@@ -1184,6 +1184,7 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 			Type:     "command",
 			PoolID:   *pool,
 			Priority: 10,
+			Source:   "cli",
 			Spec:     spec,
 		})
 		if err != nil {
