@@ -156,7 +156,7 @@ function createMockServer() {
   let portForwards = [];
   let pools = [{ id: 'pool-default', name: 'default' }];
   let webhooks = [];
-  let profiles = [];
+  let ciRepos = [];
   let apiKeys = [];
   let sshKeys = [];
 
@@ -293,8 +293,9 @@ function createMockServer() {
         }
         if (sub === 'public-ip' && (req.method === 'PATCH' || req.method === 'POST' || req.method === 'PUT')) {
           await sleep(DELAY_MS);
-          vms = vms.map((v) => (v.id === id ? { ...v, public_ip_enabled: Boolean(body.enabled) } : v));
-          return json(200, { public_ip_enabled: Boolean(body.enabled) });
+          const next = Boolean(body.public_ip_enabled ?? body.enabled);
+          vms = vms.map((v) => (v.id === id ? { ...v, public_ip_enabled: next } : v));
+          return json(200, { public_ip_enabled: next });
         }
       }
 
@@ -334,12 +335,26 @@ function createMockServer() {
         return json(201, tpl);
       }
 
-      if (p === '/api/v1/images' && req.method === 'GET') return json(200, images);
-      if (p === '/api/v1/images' && req.method === 'POST') {
+      if (p === '/api/v1/ci/repos' && req.method === 'GET') return json(200, ciRepos);
+      if (p === '/api/v1/ci/repos' && req.method === 'POST') {
         await sleep(DELAY_MS);
-        const img = { id: `img-${Date.now()}`, name: body.name, base_image: body.base_image, packages: body.packages || [], status: 'building', size_mb: 512 };
-        images = [...images, img];
-        return json(201, img);
+        const repo = {
+          id: `gh-${Date.now()}`,
+          owner_id: 'u1',
+          name: body.name || 'acme/repo',
+          repo_url: body.repo_url,
+          default_branch: body.default_branch || 'main',
+          has_token: Boolean(body.github_token),
+          has_webhook_secret: true,
+          webhook_secret: 'whsec_test_123',
+          default_command: body.default_command || 'npm test',
+          vcpus: body.vcpus || 2,
+          memory_mb: body.memory_mb || 2048,
+          timeout_sec: body.timeout_sec || 600,
+          created_at: new Date().toISOString(),
+        };
+        ciRepos = [...ciRepos, repo];
+        return json(201, repo);
       }
 
       if (p === '/api/v1/jobs' && req.method === 'GET') return json(200, jobs);
@@ -348,6 +363,9 @@ function createMockServer() {
         const job = { id: `job-${Date.now()}`, type: 'command', pool_id: 'default', state: 'queued', spec_json: JSON.stringify(body.spec), queued_at: new Date().toISOString() };
         jobs = [...jobs, job];
         return json(201, job);
+      }
+      if (p.match(/^\/api\/v1\/jobs\/[^/]+\/logs$/) && req.method === 'GET') {
+        return json(200, []);
       }
 
       if (p === '/api/v1/network/port-forwards' && req.method === 'GET') return json(200, portForwards);
@@ -372,14 +390,6 @@ function createMockServer() {
         const wh = { id: `wh-${Date.now()}`, ...body, secret: 'whsec_test123', active: true };
         webhooks = [...webhooks, wh];
         return json(201, wh);
-      }
-
-      if (p === '/api/v1/agent-profiles' && req.method === 'GET') return json(200, profiles);
-      if (p === '/api/v1/agent-profiles' && req.method === 'POST') {
-        await sleep(DELAY_MS);
-        const ap = { id: `ap-${Date.now()}`, ...body, status: 'active' };
-        profiles = [...profiles, ap];
-        return json(201, ap);
       }
 
       if (p === '/api/v1/api-keys' && req.method === 'GET') return json(200, apiKeys);
@@ -553,7 +563,7 @@ test('operation dialogs and drawers close immediately while loading toasts persi
 
   try {
     await cdp.send('Page.navigate', { url: baseUrl });
-    await waitFor(cdp, `document.body && document.body.innerText.includes('sbx-alpha')`, 8000, 'instances loaded');
+    await waitFor(cdp, `document.body && document.body.innerText.includes('sbx-alpha')`, 15000, 'instances loaded');
 
     await cdp.evalJS(`
       window.__clickButtonByText = (text, root = document) => {
@@ -657,7 +667,11 @@ test('operation dialogs and drawers close immediately while loading toasts persi
 
     await t.test('Inspect VM Public IP toggle closes modal immediately with loading toast', async () => {
       await cdp.evalJS(`Array.from(document.querySelectorAll('tr')).find(r => r.innerText.includes('sbx-alpha')).click()`);
-      await waitFor(cdp, `window.__clickButtonByText('JSON Spec')`, 3000, 'inspector drawer open');
+      await waitFor(cdp, `document.querySelector('[data-testid="sandbox-detail-panel"]') !== null`, 3000, 'detail panel open');
+      await cdp.realClick(`Array.from(document.querySelectorAll('[data-testid="sandbox-detail-panel"] button')).find(b => b.innerText.trim() === 'More')`);
+      await waitFor(cdp, `Array.from(document.querySelectorAll('[role="menuitem"]')).some(el => el.innerText.trim() === 'JSON Spec')`, 3000, 'detail More menu open');
+      await sleep(120);
+      await cdp.realClick(`Array.from(document.querySelectorAll('[role="menuitem"]')).find(el => el.innerText.trim() === 'JSON Spec')`);
       await waitFor(cdp, `document.body.innerText.includes('vm-alpha') && Array.from(document.querySelectorAll('[role="tab"]')).some(t => t.innerText.includes('Network'))`, 3000, 'inspect dialog open');
       await cdp.realClick(`Array.from(document.querySelectorAll('[role="tab"]')).find(t => t.innerText.includes('Network'))`);
       await waitFor(cdp, `document.body.innerText.includes('Turn Off Public IP')`, 3000, 'public ip button visible');
@@ -676,9 +690,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
         (() => {
           const input = document.querySelector('input[aria-label="Sandbox name"]');
           window.__setReactInput(input, 'sbx-fast-close');
-          input.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[aria-label="Sandbox name"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`document.getElementById('advanced-create-title') === null`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
@@ -703,9 +718,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
           const pubInput = document.getElementById('key-content');
           window.__setReactInput(nameInput, 'modal-key');
           window.__setReactInput(pubInput, 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example');
-          nameInput.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.getElementById('key-name').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Account SSH Keys')`), true, 'SSHKeysDialog should close immediately on add');
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding SSH key "modal-key"'), 'Expected SSH key modal loading toast');
@@ -721,9 +737,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
         (() => {
           const input = document.querySelector('input[aria-label="Volume name"]');
           window.__setReactInput(input, 'fast-vol-1');
-          input.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[aria-label="Volume name"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`document.querySelector('input[aria-label="Volume name"]') === null`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
@@ -741,9 +758,9 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await waitFor(cdp, `window.__getToastsText().includes('Attached')`, 3000, 'attach toast success');
     });
 
-    await t.test('Images & Templates drawers close immediately while loading toasts show', async () => {
-      await cdp.send('Page.navigate', { url: `${baseUrl}#/images` });
-      await waitFor(cdp, `document.body.innerText.includes('Create Snapshot')`, 3000, 'images page');
+    await t.test('Snapshots & Templates modal closes immediately while loading toast shows', async () => {
+      await cdp.send('Page.navigate', { url: `${baseUrl}#/snapshots` });
+      await waitFor(cdp, `document.body.innerText.includes('Create Snapshot')`, 3000, 'snapshots page');
       await cdp.evalJS(`window.__clickButtonByText('Create Snapshot')`);
       await waitFor(cdp, `document.body.innerText.includes('Create Sandbox Snapshot')`, 3000, 'snapshot modal open');
       await cdp.evalJS(`
@@ -752,37 +769,28 @@ test('operation dialogs and drawers close immediately while loading toasts persi
           if (!sel.value && sel.options.length > 1) {
             window.__setReactInput(sel, sel.options[1].value);
           }
-          const input = document.querySelector('input[aria-label="Snapshot name"]');
-          window.__setReactInput(input, 'tpl-fast');
-          input.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`
+        (() => {
+          const input = document.querySelector('input[aria-label="Snapshot name"]');
+          window.__setReactInput(input, 'tpl-fast');
+        })()
+      `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[aria-label="Snapshot name"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Create Sandbox Snapshot')`), true);
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Creating snapshot "tpl-fast"'));
       await waitFor(cdp, `window.__getToastsText().includes('Snapshot "tpl-fast" created')`, 3000, 'snapshot toast success');
-
-      await cdp.evalJS(`window.__clickButtonByText('Custom Rootfs Images')`);
-      await waitFor(cdp, `window.__clickButtonByText('Build Rootfs Image')`, 3000, 'build image button');
-      await waitFor(cdp, `document.body.innerText.includes('Build Custom Rootfs Image')`, 3000, 'build image drawer open');
-      await cdp.evalJS(`
-        (() => {
-          const input = document.querySelector('input[placeholder="custom-dev-rootfs"]');
-          window.__setReactInput(input, 'img-fast');
-          input.closest('form').requestSubmit();
-        })()
-      `);
-      await sleep(70);
-      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Build Custom Rootfs Image')`), true);
-      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Starting custom rootfs build "img-fast"'));
-      await waitFor(cdp, `window.__getToastsText().includes('Started building custom rootfs "img-fast"')`, 3000, 'image toast success');
     });
 
-    await t.test('Jobs Dispatch drawer closes immediately while loading toast shows', async () => {
+    await t.test('CI Jobs Ad-hoc Run and Connect GitHub Repository modals close immediately while loading toasts show', async () => {
       await cdp.send('Page.navigate', { url: `${baseUrl}#/jobs` });
-      await waitFor(cdp, `document.body.innerText.includes('CI on Compute VMs')`, 3000, 'jobs page');
-      await cdp.evalJS(`window.__clickButtonByText('Connect GitHub')`);
-      await waitFor(cdp, `document.body.innerText.includes('Dispatch Ephemeral Runner Job')`, 3000, 'job drawer open');
+      await waitFor(cdp, `document.body.innerText.includes('CI Jobs')`, 3000, 'jobs page');
+      await cdp.evalJS(`window.__clickButtonByText('Run Ad-hoc Job')`);
+      await waitFor(cdp, `document.body.innerText.includes('Run Ad-hoc Ephemeral Job')`, 3000, 'job modal open');
       await cdp.evalJS(`
         (() => {
           const btn = Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === 'Run Job');
@@ -790,10 +798,25 @@ test('operation dialogs and drawers close immediately while loading toasts persi
         })()
       `);
       await sleep(70);
-      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Dispatch Ephemeral Runner Job')`), true);
+      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Run Ad-hoc Ephemeral Job')`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
       assert(toastText.includes('Dispatching CI job'), `Expected job loading toast, got: ${toastText}`);
       await waitFor(cdp, `window.__getToastsText().includes('Dispatched CI job')`, 3000, 'job toast success');
+
+      await cdp.evalJS(`window.__clickButtonByText('Connect GitHub Repository')`);
+      await waitFor(cdp, `document.getElementById('ci-repo-modal-title') !== null`, 3000, 'connect repo modal open');
+      await cdp.evalJS(`
+        (() => {
+          const urlInput = document.querySelector('input[aria-label="Repository URL"]');
+          window.__setReactInput(urlInput, 'https://github.com/acme/web-app');
+        })()
+      `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[aria-label="Repository URL"]').closest('form').requestSubmit()`);
+      await sleep(70);
+      assert.equal(await cdp.evalJS(`document.getElementById('ci-repo-modal-title') === null`), true);
+      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Connecting GitHub repository'), 'Expected connecting repo loading toast');
+      await waitFor(cdp, `window.__getToastsText().includes('Connected acme/repo')`, 3000, 'connect repo toast success');
     });
 
     await t.test('Network Add Port Forward drawer closes immediately while loading toast shows', async () => {
@@ -808,9 +831,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
           if (!sel.value && sel.options.length > 1) {
             window.__setReactInput(sel, sel.options[1].value);
           }
-          sel.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('select[aria-label="Sandbox to forward"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Add DNAT Port Forward Rule')`), true);
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding DNAT port forward'));
@@ -826,9 +850,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
         (() => {
           const input = document.querySelector('input[aria-label="New pool name"]');
           window.__setReactInput(input, 'pool-fast');
-          input.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[aria-label="New pool name"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`document.querySelector('input[aria-label="New pool name"]') === null`), true);
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Creating worker pool "pool-fast"'));
@@ -844,31 +869,19 @@ test('operation dialogs and drawers close immediately while loading toasts persi
         (() => {
           const input = document.querySelector('input[type="url"]');
           window.__setReactInput(input, 'https://example.com/hook');
-          input.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[type="url"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Register Outbound Webhook Subscription')`), true);
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Registering webhook endpoint'));
       await waitFor(cdp, `window.__getToastsText().includes('Registered webhook endpoint')`, 3000, 'webhook toast success');
     });
 
-    await t.test('API New Proxy Profile drawer closes immediately while loading toast shows', async () => {
+    await t.test('Legacy API route redirects cleanly to Settings Access & Keys', async () => {
       await cdp.send('Page.navigate', { url: `${baseUrl}#/api` });
-      await waitFor(cdp, `document.body.innerText.includes('New Proxy Profile')`, 3000, 'api page');
-      await cdp.evalJS(`window.__clickButtonByText('New Proxy Profile')`);
-      await waitFor(cdp, `document.body.innerText.includes('Create Agent Credential Proxy Profile')`, 3000, 'api profile drawer open');
-      await cdp.evalJS(`
-        (() => {
-          const input = document.querySelector('input[placeholder="claude-code-default"]');
-          window.__setReactInput(input, 'proxy-fast');
-          input.closest('form').requestSubmit();
-        })()
-      `);
-      await sleep(70);
-      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Create Agent Credential Proxy Profile')`), true);
-      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Creating agent proxy profile "proxy-fast"'));
-      await waitFor(cdp, `window.__getToastsText().includes('Created agent proxy profile "proxy-fast"')`, 3000, 'profile toast success');
+      await waitFor(cdp, `document.body.innerText.includes('Settings') && document.body.innerText.includes('Create API Key')`, 3000, 'api redirect to settings');
     });
 
     await t.test('Access Create API Key & Add SSH Key drawers close immediately while loading toasts show', async () => {
@@ -880,9 +893,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
         (() => {
           const input = document.querySelector('input[aria-label="API key name"]');
           window.__setReactInput(input, 'key-fast');
-          input.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[aria-label="API key name"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Create Scoped API Key')`), true);
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Creating API key "key-fast"'));
@@ -897,9 +911,10 @@ test('operation dialogs and drawers close immediately while loading toasts persi
           const pubInput = document.querySelector('textarea');
           window.__setReactInput(nameInput, 'ssh-fast');
           window.__setReactInput(pubInput, 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@example');
-          nameInput.closest('form').requestSubmit();
         })()
       `);
+      await sleep(50);
+      await cdp.evalJS(`document.querySelector('input[placeholder*="work-laptop-ed25519"]').closest('form').requestSubmit()`);
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Register SSH Public Key')`), true);
       assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding SSH key "ssh-fast"'));

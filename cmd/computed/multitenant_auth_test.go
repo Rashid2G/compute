@@ -1304,7 +1304,7 @@ func TestMultiTenant_PlatformEndpointsAdminOnly(t *testing.T) {
 		"/api/v1/webhooks",
 		"/api/v1/environments",
 		"/api/v1/otel",
-		"/api/v1/agent-profiles",
+		"/api/v1/admin/resources",
 	} {
 		resp, body := mtRequest(t, ts, http.MethodGet, path, aliceKey, nil)
 		if resp.StatusCode != http.StatusForbidden {
@@ -1317,7 +1317,7 @@ func TestMultiTenant_PlatformEndpointsAdminOnly(t *testing.T) {
 		"/api/v1/webhooks",
 		"/api/v1/environments",
 		"/api/v1/otel",
-		"/api/v1/agent-profiles",
+		"/api/v1/admin/resources",
 	} {
 		resp, body := mtRequest(t, ts, http.MethodGet, path, multiTenantAdminSecret, nil)
 		if resp.StatusCode != http.StatusOK {

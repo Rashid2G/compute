@@ -34,3 +34,15 @@ func TestJobSandboxName(t *testing.T) {
 		t.Fatalf("jobSandboxName = %s", got)
 	}
 }
+
+func TestBuildJobCommandQuotesMultilineScript(t *testing.T) {
+	script := "set -e\nmkdir -p /workspace\ngit clone \"$REPO_URL\" repo"
+	got := buildJobCommand("/workspace", api.JobSpec{
+		Command: []string{"bash", "-lc", script},
+		Env:     map[string]string{"GITHUB_TOKEN": "ghp_secret123"},
+	})
+	wantSuffix := "bash -lc 'set -e\nmkdir -p /workspace\ngit clone \"$REPO_URL\" repo'"
+	if !strings.HasSuffix(got, wantSuffix) {
+		t.Fatalf("expected script to be single-quoted, got: %s", got)
+	}
+}

@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ChevronDown, Globe, Play, Shield, X } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Play, Shield, X } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import type {
   CreateVMRequest,
-  CustomImage,
   DaemonConfig,
   NetworkIsolationMode,
   SSHKey,
@@ -16,12 +15,8 @@ import { cn } from '@/lib/utils';
 interface CreateVMDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  config: DaemonConfig | null;
-  onCreate: (
-    payload: CreateVMRequest,
-    autoStart: boolean,
-    options?: { setupScript?: string },
-  ) => Promise<void>;
+  config?: DaemonConfig | null;
+  onCreate: (payload: CreateVMRequest, autoStart: boolean) => Promise<void>;
 }
 
 interface Preset {
@@ -36,6 +31,7 @@ const PRESETS: Preset[] = [
   { vcpus: 4, label: 'medium', defaultMemoryMb: 2048 },
 ];
 
+const DEFAULT_DISK_GB = 20;
 const HOST_RESERVE_MB = 256;
 
 function formatMemory(mb: number): string {
@@ -49,24 +45,21 @@ function formatMemory(mb: number): string {
 export function CreateVMDialog({
   open,
   onOpenChange,
-  config,
   onCreate,
 }: CreateVMDialogProps) {
   const [vcpus, setVcpus] = useState<1 | 2 | 4>(1);
   const [memoryMb, setMemoryMb] = useState(512);
-  const [diskGb, setDiskGb] = useState<number>(50);
+  const [diskGb, setDiskGb] = useState<number>(DEFAULT_DISK_GB);
   const [count, setCount] = useState<number>(1);
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
   const [sshKeyId, setSshKeyId] = useState('');
   const [sshPassword, setSshPassword] = useState('');
-  const [setupScript, setSetupScript] = useState('');
   const [networkIsolation, setNetworkIsolation] =
     useState<NetworkIsolationMode>('account');
   const [protectedVM, setProtectedVM] = useState(false);
 
   const [templates, setTemplates] = useState<Template[]>([]);
-  const [images, setImages] = useState<CustomImage[]>([]);
   const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
   const [stats, setStats] = useState<StatsResult | null>(null);
 
@@ -76,10 +69,6 @@ export function CreateVMDialog({
       .listTemplates()
       .then((res) => setTemplates(res || []))
       .catch(() => setTemplates([]));
-    void api
-      .listImages()
-      .then((res) => setImages(res || []))
-      .catch(() => setImages([]));
     void api
       .listKeys()
       .then((res) => setSshKeys(res || []))
@@ -112,21 +101,25 @@ export function CreateVMDialog({
     setMemoryMb((current) => Math.min(current, maxUsableMb));
   }, [open, maxUsableMb]);
 
-  // Never keep a typed password in memory after the dialog closes.
+  // Never keep a typed password or stale inputs in memory after the dialog closes.
   useEffect(() => {
     if (!open) {
+      setSandboxName('');
+      setVcpus(1);
+      setMemoryMb(512);
+      setCount(1);
+      setProtectedVM(false);
       setSshPassword('');
       setSshKeyId('');
       setNetworkIsolation('account');
+      setDiskGb(DEFAULT_DISK_GB);
+      setFromSource('fresh');
     }
   }, [open]);
 
   if (!open) return null;
 
-  const availableImages = config?.images?.available ?? [];
   const willQueue = maxUsableMb !== null && memoryMb > maxUsableMb;
-  // The account's default key is embedded automatically by the daemon when
-  // the request carries no ssh_key_id, so "" means "use the default key".
   const defaultKey = sshKeys.find((k) => k.is_default) ?? null;
 
   function handleSubmit(e: React.FormEvent) {
@@ -134,7 +127,6 @@ export function CreateVMDialog({
     const baseName = sandboxName.trim();
     const calculatedDiskMb = Math.max(1, Math.round(diskGb)) * 1024;
     const totalToCreate = Math.max(1, count);
-    const trimmedScript = setupScript.trim() || undefined;
 
     const payloads: CreateVMRequest[] = Array.from({ length: totalToCreate }, (_, i) => {
       let name: string | undefined;
@@ -157,8 +149,6 @@ export function CreateVMDialog({
 
       if (fromSource.startsWith('tpl:')) {
         payload.template = fromSource.slice(4);
-      } else if (fromSource.startsWith('img:')) {
-        payload.image = fromSource.slice(4);
       } else {
         payload.image = 'ubuntu-24';
       }
@@ -169,18 +159,13 @@ export function CreateVMDialog({
     onOpenChange(false);
     setSandboxName('');
     setSshPassword('');
-    setSetupScript('');
     setNetworkIsolation('account');
     setProtectedVM(false);
+    setDiskGb(DEFAULT_DISK_GB);
+    setFromSource('fresh');
     setCount(1);
 
-    void Promise.allSettled(
-      payloads.map((payload) =>
-        onCreate(payload, true, {
-          setupScript: trimmedScript,
-        }),
-      ),
-    );
+    void Promise.allSettled(payloads.map((payload) => onCreate(payload, true)));
   }
 
   return (
@@ -196,12 +181,17 @@ export function CreateVMDialog({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-5">
-          <h2
-            id="advanced-create-title"
-            className="text-[15px] font-medium text-foreground"
-          >
-            New sandbox
-          </h2>
+          <div>
+            <h2
+              id="advanced-create-title"
+              className="text-[15px] font-medium text-foreground"
+            >
+              New sandbox
+            </h2>
+            <p className="mt-0.5 font-mono text-[10.5px] text-muted-foreground">
+              Ubuntu 24.04 LTS (ubuntu-24)
+            </p>
+          </div>
           <button
             type="button"
             onClick={() => onOpenChange(false)}
@@ -221,9 +211,17 @@ export function CreateVMDialog({
               type="text"
               aria-label="Sandbox name"
               value={sandboxName}
-              onChange={(e) => setSandboxName(e.target.value.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').slice(0, 63))}
+              onChange={(e) =>
+                setSandboxName(
+                  e.target.value
+                    .toLowerCase()
+                    .replace(/[^a-z0-9-]+/g, '-')
+                    .replace(/-{2,}/g, '-')
+                    .slice(0, 63),
+                )
+              }
               placeholder="sbx-prod-api-01"
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
           </div>
 
@@ -241,7 +239,7 @@ export function CreateVMDialog({
                     className={cn(
                       'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                       count === qty
-                        ? 'border-primary bg-selected text-selected-foreground font-medium'
+                        ? 'border-[#263fa9] bg-[#0f1634] text-white'
                         : 'border-border text-muted-foreground hover:text-foreground',
                     )}
                   >
@@ -256,8 +254,10 @@ export function CreateVMDialog({
               min={1}
               max={20}
               value={count}
-              onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
+              onChange={(e) =>
+                setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))
+              }
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
             />
           </div>
 
@@ -283,7 +283,7 @@ export function CreateVMDialog({
                     className={cn(
                       'flex flex-col items-center justify-center border py-2.5 px-1.5 text-center transition-colors',
                       selected
-                        ? 'border-primary bg-selected text-selected-foreground'
+                        ? 'border-[#495eb7] bg-[#0f1634] text-white'
                         : 'border-border bg-background text-foreground hover:border-foreground/40',
                     )}
                   >
@@ -310,8 +310,10 @@ export function CreateVMDialog({
                 min={128}
                 step={128}
                 value={memoryMb}
-                onChange={(e) => setMemoryMb(Math.max(128, Number(e.target.value) || 128))}
-                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
+                onChange={(e) =>
+                  setMemoryMb(Math.max(128, Number(e.target.value) || 128))
+                }
+                className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
               />
             </div>
             <div className="space-y-1.5">
@@ -328,7 +330,7 @@ export function CreateVMDialog({
                       className={cn(
                         'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                         diskGb === preset
-                          ? 'border-primary bg-selected text-selected-foreground font-medium'
+                          ? 'border-[#263fa9] bg-[#0f1634] text-white'
                           : 'border-border text-muted-foreground hover:text-foreground',
                       )}
                     >
@@ -344,8 +346,10 @@ export function CreateVMDialog({
                   min={1}
                   max={2048}
                   value={diskGb}
-                  onChange={(e) => setDiskGb(Math.max(1, Number(e.target.value) || 1))}
-                  className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
+                  onChange={(e) =>
+                    setDiskGb(Math.max(1, Number(e.target.value) || DEFAULT_DISK_GB))
+                  }
+                  className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
                 />
                 <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">
                   GB
@@ -354,41 +358,29 @@ export function CreateVMDialog({
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <label className="block text-[12px] text-muted-foreground">
-              From
-            </label>
-            <div className="relative">
-              <select
-                aria-label="Sandbox source"
-                value={fromSource}
-                onChange={(e) => setFromSource(e.target.value)}
-                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-primary focus:outline-none"
-              >
-                <option value="fresh">Fresh sandbox (ubuntu-24)</option>
-                {availableImages
-                  .filter((img) => img.name !== 'ubuntu-24')
-                  .map((img) => (
-                    <option key={`avail-${img.name}`} value={`img:${img.name}`}>
-                      Image: {img.name}
+          {templates.length > 0 && (
+            <div className="space-y-1.5">
+              <label className="block text-[12px] text-muted-foreground">
+                Snapshot (optional)
+              </label>
+              <div className="relative">
+                <select
+                  aria-label="Sandbox snapshot"
+                  value={fromSource}
+                  onChange={(e) => setFromSource(e.target.value)}
+                  className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
+                >
+                  <option value="fresh">Fresh Ubuntu 24.04 LTS</option>
+                  {templates.map((tpl) => (
+                    <option key={`tpl-${tpl.id}`} value={`tpl:${tpl.name}`}>
+                      Snapshot: {tpl.name}
                     </option>
                   ))}
-                {images
-                  .filter((i) => i.status === 'ready')
-                  .map((img) => (
-                    <option key={`custom-${img.id}`} value={`img:${img.name}`}>
-                      Custom: {img.name}
-                    </option>
-                  ))}
-                {templates.map((tpl) => (
-                  <option key={`tpl-${tpl.id}`} value={`tpl:${tpl.name}`}>
-                    Snapshot: {tpl.name}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="space-y-1.5">
             <label className="block text-[12px] text-muted-foreground">
@@ -399,7 +391,7 @@ export function CreateVMDialog({
                 aria-label="SSH key"
                 value={sshKeyId}
                 onChange={(e) => setSshKeyId(e.target.value)}
-                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-primary focus:outline-none"
+                className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-[#263fa9] focus:outline-none"
               >
                 <option value="">
                   {defaultKey
@@ -436,26 +428,12 @@ export function CreateVMDialog({
               value={sshPassword}
               onChange={(e) => setSshPassword(e.target.value)}
               placeholder="Leave blank for public-key-only access"
-              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
             />
             <p className="text-[10.5px] text-muted-foreground">
               Minimum 8 characters. Applied to the compute and root accounts. If
               left blank, password login is disabled.
             </p>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-[12px] text-muted-foreground">
-              Setup script (optional, runs after boot)
-            </label>
-            <textarea
-              rows={3}
-              aria-label="Setup script"
-              value={setupScript}
-              onChange={(e) => setSetupScript(e.target.value)}
-              placeholder="#!/bin/bash&#10;apt-get update && apt-get install -y nginx"
-              className="w-full border border-border bg-background p-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
-            />
           </div>
 
           <div className="space-y-1.5">
@@ -469,7 +447,7 @@ export function CreateVMDialog({
                 className={cn(
                   'flex flex-col items-start border px-3 py-2 text-left transition-colors',
                   networkIsolation === 'account'
-                    ? 'border-primary bg-selected text-selected-foreground'
+                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
                     : 'border-border bg-background text-foreground hover:border-foreground/40',
                 )}
               >
@@ -486,7 +464,7 @@ export function CreateVMDialog({
                 className={cn(
                   'flex flex-col items-start border px-3 py-2 text-left transition-colors',
                   networkIsolation === 'isolated'
-                    ? 'border-primary bg-selected text-selected-foreground'
+                    ? 'border-[#495eb7] bg-[#0f1634] text-white'
                     : 'border-border bg-background text-foreground hover:border-foreground/40',
                 )}
               >
@@ -506,13 +484,13 @@ export function CreateVMDialog({
               type="checkbox"
               checked={protectedVM}
               onChange={(e) => setProtectedVM(e.target.checked)}
-              className="h-3.5 w-3.5 accent-primary cursor-pointer"
+              className="h-3.5 w-3.5 accent-[#263fa9] cursor-pointer"
             />
             <label
               htmlFor="enable-protection"
               className="text-[12px] text-foreground cursor-pointer select-none flex items-center gap-1.5"
             >
-              <Shield className="h-3.5 w-3.5 text-primary dark:text-[var(--accent-bright)]" />
+              <Shield className="h-3.5 w-3.5 text-[#5e7ff5]" />
               <span>Enable deletion protection</span>
             </label>
           </div>
@@ -536,7 +514,7 @@ export function CreateVMDialog({
           <div className="flex justify-end pt-2">
             <button
               type="submit"
-              className="flex h-9 items-center gap-2 bg-primary hover:bg-primary-hover px-4 text-[13px] font-medium text-primary-foreground transition-colors disabled:opacity-50"
+              className="flex h-9 items-center gap-2 bg-[#263fa9] hover:bg-[#1e3180] px-4 text-[13px] font-medium text-white transition-colors disabled:opacity-50"
             >
               <Play className="h-3 w-3 fill-current" />
               <span>

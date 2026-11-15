@@ -14,12 +14,14 @@ x-logging: &default-logging
 
 x-daemon-image: &daemon-image
   image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-1.0.0}
+  pull_policy: ${COMPUTE_PULL_POLICY:-build}
   build:
     context: .
     dockerfile: Dockerfile.daemon
 
 x-worker-image: &worker-image
   image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-1.0.0}
+  pull_policy: ${COMPUTE_PULL_POLICY:-build}
   build:
     context: .
     dockerfile: Dockerfile.worker
@@ -28,23 +30,31 @@ x-data-volume: &data-volume
   ${COMPUTE_HOST_DATA_DIR:-./data}:/var/lib/compute
 
 services:
-  # One-shot bootstrap: downloads/verifies base images and generates the
-  # internal SSH key before the daemon starts. Idempotent; safe on every up.
+  # One-shot bootstrap: installs the kernel, builds the Ubuntu 24.04 rootfs,
+  # and generates the internal SSH key before the daemon starts. Idempotent.
   compute-init:
     <<: *daemon-image
     restart: "no"
     network_mode: host
+    # Required to mount proc/sysfs/devpts during first-run rootfs chroot build.
+    privileged: true
     logging: *default-logging
     volumes:
       - *data-volume
     environment:
-      COMPUTE_DATA_DIR: /var/lib/compute
-      COMPUTE_IMAGES_DIR: /var/lib/compute/images
-      COMPUTE_IMAGES_MODE: ${COMPUTE_IMAGES_MODE:-build}
+      COMPUTE_DATA_DIR: ${COMPUTE_DATA_DIR:-/var/lib/compute}
+      COMPUTE_IMAGES_DIR: ${COMPUTE_IMAGES_DIR:-/var/lib/compute/images}
+      COMPUTE_IMAGES_MODE: ${COMPUTE_IMAGES_MODE:-auto}
       COMPUTE_IMAGE_MANIFEST_URL: ${COMPUTE_IMAGE_MANIFEST_URL:-}
+      COMPUTE_IMAGE_ALLOW_HTTP: ${COMPUTE_IMAGE_ALLOW_HTTP:-}
+      COMPUTE_KERNEL_SRC: ${COMPUTE_KERNEL_SRC:-}
+      COMPUTE_KERNEL_URL: ${COMPUTE_KERNEL_URL:-}
+      COMPUTE_KERNEL_SHA256: ${COMPUTE_KERNEL_SHA256:-}
+      COMPUTE_ROOTFS_SIZE_MB: ${COMPUTE_ROOTFS_SIZE_MB:-2048}
+      COMPUTE_ROOTFS_BUILDER: ${COMPUTE_ROOTFS_BUILDER:-}
       COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
       COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
-      COMPUTE_SSH_KEY_PATH: /var/lib/compute/images/ssh/id_ed25519
+      COMPUTE_SSH_KEY_PATH: ${COMPUTE_SSH_KEY_PATH:-/var/lib/compute/images/ssh/id_ed25519}
     entrypoint: ["/usr/local/bin/computed"]
     command: ["init", "--images"]
 
@@ -65,23 +75,61 @@ services:
     depends_on:
       compute-init:
         condition: service_completed_successfully
-    env_file:
-      - .env
     environment:
-      COMPUTE_DATA_DIR: /var/lib/compute
+      COMPUTE_DATA_DIR: ${COMPUTE_DATA_DIR:-/var/lib/compute}
+      COMPUTE_DB_PATH: ${COMPUTE_DB_PATH:-}
+      COMPUTE_LISTEN: ${COMPUTE_LISTEN:-}
       COMPUTE_BIND_ADDRESS: ${COMPUTE_BIND_ADDRESS:-127.0.0.1}
       COMPUTE_API_PORT: ${COMPUTE_API_PORT:-18080}
+      COMPUTE_FIRECRACKER_BIN: ${COMPUTE_FIRECRACKER_BIN:-}
       COMPUTE_AUTH_ENABLED: ${COMPUTE_AUTH_ENABLED:-true}
       COMPUTE_SIGNUP_ENABLED: ${COMPUTE_SIGNUP_ENABLED:-false}
       COMPUTE_ADMIN_USERNAME: ${COMPUTE_ADMIN_USERNAME:-admin}
       COMPUTE_ADMIN_EMAIL: ${COMPUTE_ADMIN_EMAIL:-admin@compute.local}
-      COMPUTE_ADMIN_PASSWORD: ${COMPUTE_ADMIN_PASSWORD:-}
+      # Use `-admin` (not `:-admin`) so explicitly leaving COMPUTE_ADMIN_PASSWORD=
+      # empty in .env (e.g. when using COMPUTE_ADMIN_SECRET) is respected.
+      COMPUTE_ADMIN_PASSWORD: ${COMPUTE_ADMIN_PASSWORD-admin}
       COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
       COMPUTE_TLS_CERT_FILE: ${COMPUTE_TLS_CERT_FILE:-}
       COMPUTE_TLS_KEY_FILE: ${COMPUTE_TLS_KEY_FILE:-}
-      COMPUTE_DNS_ENABLED: ${COMPUTE_DNS_ENABLED:-false}
-      COMPUTE_DNS_BASE_DOMAIN: ${COMPUTE_DOMAIN:-}
       COMPUTE_EDGE_LISTEN: ${COMPUTE_EDGE_LISTEN:-}
+      COMPUTE_CGROUP_ENFORCE: ${COMPUTE_CGROUP_ENFORCE:-}
+      COMPUTE_JAILER_ENABLED: ${COMPUTE_JAILER_ENABLED:-}
+      COMPUTE_JAILER_BIN: ${COMPUTE_JAILER_BIN:-}
+      COMPUTE_JAILER_DIR: ${COMPUTE_JAILER_DIR:-}
+      COMPUTE_ALLOW_UNREADY_STARTUP: ${COMPUTE_ALLOW_UNREADY_STARTUP:-}
+      COMPUTE_DEPLOYMENTS_INDEX: ${COMPUTE_DEPLOYMENTS_INDEX:-}
+      COMPUTE_DNS_ENABLED: ${COMPUTE_DNS_ENABLED:-false}
+      COMPUTE_DNS_LISTEN: ${COMPUTE_DNS_LISTEN:-}
+      COMPUTE_DNS_BASE_DOMAIN: ${COMPUTE_DNS_BASE_DOMAIN:-${COMPUTE_DOMAIN:-}}
+      COMPUTE_DNS_EXTRA_BASE_DOMAINS: ${COMPUTE_DNS_EXTRA_BASE_DOMAINS:-}
+      COMPUTE_DNS_HOST_ADDRESSES: ${COMPUTE_DNS_HOST_ADDRESSES:-}
+      COMPUTE_DEFAULT_VCPUS: ${COMPUTE_DEFAULT_VCPUS:-}
+      COMPUTE_DEFAULT_MEMORY_MB: ${COMPUTE_DEFAULT_MEMORY_MB:-}
+      COMPUTE_DEFAULT_DISK_MB: ${COMPUTE_DEFAULT_DISK_MB:-}
+      COMPUTE_DEFAULT_IMAGE: ${COMPUTE_DEFAULT_IMAGE:-}
+      COMPUTE_IMAGES_DIR: ${COMPUTE_IMAGES_DIR:-}
+      COMPUTE_VMS_DIR: ${COMPUTE_VMS_DIR:-}
+      COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
+      COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
+      COMPUTE_SSH_KEY_PATH: ${COMPUTE_SSH_KEY_PATH:-}
+      COMPUTE_NETWORK_MODE: ${COMPUTE_NETWORK_MODE:-}
+      COMPUTE_BRIDGE_NAME: ${COMPUTE_BRIDGE_NAME:-}
+      COMPUTE_BRIDGE_IP: ${COMPUTE_BRIDGE_IP:-}
+      COMPUTE_SUBNET: ${COMPUTE_SUBNET:-}
+      COMPUTE_GATEWAY_IP: ${COMPUTE_GATEWAY_IP:-}
+      COMPUTE_PHYSICAL_NIC: ${COMPUTE_PHYSICAL_NIC:-}
+      COMPUTE_NETWORK_BASE_DOMAIN: ${COMPUTE_NETWORK_BASE_DOMAIN:-}
+      COMPUTE_LINKED_BRIDGES: ${COMPUTE_LINKED_BRIDGES:-}
+      COMPUTE_LINK_OTHER_BRIDGES: ${COMPUTE_LINK_OTHER_BRIDGES:-}
+      COMPUTE_MAX_RUNNING_VMS: ${COMPUTE_MAX_RUNNING_VMS:-}
+      COMPUTE_MAX_TOTAL_VCPUS: ${COMPUTE_MAX_TOTAL_VCPUS:-}
+      COMPUTE_MAX_TOTAL_MEMORY_MB: ${COMPUTE_MAX_TOTAL_MEMORY_MB:-}
+      COMPUTE_MAX_TOTAL_DISK_MB: ${COMPUTE_MAX_TOTAL_DISK_MB:-}
+      COMPUTE_MIN_FREE_DISK_MB: ${COMPUTE_MIN_FREE_DISK_MB:-}
+      COMPUTE_JOBS_LOCAL_EXECUTION: ${COMPUTE_JOBS_LOCAL_EXECUTION:-}
+      COMPUTE_JOBS_MAX_CONCURRENT: ${COMPUTE_JOBS_MAX_CONCURRENT:-}
+      COMPUTE_JOBS_BOOT_TIMEOUT_SECONDS: ${COMPUTE_JOBS_BOOT_TIMEOUT_SECONDS:-}
       # Defensive marker: the daemon warns if it detects a private container
       # network namespace while this is unset.
       COMPUTE_HOST_NETWORK: "1"
@@ -109,8 +157,6 @@ services:
     depends_on:
       computed:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
       COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
       COMPUTE_API_KEY: ${COMPUTE_API_KEY:-}
@@ -141,20 +187,27 @@ services:
     depends_on:
       computed:
         condition: service_healthy
-    env_file:
-      - .env
     environment:
-      COMPUTE_CONTROL_PLANE: http://127.0.0.1:${COMPUTE_API_PORT:-18080}
+      COMPUTE_CONTROL_PLANE: ${COMPUTE_CONTROL_PLANE:-http://127.0.0.1:${COMPUTE_API_PORT:-18080}}
+      COMPUTE_WORKER_ID: ${COMPUTE_WORKER_ID:-}
       COMPUTE_WORKER_TOKEN: ${COMPUTE_WORKER_TOKEN:-}
       COMPUTE_WORKER_NAME: ${COMPUTE_WORKER_NAME:-docker-worker}
       COMPUTE_POOL_ID: ${COMPUTE_POOL_ID:-default}
-      COMPUTE_WORKER_STATE_DIR: /var/lib/compute-worker
-      COMPUTE_IMAGES_DIR: /var/lib/compute/images
-      COMPUTE_VMS_DIR: /var/lib/compute-worker/vms
-      COMPUTE_SSH_KEY_PATH: /var/lib/compute/images/ssh/id_ed25519
+      COMPUTE_WORKER_STATE_DIR: ${COMPUTE_WORKER_STATE_DIR:-/var/lib/compute-worker}
+      COMPUTE_FIRECRACKER_BIN: ${COMPUTE_FIRECRACKER_BIN:-}
+      COMPUTE_CGROUP_ENFORCE: ${COMPUTE_CGROUP_ENFORCE:-}
+      COMPUTE_IMAGES_DIR: ${COMPUTE_IMAGES_DIR:-/var/lib/compute/images}
+      COMPUTE_VMS_DIR: ${COMPUTE_VMS_DIR:-/var/lib/compute-worker/vms}
+      COMPUTE_SSH_KEY_PATH: ${COMPUTE_SSH_KEY_PATH:-/var/lib/compute/images/ssh/id_ed25519}
       COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
       COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
+      COMPUTE_NETWORK_MODE: ${COMPUTE_NETWORK_MODE:-}
       COMPUTE_BRIDGE_NAME: ${COMPUTE_BRIDGE_NAME:-mft3br0}
+      COMPUTE_BRIDGE_IP: ${COMPUTE_BRIDGE_IP:-}
+      COMPUTE_SUBNET: ${COMPUTE_SUBNET:-}
+      COMPUTE_GATEWAY_IP: ${COMPUTE_GATEWAY_IP:-}
+      COMPUTE_WORKER_BOOT_TIMEOUT_SECONDS: ${COMPUTE_WORKER_BOOT_TIMEOUT_SECONDS:-}
+      COMPUTE_WORKER_ALLOW_LOCAL_EXEC: ${COMPUTE_WORKER_ALLOW_LOCAL_EXEC:-}
     command: ["run"]
     volumes:
       - worker-data:/var/lib/compute-worker
@@ -171,7 +224,7 @@ services:
       start_period: 10s
 
   # Local development helper: builds the daemon image with the working tree and
-  # prints its version. The default install pulls/builds the pinned image via
+  # prints its version. The default install builds/uses the pinned image via
   # COMPUTE_VERSION; the dev profile is for exercising local changes.
   compute-dev:
     <<: *daemon-image

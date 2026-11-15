@@ -69,7 +69,7 @@ Compute (`on-demand-vms`) is a Go-based platform for managing Firecracker microV
 
 ## Local deployment & verification
 
-- **Docker Compose**: configure `.env` from `.env.example`, run `./scripts/preflight.sh` and `sudo ./scripts/host-prepare.sh`, then `make up` (`docker compose up -d`). Verify `GET /api/v1/health` and `GET /api/v1/ready`.
+- **Docker Compose**: `make up` (`docker compose up -d`) works out of the box without `.env` or manual image builds (`COMPUTE_IMAGES_MODE=auto`); optionally copy `.env.example` to `.env` to customize settings and run `./scripts/preflight.sh`. Verify `GET /api/v1/health` and `GET /api/v1/ready`.
 - **DNS/edge (optional)**: authoritative DNS responder on port 53 (UDP+TCP) and HTTP edge listener on port 80 when `COMPUTE_DNS_ENABLED=true` and `COMPUTE_DOMAIN` is set. Sandbox hostnames are `<sandbox>.<username>.<domain>`; `api`/`gui`/`www` and the zone apex route to the daemon (see `docs/dns-ssh.md`).
 
 ## Agent delegation

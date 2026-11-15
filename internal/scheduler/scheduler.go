@@ -212,6 +212,34 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 					continue
 				}
 
+				execSpec := spec
+				if job.RepoID != "" {
+					if ghStore, ok := s.store.(interface {
+						GetGitHubConnection(ctx context.Context, id string) (*db.GitHubConnection, error)
+					}); ok {
+						if conn, err := ghStore.GetGitHubConnection(ctx, job.RepoID); err == nil && conn != nil && conn.GitHubToken != "" {
+							authorized := spec.AllowCrossOwner || conn.OwnerID == job.OwnerID || (conn.OwnerID == "default" && job.OwnerID == "default")
+							if !authorized {
+								for _, oid := range spec.AuthorizedOwnerIDs {
+									if oid != "" && oid == conn.OwnerID {
+										authorized = true
+										break
+									}
+								}
+							}
+							if authorized {
+								execSpec.Env = make(map[string]string, len(spec.Env)+1)
+								for k, v := range spec.Env {
+									execSpec.Env[k] = v
+								}
+								if execSpec.Env["GITHUB_TOKEN"] == "" {
+									execSpec.Env["GITHUB_TOKEN"] = conn.GitHubToken
+								}
+							}
+						}
+					}
+				}
+
 				msg := api.WorkerAssignment{
 					WorkerMessage: api.WorkerMessage{
 						Version:  1,
@@ -223,9 +251,14 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 					LeaseID:   leaseID,
 					AttemptID: attemptID,
 					OwnerID:   job.OwnerID,
-					Spec:      spec,
+					Spec:      execSpec,
 				}
 				if err := s.registry.Send(ctx, w.ID, msg); err == nil {
+					if updater, ok := s.store.(interface {
+						UpdateJobExecution(ctx context.Context, id, vmID, workerID string) error
+					}); ok {
+						_ = updater.UpdateJobExecution(ctx, job.ID, "", w.ID)
+					}
 					assigned++
 					dispatched = true
 					break
