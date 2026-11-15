@@ -60,7 +60,7 @@ export function LoginDialog({
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center bg-[#f1f3f9] dark:bg-[#0f1634] text-[#263fa9] dark:text-[#929fd3] border border-border">
+            <div className="flex h-9 w-9 items-center justify-center bg-selected text-selected-foreground dark:text-[var(--accent-bright)] border border-border">
               <ShieldCheck className="h-5 w-5" />
             </div>
             <div>

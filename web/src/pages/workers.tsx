@@ -236,7 +236,7 @@ export function WorkersPage({
           <button
             type="button"
             onClick={() => setEnrollOpen((v) => !v)}
-            className="flex h-8 items-center gap-1.5 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180] transition-colors"
+            className="flex h-8 items-center gap-1.5 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
           >
             <ShieldCheck className="h-3.5 w-3.5" />
             <span>Enroll Worker</span>
@@ -270,7 +270,7 @@ export function WorkersPage({
           </div>
           <div className="h-1.5 w-full bg-muted overflow-hidden">
             <div
-              className="h-full bg-[#263fa9]"
+              className="h-full bg-primary"
               style={{
                 width: `${totalVCPUs > 0 ? Math.min(100, Math.round((usedVCPUs / totalVCPUs) * 100)) : 0}%`,
               }}
@@ -288,7 +288,7 @@ export function WorkersPage({
           </div>
           <div className="h-1.5 w-full bg-muted overflow-hidden">
             <div
-              className="h-full bg-[#263fa9]"
+              className="h-full bg-primary"
               style={{
                 width: `${totalMemMB > 0 ? Math.min(100, Math.round((usedMemMB / totalMemMB) * 100)) : 0}%`,
               }}
@@ -330,11 +330,11 @@ export function WorkersPage({
             onChange={(e) => setNewPoolName(e.target.value)}
             placeholder="e.g. nvme-high-iops"
             required
-            className="h-8 w-64 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-[#263fa9] focus:outline-none"
+            className="h-8 w-64 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
           />
           <button
             type="submit"
-            className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white"
+            className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
             Create Pool
           </button>
@@ -413,14 +413,14 @@ export function WorkersPage({
             </div>
             <button
               type="submit"
-              className="h-8 bg-[#263fa9] px-3 text-[12px] font-medium text-white hover:bg-[#1e3180]"
+              className="h-8 bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
             >
               Generate Bootstrap Token
             </button>
           </form>
 
           {generatedToken && (
-            <div className="border border-[#263fa9] bg-[#0f1634]/50 p-3 space-y-2">
+            <div className="border border-primary bg-selected/60 p-3 space-y-2">
               <div className="flex items-center justify-between text-[11.5px]">
                 <span className="font-medium text-foreground">
                   Run on target KVM host:
@@ -444,7 +444,7 @@ export function WorkersPage({
                   <span>Copy Command</span>
                 </button>
               </div>
-              <pre className="overflow-x-auto bg-[#060606] p-2.5 font-mono text-[11.5px] text-white">
+              <pre className="overflow-x-auto bg-[#0a0a0b] p-2.5 font-mono text-[11.5px] text-[#f5f5f4]">
                 sudo compute-worker run --control-plane http://
                 {window.location.hostname}:18080 --token {generatedToken} --pool{' '}
                 {newTokenPool}
@@ -503,7 +503,7 @@ export function WorkersPage({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Filter by hostname, ID, IP, pool…"
-            className="h-8 w-full border border-border bg-background pl-8 pr-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-[#263fa9] focus:outline-none"
+            className="h-8 w-full border border-border bg-background pl-8 pr-3 text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           />
         </div>
 
@@ -648,7 +648,7 @@ export function WorkersPage({
                         <button
                           type="button"
                           onClick={() => void handleCordonToggle(node)}
-                          className="border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-[#263fa9]"
+                          className="border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-primary"
                         >
                           {isCordoned ? 'Uncordon' : 'Cordon'}
                         </button>
