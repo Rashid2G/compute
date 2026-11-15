@@ -164,6 +164,12 @@ type JobCreateRequest struct {
 	Type        string                 `json:"type"`
 	PoolID      string                 `json:"pool_id,omitempty"`
 	Priority    int                    `json:"priority,omitempty"`
+	Source      string                 `json:"source,omitempty"`
+	RepoID      string                 `json:"repo_id,omitempty"`
+	RepoURL     string                 `json:"repo_url,omitempty"`
+	RepoName    string                 `json:"repo_name,omitempty"`
+	Branch      string                 `json:"branch,omitempty"`
+	CommitSHA   string                 `json:"commit_sha,omitempty"`
 	Spec        JobSpec                `json:"spec"`
 	RetryPolicy map[string]interface{} `json:"retry_policy,omitempty"`
 	DeadlineAt  *int64                 `json:"deadline_at,omitempty"`

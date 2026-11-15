@@ -60,6 +60,11 @@ type JobSpec struct {
 	Env            map[string]string `json:"env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 	NetworkPolicy  string            `json:"network_policy,omitempty"`
+	RepoURL        string            `json:"repo_url,omitempty"`
+	RepoName       string            `json:"repo_name,omitempty"`
+	Branch         string            `json:"branch,omitempty"`
+	CommitSHA      string            `json:"commit_sha,omitempty"`
+	Source         string            `json:"source,omitempty"`
 
 	// AuthorizedOwnerIDs and AllowCrossOwner are populated by the control plane
 	// after authenticating the job submission. They are never trusted directly

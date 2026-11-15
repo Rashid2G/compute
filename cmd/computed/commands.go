@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,7 +51,7 @@ func runInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "/var/lib/compute/master", "Directory for master data, keys, and SQLite state")
 	images := fs.Bool("images", false, "Bootstrap base images and the internal SSH key, then exit")
-	mode := fs.String("images-mode", "", "Image mode: download, prebuilt, build, or none (default COMPUTE_IMAGES_MODE)")
+	mode := fs.String("images-mode", "", "Image mode: auto, download, prebuilt, build, or none (default COMPUTE_IMAGES_MODE or auto)")
 	manifestURL := fs.String("image-manifest-url", "", "Image manifest URL (default COMPUTE_IMAGE_MANIFEST_URL)")
 	imagesDir := fs.String("images-dir", "", "Base images directory (default COMPUTE_IMAGES_DIR)")
 	sshKeyPath := fs.String("ssh-key-path", "", "Internal SSH private key path (default COMPUTE_SSH_KEY_PATH)")
@@ -127,6 +128,15 @@ func runInitImages(mode, manifestURL, imagesDir, sshKeyPath string) {
 			resolvedKeyPath = filepath.Join(resolvedImagesDir, "ssh", "id_ed25519")
 		}
 	}
+	var rootfsSizeMB int
+	if rawSize := strings.TrimSpace(os.Getenv("COMPUTE_ROOTFS_SIZE_MB")); rawSize != "" {
+		parsed, err := strconv.Atoi(rawSize)
+		if err != nil || parsed <= 0 {
+			fmt.Fprintf(os.Stderr, "Error: invalid COMPUTE_ROOTFS_SIZE_MB=%q: expected a positive integer\n", rawSize)
+			os.Exit(1)
+		}
+		rootfsSizeMB = parsed
+	}
 	opts := image.BootstrapOptions{
 		Mode:           firstNonEmpty(mode, os.Getenv("COMPUTE_IMAGES_MODE")),
 		ManifestURL:    firstNonEmpty(manifestURL, os.Getenv("COMPUTE_IMAGE_MANIFEST_URL")),
@@ -134,6 +144,10 @@ func runInitImages(mode, manifestURL, imagesDir, sshKeyPath string) {
 		KernelName:     cfg.Images.DefaultKernel,
 		RootfsName:     cfg.Images.DefaultRootfs,
 		SSHKeyPath:     resolvedKeyPath,
+		KernelSrc:      strings.TrimSpace(os.Getenv("COMPUTE_KERNEL_SRC")),
+		KernelURL:      strings.TrimSpace(os.Getenv("COMPUTE_KERNEL_URL")),
+		KernelSHA256:   strings.TrimSpace(os.Getenv("COMPUTE_KERNEL_SHA256")),
+		RootfsSizeMB:   rootfsSizeMB,
 		Logf:           log.Printf,
 		AllowPlainHTTP: envTruthy("COMPUTE_IMAGE_ALLOW_HTTP"),
 	}
@@ -152,7 +166,7 @@ func runInitImages(mode, manifestURL, imagesDir, sshKeyPath string) {
 	}
 	fmt.Printf("  ssh key: %s%s\n", res.KeyPath, map[bool]string{true: " (generated)", false: ""}[res.GeneratedKey])
 	for _, path := range res.Downloaded {
-		fmt.Printf("  downloaded: %s\n", path)
+		fmt.Printf("  installed: %s\n", path)
 	}
 }
 

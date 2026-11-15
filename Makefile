@@ -78,7 +78,7 @@ build-images: ## Install the Firecracker kernel and build the rootfs into IMAGES
 		COMPUTE_KERNEL_URL="$(COMPUTE_KERNEL_URL)" \
 		COMPUTE_KERNEL_SHA256="$(COMPUTE_KERNEL_SHA256)" \
 		./scripts/build-kernel.sh $(IMAGES_DIR)
-	sudo ./scripts/build-rootfs.sh $(IMAGES_DIR) 1024
+	sudo ./scripts/build-rootfs.sh $(IMAGES_DIR) 2048
 
 validate-compose: ## Validate docker-compose.yml and .env.example contract
 	./scripts/validate-compose.sh
