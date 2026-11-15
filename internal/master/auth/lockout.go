@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
+	"github.com/Rashid2G/compute/internal/store/db"
 )
 
 const (

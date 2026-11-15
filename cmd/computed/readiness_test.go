@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/doctor"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/doctor"
 )
 
 func TestReadyEndpointReportsMissingComponents(t *testing.T) {

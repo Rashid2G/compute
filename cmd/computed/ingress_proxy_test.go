@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/compute/internal/db"
 	"github.com/coder/websocket"
 )
 

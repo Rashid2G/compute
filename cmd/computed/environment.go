@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/vm"
 )
 
 // applyEnvironment injects the selected environment profile into a freshly

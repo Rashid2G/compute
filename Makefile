@@ -4,7 +4,7 @@ VERSION ?= 1.0.0
 RELEASE_NAME ?= Compute
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-PKG_VERSION = github.com/Rashid2G/on-demand-vms/pkg/version
+PKG_VERSION = github.com/Rashid2G/compute/pkg/version
 LDFLAGS = -ldflags "-X '$(PKG_VERSION).Version=$(VERSION)' -X '$(PKG_VERSION).ReleaseName=$(RELEASE_NAME)' -X '$(PKG_VERSION).GitCommit=$(GIT_COMMIT)' -X '$(PKG_VERSION).BuildDate=$(BUILD_DATE)'"
 IMAGES_DIR ?= ./data/images
 
@@ -18,6 +18,7 @@ help: ## Show available Make targets
 all: build ## Build Go binaries
 
 build: ## Build compute, computed, compute-worker, and compute-bench binaries
+	@command -v go >/dev/null 2>&1 || { echo "Error: 'go' is not installed or not in PATH (Go 1.26+ required)" >&2; exit 127; }
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/compute ./cmd/compute
 	go build $(LDFLAGS) -o bin/computed ./cmd/computed

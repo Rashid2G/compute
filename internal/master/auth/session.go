@@ -10,8 +10,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
+	"github.com/Rashid2G/compute/internal/store"
+	"github.com/Rashid2G/compute/internal/store/db"
 )
 
 var (
