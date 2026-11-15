@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
+	"github.com/Rashid2G/compute/internal/config"
 )
 
 func TestIsLoopbackListen(t *testing.T) {

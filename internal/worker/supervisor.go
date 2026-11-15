@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 // LogStreamFunc receives streamed lines from stdout/stderr.

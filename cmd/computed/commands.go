@@ -12,16 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/dns"
-	"github.com/Rashid2G/on-demand-vms/internal/doctor"
-	"github.com/Rashid2G/on-demand-vms/internal/image"
-	"github.com/Rashid2G/on-demand-vms/internal/master/audit"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/pkg/version"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/dns"
+	"github.com/Rashid2G/compute/internal/doctor"
+	"github.com/Rashid2G/compute/internal/image"
+	"github.com/Rashid2G/compute/internal/master/audit"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/store"
+	"github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/pkg/version"
 )
 
 func handleSubcommands() bool {

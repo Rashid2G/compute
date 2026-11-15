@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/worker"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
+	"github.com/Rashid2G/compute/internal/worker"
+	"github.com/Rashid2G/compute/pkg/api"
 )
 
 func TestLocalSandboxSupervisor_Execution(t *testing.T) {

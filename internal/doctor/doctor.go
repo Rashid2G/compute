@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
+	"github.com/Rashid2G/compute/internal/config"
 	"golang.org/x/crypto/ssh"
 )
 

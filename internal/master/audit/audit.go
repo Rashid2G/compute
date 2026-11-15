@@ -13,8 +13,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/store"
 )
 
 const GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"

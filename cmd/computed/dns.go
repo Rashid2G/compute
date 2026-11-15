@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/dns"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	storedb "github.com/Rashid2G/on-demand-vms/internal/store/db"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/dns"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	storedb "github.com/Rashid2G/compute/internal/store/db"
 )
 
 // dnsRuntime tracks the DNS responder lifecycle and state for /api/v1/dns/status.

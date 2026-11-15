@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	storeDB "github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/internal/vm"
 )
 
 // safeConfig returns the daemon configuration as it may be exposed to the
