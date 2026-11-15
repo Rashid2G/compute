@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/dns"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth/quota"
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	"github.com/Rashid2G/on-demand-vms/internal/store/db"
+	"github.com/Rashid2G/compute/internal/dns"
+	"github.com/Rashid2G/compute/internal/master/auth/quota"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/store"
+	"github.com/Rashid2G/compute/internal/store/db"
 )
 
 type contextKey string

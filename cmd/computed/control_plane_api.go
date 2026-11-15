@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/master/auth"
 	"github.com/google/uuid"
 )
 
@@ -1052,18 +1052,18 @@ func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(envs) == 0 {
 			base := &db.EnvironmentProfile{
-				Name:               "base",
-				IsDefault:          true,
-				Version:            1,
+				Name:                "base",
+				IsDefault:           true,
+				Version:             1,
 				SecretsEnabled:      true,
 				ComputeCredsEnabled: true,
 				BoatCredsEnabled:    true,
 				AgentCredsEnabled:   true,
-				CredentialProfile:  "Owner's default",
-				GitHubReposEnabled: true,
-				GitHubRepos:        []string{},
-				Secrets:            "",
-				UpdatedAt:          time.Now().UTC(),
+				CredentialProfile:   "Owner's default",
+				GitHubReposEnabled:  true,
+				GitHubRepos:         []string{},
+				Secrets:             "",
+				UpdatedAt:           time.Now().UTC(),
 			}
 			_ = st.SaveEnvironment(ctx, base)
 			envs = []*db.EnvironmentProfile{base}

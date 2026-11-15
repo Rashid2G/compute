@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
 )
 
 var (

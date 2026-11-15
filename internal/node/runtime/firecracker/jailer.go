@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/compute/internal/storage"
 )
 
 // Linux namespace clone flags for isolation hardening

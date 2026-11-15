@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/network"
+	"github.com/Rashid2G/compute/internal/storage"
+	"github.com/Rashid2G/compute/internal/vm"
 )
 
 func newAuthBootstrappedServer(t *testing.T, root string, mutate func(*config.GlobalConfig)) *Server {
@@ -481,4 +481,3 @@ func TestSafeConfig_RedactsSecretsEvenForAdmin(t *testing.T) {
 		t.Fatalf("GET /api/v1/config leaked server.admin_password to admin: %q", v)
 	}
 }
-

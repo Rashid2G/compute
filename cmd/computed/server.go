@@ -23,20 +23,20 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/doctor"
-	"github.com/Rashid2G/on-demand-vms/internal/jobs"
-	"github.com/Rashid2G/on-demand-vms/internal/master/auth"
-	"github.com/Rashid2G/on-demand-vms/internal/master/pki"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	"github.com/Rashid2G/on-demand-vms/internal/scheduler"
-	"github.com/Rashid2G/on-demand-vms/internal/store"
-	storeDB "github.com/Rashid2G/on-demand-vms/internal/store/db"
-	storedb "github.com/Rashid2G/on-demand-vms/internal/store/db"
-	"github.com/Rashid2G/on-demand-vms/internal/vm"
-	"github.com/Rashid2G/on-demand-vms/pkg/api"
-	"github.com/Rashid2G/on-demand-vms/pkg/version"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/doctor"
+	"github.com/Rashid2G/compute/internal/jobs"
+	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/network"
+	"github.com/Rashid2G/compute/internal/scheduler"
+	"github.com/Rashid2G/compute/internal/store"
+	storeDB "github.com/Rashid2G/compute/internal/store/db"
+	storedb "github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/internal/vm"
+	"github.com/Rashid2G/compute/pkg/api"
+	"github.com/Rashid2G/compute/pkg/version"
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
@@ -186,18 +186,18 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		// 4. Auto-seed "base" default environment profile if environments table is empty
 		if envs, err := st.ListEnvironments(initCtx); err == nil && len(envs) == 0 {
 			_ = st.SaveEnvironment(initCtx, &db.EnvironmentProfile{
-				Name:               "base",
-				IsDefault:          true,
-				Version:            1,
+				Name:                "base",
+				IsDefault:           true,
+				Version:             1,
 				SecretsEnabled:      true,
 				ComputeCredsEnabled: true,
 				BoatCredsEnabled:    true,
 				AgentCredsEnabled:   true,
-				CredentialProfile:  "Owner's default",
-				GitHubReposEnabled: false,
-				GitHubRepos:        []string{},
-				Secrets:            "",
-				UpdatedAt:          now,
+				CredentialProfile:   "Owner's default",
+				GitHubReposEnabled:  false,
+				GitHubRepos:         []string{},
+				Secrets:             "",
+				UpdatedAt:           now,
 			})
 		}
 	}

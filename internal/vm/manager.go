@@ -21,14 +21,14 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Rashid2G/on-demand-vms/internal/config"
-	"github.com/Rashid2G/on-demand-vms/internal/db"
-	"github.com/Rashid2G/on-demand-vms/internal/dns"
-	"github.com/Rashid2G/on-demand-vms/internal/firecracker"
-	"github.com/Rashid2G/on-demand-vms/internal/image"
-	"github.com/Rashid2G/on-demand-vms/internal/network"
-	jailer "github.com/Rashid2G/on-demand-vms/internal/node/runtime/firecracker"
-	"github.com/Rashid2G/on-demand-vms/internal/storage"
+	"github.com/Rashid2G/compute/internal/config"
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/dns"
+	"github.com/Rashid2G/compute/internal/firecracker"
+	"github.com/Rashid2G/compute/internal/image"
+	"github.com/Rashid2G/compute/internal/network"
+	jailer "github.com/Rashid2G/compute/internal/node/runtime/firecracker"
+	"github.com/Rashid2G/compute/internal/storage"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/ssh"
 )
@@ -414,11 +414,11 @@ func (m *Manager) SetResourceLimits(limits config.ResourceLimits) {
 type CreateRequest struct {
 	Name             string `json:"name"`
 	OwnerID          string `json:"owner_id,omitempty"`
-	Tier             string `json:"tier,omitempty"`       // "1vcpu", "2vcpu", "4vcpu" (or "micro", "small", "medium")
-	VCPUs            int    `json:"vcpus"`                // 1, 2, or 4
-	MemoryMB         int    `json:"memory_mb,omitempty"`  // Optional: default 2048, 4096, 8192
-	DiskMB           int    `json:"disk_mb,omitempty"`    // 51200 (50GB) or 102400 (100GB)
-	DiskGB           int    `json:"disk_gb,omitempty"`    // Optional convenience override in GB
+	Tier             string `json:"tier,omitempty"`      // "1vcpu", "2vcpu", "4vcpu" (or "micro", "small", "medium")
+	VCPUs            int    `json:"vcpus"`               // 1, 2, or 4
+	MemoryMB         int    `json:"memory_mb,omitempty"` // Optional: default 2048, 4096, 8192
+	DiskMB           int    `json:"disk_mb,omitempty"`   // 51200 (50GB) or 102400 (100GB)
+	DiskGB           int    `json:"disk_gb,omitempty"`   // Optional convenience override in GB
 	Description      string `json:"description,omitempty"`
 	AutoStart        bool   `json:"auto_start,omitempty"`
 	Image            string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
