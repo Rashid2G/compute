@@ -222,6 +222,32 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  COMPUTE_DAEMON      Daemon address (default: 127.0.0.1:18080)")
 }
 
+// queuedVMReason returns the admission-queue reason for a VM, or "" when the
+// VM is not queued (or the queue cannot be read).
+func queuedVMReason(ctx context.Context, client *DaemonClient, vmID string) string {
+	queue, err := client.GetQueue(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, item := range queue.QueuedVMs {
+		if item != nil && item.VMID == vmID {
+			return item.Reason
+		}
+	}
+	return ""
+}
+
+// printQueuedHint explains why a sandbox is waiting instead of booting.
+func printQueuedHint(ctx context.Context, client *DaemonClient, v *db.VM) {
+	reason := queuedVMReason(ctx, client, v.ID)
+	if reason == "" {
+		reason = "host capacity is insufficient for the requested resources"
+	}
+	fmt.Printf("  Queue reason:  %s\n", reason)
+	fmt.Printf("  Hint:          stop a running sandbox or free host resources; for a smaller\n")
+	fmt.Printf("                 request use --memory/--vcpus, then run 'compute sandbox start %s'\n", v.Name)
+}
+
 // Sandbox command implementation
 func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []string) {
 	if printHelpIfRequested("sandbox", args) {
@@ -355,6 +381,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			v = runningVM
 			fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s\n",
 				v.ID, v.Name, v.IPAddress, v.Status)
+			if v.Status == db.StatusQueued {
+				printQueuedHint(ctx, client, v)
+			}
 		}
 
 	case "start", "run":
@@ -555,6 +584,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
+		if v.Status == db.StatusQueued {
+			printQueuedHint(ctx, client, v)
+		}
 
 	case "url":
 		handleSandboxURL(ctx, client, subArgs)

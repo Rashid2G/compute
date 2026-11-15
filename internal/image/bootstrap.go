@@ -223,7 +223,7 @@ func manifestArtifact(m *Manifest, kernel bool) *ManifestArtifact {
 
 func annotateModeError(mode string, err error) error {
 	if mode == ModeBuild {
-		return fmt.Errorf("%w (COMPUTE_IMAGES_MODE=build expects images built with scripts/build-kernel.sh and scripts/build-rootfs.sh under COMPUTE_HOST_DATA_DIR/images, or set COMPUTE_IMAGES_MODE=download with a published manifest)", err)
+		return fmt.Errorf("%w (COMPUTE_IMAGES_MODE=build expects images installed by 'make build-images' or scripts/build-kernel.sh + scripts/build-rootfs.sh under COMPUTE_HOST_DATA_DIR/images, or set COMPUTE_IMAGES_MODE=download with a published manifest)", err)
 	}
 	if mode == ModePrebuilt {
 		return fmt.Errorf("%w (COMPUTE_IMAGES_MODE=prebuilt expects the kernel/rootfs under COMPUTE_HOST_DATA_DIR/images)", err)

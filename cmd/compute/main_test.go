@@ -88,6 +88,27 @@ func TestDaemonClientGetConfigAndQueue(t *testing.T) {
 	}
 }
 
+func TestQueuedVMReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"count":1,"queued_vms":[{"position":1,"vm_id":"vm-123","vm_name":"queued-vm","reason":"insufficient host memory"}]}`)
+	}))
+	defer srv.Close()
+
+	client := NewDaemonClient(srv.URL)
+	if got := queuedVMReason(context.Background(), client, "vm-123"); got != "insufficient host memory" {
+		t.Fatalf("queuedVMReason = %q, want %q", got, "insufficient host memory")
+	}
+	if got := queuedVMReason(context.Background(), client, "vm-missing"); got != "" {
+		t.Fatalf("queuedVMReason for unknown VM = %q, want empty", got)
+	}
+
+	srv.Close()
+	if got := queuedVMReason(context.Background(), client, "vm-123"); got != "" {
+		t.Fatalf("queuedVMReason after queue failure = %q, want empty", got)
+	}
+}
+
 func TestCLIValidation(t *testing.T) {
 	for _, args := range [][]string{{"sandbox", "start"}, {"sandbox", "delete"}, {"bogus"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
@@ -814,6 +835,3 @@ func TestSandboxHelpListsDiscoveryAndStartFlags(t *testing.T) {
 		}
 	}
 }
-
-
-
