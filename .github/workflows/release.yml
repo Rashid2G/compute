@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Publish Release Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Determine Version
+        id: vars
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [ -n "${{ github.ref_name }}" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v1.0.0"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+      - name: Compile Cross-Platform Binaries
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+          GIT_COMMIT: ${{ steps.vars.outputs.commit }}
+          BUILD_DATE: ${{ steps.vars.outputs.date }}
+          PKG_VERSION: github.com/Rashid2G/compute/pkg/version
+        run: |
+          mkdir -p dist
+
+          LDFLAGS="-s -w -X '${PKG_VERSION}.Version=${VERSION}' -X '${PKG_VERSION}.ReleaseName=Compute' -X '${PKG_VERSION}.GitCommit=${GIT_COMMIT}' -X '${PKG_VERSION}.BuildDate=${BUILD_DATE}'"
+
+          for arch in amd64 arm64; do
+            echo "Building linux/${arch}..."
+            mkdir -p "dist/linux-${arch}"
+            GOOS=linux GOARCH=${arch} CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/linux-${arch}/compute" ./cmd/compute
+            GOOS=linux GOARCH=${arch} CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/linux-${arch}/computed" ./cmd/computed
+            GOOS=linux GOARCH=${arch} CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/linux-${arch}/compute-worker" ./cmd/compute-worker
+            GOOS=linux GOARCH=${arch} CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/linux-${arch}/compute-bench" ./cmd/compute-bench
+
+            # Archive individual binaries
+            tar -czf "dist/compute_${VERSION}_linux_${arch}.tar.gz" -C "dist/linux-${arch}" compute
+            tar -czf "dist/computed_${VERSION}_linux_${arch}.tar.gz" -C "dist/linux-${arch}" computed
+            tar -czf "dist/compute-worker_${VERSION}_linux_${arch}.tar.gz" -C "dist/linux-${arch}" compute-worker
+            tar -czf "dist/compute-bench_${VERSION}_linux_${arch}.tar.gz" -C "dist/linux-${arch}" compute-bench
+
+            # Archive full suite
+            tar -czf "dist/compute-suite_${VERSION}_linux_${arch}.tar.gz" -C "dist/linux-${arch}" compute computed compute-worker compute-bench
+          done
+
+      - name: Generate Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: Compute ${{ steps.vars.outputs.tag }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
