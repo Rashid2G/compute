@@ -28,7 +28,11 @@ API_PORT="${COMPUTE_API_PORT:-18080}"
 DNS_ENABLED="${COMPUTE_DNS_ENABLED:-false}"
 EDGE_LISTEN="${COMPUTE_EDGE_LISTEN:-}"
 GUI_PORT="${COMPUTE_GUI_PORT:-8080}"
-IMAGES_MODE="${COMPUTE_IMAGES_MODE:-build}"
+IMAGES_MODE="${COMPUTE_IMAGES_MODE:-auto}"
+
+have_cmd() {
+    command -v "$1" >/dev/null 2>&1 || [ -x "/sbin/$1" ] || [ -x "/usr/sbin/$1" ]
+}
 
 version_ge() {
     # version_ge HAVE REQUIRED
@@ -128,13 +132,19 @@ else
 fi
 
 section "Kernel modules and sysctls"
+resolve_cmd() {
+    PATH="${PATH}:/sbin:/usr/sbin" command -v "$1" 2>/dev/null || true
+}
 module_available() {
+    local modprobe_bin modinfo_bin
+    modprobe_bin="$(resolve_cmd modprobe)"
+    modinfo_bin="$(resolve_cmd modinfo)"
     # modprobe -n needs module dependency lookups; modinfo works as a
     # non-root fallback when the module exists but is not loaded yet.
-    if command -v modprobe >/dev/null 2>&1 && modprobe -n "$1" >/dev/null 2>&1; then
+    if [ -n "${modprobe_bin}" ] && "${modprobe_bin}" -n "$1" >/dev/null 2>&1; then
         return 0
     fi
-    command -v modinfo >/dev/null 2>&1 && modinfo "$1" >/dev/null 2>&1
+    [ -n "${modinfo_bin}" ] && "${modinfo_bin}" "$1" >/dev/null 2>&1
 }
 for module in tun bridge br_netfilter vhost_net; do
     if [ -d "/sys/module/${module}" ]; then
@@ -150,35 +160,31 @@ for module in tun bridge br_netfilter vhost_net; do
     fi
 done
 
-if command -v sysctl >/dev/null 2>&1; then
-    if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" = "1" ]; then
+SYSCTL_BIN="$(resolve_cmd sysctl)"
+if [ -n "${SYSCTL_BIN}" ]; then
+    if [ "$("${SYSCTL_BIN}" -n net.ipv4.ip_forward 2>/dev/null || echo 0)" = "1" ]; then
         say_ok "net.ipv4.ip_forward=1"
     else
-        say_warn "net.ipv4.ip_forward is not enabled: scripts/host-prepare.sh sets it"
+        say_warn "net.ipv4.ip_forward is not enabled (computed enables it automatically on startup, or run scripts/host-prepare.sh)"
     fi
 fi
 
 section "Image build tools"
-# These are host-side tools used by scripts/build-kernel.sh and
-# scripts/build-rootfs.sh (the default COMPUTE_IMAGES_MODE=build path).
-have_cmd() {
-    command -v "$1" >/dev/null 2>&1 || [ -x "/sbin/$1" ] || [ -x "/usr/sbin/$1" ]
-}
-missing_build_tools=""
-for cmd in curl sha256sum ssh-keygen mkfs.ext4 mount truncate tar; do
-    if have_cmd "${cmd}"; then
-        say_ok "${cmd} available"
-    else
-        missing_build_tools="${missing_build_tools} ${cmd}"
+if [ "${IMAGES_MODE}" = "build" ]; then
+    # Host-side tools are only needed when running scripts/build-rootfs.sh directly.
+    missing_build_tools=""
+    for cmd in curl sha256sum ssh-keygen mkfs.ext4 mount truncate tar; do
+        if have_cmd "${cmd}"; then
+            say_ok "${cmd} available"
+        else
+            missing_build_tools="${missing_build_tools} ${cmd}"
+        fi
+    done
+    if [ -n "${missing_build_tools}" ]; then
+        say_fail "missing image build tools:${missing_build_tools} (install curl, coreutils, openssh-client, e2fsprogs, util-linux, tar; or use COMPUTE_IMAGES_MODE=auto)"
     fi
-done
-if [ -n "${missing_build_tools}" ]; then
-    # The download/prebuilt modes do not need these host tools.
-    if [ "${IMAGES_MODE}" = "build" ]; then
-        say_fail "missing image build tools:${missing_build_tools} (install curl, coreutils, openssh-client, e2fsprogs, util-linux, tar; or use COMPUTE_IMAGES_MODE=prebuilt with prebuilt images)"
-    else
-        say_warn "missing image build tools:${missing_build_tools} (only needed for COMPUTE_IMAGES_MODE=build)"
-    fi
+else
+    say_ok "host image build tools not required for COMPUTE_IMAGES_MODE=${IMAGES_MODE} (compute-init handles bootstrap inside the container)"
 fi
 
 section "Network ports"

@@ -130,48 +130,35 @@
       </section>
 
       <!-- 2. Self-Hosting Quickstart -->
-      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs">
+      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs firecracker">
         <h2>Self-Hosting Quickstart</h2>
         <p>
           Compute runs on any Linux host (<code>x86_64</code> or <code>arm64</code>) with hardware virtualization (<code>/dev/kvm</code>),
-          cgroup v2, and Docker Engine 24+ (or directly on bare metal via <code>systemd</code>).
+          cgroup v2, and rootful Docker Engine 24+ with Compose v2.20+.
+          <strong>Firecracker and Jailer are bundled inside the container image</strong>—you do not need a host <code>firecracker</code> binary or a <code>.env</code> file to start.
         </p>
 
-        <h3>1. Verify Host Readiness &amp; Prepare Kernel Modules</h3>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>./scripts/preflight.sh
-sudo ./scripts/host-prepare.sh</code></pre>
-        </div>
-
-        <h3>2. Configure Environment (<code>.env</code>)</h3>
-        <p>Copy <code>.env.example</code> to <code>.env</code> and configure your administrator credentials:</p>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>cp .env.example .env
-chmod 600 .env</code></pre>
-        </div>
-
-        <h3>3. Install Kernel &amp; Build Rootfs Artifacts</h3>
-        <div class="code-block">
-          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code>sudo ./scripts/build-kernel.sh ./data/images
-sudo ./scripts/build-rootfs.sh ./data/images 1024</code></pre>
-        </div>
-        <p>
-          <code>build-kernel.sh</code> downloads the pinned, checksummed Firecracker
-          <code>vmlinux</code> for your architecture. Both steps are idempotent, or run
-          <code>make build-images</code> to do both at once.
-        </p>
-
-        <h3>4. Launch with Docker Compose</h3>
+        <h3>1. Launch with Docker Compose</h3>
         <div class="code-block">
           <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
           <pre><code>docker compose up -d
-curl -fsS http://127.0.0.1:18080/api/v1/health</code></pre>
+curl -fsS http://127.0.0.1:18080/api/v1/ready</code></pre>
         </div>
         <p>
-          Open <code>http://127.0.0.1:18080/</code> in your browser to sign in to the Compute Web Dashboard.
+          On first startup, <code>compute-init</code> automatically downloads the pinned Firecracker Linux kernel (<code>vmlinux</code>),
+          builds the Ubuntu 24.04 ext4 rootfs inside the container, and generates the internal Ed25519 SSH key under <code>./data/images</code>.
+          Open <code>http://127.0.0.1:18080/</code> in your browser and sign in with the default loopback credentials (<code>admin</code> / <code>admin</code>).
+        </p>
+
+        <h3>2. Optional: Preflight Check &amp; <code>.env</code> Customization</h3>
+        <div class="code-block">
+          <div class="code-header"><span>bash</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code>./scripts/preflight.sh
+cp .env.example .env &amp;&amp; chmod 600 .env</code></pre>
+        </div>
+        <p>
+          Create a <code>.env</code> file before setting <code>COMPUTE_BIND_ADDRESS=0.0.0.0</code> so you can replace the default <code>COMPUTE_ADMIN_PASSWORD</code>.
+          If you prefer building base images on the host instead of automatic container bootstrap, run <code>make build-images</code> (or <code>sudo ./scripts/build-kernel.sh ./data/images</code> and <code>sudo ./scripts/build-rootfs.sh ./data/images 2048</code>).
         </p>
       </section>
 
