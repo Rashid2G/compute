@@ -26,6 +26,8 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { resolveQueuedTask } from '@/lib/queued-task';
+
 import {
   AlertDialog,
   AlertDialogAction,
@@ -482,6 +484,7 @@ export function InstancesPage({
         toast.success(`Queued stop for ${res.queued ?? targets.length} sandboxes`, {
           id: toastID,
         });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Stopped', noun: 'sandboxes' });
       } else if (res.failed.length > 0) {
         toast.warning(
           `Stopped ${res.succeeded.length} of ${res.requested} sandboxes`,
@@ -520,6 +523,7 @@ export function InstancesPage({
         toast.success(`Queued start for ${res.queued ?? toStart.length} sandboxes`, {
           id: toastID,
         });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Started', noun: 'sandboxes' });
       } else if (res.failed.length > 0) {
         toast.warning(
           `Started ${res.succeeded.length} of ${res.requested} sandboxes`,
@@ -569,6 +573,7 @@ export function InstancesPage({
         toast.success(`Queued pause for ${res.queued ?? toSnap.length} sandboxes`, {
           id: toastID,
         });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Paused', noun: 'sandboxes' });
       } else if (res.failed.length > 0) {
         toast.warning(
           `Paused ${res.succeeded.length} of ${res.requested} sandboxes`,
@@ -628,6 +633,7 @@ export function InstancesPage({
         toast.success(`Queued clone of ${res.queued ?? idsToClone.length} sandboxes`, {
           id: toastID,
         });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Cloned', noun: 'sandboxes' });
       } else if (res.failed.length > 0) {
         toast.warning(
           `Cloned ${res.succeeded.length} of ${res.requested} sandboxes`,
@@ -745,6 +751,7 @@ export function InstancesPage({
           toast.success(`Queued deletion of ${res.queued ?? ids.length} sandbox(es)`, {
             id: toastID,
           });
+          void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Deleted', noun: 'sandbox(es)' });
         } else {
           toast.success(`Deleted ${res.succeeded.length} sandbox(es)`, { id: toastID });
         }

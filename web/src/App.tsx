@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Menu } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 
+import { resolveQueuedTask } from '@/lib/queued-task';
+
 import { CommandPalette } from '@/components/command-palette';
 import { CreateVMDialog } from '@/components/create-vm-dialog';
 import { DeleteVMDialog } from '@/components/delete-vm-dialog';
@@ -345,18 +347,28 @@ export default function App() {
     try {
       const created = await api.createVM({ ...payload, auto_start: autoStart });
       const createdName = created?.name || targetName;
-      const statusNote =
-        created.status === 'running'
-          ? `${createdName} is running`
-          : created.status === 'queued'
-            ? `${createdName} queued`
-            : `${createdName} provisioned`;
-      toast.success(statusNote, {
-        id: toastID,
-        description: created.ip_address
-          ? `Address ${created.ip_address}`
-          : 'Address assigned automatically.',
-      });
+      if (autoStart && created.status !== 'running' && created.status !== 'queued') {
+        // The record exists but the requested boot did not complete; say so
+        // instead of reporting a plain success.
+        toast.warning(`${createdName} provisioned but did not start`, {
+          id: toastID,
+          description:
+            'The sandbox was created but its boot did not finish. Check the activity log for the reason.',
+        });
+      } else {
+        const statusNote =
+          created.status === 'running'
+            ? `${createdName} is running`
+            : created.status === 'queued'
+              ? `${createdName} queued`
+              : `${createdName} provisioned`;
+        toast.success(statusNote, {
+          id: toastID,
+          description: created.ip_address
+            ? `Address ${created.ip_address}`
+            : 'Address assigned automatically.',
+        });
+      }
       await cluster.refresh(true);
     } catch (error) {
       toast.error(`Could not provision ${targetName}`, {
@@ -395,6 +407,10 @@ export default function App() {
               'Provisioning continues on the backend even if you refresh or navigate away.',
           });
         }
+        void resolveQueuedTask(res.task_id, toastID, {
+          doneVerb: 'Created',
+          noun: 'sandboxes',
+        });
       } else if (res.failed.length === 0) {
         toast.success(`Provisioned ${res.succeeded.length} sandboxes`, {
           id: toastID,
@@ -473,6 +489,10 @@ export default function App() {
             description: 'The backend is removing processes, leases, and disks.',
           });
         }
+        void resolveQueuedTask(res.task_id, toastID, {
+          doneVerb: 'Deleted',
+          noun: 'sandbox(es)',
+        });
       } else if (res.failed.length === 0) {
         toast.success(`Deleted ${res.succeeded.length} sandbox(es)`, {
           id: toastID,

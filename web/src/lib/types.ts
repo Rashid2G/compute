@@ -863,6 +863,21 @@ export interface BulkVMsResponse {
   requested: number;
   succeeded: string[];
   failed: BulkVMItemError[];
+  warnings?: BulkVMItemError[];
+}
+
+/** Terminal or in-flight state of an asynchronous bulk task. */
+export interface BulkTaskRecord {
+  id: string;
+  action: string;
+  status: 'queued' | 'completed' | 'partial' | 'failed' | string;
+  requested: number;
+  queued: number;
+  succeeded: string[];
+  failed: BulkVMItemError[];
+  warnings?: BulkVMItemError[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface BulkCreateVMsRequest {

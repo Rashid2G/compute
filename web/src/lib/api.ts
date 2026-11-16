@@ -4,6 +4,7 @@ import type {
   AuditEventRecord,
   BulkCloneVMsRequest,
   BulkCreateVMsRequest,
+  BulkTaskRecord,
   BulkVMsRequest,
   BulkVMsResponse,
   CloneVMOptions,
@@ -351,6 +352,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  /** Resolve a queued bulk task's final outcome. */
+  getBulkTask(taskID: string): Promise<BulkTaskRecord> {
+    return request<BulkTaskRecord>(`/tasks/${encodeURIComponent(taskID)}`);
   },
 
   migrateVM(id: string, payload: MigrateVMRequest): Promise<VM> {
