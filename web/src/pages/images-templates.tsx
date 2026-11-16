@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Camera,
   ChevronDown,
@@ -82,6 +82,11 @@ export function ImagesTemplatesPage({
   const [launchName, setLaunchName] = useState('');
   const [launchAutoStart, setLaunchAutoStart] = useState(true);
 
+  const selectedProfileNameRef = useRef(selectedProfileName);
+  selectedProfileNameRef.current = selectedProfileName;
+  const hasPropTemplatesRef = useRef(propTemplates !== undefined);
+  hasPropTemplatesRef.current = propTemplates !== undefined;
+
   const applyProfile = useCallback((p: EnvironmentProfileRecord) => {
     setSelectedProfileName(p.name);
     setSafeForThirdParties(Boolean(p.safe_for_third_parties));
@@ -96,19 +101,20 @@ export function ImagesTemplatesPage({
     setVersion(p.version || 1);
   }, []);
 
-  const loadEnvironments = useCallback(async () => {
+  const loadEnvironments = useCallback(async (overrideName?: string) => {
     try {
       const list = await api.listEnvironments();
       setProfiles(list || []);
+      const targetName = overrideName ?? selectedProfileNameRef.current;
       const current =
-        list.find((item) => item.name === selectedProfileName) || list[0];
+        list.find((item) => item.name === targetName) || list[0];
       if (current) {
         applyProfile(current);
       }
     } catch {
       // Fallback initial state before first save
     }
-  }, [applyProfile, selectedProfileName]);
+  }, [applyProfile]);
 
   const loadSnapshots = useCallback(async () => {
     setLoadingAssets(true);
@@ -130,10 +136,10 @@ export function ImagesTemplatesPage({
 
   useEffect(() => {
     void loadEnvironments();
-    if (propTemplates === undefined) {
+    if (!hasPropTemplatesRef.current) {
       void loadSnapshots();
     }
-  }, [loadEnvironments, loadSnapshots, propTemplates]);
+  }, [loadEnvironments, loadSnapshots]);
 
   async function handleSaveEnvironment() {
     setSavingEnv(true);
@@ -150,7 +156,7 @@ export function ImagesTemplatesPage({
         credential_profile: credentialProfile,
       });
       applyProfile(saved);
-      await loadEnvironments();
+      await loadEnvironments(saved.name);
       toast.success(`Environment "${saved.name}" saved (v${saved.version})`);
     } catch (err) {
       toast.error(`Failed to save environment: ${errorMessage(err)}`);
