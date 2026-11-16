@@ -4,14 +4,15 @@ import "fmt"
 
 // Standard typed error codes
 const (
-	ErrCodeUnauthenticated  = "unauthenticated"
-	ErrCodePermissionDenied = "permission_denied"
-	ErrCodeNotFound         = "not_found"
-	ErrCodeQuotaExceeded    = "quota_exceeded"
-	ErrCodeConflict         = "conflict"
-	ErrCodeBadRequest       = "bad_request"
-	ErrCodeRateLimited      = "rate_limited"
-	ErrCodeInternalError    = "internal_error"
+	ErrCodeUnauthenticated       = "unauthenticated"
+	ErrCodePermissionDenied      = "permission_denied"
+	ErrCodeNotFound              = "not_found"
+	ErrCodeQuotaExceeded         = "quota_exceeded"
+	ErrCodeConflict              = "conflict"
+	ErrCodeBadRequest            = "bad_request"
+	ErrCodeRateLimited           = "rate_limited"
+	ErrCodeInternalError         = "internal_error"
+	ErrCodeResourceLimitExceeded = "RESOURCE_LIMIT_EXCEEDED"
 )
 
 // Error represents a structured error returned in WS responses or HTTP APIs.
@@ -24,6 +25,23 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
+}
+
+// ResourceLimitError describes a capacity or overcommit limit rejection.
+type ResourceLimitError struct {
+	Code       string `json:"code"`
+	Resource   string `json:"resource"`   // "disk", "cpu", "memory"
+	LimitType  string `json:"limit_type"` // "hard", "soft"
+	NodeID     string `json:"node_id,omitempty"`
+	Requested  int64  `json:"requested"`
+	Available  int64  `json:"available"`
+	Limit      int64  `json:"limit"`
+	Message    string `json:"error"`
+	Suggestion string `json:"suggestion,omitempty"`
+}
+
+func (e *ResourceLimitError) Error() string {
+	return e.Message
 }
 
 func NewError(code, message string, traceID string) *Error {

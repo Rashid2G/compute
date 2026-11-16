@@ -41,7 +41,32 @@ function createMockServer() {
       mac_address: '02:fc:00:00:00:10',
       tap_device: 'tap0',
       pid: 12345,
+      worker_id: 'nod-1',
+      pool_id: 'default',
       disk_path: '/var/lib/compute/vms/vm-alpha/disk.ext4',
+      rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
+      kernel_path: '/var/lib/compute/vmlinux',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      protected: false,
+    },
+    {
+      id: 'vm-hibernated',
+      name: 'sbx-hibernated',
+      status: 'stopped',
+      auto_hibernated: true,
+      hibernate_reason: 'memory_pressure',
+      vcpus: 1,
+      memory_mb: 512,
+      disk_mb: 20480,
+      ip_address: '172.16.0.12',
+      public_ip_enabled: false,
+      network_isolation: 'account',
+      mac_address: '02:fc:00:00:00:12',
+      tap_device: 'tap12',
+      worker_id: 'nod-1',
+      pool_id: 'default',
+      disk_path: '/var/lib/compute/vms/vm-hibernated/disk.ext4',
       rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
       kernel_path: '/var/lib/compute/vmlinux',
       created_at: new Date().toISOString(),
@@ -89,6 +114,84 @@ function createMockServer() {
   let portForwards = [];
   let ciRepos = [];
   let jobs = [];
+  let workers = [
+    {
+      id: 'nod-1',
+      name: 'worker-01',
+      pool_id: 'default',
+      role: 'worker',
+      status: 'ready',
+      underlay_ip: '10.0.1.11',
+      arch: 'amd64',
+      total_vcpus: 16,
+      allocated_vcpus: 16,
+      physical_vcpus: 16,
+      used_vcpus: 2,
+      total_mem_mb: 32768,
+      allocated_mem_mb: 32768,
+      physical_mem_mb: 32768,
+      used_mem_mb: 1024,
+      available_mem_mb: 31744,
+      total_disk_mb: 512000,
+      allocated_disk_mb: 512000,
+      physical_disk_mb: 512000,
+      used_disk_mb: 20480,
+      available_disk_mb: 491520,
+      running_vms: 1,
+      fc_version: '1.9.1',
+      agent_version: '1.0.0',
+      last_heartbeat: new Date().toISOString(),
+    },
+    {
+      id: 'nod-2',
+      name: 'worker-02',
+      pool_id: 'gpu-pool',
+      role: 'worker',
+      status: 'ready',
+      underlay_ip: '10.0.1.12',
+      arch: 'amd64',
+      total_vcpus: 32,
+      allocated_vcpus: 32,
+      physical_vcpus: 32,
+      used_vcpus: 0,
+      total_mem_mb: 65536,
+      allocated_mem_mb: 65536,
+      physical_mem_mb: 65536,
+      used_mem_mb: 0,
+      available_mem_mb: 65536,
+      total_disk_mb: 1024000,
+      allocated_disk_mb: 1024000,
+      physical_disk_mb: 1024000,
+      used_disk_mb: 0,
+      available_disk_mb: 1024000,
+      running_vms: 0,
+      fc_version: '1.9.1',
+      agent_version: '1.0.0',
+      last_heartbeat: new Date().toISOString(),
+    },
+  ];
+  let pools = [
+    { id: 'pool-default', name: 'default', labels_json: '{}', policy_json: '{}', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+    { id: 'pool-gpu', name: 'gpu-pool', labels_json: '{}', policy_json: '{}', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  ];
+  let workerTokens = [];
+  let schedulingPolicy = {
+    strategy: 'least_loaded',
+    cpu_weight: 1.0,
+    memory_weight: 1.0,
+    disk_weight: 0.5,
+    cpu_soft_overcommit_ratio: 4.0,
+    cpu_hard_overcommit_ratio: 6.0,
+    cpu_share_weight_base: 1024,
+    memory_hard_guarantee: true,
+    idle_ram_snapshot_enabled: true,
+    idle_threshold_seconds: 900,
+    auto_reclaim_on_pressure: true,
+    host_reserved_vcpus: 1,
+    host_reserved_memory_mb: 1024,
+    host_reserved_disk_mb: 4096,
+    disk_hard_enforcement: true,
+  };
   let users = [
     {
       id: 'usr_admin',
@@ -103,6 +206,11 @@ function createMockServer() {
   const cloneCalls = [];
   const launchCalls = [];
   const createCalls = [];
+  const migrateCalls = [];
+  const workerUpdateCalls = [];
+  const policyUpdateCalls = [];
+  const poolMigrateCalls = [];
+  const bulkDeleteCalls = [];
   let currentUserRole = 'admin';
 
   const mime = {
@@ -281,9 +389,44 @@ function createMockServer() {
         return json(201, pf);
       }
       if (p === '/api/v1/volumes' && req.method === 'GET') return json(200, volumes);
-      if (p === '/api/v1/workers') return json(200, []);
-      if (p === '/api/v1/worker-tokens') return json(200, []);
-      if (p === '/api/v1/pools') return json(200, []);
+      if (p === '/api/v1/workers' && req.method === 'GET') return json(200, workers);
+      const workerUpdateMatch = p.match(/^\/api\/v1\/workers\/([^/]+)$/);
+      if (workerUpdateMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+        workerUpdateCalls.push({ id: workerUpdateMatch[1], body });
+        workers = workers.map((w) => (w.id === workerUpdateMatch[1] ? { ...w, ...body } : w));
+        return json(200, workers.find((w) => w.id === workerUpdateMatch[1]) || {});
+      }
+      if (p === '/api/v1/worker-tokens' && req.method === 'GET') return json(200, workerTokens);
+      if (p === '/api/v1/worker-tokens' && req.method === 'POST') {
+        const wt = { id: `wt-${Date.now()}`, token: `wt_tok_${Date.now()}`, prefix: 'wt_tok_', pool_id: body.pool_id || 'default', created_at: new Date().toISOString() };
+        workerTokens = [...workerTokens, wt];
+        return json(201, wt);
+      }
+      if (p.match(/^\/api\/v1\/worker-tokens\/[^/]+$/) && req.method === 'DELETE') {
+        const tid = p.split('/').pop();
+        workerTokens = workerTokens.filter((wt) => wt.id !== tid && wt.token !== tid);
+        return json(200, { status: 'revoked' });
+      }
+      if (p === '/api/v1/pools' && req.method === 'GET') return json(200, pools);
+      const poolMigrateMatch = p.match(/^\/api\/v1\/pools\/([^/]+)\/migrate$/);
+      if (poolMigrateMatch && req.method === 'POST') {
+        poolMigrateCalls.push({ pool: poolMigrateMatch[1], body });
+        return json(200, {
+          source_pool: poolMigrateMatch[1],
+          target_pool: body.target_pool_id || '',
+          workers_moved: 1,
+          workers_failed: 0,
+          sandboxes_migrated: 1,
+          sandboxes_failed: 0,
+          errors: [],
+        });
+      }
+      if (p === '/api/v1/scheduler/policy' && req.method === 'GET') return json(200, schedulingPolicy);
+      if (p === '/api/v1/scheduler/policy' && req.method === 'PUT') {
+        policyUpdateCalls.push(body);
+        schedulingPolicy = { ...schedulingPolicy, ...body, updated_at: new Date().toISOString() };
+        return json(200, schedulingPolicy);
+      }
       if (p === '/api/v1/events') return json(200, []);
       if (p === '/api/v1/events/stream') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -352,6 +495,19 @@ function createMockServer() {
 
       if (p === '/api/v1/vms' && req.method === 'GET') return json(200, vms);
       if (p === '/api/v1/vms' && req.method === 'POST') {
+        if (body.name === 'sbx-limit-test') {
+          return json(429, {
+            code: 'RESOURCE_LIMIT_EXCEEDED',
+            error: 'Worker node memory limit exceeded',
+            resource: 'memory_mb',
+            limit_type: 'worker_allocation',
+            node_id: 'nod-1',
+            requested: 4096,
+            available: 512,
+            limit: 32768,
+            suggestion: 'Select another worker pool or reduce sandbox memory',
+          });
+        }
         createCalls.push(body);
         const created = {
           id: `vm-created-${createCalls.length}`,
@@ -360,6 +516,8 @@ function createMockServer() {
           vcpus: body.vcpus || 2,
           memory_mb: body.memory_mb || 2048,
           disk_mb: body.disk_mb || ((body.disk_gb || 20) * 1024),
+          worker_id: body.worker_id || 'nod-1',
+          pool_id: body.pool_id || 'default',
           ip_address: `172.16.0.${30 + createCalls.length}`,
           mac_address: `02:fc:00:00:00:3${createCalls.length}`,
           tap_device: `tap3${createCalls.length}`,
@@ -372,6 +530,12 @@ function createMockServer() {
         vms = [...vms, created];
         return json(201, created);
       }
+      if (p === '/api/v1/vms/bulk-delete' && req.method === 'POST') {
+        bulkDeleteCalls.push(body);
+        const ids = Array.isArray(body.ids) ? body.ids : (Array.isArray(body.vm_ids) ? body.vm_ids : []);
+        vms = vms.filter((v) => !ids.includes(v.id));
+        return json(200, { action: 'delete', requested: ids.length, succeeded: ids, failed: [] });
+      }
 
       const vmMatch = p.match(/^\/api\/v1\/vms\/([^/]+)(?:\/(.*))?$/);
       if (vmMatch) {
@@ -379,6 +543,19 @@ function createMockServer() {
         const src = vms.find((v) => v.id === id);
         if (sub === 'run' && req.method === 'POST') {
           vms = vms.map((v) => (v.id === id ? { ...v, status: 'running' } : v));
+          return json(200, vms.find((v) => v.id === id));
+        }
+        if (sub === 'migrate' && req.method === 'POST') {
+          migrateCalls.push({ id, body });
+          vms = vms.map((v) =>
+            v.id === id
+              ? {
+                  ...v,
+                  worker_id: body.target_worker_id || v.worker_id,
+                  pool_id: body.target_pool_id || v.pool_id,
+                }
+              : v,
+          );
           return json(200, vms.find((v) => v.id === id));
         }
         if (sub === 'clone' && req.method === 'POST') {
@@ -506,6 +683,11 @@ function createMockServer() {
     cloneCalls,
     launchCalls,
     createCalls,
+    migrateCalls,
+    workerUpdateCalls,
+    policyUpdateCalls,
+    poolMigrateCalls,
+    bulkDeleteCalls,
     setUserRole: (role) => {
       currentUserRole = role;
     },
@@ -586,7 +768,17 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
     return;
   }
 
-  const { server, cloneCalls, launchCalls, createCalls, setUserRole } = createMockServer();
+  const {
+    server,
+    cloneCalls,
+    launchCalls,
+    createCalls,
+    migrateCalls,
+    workerUpdateCalls,
+    policyUpdateCalls,
+    poolMigrateCalls,
+    setUserRole,
+  } = createMockServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   const baseUrl = `http://127.0.0.1:${port}/`;
@@ -653,6 +845,7 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
         btn.click();
         return true;
       };
+      window.__getToastsText = () => Array.from(document.querySelectorAll('[data-sonner-toast]')).map(el => el.innerText.trim()).join(' | ');
       window.__setReactInput = (el, value) => {
         const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : el.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
@@ -857,6 +1050,137 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       assert(resText.includes('Platform Allocations'), 'Expected Platform Allocations section');
       const hasWarning = await cdp.evalJS(`document.querySelector('[data-testid="capacity-warnings-banner"]')?.innerText.includes('Memory headroom approaching threshold')`);
       assert.equal(hasWarning, true, 'Expected capacity warnings banner');
+    });
+
+    await t.test('Zero manual Refresh buttons exist across views', async () => {
+      const routes = [
+        { hash: '#/instances', waitForExpr: `document.body.innerText.includes('sbx-alpha')` },
+        { hash: '#/snapshots', waitForExpr: `document.body.innerText.includes('Create Snapshot')` },
+        { hash: '#/storage', waitForExpr: `document.body.innerText.includes('Persistent Volumes')` },
+        { hash: '#/jobs', waitForExpr: `document.body.innerText.includes('CI Jobs')` },
+        { hash: '#/workers', waitForExpr: `document.body.innerText.includes('Worker Nodes')` },
+        { hash: '#/resources', waitForExpr: `document.body.innerText.includes('Platform Allocations')` },
+        { hash: '#/settings', waitForExpr: `document.body.innerText.includes('Default VM Resources')` },
+        { hash: '#/access', waitForExpr: `document.body.innerText.includes('Create API Key')` },
+        { hash: '#/events', waitForExpr: `document.body.innerText.includes('Add Webhook')` },
+      ];
+      for (const r of routes) {
+        await cdp.evalJS(`window.location.hash = '${r.hash}'`);
+        await waitFor(cdp, `window.location.hash === '${r.hash}' && ${r.waitForExpr}`, 4000, `route ${r.hash}`);
+        const badButtons = await cdp.evalJS(`
+          Array.from(document.querySelectorAll('button'))
+            .map(b => (b.innerText || '').trim())
+            .filter(t => t === 'Refresh' || t === 'Refresh Logs' || t === 'Refresh Cluster State')
+        `);
+        assert.deepEqual(badButtons, [], `Unexpected manual refresh buttons on ${r.hash}: ${JSON.stringify(badButtons)}`);
+      }
+    });
+
+    await t.test('Create Sandbox Placement selector and 429 ResourceLimitError formatting', async () => {
+      await cdp.evalJS(`window.location.hash = '#/instances'`);
+      await waitFor(cdp, `window.location.hash === '#/instances' && document.body.innerText.includes('sbx-alpha')`, 4000, 'instances for placement');
+
+      await cdp.evalJS(`window.__clickButtonByText('New')`);
+      await waitFor(cdp, `document.getElementById('advanced-create-title') !== null`, 3000, 'create modal open for worker placement');
+      await cdp.evalJS(`window.__clickButtonByText('Worker Node')`);
+      await waitFor(cdp, `document.querySelector('select[aria-label="Placement worker node"]') !== null`, 3000, 'placement worker select visible');
+      await cdp.evalJS(`(() => {
+        const sel = document.querySelector('select[aria-label="Placement worker node"]');
+        window.__setReactInput(sel, 'nod-2');
+        const input = document.querySelector('input[aria-label="Sandbox name"]');
+        window.__setReactInput(input, 'sbx-placed-w2');
+        input.closest('form').requestSubmit();
+      })()`);
+      await waitFor(cdp, `document.getElementById('advanced-create-title') === null`, 3000, 'placed create modal closed');
+      await waitFor(cdp, `document.body.innerText.includes('sbx-placed-w2')`, 4000, 'placed sandbox rendered');
+      const placedCall = createCalls.find((c) => c.name === 'sbx-placed-w2');
+      assert(placedCall, 'Expected sbx-placed-w2 create call');
+      assert.equal(placedCall.worker_id, 'nod-2');
+      assert.equal(placedCall.pool_id, 'gpu-pool');
+
+      // Test 429 ResourceLimitError toast formatting
+      await cdp.evalJS(`window.__clickButtonByText('New')`);
+      await waitFor(cdp, `document.getElementById('advanced-create-title') !== null`, 3000, 'create modal open for 429');
+      await cdp.evalJS(`(() => {
+        const input = document.querySelector('input[aria-label="Sandbox name"]');
+        window.__setReactInput(input, 'sbx-limit-test');
+        input.closest('form').requestSubmit();
+      })()`);
+      await waitFor(
+        cdp,
+        `window.__getToastsText().includes('Worker node memory limit exceeded') && window.__getToastsText().includes('nod-1') && window.__getToastsText().includes('Select another worker pool')`,
+        4000,
+        '429 ResourceLimitError formatted toast',
+      );
+    });
+
+    await t.test('Workers page supports expandable sandboxes, Edit Allocation/Pool, Load Balancer policy & Pool Migration', async () => {
+      await cdp.evalJS(`window.location.hash = '#/workers'`);
+      await waitFor(cdp, `window.location.hash === '#/workers' && document.body.innerText.includes('worker-01')`, 4000, 'workers loaded');
+
+      // Expand worker-01 sandboxes
+      await cdp.evalJS(`document.querySelector('button[aria-label="Toggle sandboxes for worker-01"]').click()`);
+      await waitFor(cdp, `document.body.innerText.includes('Sandboxes on worker-01') && document.body.innerText.includes('sbx-alpha')`, 3000, 'expanded worker sandboxes');
+
+      // Edit node allocation & pool
+      await cdp.evalJS(`document.querySelector('button[title="Edit Node Allocation & Pool"]').click()`);
+      await waitFor(cdp, `document.body.innerText.includes('Edit Node Allocation & Pool')`, 3000, 'edit node modal open');
+      await cdp.evalJS(`(() => {
+        const poolSel = document.querySelector('select[aria-label="Node Pool"]');
+        window.__setReactInput(poolSel, 'gpu-pool');
+        poolSel.closest('form').requestSubmit();
+      })()`);
+      await waitFor(cdp, `!document.body.innerText.includes('Edit Node Allocation & Pool')`, 3000, 'edit node modal closed');
+      await waitFor(cdp, `window.__getToastsText().includes('Updated node worker-01')`, 3000, 'edit node toast success');
+      assert.equal(workerUpdateCalls.length, 1);
+      assert.equal(workerUpdateCalls[0].body.pool_id, 'gpu-pool');
+
+      // Save Cluster Load Balancer & Resource Policy
+      await cdp.evalJS(`(() => {
+        const stratSel = document.querySelector('select[aria-label="Placement Strategy"]');
+        window.__setReactInput(stratSel, 'bin_pack');
+      })()`);
+      await cdp.evalJS(`window.__clickButtonByText('Save Policy')`);
+      await waitFor(cdp, `window.__getToastsText().includes('Scheduling & load-balancer policy updated')`, 3000, 'policy save toast');
+      assert.equal(policyUpdateCalls.length, 1);
+      assert.equal(policyUpdateCalls[0].strategy, 'bin_pack');
+
+      // Migrate Pool
+      await cdp.evalJS(`window.__clickButtonByText('Migrate Pool')`);
+      await waitFor(cdp, `document.querySelector('[role="dialog"][aria-label="Migrate Pool"]') !== null`, 3000, 'migrate pool modal open');
+      await cdp.evalJS(`(() => {
+        const dlg = document.querySelector('[role="dialog"][aria-label="Migrate Pool"]');
+        const destSel = dlg.querySelector('select[aria-label="Destination Pool"]');
+        window.__setReactInput(destSel, 'gpu-pool');
+        dlg.querySelector('form').requestSubmit();
+      })()`);
+      await waitFor(cdp, `document.querySelector('[role="dialog"][aria-label="Migrate Pool"]') === null`, 3000, 'migrate pool modal closed');
+      await waitFor(cdp, `window.__getToastsText().includes('Migrated pool')`, 3000, 'migrate pool toast');
+      assert.equal(poolMigrateCalls.length, 1);
+      assert.equal(poolMigrateCalls[0].body.target_pool_id, 'gpu-pool');
+    });
+
+    await t.test('Instances shows SSD Hibernated badge and Migrate Sandbox modal', async () => {
+      await cdp.evalJS(`window.location.hash = '#/instances'`);
+      await waitFor(cdp, `window.location.hash === '#/instances' && document.body.innerText.includes('sbx-hibernated')`, 4000, 'instances with hibernated VM');
+      const instText = await cdp.evalJS(`document.body.innerText`);
+      assert(instText.toUpperCase().includes('SSD HIBERNATED'), 'Expected SSD Hibernated badge on hibernated sandbox');
+
+      await cdp.realClick(`document.querySelector('button[aria-label="More actions for sbx-alpha"]')`);
+      await waitFor(cdp, `Array.from(document.querySelectorAll('[role="menuitem"]')).some(el => el.innerText.trim() === 'Migrate Sandbox')`, 3000, 'migrate menu item open');
+      await sleep(120);
+      await cdp.realClick(`Array.from(document.querySelectorAll('[role="menuitem"]')).find(el => el.innerText.trim() === 'Migrate Sandbox')`);
+      await waitFor(cdp, `document.querySelector('form[aria-label="Migrate Sandbox"]') !== null`, 3000, 'migrate sandbox modal open');
+      await cdp.evalJS(`(() => {
+        const form = document.querySelector('form[aria-label="Migrate Sandbox"]');
+        const workerSel = form.querySelector('select[aria-label="Target Worker Node"]');
+        window.__setReactInput(workerSel, 'nod-2');
+        form.requestSubmit();
+      })()`);
+      await waitFor(cdp, `document.querySelector('form[aria-label="Migrate Sandbox"]') === null`, 3000, 'migrate sandbox modal closed');
+      await waitFor(cdp, `window.__getToastsText().includes('Migrated sandbox sbx-alpha')`, 3000, 'migrate sandbox toast');
+      assert.equal(migrateCalls.length, 1);
+      assert.equal(migrateCalls[0].body.target_worker_id, 'nod-2');
     });
 
     await t.test('Access Users tab displays signup status, provisions users, and deletes non-admin users', async () => {

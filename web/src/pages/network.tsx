@@ -3,7 +3,7 @@ import {
   Activity,
   Network,
   Plus,
-  RefreshCw,
+  RotateCw,
   Trash2,
   X,
 } from 'lucide-react';
@@ -22,6 +22,7 @@ import { cn } from '@/lib/utils';
 interface NetworkPageProps {
   allocations: NetworkAllocation[];
   networkConfig: NetworkConfig | null;
+  portForwards?: PortForwardRecord[];
   onRefresh: () => void;
   embedded?: boolean;
 }
@@ -29,6 +30,7 @@ interface NetworkPageProps {
 export function NetworkPage({
   allocations,
   networkConfig,
+  portForwards: portForwardsProp,
   onRefresh,
   embedded = false,
 }: NetworkPageProps) {
@@ -39,21 +41,30 @@ export function NetworkPage({
     useState<NetworkInspectResult | null>(null);
   const [inspectingId, setInspectingId] = useState<string | null>(null);
 
-  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>(
+    () => portForwardsProp ?? [],
+  );
   const [addPfOpen, setAddPfOpen] = useState(false);
   const [pfHostPort, setPfHostPort] = useState(18081);
   const [pfGuestPort, setPfGuestPort] = useState(8080);
   const [pfVmId, setPfVmId] = useState('');
   const [pfProto, setPfProto] = useState('tcp');
 
-  const loadPortForwards = useCallback(async () => {
+  useEffect(() => {
+    if (portForwardsProp !== undefined) {
+      setPortForwards(portForwardsProp);
+    }
+  }, [portForwardsProp]);
+
+  const loadPortForwards = useCallback(async (force = false) => {
+    if (!force && portForwardsProp !== undefined) return;
     try {
       const list = await api.listPortForwards();
       setPortForwards(list || []);
     } catch {
       // Ignore if empty
     }
-  }, []);
+  }, [portForwardsProp]);
 
   useEffect(() => {
     void loadPortForwards();
@@ -114,7 +125,7 @@ export function NetworkPage({
           `Added DNAT port forward :${payload.host_port} -> :${payload.guest_port}`,
           { id: toastID },
         );
-        await loadPortForwards();
+        await loadPortForwards(true);
       })
       .catch((err) => {
         toast.error(errorMessage(err), { id: toastID });
@@ -159,11 +170,11 @@ export function NetworkPage({
             type="button"
             onClick={() => {
               onRefresh();
-              void loadPortForwards();
+              void loadPortForwards(true);
             }}
             className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
-            <RefreshCw className="h-3.5 w-3.5" />
+            <RotateCw className="h-3.5 w-3.5" />
             <span>Reconcile Bridge</span>
           </button>
         </div>
@@ -560,7 +571,7 @@ export function NetworkPage({
                               .deletePortForward(pf.id)
                               .then(() => {
                                 toast.success('Deleted port forward rule');
-                                void loadPortForwards();
+                                void loadPortForwards(true);
                               })
                               .catch((err) => toast.error(errorMessage(err)));
                           }}

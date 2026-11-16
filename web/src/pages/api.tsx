@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import type { DaemonConfig, VMTier } from '@/lib/types';
@@ -76,15 +75,6 @@ export function ApiPage({ config, embedded = false }: ApiPageProps) {
               Supported VM tiers and live REST control-plane reference.
             </p>
           </div>
-
-          <button
-            type="button"
-            onClick={() => void loadData()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
         </div>
       )}
 

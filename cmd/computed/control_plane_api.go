@@ -19,6 +19,7 @@ import (
 
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/vm"
 	"github.com/google/uuid"
 )
 
@@ -227,36 +228,57 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
+		var vol *db.Volume
+		var statusCode int
+		var opErr error
+		_ = s.vmMgr.WithDiskLock(func() error {
+			if err := s.vmMgr.CheckDiskCapacity(ctx, int64(req.SizeGB)*1024, 16); err != nil {
+				statusCode = http.StatusTooManyRequests
+				opErr = err
+				return err
+			}
 
-		volID := "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
-		path, err := s.vmMgr.GetStorageManager().CreateDataVolume(volID, req.SizeGB, req.Filesystem)
-		if err != nil {
-			httpError(w, "failed to allocate volume: "+err.Error(), http.StatusBadRequest)
-			return
-		}
+			volID := "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+			path, err := s.vmMgr.GetStorageManager().CreateDataVolume(volID, req.SizeGB, req.Filesystem)
+			if err != nil {
+				statusCode = http.StatusBadRequest
+				opErr = fmt.Errorf("failed to allocate volume: %w", err)
+				return opErr
+			}
 
-		vol := &db.Volume{
-			ID:         volID,
-			OwnerID:    volOwner,
-			Name:       req.Name,
-			Pool:       req.Pool,
-			SizeGB:     req.SizeGB,
-			UsedGB:     0.0,
-			Status:     status,
-			AttachedVM: req.AttachedVM,
-			DevicePath: devicePath,
-			MountPoint: mountPoint,
-			Filesystem: req.Filesystem,
-			Path:       path,
-			IOPS:       3200,
-			Throughput: "250 MB/s",
-			Snapshots:  0,
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
-		}
-		if err := st.SaveVolume(ctx, vol); err != nil {
-			_ = s.vmMgr.GetStorageManager().DeleteDataVolume(path)
-			httpError(w, err.Error(), http.StatusInternalServerError)
+			candidate := &db.Volume{
+				ID:         volID,
+				OwnerID:    volOwner,
+				Name:       req.Name,
+				Pool:       req.Pool,
+				SizeGB:     req.SizeGB,
+				UsedGB:     0.0,
+				Status:     status,
+				AttachedVM: req.AttachedVM,
+				DevicePath: devicePath,
+				MountPoint: mountPoint,
+				Filesystem: req.Filesystem,
+				Path:       path,
+				IOPS:       3200,
+				Throughput: "250 MB/s",
+				Snapshots:  0,
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			if err := st.SaveVolume(ctx, candidate); err != nil {
+				_ = s.vmMgr.GetStorageManager().DeleteDataVolume(path)
+				statusCode = http.StatusInternalServerError
+				opErr = err
+				return err
+			}
+			vol = candidate
+			return nil
+		})
+		if opErr != nil {
+			if writeResourceLimitError(w, r, opErr) {
+				return
+			}
+			httpError(w, opErr.Error(), statusCode)
 			return
 		}
 
@@ -420,13 +442,32 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
-		if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
-			httpError(w, "failed to expand volume: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		vol.SizeGB += req.AddGB
-		if err := st.SaveVolume(ctx, vol); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		var statusCode int
+		var opErr error
+		_ = s.vmMgr.WithDiskLock(func() error {
+			if err := s.vmMgr.CheckDiskCapacity(ctx, int64(req.AddGB)*1024, 16); err != nil {
+				statusCode = http.StatusTooManyRequests
+				opErr = err
+				return err
+			}
+			if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
+				statusCode = http.StatusBadRequest
+				opErr = fmt.Errorf("failed to expand volume: %w", err)
+				return opErr
+			}
+			vol.SizeGB += req.AddGB
+			if err := st.SaveVolume(ctx, vol); err != nil {
+				statusCode = http.StatusInternalServerError
+				opErr = err
+				return err
+			}
+			return nil
+		})
+		if opErr != nil {
+			if writeResourceLimitError(w, r, opErr) {
+				return
+			}
+			httpError(w, opErr.Error(), statusCode)
 			return
 		}
 		s.recordEvent("volume.expanded", getActor(r), vol.Name, "delivered", 20, map[string]interface{}{"added_gb": req.AddGB, "new_size": vol.SizeGB})
@@ -439,13 +480,40 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if _, err := s.vmMgr.GetStorageManager().SnapshotDataVolume(vol.Path, vol.Snapshots+1); err != nil {
-			httpError(w, "failed to snapshot volume: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		vol.Snapshots++
-		if err := st.SaveVolume(ctx, vol); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		var statusCode int
+		var opErr error
+		_ = s.vmMgr.WithDiskLock(func() error {
+			reqLogicalMB := int64(vol.SizeGB) * 1024
+			if reqLogicalMB < 16 {
+				reqLogicalMB = 16
+			}
+			reqPhysMB := vm.FileAllocatedMB(vol.Path)
+			if reqPhysMB < 16 {
+				reqPhysMB = 16
+			}
+			if err := s.vmMgr.CheckDiskCapacity(ctx, reqLogicalMB, reqPhysMB); err != nil {
+				statusCode = http.StatusTooManyRequests
+				opErr = err
+				return err
+			}
+			if _, err := s.vmMgr.GetStorageManager().SnapshotDataVolume(vol.Path, vol.Snapshots+1); err != nil {
+				statusCode = http.StatusBadRequest
+				opErr = fmt.Errorf("failed to snapshot volume: %w", err)
+				return opErr
+			}
+			vol.Snapshots++
+			if err := st.SaveVolume(ctx, vol); err != nil {
+				statusCode = http.StatusInternalServerError
+				opErr = err
+				return err
+			}
+			return nil
+		})
+		if opErr != nil {
+			if writeResourceLimitError(w, r, opErr) {
+				return
+			}
+			httpError(w, opErr.Error(), statusCode)
 			return
 		}
 		s.recordEvent("volume.snapshot.created", getActor(r), vol.Name, "delivered", 35, map[string]interface{}{"snapshots": vol.Snapshots})
