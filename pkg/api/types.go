@@ -350,4 +350,7 @@ type BulkVMsResponse struct {
 	Queued    int               `json:"queued,omitempty"`
 	Succeeded []string          `json:"succeeded"`
 	Failed    []BulkVMItemError `json:"failed"`
+	// Warnings reports items that were created but could not fully start, so a
+	// queued bulk create does not silently look like a clean success.
+	Warnings []BulkVMItemError `json:"warnings,omitempty"`
 }

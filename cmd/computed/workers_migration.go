@@ -1078,6 +1078,10 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "ids is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.IDs) > maxBulkRequestItems {
+		httpError(w, fmt.Sprintf("too many ids: %d (max %d per request)", len(req.IDs), maxBulkRequestItems), http.StatusBadRequest)
+		return
+	}
 
 	ctx := r.Context()
 	actor := getActor(r)
@@ -1148,6 +1152,11 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
 			}
 		}
+		if validCount > 0 && s.ensureOpQueue().wouldExceed(validCount) {
+			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
+			return
+		}
+		s.recordQueuedTask(resp)
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -1157,12 +1166,42 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 			reconcileOwners := make(map[string]bool)
 			localDeleted := false
 
+			finish := func(bgCtx context.Context) {
+				if remaining.Add(-1) != 0 {
+					return
+				}
+				mu.Lock()
+				ownersCopy := make([]string, 0, len(reconcileOwners))
+				for owner := range reconcileOwners {
+					ownersCopy = append(ownersCopy, owner)
+				}
+				doReconcile := localDeleted
+				summary := api.BulkVMsResponse{
+					Action:    "delete",
+					Status:    "completed",
+					TaskID:    taskID,
+					Requested: len(req.IDs),
+					Succeeded: succeeded,
+					Failed:    failed,
+				}
+				mu.Unlock()
+				s.recordTaskSummary(summary)
+				if doReconcile && s.vmMgr != nil {
+					for _, owner := range ownersCopy {
+						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
+					}
+					s.vmMgr.ProcessQueue(bgCtx)
+				}
+				s.recordEvent("sandbox.bulk_deleted", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 50, summary)
+				s.broadcastClusterUpdate()
+			}
+
 			for _, t := range targets {
 				if t.resolveErr != "" {
 					continue
 				}
 				target := t
-				s.enqueueBackendOp(func(bgCtx context.Context) {
+				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
 					delErr := execOneDelete(bgCtx, target.vm)
 					mu.Lock()
 					if delErr != nil {
@@ -1180,32 +1219,14 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 					}
 					mu.Unlock()
 					s.broadcastClusterUpdate()
-					if remaining.Add(-1) == 0 {
-						mu.Lock()
-						ownersCopy := make([]string, 0, len(reconcileOwners))
-						for owner := range reconcileOwners {
-							ownersCopy = append(ownersCopy, owner)
-						}
-						doReconcile := localDeleted
-						summary := api.BulkVMsResponse{
-							Action:    "delete",
-							Status:    "completed",
-							TaskID:    taskID,
-							Requested: len(req.IDs),
-							Succeeded: succeeded,
-							Failed:    failed,
-						}
-						mu.Unlock()
-						if doReconcile && s.vmMgr != nil {
-							for _, owner := range ownersCopy {
-								s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
-							}
-							s.vmMgr.ProcessQueue(bgCtx)
-						}
-						s.recordEvent("sandbox.bulk_deleted", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 50, summary)
-						s.broadcastClusterUpdate()
-					}
+					finish(bgCtx)
 				})
+				if enqErr != nil {
+					mu.Lock()
+					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
+					mu.Unlock()
+					finish(context.Background())
+				}
 			}
 		}
 		s.recordEvent("sandbox.bulk_queued", actor, fmt.Sprintf("delete %d sandboxes", validCount), "queued", 0, resp)
@@ -1297,6 +1318,10 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.IDs) == 0 {
 		httpError(w, "ids is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.IDs) > maxBulkRequestItems {
+		httpError(w, fmt.Sprintf("too many ids: %d (max %d per request)", len(req.IDs), maxBulkRequestItems), http.StatusBadRequest)
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(req.Action))
@@ -1455,6 +1480,11 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
 			}
 		}
+		if validCount > 0 && s.ensureOpQueue().wouldExceed(validCount) {
+			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
+			return
+		}
+		s.recordQueuedTask(resp)
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -1464,12 +1494,42 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 			reconcileOwners := make(map[string]bool)
 			localNeedsReconcile := false
 
+			finish := func(bgCtx context.Context) {
+				if remaining.Add(-1) != 0 {
+					return
+				}
+				mu.Lock()
+				ownersCopy := make([]string, 0, len(reconcileOwners))
+				for owner := range reconcileOwners {
+					ownersCopy = append(ownersCopy, owner)
+				}
+				doReconcile := localNeedsReconcile
+				summary := api.BulkVMsResponse{
+					Action:    action,
+					Status:    "completed",
+					TaskID:    taskID,
+					Requested: len(req.IDs),
+					Succeeded: succeeded,
+					Failed:    failed,
+				}
+				mu.Unlock()
+				s.recordTaskSummary(summary)
+				if doReconcile && s.vmMgr != nil {
+					for _, owner := range ownersCopy {
+						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
+					}
+					s.vmMgr.ProcessQueue(bgCtx)
+				}
+				s.recordEvent("sandbox.bulk_"+action, actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 50, summary)
+				s.broadcastClusterUpdate()
+			}
+
 			for _, t := range targets {
 				if t.resolveErr != "" {
 					continue
 				}
 				target := t
-				s.enqueueBackendOp(func(bgCtx context.Context) {
+				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
 					opErr := execOneAction(bgCtx, target.vm)
 					mu.Lock()
 					if opErr != nil {
@@ -1487,32 +1547,14 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					}
 					mu.Unlock()
 					s.broadcastClusterUpdate()
-					if remaining.Add(-1) == 0 {
-						mu.Lock()
-						ownersCopy := make([]string, 0, len(reconcileOwners))
-						for owner := range reconcileOwners {
-							ownersCopy = append(ownersCopy, owner)
-						}
-						doReconcile := localNeedsReconcile
-						summary := api.BulkVMsResponse{
-							Action:    action,
-							Status:    "completed",
-							TaskID:    taskID,
-							Requested: len(req.IDs),
-							Succeeded: succeeded,
-							Failed:    failed,
-						}
-						mu.Unlock()
-						if doReconcile && s.vmMgr != nil {
-							for _, owner := range ownersCopy {
-								s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
-							}
-							s.vmMgr.ProcessQueue(bgCtx)
-						}
-						s.recordEvent("sandbox.bulk_"+action, actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 50, summary)
-						s.broadcastClusterUpdate()
-					}
+					finish(bgCtx)
 				})
+				if enqErr != nil {
+					mu.Lock()
+					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
+					mu.Unlock()
+					finish(context.Background())
+				}
 			}
 		}
 		s.recordEvent("sandbox.bulk_queued", actor, fmt.Sprintf("%s %d sandboxes", action, validCount), "queued", 0, resp)

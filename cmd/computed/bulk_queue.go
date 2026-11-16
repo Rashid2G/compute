@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,20 +20,36 @@ import (
 	"github.com/google/uuid"
 )
 
-const backendOpQueueWorkers = 4
+const (
+	backendOpQueueWorkers = 4
+	// backendOpQueueMaxDepth bounds how many operations may sit in the backend
+	// queue at once. Bulk handlers reject new work with 429 above this depth so
+	// a client cannot enqueue unbounded closures (memory DoS / cross-tenant
+	// starvation).
+	backendOpQueueMaxDepth = 1024
+	// maxBulkRequestItems bounds how many items a single bulk request may
+	// carry. Larger requests are rejected with 400.
+	maxBulkRequestItems = 100
+	// maxTrackedTasks caps the in-memory task registry used by
+	// GET /api/v1/tasks/{id}; oldest entries are evicted first.
+	maxTrackedTasks = 256
+)
 
-// serverOpQueue is a bounded-concurrency, unbounded-FIFO backend execution
+var errBackendQueueFull = errors.New("backend operation queue is full; retry shortly")
+
+// serverOpQueue is a bounded-concurrency, bounded-depth FIFO backend execution
 // queue so bulk and long-running requests accepted from HTTP handlers keep
 // executing cleanly in order even if the browser disconnects or refreshes.
 type serverOpQueue struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	items  []func()
-	active int
+	mu       sync.Mutex
+	cond     *sync.Cond
+	items    []func()
+	active   int
+	maxDepth int
 }
 
-func newServerOpQueue(workers int) *serverOpQueue {
-	q := &serverOpQueue{}
+func newServerOpQueue(workers, maxDepth int) *serverOpQueue {
+	q := &serverOpQueue{maxDepth: maxDepth}
 	q.cond = sync.NewCond(&q.mu)
 	if workers < 1 {
 		workers = 1
@@ -70,11 +87,15 @@ func (q *serverOpQueue) workerLoop() {
 	}
 }
 
-func (q *serverOpQueue) enqueue(fn func()) {
+func (q *serverOpQueue) enqueue(fn func()) error {
 	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.maxDepth > 0 && len(q.items) >= q.maxDepth {
+		return errBackendQueueFull
+	}
 	q.items = append(q.items, fn)
 	q.cond.Signal()
-	q.mu.Unlock()
+	return nil
 }
 
 func (q *serverOpQueue) pendingCount() int {
@@ -84,25 +105,36 @@ func (q *serverOpQueue) pendingCount() int {
 	return n
 }
 
+// wouldExceed reports whether admitting n more operations would push the queue
+// past its depth bound.
+func (q *serverOpQueue) wouldExceed(n int) bool {
+	if q.maxDepth <= 0 {
+		return false
+	}
+	q.mu.Lock()
+	depth := len(q.items) + q.active
+	q.mu.Unlock()
+	return depth+n > q.maxDepth
+}
+
 func (s *Server) ensureOpQueue() *serverOpQueue {
 	s.opQueueOnce.Do(func() {
-		s.opQueue = newServerOpQueue(backendOpQueueWorkers)
+		s.opQueue = newServerOpQueue(backendOpQueueWorkers, backendOpQueueMaxDepth)
 	})
 	return s.opQueue
 }
 
-func (s *Server) enqueueBackendOp(fn func(context.Context)) {
+func (s *Server) enqueueBackendOp(fn func(context.Context)) error {
 	q := s.ensureOpQueue()
-	q.enqueue(func() {
+	return q.enqueue(func() {
 		fn(context.Background())
 	})
 }
 
 func (s *Server) backendOpPending() int {
-	if s.opQueue == nil {
-		return 0
-	}
-	return s.opQueue.pendingCount()
+	// Route through the same sync.Once that creates the queue so concurrent
+	// /queue and cluster-snapshot polling never race the first bulk request.
+	return s.ensureOpQueue().pendingCount()
 }
 
 type httpStatusError struct {
@@ -133,9 +165,24 @@ func writeDetachedError(w http.ResponseWriter, r *http.Request, err error) {
 	httpError(w, err.Error(), http.StatusInternalServerError)
 }
 
+// vmStartWarning reports that a sandbox record was created successfully but the
+// requested auto-start did not complete. The VM exists, so the request is not a
+// failure, but callers should surface the reason instead of reporting a plain
+// success.
+type vmStartWarning struct {
+	vmID   string
+	reason string
+}
+
+func (w *vmStartWarning) Error() string { return w.reason }
+
 // runDetached executes fn with context.Background() so an in-flight request
 // continues to completion even if the HTTP client disconnects or refreshes.
 // If the client stays connected, its result is returned directly.
+//
+// A panic inside fn is recovered and delivered as an error: a bare goroutine
+// panic would otherwise escape net/http's per-request recover and crash the
+// daemon.
 func runDetached[T any](r *http.Request, fn func(context.Context) (T, error)) (T, error, bool) {
 	type result struct {
 		val T
@@ -143,6 +190,15 @@ func runDetached[T any](r *http.Request, fn func(context.Context) (T, error)) (T
 	}
 	ch := make(chan result, 1)
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				stack := make([]byte, 16<<10)
+				n := runtime.Stack(stack, false)
+				log.Printf("[computed] recovered panic in detached request: %v\n%s", rec, stack[:n])
+				var zero T
+				ch <- result{val: zero, err: fmt.Errorf("internal error: %v", rec)}
+			}
+		}()
 		val, err := fn(context.Background())
 		ch <- result{val: val, err: err}
 	}()
@@ -259,20 +315,20 @@ func (s *Server) validateCreateItem(ctx context.Context, r *http.Request, ownerI
 	return nil
 }
 
-func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.CreateRequest) (*db.VM, error) {
-	vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
-		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
-	}
-
+// createVMPlaced selects a placement target and creates the VM record while
+// holding createPlaceMu so concurrent creates cannot over-commit a worker.
+// The lock is released with defer before the caller starts the VM, so a panic
+// anywhere in placement or creation can never leave it locked forever.
+func (s *Server) createVMPlaced(ctx context.Context, req vm.CreateRequest, vcpus, memoryMB, diskMB int) (*db.VM, error) {
 	s.createPlaceMu.Lock()
+	defer s.createPlaceMu.Unlock()
+
 	var selectedNode *db.WorkerNode
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
 		workers, localNode, policy, pErr := s.buildPlacementNodes(ctx)
 		if pErr == nil && (len(workers) > 0 || localNode != nil) {
 			if len(workers) == 0 && req.WorkerID == "" && (req.PoolID == "" || (localNode != nil && localNode.PoolID == req.PoolID)) {
 				if localNode != nil && localNode.Status != "ready" {
-					s.createPlaceMu.Unlock()
 					return nil, &httpStatusError{
 						code: http.StatusBadRequest,
 						err:  fmt.Errorf("worker %q is not ready (status: %s)", localNode.ID, localNode.Status),
@@ -288,7 +344,6 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 					DiskMB:   diskMB,
 				}, policy)
 				if selErr != nil {
-					s.createPlaceMu.Unlock()
 					var rle *api.ResourceLimitError
 					if errors.As(selErr, &rle) {
 						return nil, selErr
@@ -303,37 +358,25 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 		}
 	}
 
-	var created *db.VM
-	var err error
 	if selectedNode != nil && selectedNode.ID != "nod_host_local" {
-		created, err = s.dispatchRemoteVMCreate(ctx, req, selectedNode)
-		s.createPlaceMu.Unlock()
-	} else {
-		if selectedNode != nil {
-			req.WorkerID = selectedNode.ID
-			if req.PoolID == "" && selectedNode.PoolID != "" {
-				req.PoolID = selectedNode.PoolID
-			}
-		}
-		created, err = s.vmMgr.CreateVM(ctx, req)
-		s.createPlaceMu.Unlock()
-		if err == nil && req.AutoStart {
-			if qErr := s.enforceRunQuotaWithAdmin(ctx, isAdmin, created); qErr == nil {
-				if runErr := s.vmMgr.RunVM(ctx, created.ID); runErr == nil {
-					if started, gErr := s.vmMgr.GetVM(ctx, created.ID); gErr == nil && started != nil {
-						created = started
-						if created.Status == db.StatusRunning {
-							s.mountAttachedVolumes(ctx, created)
-							s.applyEnvironment(ctx, created)
-							s.applyPortForwardsForVM(ctx, created)
-						}
-					}
-				} else {
-					log.Printf("[computed] create %s auto_start skipped/failed: %v", created.ID, runErr)
-				}
-			}
+		return s.dispatchRemoteVMCreate(ctx, req, selectedNode)
+	}
+	if selectedNode != nil {
+		req.WorkerID = selectedNode.ID
+		if req.PoolID == "" && selectedNode.PoolID != "" {
+			req.PoolID = selectedNode.PoolID
 		}
 	}
+	return s.vmMgr.CreateVM(ctx, req)
+}
+
+func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.CreateRequest) (*db.VM, error) {
+	vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
+	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
+		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
+	}
+
+	created, err := s.createVMPlaced(ctx, req, vcpus, memoryMB, diskMB)
 	if err != nil {
 		var rle *api.ResourceLimitError
 		if errors.As(err, &rle) {
@@ -350,7 +393,37 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 		}
 		return nil, err
 	}
+
+	// Auto-start runs outside createPlaceMu so slow boots never serialize
+	// placement. A failure here leaves a valid stopped VM behind; report it as
+	// a warning so callers do not claim the sandbox is running.
+	var startErr error
+	if created != nil && req.AutoStart {
+		if qErr := s.enforceRunQuotaWithAdmin(ctx, isAdmin, created); qErr != nil {
+			startErr = qErr
+		} else if runErr := s.vmMgr.RunVM(ctx, created.ID); runErr != nil {
+			startErr = runErr
+		} else if started, gErr := s.vmMgr.GetVM(ctx, created.ID); gErr == nil && started != nil {
+			created = started
+			if created.Status == db.StatusRunning {
+				s.mountAttachedVolumes(ctx, created)
+				s.applyEnvironment(ctx, created)
+				s.applyPortForwardsForVM(ctx, created)
+			}
+		}
+		if startErr != nil {
+			log.Printf("[computed] create %s auto_start failed: %v", created.ID, startErr)
+			s.recordEvent("sandbox.auto_start_failed", "", created.Name, "failed", 0, map[string]interface{}{
+				"vm_id":  created.ID,
+				"reason": startErr.Error(),
+			})
+		}
+	}
+
 	s.broadcastClusterUpdate()
+	if startErr != nil && created != nil {
+		return created, &vmStartWarning{vmID: created.ID, reason: startErr.Error()}
+	}
 	return created, nil
 }
 
@@ -373,12 +446,12 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 		}
 		return nil, err
 	}
+	var startErr error
 	if req.AutoStart {
 		if qErr := s.enforceRunQuotaWithAdmin(ctx, isAdmin, cloned); qErr != nil {
-			return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
-		}
-		if runErr := s.vmMgr.RunVM(ctx, cloned.ID); runErr != nil {
-			log.Printf("[computed] clone %s auto_start skipped/failed: %v", cloned.ID, runErr)
+			startErr = qErr
+		} else if runErr := s.vmMgr.RunVM(ctx, cloned.ID); runErr != nil {
+			startErr = runErr
 		} else if started, getErr := s.vmMgr.GetVM(ctx, cloned.ID); getErr == nil && started != nil {
 			cloned = started
 			if cloned.Status == db.StatusRunning {
@@ -387,8 +460,18 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 				s.applyPortForwardsForVM(ctx, cloned)
 			}
 		}
+		if startErr != nil {
+			log.Printf("[computed] clone %s auto_start failed: %v", cloned.ID, startErr)
+			s.recordEvent("sandbox.auto_start_failed", "", cloned.Name, "failed", 0, map[string]interface{}{
+				"vm_id":  cloned.ID,
+				"reason": startErr.Error(),
+			})
+		}
 	}
 	s.broadcastClusterUpdate()
+	if startErr != nil && cloned != nil {
+		return cloned, &vmStartWarning{vmID: cloned.ID, reason: startErr.Error()}
+	}
 	return cloned, nil
 }
 
@@ -467,6 +550,10 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "items is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.Items) > maxBulkRequestItems {
+		httpError(w, fmt.Sprintf("too many items: %d (max %d per request)", len(req.Items), maxBulkRequestItems), http.StatusBadRequest)
+		return
+	}
 
 	var dummyReq vm.CreateRequest
 	ownerID, isAdmin, ok := s.authorizeCreateRequest(w, r, &dummyReq)
@@ -510,12 +597,18 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 			Queued:    validCount,
 			Succeeded: []string{},
 			Failed:    []api.BulkVMItemError{},
+			Warnings:  []api.BulkVMItemError{},
 		}
 		for _, t := range targets {
 			if t.resolveErr != "" {
 				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.label, Error: t.resolveErr})
 			}
 		}
+		if validCount > 0 && s.ensureOpQueue().wouldExceed(validCount) {
+			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
+			return
+		}
+		s.recordQueuedTask(resp)
 
 		if validCount > 0 {
 			var remaining atomic.Int64
@@ -523,19 +616,42 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 			var mu sync.Mutex
 			succeeded := make([]string, 0, validCount)
 			failed := append([]api.BulkVMItemError{}, resp.Failed...)
+			warnings := make([]api.BulkVMItemError, 0)
+
+			finish := func() {
+				if remaining.Add(-1) != 0 {
+					return
+				}
+				mu.Lock()
+				summary := api.BulkVMsResponse{
+					Action:    "create",
+					Status:    "completed",
+					TaskID:    taskID,
+					Requested: len(req.Items),
+					Succeeded: succeeded,
+					Failed:    failed,
+					Warnings:  warnings,
+				}
+				mu.Unlock()
+				s.recordTaskSummary(summary)
+				s.recordEvent("sandbox.bulk_created", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 80, summary)
+				s.broadcastClusterUpdate()
+			}
 
 			for _, t := range targets {
 				if t.resolveErr != "" {
 					continue
 				}
 				target := t
-				s.enqueueBackendOp(func(bgCtx context.Context) {
+				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
 					created, err := s.executeCreateVM(bgCtx, isAdmin, target.req)
 					mu.Lock()
-					if err != nil {
-						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
-					} else if created != nil {
+					switch {
+					case created != nil:
 						succeeded = append(succeeded, created.ID)
+						if err != nil {
+							warnings = append(warnings, api.BulkVMItemError{ID: target.label, Error: err.Error()})
+						}
 						s.recordEvent("sandbox.created", actor, created.Name, "delivered", 85, map[string]interface{}{
 							"vm_id":     created.ID,
 							"vcpus":     created.VCPUs,
@@ -544,23 +660,18 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 							"pool_id":   created.PoolID,
 							"task_id":   taskID,
 						})
+					case err != nil:
+						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 					}
 					mu.Unlock()
-					if remaining.Add(-1) == 0 {
-						mu.Lock()
-						summary := api.BulkVMsResponse{
-							Action:    "create",
-							Status:    "completed",
-							TaskID:    taskID,
-							Requested: len(req.Items),
-							Succeeded: succeeded,
-							Failed:    failed,
-						}
-						mu.Unlock()
-						s.recordEvent("sandbox.bulk_created", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 80, summary)
-						s.broadcastClusterUpdate()
-					}
+					finish()
 				})
+				if enqErr != nil {
+					mu.Lock()
+					failed = append(failed, api.BulkVMItemError{ID: target.label, Error: enqErr.Error()})
+					mu.Unlock()
+					finish()
+				}
 			}
 		}
 
@@ -598,10 +709,12 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 				defer func() { <-sem }()
 				created, err := s.executeCreateVM(bgCtx, isAdmin, target.req)
 				resMu.Lock()
-				if err != nil {
-					out.Failed = append(out.Failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
-				} else if created != nil {
+				switch {
+				case created != nil:
 					out.Succeeded = append(out.Succeeded, created.ID)
+					if err != nil {
+						out.Warnings = append(out.Warnings, api.BulkVMItemError{ID: target.label, Error: err.Error()})
+					}
 					s.recordEvent("sandbox.created", actor, created.Name, "delivered", 85, map[string]interface{}{
 						"vm_id":     created.ID,
 						"vcpus":     created.VCPUs,
@@ -609,6 +722,8 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 						"worker_id": created.WorkerID,
 						"pool_id":   created.PoolID,
 					})
+				case err != nil:
+					out.Failed = append(out.Failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 				}
 				resMu.Unlock()
 			}(t)
@@ -661,6 +776,10 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(items) == 0 {
 		httpError(w, "items or (source_id and names) is required", http.StatusBadRequest)
+		return
+	}
+	if len(items) > maxBulkRequestItems {
+		httpError(w, fmt.Sprintf("too many items: %d (max %d per request)", len(items), maxBulkRequestItems), http.StatusBadRequest)
 		return
 	}
 
@@ -737,6 +856,12 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if validCount > 0 && s.ensureOpQueue().wouldExceed(validCount) {
+			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
+			return
+		}
+		s.recordQueuedTask(resp)
+
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -744,40 +869,53 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 			succeeded := make([]string, 0, validCount)
 			failed := append([]api.BulkVMItemError{}, resp.Failed...)
 
+			finish := func() {
+				if remaining.Add(-1) != 0 {
+					return
+				}
+				mu.Lock()
+				summary := api.BulkVMsResponse{
+					Action:    "clone",
+					Status:    "completed",
+					TaskID:    taskID,
+					Requested: len(items),
+					Succeeded: succeeded,
+					Failed:    failed,
+				}
+				mu.Unlock()
+				s.recordTaskSummary(summary)
+				s.recordEvent("sandbox.bulk_cloned", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 60, summary)
+				s.broadcastClusterUpdate()
+			}
+
 			for _, t := range targets {
 				if t.resolveErr != "" {
 					continue
 				}
 				target := t
-				s.enqueueBackendOp(func(bgCtx context.Context) {
+				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
 					cloned, err := s.executeCloneVM(bgCtx, isAdmin, target.sourceID, target.req)
 					mu.Lock()
-					if err != nil {
-						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
-					} else if cloned != nil {
+					switch {
+					case cloned != nil:
 						succeeded = append(succeeded, cloned.ID)
 						s.recordEvent("sandbox.cloned", actor, cloned.Name, "delivered", 60, map[string]string{
 							"source_id": target.sourceID,
 							"cloned_id": cloned.ID,
 							"task_id":   taskID,
 						})
+					case err != nil:
+						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 					}
 					mu.Unlock()
-					if remaining.Add(-1) == 0 {
-						mu.Lock()
-						summary := api.BulkVMsResponse{
-							Action:    "clone",
-							Status:    "completed",
-							TaskID:    taskID,
-							Requested: len(items),
-							Succeeded: succeeded,
-							Failed:    failed,
-						}
-						mu.Unlock()
-						s.recordEvent("sandbox.bulk_cloned", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 60, summary)
-						s.broadcastClusterUpdate()
-					}
+					finish()
 				})
+				if enqErr != nil {
+					mu.Lock()
+					failed = append(failed, api.BulkVMItemError{ID: target.label, Error: enqErr.Error()})
+					mu.Unlock()
+					finish()
+				}
 			}
 		}
 
@@ -815,14 +953,18 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 				defer func() { <-sem }()
 				cloned, err := s.executeCloneVM(bgCtx, isAdmin, target.sourceID, target.req)
 				resMu.Lock()
-				if err != nil {
-					out.Failed = append(out.Failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
-				} else if cloned != nil {
+				switch {
+				case cloned != nil:
 					out.Succeeded = append(out.Succeeded, cloned.ID)
+					if err != nil {
+						out.Warnings = append(out.Warnings, api.BulkVMItemError{ID: target.label, Error: err.Error()})
+					}
 					s.recordEvent("sandbox.cloned", actor, cloned.Name, "delivered", 60, map[string]string{
 						"source_id": target.sourceID,
 						"cloned_id": cloned.ID,
 					})
+				case err != nil:
+					out.Failed = append(out.Failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 				}
 				resMu.Unlock()
 			}(t)

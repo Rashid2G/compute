@@ -85,6 +85,9 @@ type Server struct {
 	opQueueOnce   sync.Once
 	opQueue       *serverOpQueue
 	createPlaceMu sync.Mutex
+	taskMu        sync.Mutex
+	tasks         map[string]*taskRecord
+	taskOrder     []string
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -338,7 +341,12 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		eventSubs:   make(map[chan *db.AuditEvent]struct{}),
 		wsClients:   make(map[*wsClient]struct{}),
 		vmListCache: make(map[string]vmListEntry),
+		tasks:       make(map[string]*taskRecord),
 	}
+
+	// Create the backend operation queue up front so /queue and cluster
+	// snapshot polling never race the first bulk request's lazy init.
+	s.ensureOpQueue()
 
 	var domains []string
 	if cfg.Network.BaseDomain != "" {
@@ -707,6 +715,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/sandboxes/bulk-delete", s.wrapAuth(s.handleBulkDeleteVMs))
 	s.mux.HandleFunc("/api/v1/sandboxes/bulk-action", s.wrapAuth(s.handleBulkActionVMs))
 	s.mux.HandleFunc("/api/v1/sandboxes/", s.wrapAuth(s.handleVMActions))
+
+	// Asynchronous bulk task status
+	s.mux.HandleFunc("/api/v1/tasks/", s.wrapAuth(s.handleGetTask))
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
 	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
@@ -1177,7 +1188,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		actor := getActor(r)
 		created, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
 			vmOut, execErr := s.executeCreateVM(bgCtx, isAdmin, req)
-			if execErr == nil && vmOut != nil {
+			if vmOut != nil {
 				s.recordEvent("sandbox.created", actor, vmOut.Name, "delivered", 85, map[string]interface{}{
 					"vm_id":     vmOut.ID,
 					"vcpus":     vmOut.VCPUs,
@@ -1191,9 +1202,23 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		if disconnected {
 			return
 		}
-		if err != nil {
-			writeDetachedError(w, r, err)
+		if created == nil {
+			if err != nil {
+				writeDetachedError(w, r, err)
+				return
+			}
+			httpError(w, "sandbox creation failed", http.StatusInternalServerError)
 			return
+		}
+		if err != nil {
+			// The record exists but auto-start did not complete; surface the
+			// reason instead of reporting a plain success.
+			var warn *vmStartWarning
+			if !errors.As(err, &warn) {
+				writeDetachedError(w, r, err)
+				return
+			}
+			w.Header().Set("X-Compute-Boot-Warning", headerSafe(warn.reason))
 		}
 		w.WriteHeader(http.StatusCreated)
 		s.encodeVM(w, created)
@@ -1363,7 +1388,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		actor := getActor(r)
 		cloned, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
 			c, cErr := s.executeCloneVM(bgCtx, isAdmin, vmID, req)
-			if cErr == nil && c != nil {
+			if c != nil {
 				s.recordEvent("sandbox.cloned", actor, c.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": c.ID})
 			}
 			return c, cErr
@@ -1371,9 +1396,21 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if disconnected {
 			return
 		}
-		if err != nil {
-			writeDetachedError(w, r, err)
+		if cloned == nil {
+			if err != nil {
+				writeDetachedError(w, r, err)
+				return
+			}
+			httpError(w, "sandbox clone failed", http.StatusInternalServerError)
 			return
+		}
+		if err != nil {
+			var warn *vmStartWarning
+			if !errors.As(err, &warn) {
+				writeDetachedError(w, r, err)
+				return
+			}
+			w.Header().Set("X-Compute-Boot-Warning", headerSafe(warn.reason))
 		}
 		w.WriteHeader(http.StatusCreated)
 		s.encodeVM(w, cloned)

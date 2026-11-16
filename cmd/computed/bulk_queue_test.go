@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -403,5 +406,159 @@ func TestDetachedExecutionSurvivesClientDisconnect(t *testing.T) {
 
 	if launcherCtxCanceled.Load() {
 		t.Fatalf("expected detached backend context not to be canceled when HTTP client disconnected")
+	}
+}
+
+func TestRunDetachedRecoversPanic(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/vms", nil)
+	val, err, disconnected := runDetached(req, func(ctx context.Context) (string, error) {
+		panic("boom in detached op")
+	})
+	if disconnected {
+		t.Fatal("unexpected disconnect")
+	}
+	if err == nil {
+		t.Fatal("expected an error from a panicking detached op")
+	}
+	if !strings.Contains(err.Error(), "internal error") || !strings.Contains(err.Error(), "boom in detached op") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if val != "" {
+		t.Fatalf("expected zero value, got %q", val)
+	}
+}
+
+func TestServerOpQueueBoundsDepth(t *testing.T) {
+	q := newServerOpQueue(1, 1)
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+
+	if err := q.enqueue(func() {
+		started <- struct{}{}
+		<-release
+	}); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	<-started
+	// The single worker is busy, so one more item fits the depth of 1.
+	if err := q.enqueue(func() {}); err != nil {
+		t.Fatalf("second enqueue: %v", err)
+	}
+	// A third would exceed the bound.
+	if err := q.enqueue(func() {}); !errors.Is(err, errBackendQueueFull) {
+		t.Fatalf("expected errBackendQueueFull, got %v", err)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for q.pendingCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestBulkCreateRejectsOversizedRequest(t *testing.T) {
+	h := newM2Harness(t, config.ResourceLimits{
+		MaxRunningVMs:      200,
+		MaxTotalVCPUs:      400,
+		MaxTotalMemoryMB:   200000,
+		MaxTotalDiskMB:     512000,
+		MinFreeDiskSpaceMB: 0,
+	})
+
+	items := make([]vm.CreateRequest, maxBulkRequestItems+1)
+	for i := range items {
+		items[i] = vm.CreateRequest{Name: fmt.Sprintf("too-many-%d", i), VCPUs: 1, MemoryMB: 128, DiskMB: 1024}
+	}
+	resp, body := doJSONRequest(t, http.MethodPost, h.ts.URL+"/api/v1/vms/bulk-create", BulkCreateVMsRequest{Items: items})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized bulk request, got %d: %s", resp.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), "too many items") {
+		t.Fatalf("unexpected body: %s", string(body))
+	}
+}
+
+func TestBulkTaskStatusResolves(t *testing.T) {
+	h := newM2Harness(t, config.ResourceLimits{
+		MaxRunningVMs:      16,
+		MaxTotalVCPUs:      32,
+		MaxTotalMemoryMB:   32768,
+		MaxTotalDiskMB:     512000,
+		MinFreeDiskSpaceMB: 0,
+	})
+
+	asyncTrue := true
+	resp, body := doJSONRequest(t, http.MethodPost, h.ts.URL+"/api/v1/vms/bulk-create", BulkCreateVMsRequest{
+		Items: []vm.CreateRequest{
+			{Name: "task-a", VCPUs: 1, MemoryMB: 256, DiskMB: 1024, AutoStart: true},
+			{Name: "task-b", VCPUs: 1, MemoryMB: 256, DiskMB: 1024, AutoStart: true},
+		},
+		Async: &asyncTrue,
+	})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d: %s", resp.StatusCode, string(body))
+	}
+	var queued api.BulkVMsResponse
+	if err := json.Unmarshal(body, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued.TaskID == "" {
+		t.Fatal("expected task_id in queued response")
+	}
+
+	var last taskRecord
+	pollUntil(t, 10*time.Second, "bulk create task completed", func() (bool, error) {
+		tResp, tBody := doJSONRequest(t, http.MethodGet, h.ts.URL+"/api/v1/tasks/"+queued.TaskID, nil)
+		if tResp.StatusCode != http.StatusOK {
+			return false, fmt.Errorf("task status %d: %s", tResp.StatusCode, string(tBody))
+		}
+		if err := json.Unmarshal(tBody, &last); err != nil {
+			return false, err
+		}
+		return last.Status == "completed" && len(last.Succeeded) == 2, nil
+	})
+
+	if last.Action != "create" || last.Requested != 2 || last.Queued != 2 {
+		t.Fatalf("unexpected task record: %+v", last)
+	}
+
+	// Unknown task ids are a clean 404.
+	missing, _ := doJSONRequest(t, http.MethodGet, h.ts.URL+"/api/v1/tasks/task_missing", nil)
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown task, got %d", missing.StatusCode)
+	}
+}
+
+func TestCreateAutoStartFailureReportsWarning(t *testing.T) {
+	h := newM2Harness(t, config.ResourceLimits{
+		MaxRunningVMs:      8,
+		MaxTotalVCPUs:      16,
+		MaxTotalMemoryMB:   16384,
+		MaxTotalDiskMB:     128000,
+		MinFreeDiskSpaceMB: 0,
+	})
+	h.vmMgr.SetLauncher(func(ctx context.Context, v *db.VM) error {
+		return fmt.Errorf("simulated boot failure")
+	})
+
+	resp, body := doJSONRequest(t, http.MethodPost, h.ts.URL+"/api/v1/vms", vm.CreateRequest{
+		Name:      "boot-fail",
+		VCPUs:     1,
+		MemoryMB:  512,
+		DiskMB:    1024,
+		AutoStart: true,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 with warning, got %d: %s", resp.StatusCode, string(body))
+	}
+	warn := resp.Header.Get("X-Compute-Boot-Warning")
+	if !strings.Contains(warn, "simulated boot failure") {
+		t.Fatalf("expected boot warning header, got %q", warn)
+	}
+	var created db.VM
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Status == db.StatusRunning {
+		t.Fatalf("expected VM to remain stopped after boot failure, got %s", created.Status)
 	}
 }
