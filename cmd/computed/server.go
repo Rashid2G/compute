@@ -81,6 +81,10 @@ type Server struct {
 	adminResourcesMu    sync.Mutex
 	adminResourcesCache *adminResourcesResponse
 	adminResourcesAt    time.Time
+
+	opQueueOnce   sync.Once
+	opQueue       *serverOpQueue
+	createPlaceMu sync.Mutex
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -692,10 +696,14 @@ func (s *Server) routes() {
 
 	// Sandboxes / VMs
 	s.mux.HandleFunc("/api/v1/vms", s.wrapAuth(s.handleVMs))
+	s.mux.HandleFunc("/api/v1/vms/bulk-create", s.wrapAuth(s.handleBulkCreateVMs))
+	s.mux.HandleFunc("/api/v1/vms/bulk-clone", s.wrapAuth(s.handleBulkCloneVMs))
 	s.mux.HandleFunc("/api/v1/vms/bulk-delete", s.wrapAuth(s.handleBulkDeleteVMs))
 	s.mux.HandleFunc("/api/v1/vms/bulk-action", s.wrapAuth(s.handleBulkActionVMs))
 	s.mux.HandleFunc("/api/v1/vms/", s.wrapAuth(s.handleVMActions))
 	s.mux.HandleFunc("/api/v1/sandboxes", s.wrapAuth(s.handleVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/bulk-create", s.wrapAuth(s.handleBulkCreateVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/bulk-clone", s.wrapAuth(s.handleBulkCloneVMs))
 	s.mux.HandleFunc("/api/v1/sandboxes/bulk-delete", s.wrapAuth(s.handleBulkDeleteVMs))
 	s.mux.HandleFunc("/api/v1/sandboxes/bulk-action", s.wrapAuth(s.handleBulkActionVMs))
 	s.mux.HandleFunc("/api/v1/sandboxes/", s.wrapAuth(s.handleVMActions))
@@ -960,12 +968,13 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	stats := s.nonJobStats(r.Context(), r)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"queued_vms":      queue,
-		"count":           len(queue),
-		"running_vms":     stats.RunningVMs,
-		"running_vcpus":   stats.RunningVCPUs,
-		"running_mem_mb":  stats.RunningMemoryMB,
-		"resource_limits": s.vmMgr.GetResourceLimits(),
+		"queued_vms":          queue,
+		"count":               len(queue),
+		"backend_ops_pending": s.backendOpPending(),
+		"running_vms":         stats.RunningVMs,
+		"running_vcpus":       stats.RunningVCPUs,
+		"running_mem_mb":      stats.RunningMemoryMB,
+		"resource_limits":     s.vmMgr.GetResourceLimits(),
 	})
 }
 
@@ -1157,171 +1166,36 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
-			httpError(w, "name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
+		ownerID, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		if !ok {
 			return
 		}
-		if ownerID, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
-			return
-		} else if req.SSHPublicKey == "" && req.SSHKeyID == "" && !req.SSHNoDefaultKey && req.OwnerID == ownerID {
-			// Include the caller's default account key unless the request
-			// chose a key explicitly or opted out. Admins creating sandboxes
-			// for another owner do not get their own default key injected.
-			if def, err := s.vmMgr.GetStore().GetDefaultSSHKey(ctx, ownerID); err != nil {
-				log.Printf("[ssh-keys] default key lookup for %s: %v", ownerID, err)
-			} else if def != nil {
-				req.SSHKeyID = def.ID
-			}
-		}
-
-		if req.CloneFrom != "" {
-			src, err := s.resolveAccessibleVM(ctx, r, req.CloneFrom)
-			if err != nil || src == nil || !s.canAccessOwner(r, src.OwnerID) {
-				httpError(w, "clone source not found", http.StatusNotFound)
-				return
-			}
-			// Pin to the unique ID so a same-named VM owned by another tenant
-			// can never be cloned by the manager's global lookup.
-			req.CloneFrom = vmIdentifier(src)
-			if req.WorkerID == "" && src.WorkerID != "" {
-				req.WorkerID = src.WorkerID
-			}
-		}
-		if req.Template != "" {
-			tpl, err := s.resolveAccessibleTemplate(ctx, r, req.Template)
-			if err != nil || tpl == nil || !s.canAccessOwner(r, tpl.OwnerID) {
-				httpError(w, "template not found", http.StatusNotFound)
-				return
-			}
-			req.Template = templateIdentifier(tpl)
-		}
-		if req.Image != "" {
-			// The image field may name either a custom image or a template; both
-			// are owner-scoped. Mirror the manager's resolution order so a
-			// non-admin cannot reach another tenant's template through it.
-			img, err := s.resolveAccessibleImage(ctx, r, req.Image)
-			if err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if img != nil {
-				// Pin to the unique ID so the manager cannot resolve a
-				// same-named image belonging to another tenant.
-				req.Image = imageIdentifier(img)
-			} else {
-				tpl, tplErr := s.resolveAccessibleTemplate(ctx, r, req.Image)
-				if tplErr != nil {
-					httpError(w, tplErr.Error(), http.StatusInternalServerError)
-					return
-				}
-				if tpl != nil {
-					req.Image = templateIdentifier(tpl)
-				} else if !s.vmMgr.IsPlatformBaseImage(req.Image) {
-					// An image/template with this name may exist for another
-					// tenant. Preserve the non-enumerating 404 contract, but
-					// never let a foreign custom image shadow a platform base
-					// image name such as "ubuntu-24.04".
-					if globalImg, _ := s.vmMgr.GetImage(ctx, req.Image); globalImg != nil {
-						httpError(w, "image not found", http.StatusNotFound)
-						return
-					}
-					if globalTpl, _ := s.vmMgr.GetTemplate(ctx, req.Image); globalTpl != nil {
-						httpError(w, "image not found", http.StatusNotFound)
-						return
-					}
-				}
-			}
-		}
-
-		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+		if err := s.validateCreateItem(ctx, r, ownerID, isAdmin, req.AuthorizedOwnerIDs, &req); err != nil {
+			writeDetachedError(w, r, err)
 			return
 		}
-
-		var selectedNode *db.WorkerNode
-		if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-			workers, localNode, policy, pErr := s.buildPlacementNodes(ctx)
-			if pErr == nil && (len(workers) > 0 || localNode != nil) {
-				if len(workers) == 0 && req.WorkerID == "" && (req.PoolID == "" || (localNode != nil && localNode.PoolID == req.PoolID)) {
-					if localNode != nil && localNode.Status != "ready" {
-						httpError(w, fmt.Sprintf("worker %q is not ready (status: %s)", localNode.ID, localNode.Status), http.StatusBadRequest)
-						return
-					}
-					selectedNode = localNode
-				} else {
-					chosen, selErr := scheduler.SelectNodeForSandbox(ctx, workers, localNode, scheduler.SandboxPlacementRequest{
-						WorkerID: req.WorkerID,
-						PoolID:   req.PoolID,
-						VCPUs:    vcpus,
-						MemoryMB: memoryMB,
-						DiskMB:   diskMB,
-					}, policy)
-					if selErr != nil {
-						if writeResourceLimitError(w, r, selErr) {
-							return
-						}
-						if strings.Contains(selErr.Error(), "not found") {
-							httpError(w, selErr.Error(), http.StatusNotFound)
-							return
-						}
-						httpError(w, selErr.Error(), http.StatusBadRequest)
-						return
-					}
-					selectedNode = chosen
-				}
+		actor := getActor(r)
+		created, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			vmOut, execErr := s.executeCreateVM(bgCtx, isAdmin, req)
+			if execErr == nil && vmOut != nil {
+				s.recordEvent("sandbox.created", actor, vmOut.Name, "delivered", 85, map[string]interface{}{
+					"vm_id":     vmOut.ID,
+					"vcpus":     vmOut.VCPUs,
+					"memory_mb": vmOut.MemoryMB,
+					"worker_id": vmOut.WorkerID,
+					"pool_id":   vmOut.PoolID,
+				})
 			}
-		}
-
-		var created *db.VM
-		var err error
-		if selectedNode != nil && selectedNode.ID != "nod_host_local" {
-			created, err = s.dispatchRemoteVMCreate(ctx, req, selectedNode)
-		} else {
-			if selectedNode != nil {
-				req.WorkerID = selectedNode.ID
-				if req.PoolID == "" && selectedNode.PoolID != "" {
-					req.PoolID = selectedNode.PoolID
-				}
-			}
-			created, err = s.vmMgr.CreateVM(ctx, req)
-			if err == nil && req.AutoStart {
-				if qErr := s.enforceRunQuota(ctx, r, created); qErr == nil {
-					if runErr := s.vmMgr.RunVM(ctx, created.ID); runErr == nil {
-						if started, gErr := s.vmMgr.GetVM(ctx, created.ID); gErr == nil && started != nil {
-							created = started
-						}
-					}
-				}
-			}
+			return vmOut, execErr
+		})
+		if disconnected {
+			return
 		}
 		if err != nil {
-			if writeResourceLimitError(w, r, err) {
-				return
-			}
-			if strings.Contains(err.Error(), "ssh key not found") {
-				httpError(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if strings.Contains(err.Error(), "base rootfs image not found") || strings.Contains(err.Error(), "image not found") || strings.Contains(err.Error(), "custom image rootfs not found") || (strings.Contains(err.Error(), "template '") && strings.Contains(err.Error(), "' not found")) {
-				httpError(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
-				httpError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			httpError(w, err.Error(), http.StatusInternalServerError)
+			writeDetachedError(w, r, err)
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		s.recordEvent("sandbox.created", getActor(r), created.Name, "delivered", 85, map[string]interface{}{
-			"vm_id":     created.ID,
-			"vcpus":     created.VCPUs,
-			"memory_mb": created.MemoryMB,
-			"worker_id": created.WorkerID,
-			"pool_id":   created.PoolID,
-		})
 		s.encodeVM(w, created)
 
 	default:
@@ -1371,22 +1245,34 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, fmt.Sprintf("item %s is protected against deletion", displayName), http.StatusBadRequest)
 				return
 			}
-			s.removePortForwardsForVM(ctx, v, true)
-			var delErr error
-			if vm.IsRemoteVM(v) {
-				if s.workers != nil {
-					delErr = s.workers.CallRPC(ctx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: s.remoteVMTargetID(v)}, nil)
-					if delErr != nil && strings.Contains(strings.ToLower(delErr.Error()), "not found") {
-						delErr = nil
+			_, isAdmin := s.currentOwnerID(r)
+			actor := getActor(r)
+			delErr, disconnected := runDetachedErr(r, func(bgCtx context.Context) error {
+				s.removePortForwardsForVM(bgCtx, v, true)
+				var err error
+				if vm.IsRemoteVM(v) {
+					if s.workers != nil {
+						err = s.workers.CallRPC(bgCtx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: s.remoteVMTargetID(v)}, nil)
+						if err != nil && strings.Contains(strings.ToLower(err.Error()), "not found") {
+							err = nil
+						}
 					}
+					if err == nil {
+						err = s.vmMgr.DeleteVMRecord(bgCtx, vmID)
+					}
+				} else if isAdmin {
+					err = s.vmMgr.DeleteVM(bgCtx, vmID)
+				} else {
+					err = s.vmMgr.DeleteVMForOwner(bgCtx, v.OwnerID, vmID)
 				}
-				if delErr == nil {
-					delErr = s.vmMgr.DeleteVMRecord(ctx, vmID)
+				if err == nil {
+					s.recordEvent("sandbox.deleted", actor, requestedID, "delivered", 40, map[string]string{"id": requestedID})
+					s.broadcastClusterUpdate()
 				}
-			} else if _, isAdmin := s.currentOwnerID(r); isAdmin {
-				delErr = s.vmMgr.DeleteVM(ctx, vmID)
-			} else {
-				delErr = s.vmMgr.DeleteVMForOwner(ctx, v.OwnerID, vmID)
+				return err
+			})
+			if disconnected {
+				return
 			}
 			if delErr != nil {
 				if strings.Contains(delErr.Error(), "protected against deletion") {
@@ -1396,7 +1282,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, delErr.Error(), http.StatusInternalServerError)
 				return
 			}
-			s.recordEvent("sandbox.deleted", getActor(r), requestedID, "delivered", 40, map[string]string{"id": requestedID})
 			json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": requestedID})
 
 		case http.MethodPatch, http.MethodPut:
@@ -1405,7 +1290,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+			actor := getActor(r)
+			updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+				u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+				if uErr == nil {
+					s.recordEvent("sandbox.config_updated", actor, vmID, "delivered", 20, req)
+					s.broadcastClusterUpdate()
+				}
+				return u, uErr
+			})
+			if disconnected {
+				return
+			}
 			if err != nil {
 				if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
 					httpError(w, err.Error(), http.StatusBadRequest)
@@ -1414,7 +1310,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
 			s.encodeVM(w, updated)
 
 		default:
@@ -1461,171 +1356,193 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
-		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		_, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		if !ok {
 			return
 		}
-		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+		actor := getActor(r)
+		cloned, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			c, cErr := s.executeCloneVM(bgCtx, isAdmin, vmID, req)
+			if cErr == nil && c != nil {
+				s.recordEvent("sandbox.cloned", actor, c.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": c.ID})
+			}
+			return c, cErr
+		})
+		if disconnected {
 			return
 		}
-		cloned, err := s.vmMgr.CloneVM(ctx, vmID, req)
 		if err != nil {
-			if writeResourceLimitError(w, r, err) {
-				return
-			}
-			if strings.Contains(err.Error(), "ssh key not found") {
-				httpError(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
-				httpError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			httpError(w, err.Error(), http.StatusInternalServerError)
+			writeDetachedError(w, r, err)
 			return
 		}
-		if req.AutoStart {
-			if err := s.enforceRunQuota(ctx, r, cloned); err != nil {
-				httpError(w, err.Error(), http.StatusTooManyRequests)
-				return
-			}
-			if runErr := s.vmMgr.RunVM(ctx, cloned.ID); runErr != nil {
-				log.Printf("[computed] clone %s auto_start skipped/failed: %v", cloned.ID, runErr)
-			} else if started, getErr := s.vmMgr.GetVM(ctx, cloned.ID); getErr == nil && started != nil {
-				cloned = started
-				if cloned.Status == db.StatusRunning {
-					s.mountAttachedVolumes(ctx, cloned)
-					s.applyEnvironment(ctx, cloned)
-					s.applyPortForwardsForVM(ctx, cloned)
-				}
-			}
-		}
-		s.recordEvent("sandbox.cloned", getActor(r), cloned.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": cloned.ID})
 		w.WriteHeader(http.StatusCreated)
 		s.encodeVM(w, cloned)
 
 	case "run", "start":
-		if err := s.enforceRunQuota(ctx, r, v); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		startedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
+			}
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.start")
+				if uErr != nil {
+					return nil, uErr
+				}
+				out = updated
+			} else {
+				if rErr := s.vmMgr.RunVM(bgCtx, vmID); rErr != nil {
+					return nil, rErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+				if out != nil && out.Status == db.StatusRunning {
+					s.waitGuestSSH(bgCtx, out, 30*time.Second)
+					s.mountAttachedVolumes(bgCtx, out)
+					s.applyEnvironment(bgCtx, out)
+					s.applyPortForwardsForVM(bgCtx, out)
+				}
+			}
+			s.recordEvent("sandbox.started", actor, vmID, "delivered", 35, nil)
+			s.broadcastClusterUpdate()
+			return out, nil
+		})
+		if disconnected {
 			return
 		}
-		if vm.IsRemoteVM(v) {
-			updated, err := s.callRemoteVMLifecycle(ctx, v, "vm.start")
-			if err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
-				}
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			v = updated
-		} else {
-			if err := s.vmMgr.RunVM(ctx, vmID); err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
-				}
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			v, _ = s.vmMgr.GetVM(ctx, vmID)
-			if v != nil && v.Status == db.StatusRunning {
-				// Give operators and automation a sandbox that is actually reachable.
-				s.waitGuestSSH(ctx, v, 30*time.Second)
-				s.mountAttachedVolumes(ctx, v)
-				s.applyEnvironment(ctx, v)
-				s.applyPortForwardsForVM(ctx, v)
-			}
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
 		}
-		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
-		s.encodeVM(w, v)
+		s.encodeVM(w, startedVM)
+
+	case "restart":
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		restartedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			out, rErr := s.restartSingleVM(bgCtx, isAdmin, v, true)
+			if rErr == nil {
+				s.recordEvent("sandbox.restarted", actor, vmID, "delivered", 40, nil)
+			}
+			return out, rErr
+		})
+		if disconnected {
+			return
+		}
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
+		}
+		s.encodeVM(w, restartedVM)
 
 	case "save-state", "snapshot":
-		if vm.IsRemoteVM(v) {
-			updated, err := s.callRemoteVMLifecycle(ctx, v, "vm.save_state")
-			if err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
+		actor := getActor(r)
+		savedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.save_state")
+				if uErr != nil {
+					return nil, uErr
 				}
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			v = updated
-		} else {
-			if err := s.vmMgr.SaveState(ctx, vmID); err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
+				out = updated
+			} else {
+				if sErr := s.vmMgr.SaveState(bgCtx, vmID); sErr != nil {
+					return nil, sErr
 				}
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
 			}
-			v, _ = s.vmMgr.GetVM(ctx, vmID)
-		}
-		s.recordEvent("snapshot.created", getActor(r), vmID, "delivered", 50, nil)
-		s.encodeVM(w, v)
-
-	case "resume":
-		if err := s.enforceRunQuota(ctx, r, v); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+			s.recordEvent("snapshot.created", actor, vmID, "delivered", 50, nil)
+			s.broadcastClusterUpdate()
+			return out, nil
+		})
+		if disconnected {
 			return
 		}
-		if vm.IsRemoteVM(v) {
-			updated, err := s.callRemoteVMLifecycle(ctx, v, "vm.resume")
-			if err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
-				}
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			v = updated
-		} else {
-			if err := s.vmMgr.ResumeVM(ctx, vmID); err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
-				}
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			v, _ = s.vmMgr.GetVM(ctx, vmID)
-			if v != nil && v.Status == db.StatusRunning {
-				s.waitGuestSSH(ctx, v, 30*time.Second)
-				s.mountAttachedVolumes(ctx, v)
-				s.applyEnvironment(ctx, v)
-				s.applyPortForwardsForVM(ctx, v)
-			}
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
 		}
-		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
-		s.encodeVM(w, v)
+		s.encodeVM(w, savedVM)
+
+	case "resume":
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		resumedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
+			}
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.resume")
+				if uErr != nil {
+					return nil, uErr
+				}
+				out = updated
+			} else {
+				if rErr := s.vmMgr.ResumeVM(bgCtx, vmID); rErr != nil {
+					return nil, rErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+				if out != nil && out.Status == db.StatusRunning {
+					s.waitGuestSSH(bgCtx, out, 30*time.Second)
+					s.mountAttachedVolumes(bgCtx, out)
+					s.applyEnvironment(bgCtx, out)
+					s.applyPortForwardsForVM(bgCtx, out)
+				}
+			}
+			s.recordEvent("sandbox.resumed", actor, vmID, "delivered", 25, nil)
+			s.broadcastClusterUpdate()
+			return out, nil
+		})
+		if disconnected {
+			return
+		}
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
+		}
+		s.encodeVM(w, resumedVM)
 
 	case "stop":
-		if vm.IsRemoteVM(v) {
-			updated, err := s.callRemoteVMLifecycle(ctx, v, "vm.stop")
-			if err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			v = updated
-			if v != nil {
-				s.removePortForwardsForVM(ctx, v, false)
-			}
-		} else {
-			if _, isAdmin := s.currentOwnerID(r); isAdmin {
-				if err := s.vmMgr.StopVM(ctx, vmID); err != nil {
-					httpError(w, err.Error(), http.StatusInternalServerError)
-					return
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		stoppedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.stop")
+				if uErr != nil {
+					return nil, uErr
 				}
-			} else if err := s.vmMgr.StopVMForOwner(ctx, v.OwnerID, vmID); err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
+				out = updated
+				if out != nil {
+					s.removePortForwardsForVM(bgCtx, out, false)
+				}
+			} else {
+				if isAdmin {
+					if sErr := s.vmMgr.StopVM(bgCtx, vmID); sErr != nil {
+						return nil, sErr
+					}
+				} else if sErr := s.vmMgr.StopVMForOwner(bgCtx, out.OwnerID, vmID); sErr != nil {
+					return nil, sErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+				if out != nil {
+					s.removePortForwardsForVM(bgCtx, out, false)
+				}
 			}
-			v, _ = s.vmMgr.GetVM(ctx, vmID)
-			if v != nil {
-				s.removePortForwardsForVM(ctx, v, false)
-			}
+			s.recordEvent("sandbox.stopped", actor, vmID, "delivered", 30, nil)
+			s.broadcastClusterUpdate()
+			return out, nil
+		})
+		if disconnected {
+			return
 		}
-		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
-		s.encodeVM(w, v)
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
+		}
+		s.encodeVM(w, stoppedVM)
 
 	case "exec":
 		var req vm.ExecRequest
@@ -1712,7 +1629,16 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			req.PublicIP = &b
 			req.PublicIPEnabled = &b
 		}
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+			if uErr == nil {
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1751,7 +1677,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "missing network_isolation or isolated parameter", http.StatusBadRequest)
 			return
 		}
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+			if uErr == nil {
+				s.recordEvent("sandbox.network_isolation_updated", actor, vmID, "delivered", 20, map[string]string{"network_isolation": u.NetworkIsolation})
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
@@ -1760,7 +1697,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.network_isolation_updated", getActor(r), vmID, "delivered", 20, map[string]string{"network_isolation": updated.NetworkIsolation})
 		s.encodeVM(w, updated)
 
 	case "config":
@@ -1771,7 +1707,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+			if uErr == nil {
+				s.recordEvent("sandbox.config_updated", actor, vmID, "delivered", 20, req)
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
@@ -1780,35 +1727,57 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
 		s.encodeVM(w, updated)
 
 	case "protect":
-		t := true
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, vm.UpdateVMConfigRequest{Protected: &t})
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			t := true
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, vm.UpdateVMConfigRequest{Protected: &t})
+			if uErr == nil {
+				s.recordEvent("sandbox.protected", actor, vmID, "delivered", 20, map[string]bool{"protected": true})
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.protected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": true})
 		json.NewEncoder(w).Encode(updated)
 
 	case "unprotect":
-		f := false
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, vm.UpdateVMConfigRequest{Protected: &f})
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			f := false
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, vm.UpdateVMConfigRequest{Protected: &f})
+			if uErr == nil {
+				s.recordEvent("sandbox.unprotected", actor, vmID, "delivered", 20, map[string]bool{"protected": false})
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.unprotected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": false})
 		json.NewEncoder(w).Encode(updated)
 
 	case "reconcile-ssh", "reconcile":
-		var syncErr error
-		if vm.IsRemoteVM(v) {
-			syncErr = s.syncRemoteVMSSHKeys(ctx, v)
-		} else {
-			syncErr = s.vmMgr.SyncSSHKeysForVM(ctx, v.ID)
+		syncErr, disconnected := runDetachedErr(r, func(bgCtx context.Context) error {
+			if vm.IsRemoteVM(v) {
+				return s.syncRemoteVMSSHKeys(bgCtx, v)
+			}
+			return s.vmMgr.SyncSSHKeysForVM(bgCtx, v.ID)
+		})
+		if disconnected {
+			return
 		}
 		if syncErr != nil {
 			httpError(w, "failed to reconcile SSH access: "+syncErr.Error(), http.StatusInternalServerError)
@@ -2160,7 +2129,8 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
-		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		_, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		if !ok {
 			return
 		}
 		// Apply any template defaults before quota estimation so limits reflect
@@ -2175,18 +2145,28 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			req.DiskMB = tpl.DiskMB
 		}
 		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
+		if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
 		// Templates launch (and run) immediately, so the running quota applies.
-		if err := s.enforceRunQuota(ctx, r, &db.VM{OwnerID: req.OwnerID, VCPUs: vcpus, MemoryMB: memoryMB, DiskMB: diskMB}); err != nil {
+		if err := s.enforceRunQuotaWithAdmin(ctx, isAdmin, &db.VM{OwnerID: req.OwnerID, VCPUs: vcpus, MemoryMB: memoryMB, DiskMB: diskMB}); err != nil {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
 		// Pin to the unique internal ID so duplicate template names cannot
 		// resolve to another tenant's template inside the manager.
-		launchedVM, err := s.vmMgr.LaunchTemplate(ctx, templateIdentifier(tpl), req)
+		tplID := templateIdentifier(tpl)
+		launchedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			vOut, lErr := s.vmMgr.LaunchTemplate(bgCtx, tplID, req)
+			if lErr == nil {
+				s.broadcastClusterUpdate()
+			}
+			return vOut, lErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			if writeResourceLimitError(w, r, err) {
 				return
@@ -2194,7 +2174,6 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.broadcastClusterUpdate()
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(launchedVM)
 		return
@@ -2305,12 +2284,13 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 		}
 	}
 	queueData := map[string]interface{}{
-		"queued_vms":      queue,
-		"count":           len(queue),
-		"running_vms":     0,
-		"running_vcpus":   0,
-		"running_mem_mb":  0,
-		"resource_limits": limits,
+		"queued_vms":          queue,
+		"count":               len(queue),
+		"backend_ops_pending": s.backendOpPending(),
+		"running_vms":         0,
+		"running_vcpus":       0,
+		"running_mem_mb":      0,
+		"resource_limits":     limits,
 	}
 	if stats != nil {
 		queueData["running_vms"] = stats.RunningVMs

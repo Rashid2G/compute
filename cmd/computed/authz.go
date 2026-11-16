@@ -1058,13 +1058,17 @@ func (s *Server) scopePermits(authCtx *auth.AuthContext, action, resource string
 
 // enforceCreateQuota rejects a new VM when it would exceed the owner's quota.
 func (s *Server) enforceCreateQuota(ctx context.Context, r *http.Request, ownerID string, vcpus, memoryMB, diskMB int) error {
+	return s.enforceCreateQuotaWithAdmin(ctx, isAdminAuthContext(auth.GetAuth(r.Context())), ownerID, vcpus, memoryMB, diskMB)
+}
+
+func (s *Server) enforceCreateQuotaWithAdmin(ctx context.Context, isAdmin bool, ownerID string, vcpus, memoryMB, diskMB int) error {
 	if !s.authEnabled() || ownerID == "" {
 		return nil
 	}
 	if s.authMgr == nil {
 		return fmt.Errorf("quota check failed: authentication backend unavailable")
 	}
-	if isAdminAuthContext(auth.GetAuth(r.Context())) {
+	if isAdmin {
 		return nil
 	}
 	limits, usage, err := s.authMgr.GetLimits(ctx, ownerID)
@@ -1118,6 +1122,10 @@ func (s *Server) enforceDiskQuota(ctx context.Context, r *http.Request, ownerID 
 // enforceRunQuota rejects starting a VM when it would exceed the owner's
 // concurrent-running quota.
 func (s *Server) enforceRunQuota(ctx context.Context, r *http.Request, v *db.VM) error {
+	return s.enforceRunQuotaWithAdmin(ctx, isAdminAuthContext(auth.GetAuth(r.Context())), v)
+}
+
+func (s *Server) enforceRunQuotaWithAdmin(ctx context.Context, isAdmin bool, v *db.VM) error {
 	if v == nil || !s.authEnabled() || v.OwnerID == "" {
 		return nil
 	}
@@ -1127,7 +1135,7 @@ func (s *Server) enforceRunQuota(ctx context.Context, r *http.Request, v *db.VM)
 	if v.Status == db.StatusRunning {
 		return nil
 	}
-	if isAdminAuthContext(auth.GetAuth(r.Context())) {
+	if isAdmin {
 		return nil
 	}
 	limits, _, err := s.authMgr.GetLimits(ctx, v.OwnerID)
