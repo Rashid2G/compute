@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +106,103 @@ func TestIngressProxy_PathRouting(t *testing.T) {
 	if !strings.Contains(string(body3), "hello from microvm") {
 		t.Fatalf("expected response from guest service, got: %s", string(body3))
 	}
+}
+
+func TestIngressProxy_PreviewHTMLSurvivesCompressedUpstream(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	guestListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guestListener.Close()
+	guestPort := guestListener.Addr().(*net.TCPAddr).Port
+
+	const page = `<!doctype html><html><head><script src="/app.js"></script></head><body>compressed app</body></html>`
+	guestMux := http.NewServeMux()
+	guestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		// Compress whenever the client negotiated it, and force gzip on
+		// ?force=gzip to emulate an upstream that ignores identity.
+		if r.URL.Query().Get("force") == "gzip" || strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			_, _ = zw.Write([]byte(page))
+			_ = zw.Close()
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+			_, _ = w.Write(buf.Bytes())
+			return
+		}
+		_, _ = w.Write([]byte(page))
+	})
+	guestServer := &http.Server{Handler: guestMux}
+	go guestServer.Serve(guestListener)
+	defer guestServer.Close()
+
+	mtSignup(t, env.ts, "preview@test.local", "previewer", "password123!")
+	token, userID := mtLogin(t, env.ts, "previewer", "password123!")
+	vm := &db.VM{
+		ID:        "preview-app",
+		Name:      "preview-app",
+		OwnerID:   userID,
+		Status:    db.StatusRunning,
+		IPAddress: "127.0.0.1",
+	}
+	if err := env.vmStore.SaveVM(context.Background(), vm); err != nil {
+		t.Fatal(err)
+	}
+
+	fetch := func(url string) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		// Browser-like negotiation: the proxy must not hand back compressed
+		// bytes as unencoded HTML.
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res, body
+	}
+
+	assertRewrittenHTML := func(name string, res *http.Response, body []byte) {
+		t.Helper()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d: %s", name, res.StatusCode, body)
+		}
+		if enc := res.Header.Get("Content-Encoding"); enc != "" {
+			t.Errorf("%s: Content-Encoding = %q, want none", name, enc)
+		}
+		if !bytes.HasPrefix(body, []byte("<!doctype html>")) {
+			t.Fatalf("%s: body is not HTML (first bytes %x)", name, body[:min(len(body), 16)])
+		}
+		if !strings.Contains(string(body), `<base href="/preview/preview-app/`+strconv.Itoa(guestPort)+`/">`) {
+			t.Errorf("%s: missing injected base href:\n%s", name, body)
+		}
+		if !strings.Contains(string(body), `src="/preview/preview-app/`+strconv.Itoa(guestPort)+`/app.js"`) {
+			t.Errorf("%s: asset path not rewritten:\n%s", name, body)
+		}
+		if got, want := res.Header.Get("Content-Length"), strconv.Itoa(len(body)); got != want {
+			t.Errorf("%s: Content-Length = %q, want %q", name, got, want)
+		}
+	}
+
+	base := fmt.Sprintf("%s/preview/%s/%d/", env.ts.URL, vm.Name, guestPort)
+	res, body := fetch(base)
+	assertRewrittenHTML("identity upstream", res, body)
+
+	// Upstream compresses regardless of the negotiated identity encoding; the
+	// proxy must decode before rewriting.
+	res, body = fetch(base + "?force=gzip")
+	assertRewrittenHTML("gzip upstream", res, body)
 }
 
 func TestIngressProxy_SubdomainRouting(t *testing.T) {

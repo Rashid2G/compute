@@ -2,6 +2,9 @@ package network
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"fmt"
 	"io"
@@ -583,6 +586,64 @@ type htmlPrefixWriter struct {
 	finalized   bool
 }
 
+// acceptsRewritableHTML reports whether a client request may receive an HTML
+// document that the proxy will rewrite. Browsers send "text/html" for
+// navigations and curl/axios send "*/*"; both are safe to ask upstream for an
+// uncompressed body.
+func acceptsRewritableHTML(accept string) bool {
+	accept = strings.ToLower(accept)
+	if strings.TrimSpace(accept) == "" {
+		return true
+	}
+	return strings.Contains(accept, "text/html") || strings.Contains(accept, "*/*")
+}
+
+// maxRewritableHTMLBody bounds decompression of an upstream HTML body so a
+// misbehaving sandbox cannot exhaust daemon memory through the rewrite path.
+const maxRewritableHTMLBody = 16 << 20
+
+// decodeHTMLBody returns the decoded document for a supported Content-Encoding.
+// Unsupported encodings return an error so the caller can forward the upstream
+// bytes untouched instead of corrupting them.
+func decodeHTMLBody(body []byte, encoding string) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body, nil
+	case "gzip", "x-gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+		return readRewritableHTML(zr)
+	case "deflate":
+		if zr, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+			decoded, readErr := readRewritableHTML(zr)
+			zr.Close()
+			if readErr == nil {
+				return decoded, nil
+			}
+		}
+		// Some servers send raw DEFLATE without the zlib wrapper.
+		fr := flate.NewReader(bytes.NewReader(body))
+		defer fr.Close()
+		return readRewritableHTML(fr)
+	default:
+		return nil, fmt.Errorf("unsupported content encoding %q", encoding)
+	}
+}
+
+func readRewritableHTML(r io.Reader) ([]byte, error) {
+	out, err := io.ReadAll(io.LimitReader(r, maxRewritableHTMLBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxRewritableHTMLBody {
+		return nil, fmt.Errorf("decoded HTML exceeds %d bytes", maxRewritableHTMLBody)
+	}
+	return out, nil
+}
+
 func newHTMLPrefixWriter(w http.ResponseWriter, prefix string) *htmlPrefixWriter {
 	return &htmlPrefixWriter{w: w, prefix: prefix}
 }
@@ -595,11 +656,26 @@ func (h *htmlPrefixWriter) WriteHeader(code int) {
 	}
 	h.wroteHeader = true
 	h.status = code
-	if strings.Contains(h.w.Header().Get("Content-Type"), "text/html") {
-		h.buffering = true
+	if !strings.Contains(h.w.Header().Get("Content-Type"), "text/html") {
+		h.w.WriteHeader(code)
 		return
 	}
-	h.w.WriteHeader(code)
+	// Buffer only bodies this writer can decode and rewrite. Anything else
+	// (e.g. "br" or a multi-encoding list) is forwarded untouched so the
+	// client can decode it.
+	if !rewritableContentEncoding(h.w.Header().Get("Content-Encoding")) {
+		h.w.WriteHeader(code)
+		return
+	}
+	h.buffering = true
+}
+
+func rewritableContentEncoding(encoding string) bool {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity", "gzip", "x-gzip", "deflate":
+		return true
+	}
+	return false
 }
 
 func (h *htmlPrefixWriter) Write(p []byte) (int, error) {
@@ -632,9 +708,21 @@ func (h *htmlPrefixWriter) finalize() {
 		return
 	}
 	h.finalized = true
-	rewritten := rewriteHTMLForPrefix(h.buf.Bytes(), h.prefix)
 	header := h.w.Header()
-	header.Del("Content-Encoding") // upstream body is decoded; no encoding to declare
+	body := h.buf.Bytes()
+	encoding := header.Get("Content-Encoding")
+	decoded, err := decodeHTMLBody(body, encoding)
+	if err != nil {
+		// The body cannot be decoded safely; forward it untouched (including
+		// Content-Encoding) rather than emitting bytes the client cannot read.
+		header.Set("Content-Length", strconv.Itoa(len(body)))
+		h.w.WriteHeader(h.status)
+		_, _ = h.w.Write(body)
+		return
+	}
+	rewritten := rewriteHTMLForPrefix(decoded, h.prefix)
+	header.Del("Content-Encoding") // body is decoded; no encoding to declare
+	header.Del("Content-Length")
 	header.Set("Content-Length", strconv.Itoa(len(rewritten)))
 	h.w.WriteHeader(h.status)
 	_, _ = h.w.Write(rewritten)
@@ -740,6 +828,16 @@ func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target 
 		req.Header.Set("X-Forwarded-Host", r.Host)
 		if prefix != "" {
 			req.Header.Set("X-Forwarded-Prefix", prefix)
+			// HTML responses under a preview prefix are buffered and rewritten by
+			// htmlPrefixWriter, which needs the decoded document. Forwarding the
+			// browser's Accept-Encoding lets the upstream compress the body; the
+			// writer would then rewrite compressed bytes and strip
+			// Content-Encoding, handing the browser an unreadable payload. Ask
+			// for identity on document requests and leave asset requests (JS,
+			// CSS, images) compressed so they still stream through efficiently.
+			if acceptsRewritableHTML(r.Header.Get("Accept")) {
+				req.Header.Set("Accept-Encoding", "identity")
+			}
 		}
 		if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			req.Header.Set("X-Forwarded-For", clientIP)
