@@ -557,28 +557,32 @@ func (s *Server) mountAttachedVolumes(ctx context.Context, v *db.VM) {
 	}
 }
 
-// applyPortForwardsForVM installs every host forwarding rule that belongs to v.
-// It is safe to call repeatedly; AddPortForward is idempotent.
-// Ingress-only port exposures (HostPort <= 0) do not bind a host DNAT port and
-// simply transition to "active" once the sandbox is running.
+// applyPortForwardsForVM reopens the serve origins that belong to v after it
+// starts (or after a daemon restart). HostPort holds the dedicated port-mode
+// listener port; it is not a host DNAT port.
 func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
-	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil || v.IPAddress == "" {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
 		return
 	}
 	st := s.vmMgr.GetStore()
 	pfs, err := st.ListPortForwards(ctx)
 	if err != nil {
-		log.Printf("[computed] port-forward reconcile: list failed: %v", err)
+		log.Printf("[computed] serve reconcile: list failed: %v", err)
 		return
 	}
 	for _, pf := range pfs {
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if pf.HostPort > 0 && s.vmMgr.NetManager() != nil {
-			if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
-				log.Printf("[computed] port-forward %s (%d->%d): %v", pf.ID, pf.HostPort, pf.GuestPort, err)
+		if s.cfg.ServeMode() == "port" && s.servePorts != nil && pf.HostPort > 0 {
+			port, err := s.servePorts.ensure(pf)
+			if err != nil {
+				log.Printf("[computed] serve %s: %v", pf.ID, err)
 				continue
+			}
+			if port != pf.HostPort || pf.PublicURL == "" {
+				pf.HostPort = port
+				pf.PublicURL = s.serveURLFor("", port)
 			}
 		}
 		if pf.Status != "active" {

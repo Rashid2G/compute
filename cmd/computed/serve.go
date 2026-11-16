@@ -521,9 +521,10 @@ func (r *servePortRegistry) restore(ctx context.Context) {
 			log.Printf("[computed] could not restore serve listener for %s: %v", pf.ID, err)
 			continue
 		}
-		if port != pf.HostPort || pf.PublicURL == "" {
+		wantURL := r.server.serveURLFor("", port)
+		if port != pf.HostPort || pf.PublicURL != wantURL {
 			pf.HostPort = port
-			pf.PublicURL = r.server.serveURLFor("", port)
+			pf.PublicURL = wantURL
 			if err := r.server.vmMgr.GetStore().SavePortForward(ctx, pf); err != nil {
 				log.Printf("[computed] could not update restored serve %s: %v", pf.ID, err)
 			}
