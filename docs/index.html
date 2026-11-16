@@ -407,9 +407,11 @@ compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk 20480 --ima
 compute sandbox ssh dev-api
 compute sandbox exec dev-api -- uname -a
 
-# Copy local directory tree into guest /workspace and print port-3000 HTTP preview URL
+# Copy local directory tree into guest /workspace and publish it over HTTP ingress
 compute scp -r ./my-service dev-api:/workspace/
-compute url --port 3000 dev-api
+compute expose dev-api 3000        # -> <daemon-url>/preview/@<user>/dev-api/3000/
+compute ports dev-api
+compute unexpose dev-api 3000
 
 # Single-request bulk stop / delete across multiple sandboxes
 curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/bulk-action \
@@ -646,8 +648,8 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
                 <td>When <code>COMPUTE_DNS_ENABLED=true</code> and <code>COMPUTE_DNS_BASE_DOMAIN</code> (or <code>COMPUTE_DOMAIN</code> in Compose) is set, resolves <code>&lt;sandbox&gt;.&lt;user&gt;.&lt;zone&gt;</code> (tailnet IP first, guest IP fallback) plus apex/<code>api</code>/<code>gui</code>/<code>www</code>.</td>
               </tr>
               <tr>
-                <td>HTTP Edge (<code>:80</code>) &amp; Port Forwards</td>
-                <td>Routes wildcard hostnames and <code>/preview/&lt;vm&gt;/&lt;port&gt;/</code> HTTP/WebSocket traffic directly into guest ports. See <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
+                <td>HTTP Edge (<code>:80</code>) &amp; Port Exposures</td>
+                <td>Routes wildcard hostnames and <code>/preview/[@user/]&lt;vm&gt;/&lt;port&gt;/</code> HTTP/SSE/WebSocket traffic directly into guest ports. <code>compute expose &lt;sandbox&gt; &lt;port&gt;</code> publishes a guest port on the daemon URL without binding a host port; <code>--private</code> requires tenant auth. See <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
               </tr>
             </tbody>
           </table>
@@ -688,6 +690,10 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
               <tr>
                 <td><code>compute scp</code> / <code>compute url</code></td>
                 <td><code>scp [-r] &lt;src&gt; &lt;dst&gt;</code> using <code>&lt;sandbox&gt;:&lt;path&gt;</code>; <code>url [--port &lt;n&gt;] [--json] &lt;sandbox&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><code>compute expose|ports|unexpose</code></td>
+                <td><code>expose [--private] [--subdomain &lt;name&gt;] &lt;sandbox&gt; &lt;guest-port&gt;</code>, <code>ports &lt;sandbox&gt;</code>, <code>unexpose &lt;sandbox&gt; &lt;guest-port&gt;</code>.</td>
               </tr>
               <tr>
                 <td><code>compute template</code></td>

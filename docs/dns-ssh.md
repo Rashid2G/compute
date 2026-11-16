@@ -134,6 +134,74 @@ The apex and reserved labels are intercepted before the ingress so they can
 never collide with a sandbox, and `api.<zone>` is reserved for the API even
 when the edge is disabled (on the daemon's own port the mux serves both).
 
+## Publishing a sandbox port (public ingress)
+
+To serve an app from a sandbox on the daemon's own public URL, expose the
+guest port. Exposure is **ingress-only** by default: the daemon does not bind a
+host port, so publishing does not consume host sockets and scales with the
+number of sandboxes rather than with host port space.
+
+```bash
+# Public: anyone with the URL can reach the app
+compute expose web 8080
+# -> http://<daemon-host>/preview/@alice/web/8080/
+
+# Private: only authenticated members of the owning tenant
+compute expose web 8080 --private
+
+# Optional DNS subdomain (requires a delegated zone)
+compute expose web 8080 --subdomain app
+
+compute ports web        # list exposures
+compute unexpose web 8080
+```
+
+Requests to the generated URL are reverse-proxied to
+`http://<sandbox-ip>:<guest-port>`, including HTTP/1.1, HTTP/2, Server-Sent
+Events, and WebSockets. HTML responses are rewritten so absolute asset and API
+paths resolve under the preview prefix, and upstream root-relative redirects
+are kept inside the prefix.
+
+URL forms:
+
+```
+/preview/@<username>/<sandbox>/<port>/   # canonical, tenant-scoped
+/preview/<sandbox>/<port>/               # legacy un-scoped form
+<port>-<sandbox>.<username>.<zone>       # subdomain form (needs DNS)
+```
+
+The owner-scoped path is used whenever the sandbox has a tenant DNS label. It
+keeps two tenants that both named a sandbox `web` at distinct URLs. The
+un-scoped form resolves a globally unique sandbox ID or a name (legacy
+behaviour) and remains available for existing links.
+
+**Access control.** A `public` exposure bypasses tenant authentication; a
+`private` exposure requires a valid session/API key for the sandbox's owner.
+Exposure checks are scoped to the resolved sandbox's owner, so a public rule
+for one tenant's `web` never unlocks another tenant's `web`.
+
+**Host-port DNAT (optional).** Supplying a host port still installs the legacy
+iptables DNAT rule and reserves that host port; this is useful for non-HTTP
+protocols or when you specifically need `host:port`. Omit it for HTTP services.
+
+### API
+
+| Method / path | Purpose |
+| --- | --- |
+| `GET /api/v1/sandboxes/<id>/ports` | list exposures for a sandbox |
+| `POST /api/v1/sandboxes/<id>/expose` | expose `{"guest_port":8080,"public":true}` |
+| `POST /api/v1/sandboxes/<id>/unexpose` | remove `{"guest_port":8080}` |
+| `PATCH /api/v1/sandboxes/<id>/ports/<port>` | toggle `{"public":false}` |
+| `DELETE /api/v1/sandboxes/<id>/ports/<port>` | remove the exposure |
+| `POST /api/v1/network/port-forwards` | low-level create (optional `host_port`, `public`) |
+| `GET /api/v1/network/port-forwards?vm_id=<id>` | list/filter all exposure rules |
+| `PATCH /api/v1/network/port-forwards/<id>` | toggle visibility / subdomain |
+
+`public_url` in responses is daemon-relative (for example
+`/preview/@alice/web/8080/`) so records stay correct behind a TLS terminator,
+tailnet name, or proxy. Resolve it against the daemon origin you used for the
+API call.
+
 ## API surface
 
 - `GET /api/v1/dns/status` — responder state (enabled, listen address, zones,
