@@ -86,6 +86,45 @@ func (m *Manager) SyncSSHKeysForVM(ctx context.Context, vmID string) error {
 	return m.storMgr.ConfigureAuthorizedKeys(vm.DiskPath, keys...)
 }
 
+// SyncExplicitSSHKeysForVM writes the given public keys (plus vm.SSHPublicKey) to a local sandbox.
+// Used by remote workers receiving resolved public keys from the control plane.
+func (m *Manager) SyncExplicitSSHKeysForVM(ctx context.Context, vmID string, explicitKeys []string) error {
+	vm, err := m.GetVM(ctx, vmID)
+	if err != nil {
+		return err
+	}
+	if vm == nil {
+		return fmt.Errorf("vm %s not found", vmID)
+	}
+	if m.storMgr == nil {
+		return fmt.Errorf("storage manager is not configured")
+	}
+	keys := make([]string, 0, len(explicitKeys)+1)
+	for _, k := range explicitKeys {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	if strings.TrimSpace(vm.SSHPublicKey) != "" {
+		keys = append(keys, vm.SSHPublicKey)
+	}
+	content := m.storMgr.AuthorizedKeys(keys...)
+	if content == "" {
+		return fmt.Errorf("no managed authorized keys available")
+	}
+	if vm.Status == db.StatusRunning {
+		if vm.IPAddress == "" || vm.IPAddress == "dhcp" {
+			return fmt.Errorf("vm %s is running without a reachable IP", vmID)
+		}
+		return m.writeAuthorizedKeysRunning(ctx, vm, content)
+	}
+	if strings.TrimSpace(vm.DiskPath) == "" {
+		return fmt.Errorf("vm %s has no disk path", vmID)
+	}
+	return m.storMgr.ConfigureAuthorizedKeys(vm.DiskPath, keys...)
+}
+
 // ReplaceSandboxSSHKey updates the explicit per-sandbox key on every sandbox
 // owned by ownerID that still references oldKey. It returns the affected VM IDs
 // so callers can reconcile their authorized_keys immediately.
@@ -129,7 +168,7 @@ func (m *Manager) SyncSSHKeysForOwner(ctx context.Context, ownerID string) (*SSH
 	}
 	result := &SSHKeySyncResult{}
 	for _, vm := range vms {
-		if vm == nil {
+		if vm == nil || IsRemoteVM(vm) {
 			continue
 		}
 		if err := m.SyncSSHKeysForVM(ctx, vm.ID); err != nil {

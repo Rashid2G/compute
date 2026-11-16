@@ -10,7 +10,6 @@ import {
   KeyRound,
   Play,
   Plus,
-  RefreshCw,
   Terminal,
   Trash2,
   Webhook,
@@ -159,15 +158,8 @@ export function CIPage({
 
   useEffect(() => {
     if (!selectedJob) return;
-    void fetchSelectedLogs(selectedJob.id, true);
-    if (!isJobActive(selectedJob.state)) return;
-
-    const timer = window.setInterval(() => {
-      void fetchSelectedLogs(selectedJob.id, false);
-      void loadAll();
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [selectedJob?.id, selectedJob?.state, fetchSelectedLogs, loadAll]);
+    void fetchSelectedLogs(selectedJob.id, jobLogs.length === 0);
+  }, [selectedJob?.id, selectedJob?.state, selectedJob?.updated_at, fetchSelectedLogs]);
 
   function openConnectModal() {
     setEditingRepo(null);
@@ -376,14 +368,6 @@ export function CIPage({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void loadAll()}
-            className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
           <button
             type="button"
             onClick={() => setDispatchOpen(true)}
@@ -757,14 +741,6 @@ export function CIPage({
               )}
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void fetchSelectedLogs(selectedJob.id, true)}
-                className="inline-flex h-6 items-center gap-1 border border-border px-2 font-mono text-[11px] text-muted-foreground hover:text-foreground"
-              >
-                <RefreshCw className="h-3 w-3" />
-                <span>Refresh Logs</span>
-              </button>
               <button
                 type="button"
                 onClick={() => setSelectedJob(null)}

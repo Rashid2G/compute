@@ -83,17 +83,39 @@ func LoadConfig(path string) (Config, error) {
 		}
 		c.BootTimeout = secs
 	}
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_WORKER_MAX_VCPUS")); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return c, fmt.Errorf("invalid COMPUTE_WORKER_MAX_VCPUS=%q: expected an integer", v)
+		}
+		c.MaxVCPUs = n
+	}
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_WORKER_MAX_MEMORY_MB")); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return c, fmt.Errorf("invalid COMPUTE_WORKER_MAX_MEMORY_MB=%q: expected an integer", v)
+		}
+		c.MaxMemoryMB = n
+	}
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_WORKER_MAX_DISK_MB")); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return c, fmt.Errorf("invalid COMPUTE_WORKER_MAX_DISK_MB=%q: expected an integer", v)
+		}
+		c.MaxDiskMB = n
+	}
 	if v := strings.TrimSpace(os.Getenv("COMPUTE_WORKER_ALLOW_LOCAL_EXEC")); v != "" {
 		c.AllowLocalExec = envBool(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("COMPUTE_CGROUP_ENFORCE")); v != "" {
 		c.CgroupEnforce = envBool(v)
 	}
-	if c.ControlPlaneURL == "" {
-		return c, errors.New("control plane URL is required")
-	}
 	if c.Name == "" {
-		c.Name = "compute-worker"
+		if hn, err := os.Hostname(); err == nil && strings.TrimSpace(hn) != "" {
+			c.Name = strings.TrimSpace(hn)
+		} else {
+			c.Name = "compute-worker"
+		}
 	}
 	if c.StateDir == "" {
 		c.StateDir = "/var/lib/compute-worker"
@@ -112,6 +134,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if c.BootTimeout <= 0 {
 		c.BootTimeout = 90
+	}
+	if c.ControlPlaneURL == "" {
+		return c, errors.New("control plane URL is required")
 	}
 	return c, nil
 }
@@ -143,6 +168,21 @@ func parseTOML(b []byte, c *Config) {
 			c.Token = v
 		case "state_dir":
 			c.StateDir = v
+		case "max_vcpus":
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+				c.MaxVCPUs = n
+			}
+		case "max_memory_mb":
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+				c.MaxMemoryMB = n
+			}
+		case "max_disk_mb":
+			var n int
+			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+				c.MaxDiskMB = n
+			}
 		}
 	}
 }

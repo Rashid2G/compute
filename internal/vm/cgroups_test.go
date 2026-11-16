@@ -60,6 +60,24 @@ func TestFormatPidsMax(t *testing.T) {
 	}
 }
 
+func TestFormatCPUWeight(t *testing.T) {
+	tests := []struct {
+		weight   int
+		expected string
+	}{
+		{weight: 0, expected: "100"},
+		{weight: -5, expected: "100"},
+		{weight: 50, expected: "50"},
+		{weight: 250, expected: "250"},
+		{weight: 20000, expected: "10000"},
+	}
+	for _, tt := range tests {
+		if got := FormatCPUWeight(tt.weight); got != tt.expected {
+			t.Errorf("FormatCPUWeight(%d) = %q; want %q", tt.weight, got, tt.expected)
+		}
+	}
+}
+
 func TestCgroupManager_Lifecycle(t *testing.T) {
 	tmpDir := t.TempDir()
 	cgroupRoot := filepath.Join(tmpDir, "cgroup", "compute")
@@ -68,6 +86,7 @@ func TestCgroupManager_Lifecycle(t *testing.T) {
 	vmID := "vm-test-123"
 	limits := CgroupLimits{
 		VCPUs:                2,
+		CPUWeight:            65,
 		MemoryMB:             2048,
 		MemorySafetyBufferMB: 64,
 		MemoryHighBufferMB:   32,
@@ -92,6 +111,15 @@ func TestCgroupManager_Lifecycle(t *testing.T) {
 	}
 	if strings.TrimSpace(string(cpuData)) != "200000 100000" {
 		t.Errorf("unexpected cpu.max content: %s", string(cpuData))
+	}
+
+	// Verify cpu.weight content
+	weightData, err := os.ReadFile(filepath.Join(cgPath, "cpu.weight"))
+	if err != nil {
+		t.Fatalf("failed to read cpu.weight: %v", err)
+	}
+	if strings.TrimSpace(string(weightData)) != "65" {
+		t.Errorf("unexpected cpu.weight content: %s", string(weightData))
 	}
 
 	// Verify memory.max content

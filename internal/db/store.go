@@ -206,6 +206,22 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 	return tx.Commit()
 }
 
+// GetWorkerToken retrieves an enrollment token by token value.
+func (s *Store) GetWorkerToken(ctx context.Context, token string) (*WorkerToken, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t := new(WorkerToken)
+	err := s.db.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).
+		Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
 // ListWorkerTokens returns all enrollment tokens.
 func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
 	s.mu.RLock()
@@ -321,6 +337,11 @@ func (s *Store) initSchema() error {
 		socket_path TEXT DEFAULT '',
 		protected INTEGER NOT NULL DEFAULT 0,
 		description TEXT NOT NULL DEFAULT '',
+		pool_id TEXT NOT NULL DEFAULT '',
+		worker_id TEXT NOT NULL DEFAULT '',
+		last_activity_at TIMESTAMP,
+		auto_hibernated INTEGER NOT NULL DEFAULT 0,
+		hibernate_reason TEXT NOT NULL DEFAULT '',
 		created_at TIMESTAMP NOT NULL,
 		updated_at TIMESTAMP NOT NULL
 	);
@@ -370,7 +391,8 @@ func (s *Store) initSchema() error {
 	);
 	CREATE TABLE IF NOT EXISTS worker_pools(id TEXT PRIMARY KEY,name TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',policy_json TEXT NOT NULL DEFAULT '{}',created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_tokens(token TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',expires_at TIMESTAMP NOT NULL,used_at TIMESTAMP,created_at TIMESTAMP NOT NULL);
-	CREATE TABLE IF NOT EXISTS worker_nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,pool_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',status TEXT NOT NULL,underlay_ip TEXT NOT NULL DEFAULT '',arch TEXT NOT NULL DEFAULT '',total_vcpus INTEGER NOT NULL DEFAULT 0,total_mem_mb INTEGER NOT NULL DEFAULT 0,total_disk_mb INTEGER NOT NULL DEFAULT 0,labels_json TEXT NOT NULL DEFAULT '{}',capabilities_json TEXT NOT NULL DEFAULT '{}',agent_version TEXT NOT NULL DEFAULT '',fc_version TEXT NOT NULL DEFAULT '',last_heartbeat TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS worker_nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,pool_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',status TEXT NOT NULL,underlay_ip TEXT NOT NULL DEFAULT '',arch TEXT NOT NULL DEFAULT '',total_vcpus INTEGER NOT NULL DEFAULT 0,total_mem_mb INTEGER NOT NULL DEFAULT 0,total_disk_mb INTEGER NOT NULL DEFAULT 0,allocated_vcpus INTEGER NOT NULL DEFAULT 0,allocated_mem_mb INTEGER NOT NULL DEFAULT 0,allocated_disk_mb INTEGER NOT NULL DEFAULT 0,physical_vcpus INTEGER NOT NULL DEFAULT 0,physical_mem_mb INTEGER NOT NULL DEFAULT 0,physical_disk_mb INTEGER NOT NULL DEFAULT 0,labels_json TEXT NOT NULL DEFAULT '{}',capabilities_json TEXT NOT NULL DEFAULT '{}',agent_version TEXT NOT NULL DEFAULT '',fc_version TEXT NOT NULL DEFAULT '',last_heartbeat TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS cluster_settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',repo_id TEXT NOT NULL DEFAULT '',repo_url TEXT NOT NULL DEFAULT '',repo_name TEXT NOT NULL DEFAULT '',branch TEXT NOT NULL DEFAULT '',commit_sha TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'cli',vm_id TEXT NOT NULL DEFAULT '',worker_id TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS github_connections (
 		id TEXT PRIMARY KEY,
@@ -527,6 +549,21 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'cli'")
 	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN vm_id TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN pool_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN last_activity_at TIMESTAMP")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN auto_hibernated INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN hibernate_reason TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN allocated_vcpus INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN allocated_mem_mb INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN allocated_disk_mb INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN physical_vcpus INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN physical_mem_mb INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN physical_disk_mb INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN used_vcpus INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN used_mem_mb INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN used_disk_mb INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN running_vms INTEGER NOT NULL DEFAULT 0")
 
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, network_isolation, and protected columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "network_isolation", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled"})
@@ -676,7 +713,8 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		mac_address = ?, tap_device = ?, tailscale_enabled = ?, tailnet_ip = ?, tailnet_dns = ?, tailscale_device_id = ?,
 		rootfs_path = ?,
 		kernel_path = ?, disk_path = ?, snapshot_path = ?, mem_file_path = ?,
-		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, ssh_password_enabled = ?, pid = ?, socket_path = ?, protected = ?, description = ?, owner_id = ?, updated_at = ?
+		ssh_key_path = ?, ssh_key_name = ?, ssh_public_key = ?, ssh_password_enabled = ?, pid = ?, socket_path = ?, protected = ?, description = ?,
+		pool_id = ?, worker_id = ?, last_activity_at = ?, auto_hibernated = ?, hibernate_reason = ?, owner_id = ?, updated_at = ?
 	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
 	`
 	res, err := s.db.ExecContext(ctx, updateQuery,
@@ -685,7 +723,8 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		vm.MACAddress, vm.TAPDevice, boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
 		vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.Description, vm.OwnerID, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.Description,
+		vm.PoolID, vm.WorkerID, vm.LastActivityAt, boolInt(vm.AutoHibernated), vm.HibernateReason, vm.OwnerID, vm.UpdatedAt,
 		vm.InternalID, vm.OwnerID, vm.ID, vm.Name,
 	)
 	if err != nil {
@@ -703,8 +742,8 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 		rootfs_path, kernel_path,
 		disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
-		pid, socket_path, protected, description, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		pid, socket_path, protected, description, pool_id, worker_id, last_activity_at, auto_hibernated, hibernate_reason, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err = s.db.ExecContext(ctx, insertQuery,
 		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
@@ -712,8 +751,21 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
 		vm.RootfsPath,
 		vm.KernelPath, vm.DiskPath, vm.SnapshotPath, vm.MemFilePath,
-		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.Description, vm.CreatedAt, vm.UpdatedAt,
+		vm.SSHKeyPath, vm.SSHKeyName, vm.SSHPublicKey, boolInt(vm.SSHPasswordEnabled), vm.PID, vm.SocketPath, boolInt(vm.Protected), vm.Description,
+		vm.PoolID, vm.WorkerID, vm.LastActivityAt, boolInt(vm.AutoHibernated), vm.HibernateReason, vm.CreatedAt, vm.UpdatedAt,
 	)
+	return err
+}
+
+// TouchVMActivity updates last_activity_at for an active VM.
+func (s *Store) TouchVMActivity(ctx context.Context, idOrInternalID string) error {
+	if strings.TrimSpace(idOrInternalID) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE vms SET last_activity_at = ?, updated_at = ? WHERE internal_id = ? OR id = ? OR name = ?`, now, now, idOrInternalID, idOrInternalID, idOrInternalID)
 	return err
 }
 
@@ -730,7 +782,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	query := `
 	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
-	       pid, socket_path, protected, description, created_at, updated_at
+	       pid, socket_path, protected, description, pool_id, worker_id, last_activity_at, auto_hibernated, hibernate_reason, created_at, updated_at
 	FROM vms
 	WHERE (internal_id = ? OR id = ? OR name = ? OR ip_address = ? OR public_ip = ?)
 	  AND (? = '' OR owner_id = ? OR owner_id = '')
@@ -755,12 +807,14 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	var protectedInt int
 	var tsEnabledInt int
 	var sshPasswordEnabledInt int
+	var autoHibernatedInt int
 	err := row.Scan(
 		&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
 		&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.NetworkIsolation, &vm.MACAddress, &vm.TAPDevice,
 		&tsEnabledInt, &vm.TailnetIP, &vm.TailnetDNS, &vm.TailscaleDeviceID, &vm.RootfsPath,
 		&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.Description, &vm.CreatedAt, &vm.UpdatedAt,
+		&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.Description,
+		&vm.PoolID, &vm.WorkerID, &vm.LastActivityAt, &autoHibernatedInt, &vm.HibernateReason, &vm.CreatedAt, &vm.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -779,6 +833,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	vm.Protected = protectedInt != 0
 	vm.TailscaleEnabled = tsEnabledInt != 0
 	vm.SSHPasswordEnabled = sshPasswordEnabledInt != 0
+	vm.AutoHibernated = autoHibernatedInt != 0
 	if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
 		vm.PublicIP = vm.IPAddress
 	}
@@ -798,7 +853,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	query := `
 	SELECT id, internal_id, owner_id, name, status, desired_running, vcpus, memory_mb, disk_mb, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, tailscale_enabled, tailnet_ip, tailnet_dns, tailscale_device_id,
 	       rootfs_path, kernel_path, disk_path, snapshot_path, mem_file_path, ssh_key_path, ssh_key_name, ssh_public_key, ssh_password_enabled,
-	       pid, socket_path, protected, description, created_at, updated_at
+	       pid, socket_path, protected, description, pool_id, worker_id, last_activity_at, auto_hibernated, hibernate_reason, created_at, updated_at
 	FROM vms
 	WHERE (? = '' OR owner_id = ?)
 	ORDER BY created_at DESC;
@@ -819,12 +874,14 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		var protectedInt int
 		var tsEnabledInt int
 		var sshPasswordEnabledInt int
+		var autoHibernatedInt int
 		err := rows.Scan(
 			&vm.ID, &vm.InternalID, &vm.OwnerID, &vm.Name, &status, &desiredRunning, &vm.VCPUs, &vm.MemoryMB, &vm.DiskMB,
 			&vm.IPAddress, &vm.PublicIP, &pubEnabledInt, &vm.NetworkIsolation, &vm.MACAddress, &vm.TAPDevice,
 			&tsEnabledInt, &vm.TailnetIP, &vm.TailnetDNS, &vm.TailscaleDeviceID, &vm.RootfsPath,
 			&vm.KernelPath, &vm.DiskPath, &vm.SnapshotPath, &vm.MemFilePath,
-			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.Description, &vm.CreatedAt, &vm.UpdatedAt,
+			&vm.SSHKeyPath, &vm.SSHKeyName, &vm.SSHPublicKey, &sshPasswordEnabledInt, &vm.PID, &vm.SocketPath, &protectedInt, &vm.Description,
+			&vm.PoolID, &vm.WorkerID, &vm.LastActivityAt, &autoHibernatedInt, &vm.HibernateReason, &vm.CreatedAt, &vm.UpdatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -840,6 +897,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 		vm.Protected = protectedInt != 0
 		vm.TailscaleEnabled = tsEnabledInt != 0
 		vm.SSHPasswordEnabled = sshPasswordEnabledInt != 0
+		vm.AutoHibernated = autoHibernatedInt != 0
 		if vm.PublicIPEnabled && vm.PublicIP == "" && vm.IPAddress != "" {
 			vm.PublicIP = vm.IPAddress
 		}
@@ -1513,9 +1571,13 @@ func (s *Store) SaveWorkerNode(ctx context.Context, n *WorkerNode) error {
 	n.UpdatedAt = now
 	query := `INSERT INTO worker_nodes (
 		id, name, pool_id, role, status, underlay_ip, arch,
-		total_vcpus, total_mem_mb, total_disk_mb, labels_json, capabilities_json,
+		total_vcpus, total_mem_mb, total_disk_mb,
+		allocated_vcpus, allocated_mem_mb, allocated_disk_mb,
+		physical_vcpus, physical_mem_mb, physical_disk_mb,
+		used_vcpus, used_mem_mb, used_disk_mb, running_vms,
+		labels_json, capabilities_json,
 		agent_version, fc_version, last_heartbeat, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		name = excluded.name,
 		pool_id = excluded.pool_id,
@@ -1526,6 +1588,16 @@ func (s *Store) SaveWorkerNode(ctx context.Context, n *WorkerNode) error {
 		total_vcpus = excluded.total_vcpus,
 		total_mem_mb = excluded.total_mem_mb,
 		total_disk_mb = excluded.total_disk_mb,
+		allocated_vcpus = excluded.allocated_vcpus,
+		allocated_mem_mb = excluded.allocated_mem_mb,
+		allocated_disk_mb = excluded.allocated_disk_mb,
+		physical_vcpus = excluded.physical_vcpus,
+		physical_mem_mb = excluded.physical_mem_mb,
+		physical_disk_mb = excluded.physical_disk_mb,
+		used_vcpus = excluded.used_vcpus,
+		used_mem_mb = excluded.used_mem_mb,
+		used_disk_mb = excluded.used_disk_mb,
+		running_vms = excluded.running_vms,
 		labels_json = excluded.labels_json,
 		capabilities_json = excluded.capabilities_json,
 		agent_version = excluded.agent_version,
@@ -1534,7 +1606,11 @@ func (s *Store) SaveWorkerNode(ctx context.Context, n *WorkerNode) error {
 		updated_at = excluded.updated_at`
 	_, err := s.db.ExecContext(ctx, query,
 		n.ID, n.Name, n.PoolID, n.Role, n.Status, n.UnderlayIP, n.Arch,
-		n.TotalVCPUs, n.TotalMemMB, n.TotalDiskMB, n.LabelsJSON, n.CapabilitiesJSON,
+		n.TotalVCPUs, n.TotalMemMB, n.TotalDiskMB,
+		n.AllocatedVCPUs, n.AllocatedMemMB, n.AllocatedDiskMB,
+		n.PhysicalVCPUs, n.PhysicalMemMB, n.PhysicalDiskMB,
+		n.UsedVCPUs, n.UsedMemMB, n.UsedDiskMB, n.RunningVMs,
+		n.LabelsJSON, n.CapabilitiesJSON,
 		n.AgentVersion, n.FCVersion, n.LastHeartbeat, n.CreatedAt, n.UpdatedAt,
 	)
 	return err
@@ -1545,9 +1621,13 @@ func (s *Store) GetWorkerNode(ctx context.Context, id string) (*WorkerNode, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	n := new(WorkerNode)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, allocated_vcpus, allocated_mem_mb, allocated_disk_mb, physical_vcpus, physical_mem_mb, physical_disk_mb, used_vcpus, used_mem_mb, used_disk_mb, running_vms, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
 		&n.ID, &n.Name, &n.PoolID, &n.Role, &n.Status, &n.UnderlayIP, &n.Arch,
-		&n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB, &n.LabelsJSON, &n.CapabilitiesJSON,
+		&n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB,
+		&n.AllocatedVCPUs, &n.AllocatedMemMB, &n.AllocatedDiskMB,
+		&n.PhysicalVCPUs, &n.PhysicalMemMB, &n.PhysicalDiskMB,
+		&n.UsedVCPUs, &n.UsedMemMB, &n.UsedDiskMB, &n.RunningVMs,
+		&n.LabelsJSON, &n.CapabilitiesJSON,
 		&n.AgentVersion, &n.FCVersion, &n.LastHeartbeat, &n.CreatedAt, &n.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1563,7 +1643,7 @@ func (s *Store) GetWorkerNode(ctx context.Context, id string) (*WorkerNode, erro
 func (s *Store) ListWorkerNodes(ctx context.Context) ([]*WorkerNode, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, allocated_vcpus, allocated_mem_mb, allocated_disk_mb, physical_vcpus, physical_mem_mb, physical_disk_mb, used_vcpus, used_mem_mb, used_disk_mb, running_vms, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1571,7 +1651,15 @@ func (s *Store) ListWorkerNodes(ctx context.Context) ([]*WorkerNode, error) {
 	var out []*WorkerNode
 	for rows.Next() {
 		n := new(WorkerNode)
-		if err := rows.Scan(&n.ID, &n.Name, &n.PoolID, &n.Role, &n.Status, &n.UnderlayIP, &n.Arch, &n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB, &n.LabelsJSON, &n.CapabilitiesJSON, &n.AgentVersion, &n.FCVersion, &n.LastHeartbeat, &n.CreatedAt, &n.UpdatedAt); err != nil {
+		if err := rows.Scan(
+			&n.ID, &n.Name, &n.PoolID, &n.Role, &n.Status, &n.UnderlayIP, &n.Arch,
+			&n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB,
+			&n.AllocatedVCPUs, &n.AllocatedMemMB, &n.AllocatedDiskMB,
+			&n.PhysicalVCPUs, &n.PhysicalMemMB, &n.PhysicalDiskMB,
+			&n.UsedVCPUs, &n.UsedMemMB, &n.UsedDiskMB, &n.RunningVMs,
+			&n.LabelsJSON, &n.CapabilitiesJSON,
+			&n.AgentVersion, &n.FCVersion, &n.LastHeartbeat, &n.CreatedAt, &n.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -2593,5 +2681,48 @@ func (s *Store) DeleteGitHubConnection(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM github_connections WHERE id = ?`, id)
+	return err
+}
+
+const schedulingPolicySettingKey = "scheduling_policy"
+
+// GetSchedulingPolicy loads the cluster-wide scheduling policy, falling back to DefaultSchedulingPolicy.
+func (s *Store) GetSchedulingPolicy(ctx context.Context) (ClusterSchedulingPolicy, error) {
+	policy := DefaultSchedulingPolicy()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var valueJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT value_json FROM cluster_settings WHERE key = ? LIMIT 1`, schedulingPolicySettingKey).Scan(&valueJSON)
+	if err == sql.ErrNoRows {
+		return policy, nil
+	}
+	if err != nil {
+		return policy, err
+	}
+	if strings.TrimSpace(valueJSON) != "" {
+		if err := json.Unmarshal([]byte(valueJSON), &policy); err != nil {
+			return DefaultSchedulingPolicy(), err
+		}
+	}
+	return policy, nil
+}
+
+// SaveSchedulingPolicy persists the cluster-wide scheduling policy.
+func (s *Store) SaveSchedulingPolicy(ctx context.Context, policy ClusterSchedulingPolicy) error {
+	data, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO cluster_settings (key, value_json, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value_json = excluded.value_json,
+			updated_at = excluded.updated_at
+	`, schedulingPolicySettingKey, string(data), now)
 	return err
 }

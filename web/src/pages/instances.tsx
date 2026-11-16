@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRightLeft,
   Camera,
   Check,
   ChevronDown,
@@ -13,7 +14,6 @@ import {
   Pause,
   Play,
   Plus,
-  RefreshCw,
   RotateCcw,
   Scaling,
   Server,
@@ -58,13 +58,20 @@ import type {
   PortForwardRecord,
   VM,
   VolumeRecord,
+  WorkerNodeRecord,
+  WorkerPoolRecord,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface InstancesPageProps {
   vms: VM[];
+  workers?: WorkerNodeRecord[];
+  pools?: WorkerPoolRecord[];
+  volumes?: VolumeRecord[];
+  portForwards?: PortForwardRecord[];
   events?: AuditEventRecord[];
   isLoading: boolean;
+  isAdmin?: boolean;
   onNew: () => void;
   onRun: (vm: VM) => void;
   onStop: (vm: VM) => void;
@@ -103,7 +110,12 @@ function deriveTierLabel(vcpus: number, memoryMb: number): string {
 
 export function InstancesPage({
   vms: rawVMs,
+  workers = [],
+  pools = [],
+  volumes: propVolumes,
+  portForwards: propPortForwards,
   isLoading,
+  isAdmin = false,
   onNew,
   onRun,
   onStop,
@@ -115,6 +127,14 @@ export function InstancesPage({
   onRefresh,
 }: InstancesPageProps) {
   const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
+
+  const workerNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const w of workers) {
+      map[w.id] = w.name;
+    }
+    return map;
+  }, [workers]);
 
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<string>('all');
@@ -143,18 +163,34 @@ export function InstancesPage({
   const [resizeDiskGb, setResizeDiskGb] = useState(20);
   const [resizeAutoStart, setResizeAutoStart] = useState(true);
 
+  // Migrate modal state
+  const [migrateTarget, setMigrateTarget] = useState<VM | null>(null);
+  const [migrateWorkerId, setMigrateWorkerId] = useState('');
+  const [migratePoolId, setMigratePoolId] = useState('');
+  const [migrateForce, setMigrateForce] = useState(false);
+
   // Detail cards state: Volumes & Port Forwards
-  const [volumes, setVolumes] = useState<VolumeRecord[]>([]);
+  const [volumes, setVolumes] = useState<VolumeRecord[]>(propVolumes || []);
   const [volumesLoading, setVolumesLoading] = useState(false);
   const [attachVolumeId, setAttachVolumeId] = useState('');
 
-  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>(
+    propPortForwards || [],
+  );
   const [forwardsLoading, setForwardsLoading] = useState(false);
   const [addForwardOpen, setAddForwardOpen] = useState(false);
   const [fwHostPort, setFwHostPort] = useState('8080');
   const [fwGuestPort, setFwGuestPort] = useState('8080');
   const [fwProtocol, setFwProtocol] = useState<'TCP' | 'HTTP/HTTPS'>('TCP');
   const [fwSubdomain, setFwSubdomain] = useState('');
+
+  useEffect(() => {
+    if (propVolumes) setVolumes(propVolumes);
+  }, [propVolumes]);
+
+  useEffect(() => {
+    if (propPortForwards) setPortForwards(propPortForwards);
+  }, [propPortForwards]);
 
   const selectedVMs = useMemo(
     () => vms.filter((v) => selectedIds.includes(v.id)),
@@ -172,12 +208,16 @@ export function InstancesPage({
     return vms.filter((vm) => {
       const q = search.trim().toLowerCase();
       const access = sandboxAccess(vm);
+      const workerName = vm.worker_id ? workerNameById[vm.worker_id] : '';
       const matchable = [
         vm.name,
         vm.id,
         vm.internal_id,
         vm.ip_address,
         vm.hostname,
+        vm.worker_id,
+        workerName,
+        vm.pool_id,
         access.url,
         access.sshHost,
       ]
@@ -200,7 +240,7 @@ export function InstancesPage({
 
       return matchesSearch && matchesState && matchesSnapshot && matchesType;
     });
-  }, [vms, search, stateFilter, snapshotFilter, typeFilter]);
+  }, [vms, search, stateFilter, snapshotFilter, typeFilter, workerNameById]);
 
   const allSelected =
     filteredVMs.length > 0 && selectedIds.length === filteredVMs.length;
@@ -226,22 +266,26 @@ export function InstancesPage({
     setTimeout(() => setCopiedId(null), 1500);
   };
 
-  const loadSandboxConnectivity = useCallback(async () => {
-    setVolumesLoading(true);
-    setForwardsLoading(true);
+  const loadSandboxConnectivity = useCallback(async (force = false) => {
+    const needVolumes = force || propVolumes === undefined;
+    const needForwards = force || propPortForwards === undefined;
+    if (!needVolumes && !needForwards) return;
+
+    if (needVolumes) setVolumesLoading(true);
+    if (needForwards) setForwardsLoading(true);
     const [volsRes, pfsRes] = await Promise.allSettled([
-      api.listVolumes(),
-      api.listPortForwards(),
+      needVolumes ? api.listVolumes() : Promise.resolve(null),
+      needForwards ? api.listPortForwards() : Promise.resolve(null),
     ]);
-    if (volsRes.status === 'fulfilled') {
+    if (needVolumes && volsRes.status === 'fulfilled' && volsRes.value) {
       setVolumes(volsRes.value || []);
     }
-    if (pfsRes.status === 'fulfilled') {
+    if (needForwards && pfsRes.status === 'fulfilled' && pfsRes.value) {
       setPortForwards(pfsRes.value || []);
     }
     setVolumesLoading(false);
     setForwardsLoading(false);
-  }, []);
+  }, [propVolumes, propPortForwards]);
 
   const selectedVMKey = selectedVM?.id ?? null;
 
@@ -249,8 +293,42 @@ export function InstancesPage({
     if (!selectedVMKey) return;
     setAddForwardOpen(false);
     setAttachVolumeId('');
-    void loadSandboxConnectivity();
+    void loadSandboxConnectivity(false);
   }, [selectedVMKey, loadSandboxConnectivity]);
+
+  function openMigrateModal(vm: VM) {
+    setMigrateTarget(vm);
+    setMigrateWorkerId('');
+    setMigratePoolId(vm.pool_id || '');
+    setMigrateForce(false);
+  }
+
+  function handleMigrateSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!migrateTarget) return;
+    const src = migrateTarget;
+    const vmName = src.name || src.id;
+    const payload = {
+      target_worker_id: migrateWorkerId || undefined,
+      target_pool_id: migratePoolId || undefined,
+      force: migrateForce,
+    };
+    setMigrateTarget(null);
+
+    const toastID = toast.loading(`Migrating sandbox ${vmName}…`);
+    void api
+      .migrateVM(src.id, payload)
+      .then(async () => {
+        toast.success(`Migrated sandbox ${vmName}`, { id: toastID });
+        await onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(`Migration failed for ${vmName}`, {
+          id: toastID,
+          description: errorMessage(err),
+        });
+      });
+  }
 
   function openResizeModal(vm: VM) {
     setResizeTarget(vm);
@@ -320,7 +398,7 @@ export function InstancesPage({
         id: toastID,
       });
       setAttachVolumeId('');
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
       toast.error(`Attach failed: ${errorMessage(err)}`, { id: toastID });
     }
@@ -331,7 +409,7 @@ export function InstancesPage({
     try {
       await api.detachVolume(vol.id);
       toast.success(`Detached ${vol.name}`, { id: toastID });
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
       toast.error(`Detach failed: ${errorMessage(err)}`, { id: toastID });
     }
@@ -361,7 +439,7 @@ export function InstancesPage({
       });
       setAddForwardOpen(false);
       setFwSubdomain('');
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
       toast.error(`Failed to add forward: ${errorMessage(err)}`, { id: toastID });
     }
@@ -372,7 +450,7 @@ export function InstancesPage({
     try {
       await api.deletePortForward(pf.id);
       toast.success(`Removed port forward :${pf.host_port}`, { id: toastID });
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
       toast.error(`Failed to remove forward: ${errorMessage(err)}`, { id: toastID });
     }
@@ -740,6 +818,7 @@ export function InstancesPage({
                 <th className="py-2 px-1 font-normal">Name / URL</th>
                 <th className="py-2 px-1 font-normal">Sandbox ID</th>
                 <th className="py-2 px-1 font-normal">State</th>
+                <th className="py-2 px-1 font-normal">Node / Pool</th>
                 <th className="py-2 px-1 font-normal">Created</th>
                 <th className="py-2 px-1 font-normal">Type</th>
                 <th className="py-2 px-1 font-normal">
@@ -776,7 +855,7 @@ export function InstancesPage({
             {filteredVMs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={12} className="py-20 text-center">
+                  <td colSpan={13} className="py-20 text-center">
                     <div className="mx-auto flex max-w-xs flex-col items-center justify-center space-y-3.5">
                       <svg
                         viewBox="0 0 120 110"
@@ -846,6 +925,11 @@ export function InstancesPage({
                   );
                   const resourcesStr = `${vm.vcpus} vCPU · ${formatMemory(vm.memory_mb)} · ${diskGb} GB`;
                   const shortId = (vm.internal_id || vm.id).slice(0, 12);
+                  const nodeName =
+                    (vm.worker_id && workerNameById[vm.worker_id]) ||
+                    vm.worker_id ||
+                    'local';
+                  const poolLabel = vm.pool_id || 'default';
 
                   return (
                     <tr
@@ -925,31 +1009,50 @@ export function InstancesPage({
                       </td>
 
                       <td className="py-2 px-1.5">
-                        <span
-                          className={cn(
-                            'inline-flex items-center gap-1 border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider',
-                            vm.status === 'running' &&
-                              'border-success/40 bg-success/10 text-success',
-                            vm.status === 'paused' &&
-                              'border-warning/40 bg-warning/10 text-warning',
-                            (vm.status === 'stopped' || vm.status === 'created') &&
-                              'border-border bg-muted/40 text-muted-foreground',
-                            vm.status === 'failed' &&
-                              'border-destructive/40 bg-destructive/10 text-destructive',
-                          )}
-                        >
+                        <div className="flex items-center gap-1">
                           <span
                             className={cn(
-                              'h-1.5 w-1.5',
-                              vm.status === 'running' && 'bg-success',
-                              vm.status === 'paused' && 'bg-warning',
+                              'inline-flex items-center gap-1 border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider',
+                              vm.status === 'running' &&
+                                'border-success/40 bg-success/10 text-success',
+                              vm.status === 'paused' &&
+                                'border-warning/40 bg-warning/10 text-warning',
                               (vm.status === 'stopped' || vm.status === 'created') &&
-                                'bg-muted-foreground',
-                              vm.status === 'failed' && 'bg-destructive',
+                                'border-border bg-muted/40 text-muted-foreground',
+                              vm.status === 'failed' &&
+                                'border-destructive/40 bg-destructive/10 text-destructive',
                             )}
-                          />
-                          {vm.status === 'paused' ? 'PAUSED (STATE SAVED)' : vm.status}
-                        </span>
+                          >
+                            <span
+                              className={cn(
+                                'h-1.5 w-1.5',
+                                vm.status === 'running' && 'bg-success',
+                                vm.status === 'paused' && 'bg-warning',
+                                (vm.status === 'stopped' || vm.status === 'created') &&
+                                  'bg-muted-foreground',
+                                vm.status === 'failed' && 'bg-destructive',
+                              )}
+                            />
+                            {vm.status === 'paused' ? 'PAUSED (STATE SAVED)' : vm.status}
+                          </span>
+                          {vm.auto_hibernated && (
+                            <span
+                              title={vm.hibernate_reason || 'Auto-hibernated to SSD'}
+                              className="inline-flex items-center border border-warning/40 bg-warning/10 px-1 py-0.5 font-mono text-[9px] uppercase text-warning"
+                            >
+                              SSD Hibernated
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="py-2 px-1.5 font-mono text-[10.5px]">
+                        <div className="text-foreground truncate max-w-[140px]" title={vm.worker_id || ''}>
+                          {nodeName}
+                        </div>
+                        <div className="text-[9.5px] text-muted-foreground">
+                          pool:{poolLabel}
+                        </div>
                       </td>
 
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-muted-foreground tabular">
@@ -1129,6 +1232,12 @@ export function InstancesPage({
                                 <Scaling className="h-3.5 w-3.5" />
                                 Resize
                               </DropdownMenuItem>
+                              {isAdmin && (
+                                <DropdownMenuItem onSelect={() => openMigrateModal(vm)}>
+                                  <ArrowRightLeft className="h-3.5 w-3.5" />
+                                  Migrate Sandbox
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuItem onSelect={() => onInspect(vm)}>
                                 <Server className="h-3.5 w-3.5" />
                                 JSON Spec
@@ -1191,12 +1300,29 @@ export function InstancesPage({
                   ? 'PAUSED (STATE SAVED)'
                   : selectedVM.status}
               </span>
+              {selectedVM.auto_hibernated && (
+                <span
+                  title={selectedVM.hibernate_reason || 'Auto-hibernated to SSD'}
+                  className="inline-flex items-center border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-warning"
+                >
+                  SSD Hibernated
+                </span>
+              )}
               {selectedVM.protected && (
                 <span className="inline-flex items-center gap-1 border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-primary dark:text-[var(--accent-bright)]">
                   <Shield className="h-2.5 w-2.5" />
                   Protected
                 </span>
               )}
+              <span className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[10.5px] text-muted-foreground">
+                <span>
+                  {(selectedVM.worker_id && workerNameById[selectedVM.worker_id]) ||
+                    selectedVM.worker_id ||
+                    'local'}
+                </span>
+                <span>·</span>
+                <span>pool:{selectedVM.pool_id || 'default'}</span>
+              </span>
 
               {selectedVM.ip_address && (
                 <button
@@ -1317,6 +1443,12 @@ export function InstancesPage({
                     <Scaling className="h-3.5 w-3.5" />
                     Resize
                   </DropdownMenuItem>
+                  {isAdmin && (
+                    <DropdownMenuItem onSelect={() => openMigrateModal(selectedVM)}>
+                      <ArrowRightLeft className="h-3.5 w-3.5" />
+                      Migrate Sandbox
+                    </DropdownMenuItem>
+                  )}
                   {selectedVM.status === 'running' && (
                     <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
                       <Pause className="h-3.5 w-3.5" />
@@ -1391,7 +1523,7 @@ export function InstancesPage({
                       onClick={() => terminalRef.current?.reconnect()}
                       className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
                     >
-                      <RefreshCw className="h-3 w-3" />
+                      <RotateCcw className="h-3 w-3" />
                       <span>Reconnect</span>
                     </button>
                     <button
@@ -1484,6 +1616,27 @@ export function InstancesPage({
                   )}{' '}
                   GB
                 </span>
+                <span className="text-muted-foreground">Worker Node</span>
+                <span className="text-right text-foreground truncate" title={selectedVM.worker_id || ''}>
+                  {(selectedVM.worker_id && workerNameById[selectedVM.worker_id]) ||
+                    selectedVM.worker_id ||
+                    'nod_host_local'}
+                </span>
+                <span className="text-muted-foreground">Pool</span>
+                <span className="text-right text-foreground">
+                  {selectedVM.pool_id || 'default'}
+                </span>
+                {selectedVM.auto_hibernated && (
+                  <>
+                    <span className="text-muted-foreground">Hibernation</span>
+                    <span
+                      className="text-right text-warning truncate"
+                      title={selectedVM.hibernate_reason || 'Auto-hibernated to SSD'}
+                    >
+                      SSD Hibernated
+                    </span>
+                  </>
+                )}
                 <span className="text-muted-foreground">OS Image</span>
                 <span className="text-right text-foreground">Ubuntu 24.04 LTS</span>
                 <span className="text-muted-foreground">Created</span>
@@ -1898,6 +2051,110 @@ export function InstancesPage({
                 className="h-8 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
               >
                 Provision Resized
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Migrate Sandbox Modal */}
+      {migrateTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setMigrateTarget(null)}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-label="Migrate Sandbox"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleMigrateSubmit}
+            className="w-full max-w-md border border-border bg-background p-5 space-y-4 text-foreground"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ArrowRightLeft className="h-4 w-4 text-primary" />
+                <h2 className="text-[15px] font-medium">
+                  Migrate {migrateTarget.name}
+                </h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close migrate dialog"
+                onClick={() => setMigrateTarget(null)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="text-[11.5px] text-muted-foreground">
+              Move sandbox <span className="font-mono text-foreground">{migrateTarget.name}</span> to a target worker node or placement pool.
+            </p>
+            <div className="space-y-3 text-[12px]">
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  Target Worker Node
+                </label>
+                <select
+                  aria-label="Target Worker Node"
+                  value={migrateWorkerId}
+                  onChange={(e) => setMigrateWorkerId(e.target.value)}
+                  className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
+                >
+                  <option value="">Auto-select in target pool</option>
+                  {workers
+                    .filter((w) => w.id !== migrateTarget.worker_id)
+                    .map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name} ({w.pool_id} · {w.status})
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  Target Pool
+                </label>
+                <select
+                  aria-label="Target Pool"
+                  value={migratePoolId}
+                  onChange={(e) => setMigratePoolId(e.target.value)}
+                  className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
+                >
+                  <option value="">Keep current / match worker</option>
+                  <option value="default">default</option>
+                  {pools
+                    .filter((p) => p.name !== 'default')
+                    .map((p) => (
+                      <option key={p.id || p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <label className="flex items-center gap-2 text-[12px] text-muted-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={migrateForce}
+                  onChange={(e) => setMigrateForce(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                <span>Force stop &amp; migrate if currently running</span>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setMigrateTarget(null)}
+                className="h-8 border border-border px-3 text-[12px] text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="h-8 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+              >
+                Migrate Sandbox
               </button>
             </div>
           </form>
