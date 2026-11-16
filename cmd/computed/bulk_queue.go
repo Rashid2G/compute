@@ -608,7 +608,7 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(resp)
+		s.recordQueuedTask(ownerID, resp)
 
 		if validCount > 0 {
 			var remaining atomic.Int64
@@ -633,7 +633,7 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 					Warnings:  warnings,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(summary)
+				s.recordTaskSummary(ownerID, summary)
 				s.recordEvent("sandbox.bulk_created", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 80, summary)
 				s.broadcastClusterUpdate()
 			}
@@ -860,7 +860,7 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(resp)
+		s.recordQueuedTask(ownerID, resp)
 
 		if validCount > 0 {
 			var remaining atomic.Int64
@@ -883,7 +883,7 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 					Failed:    failed,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(summary)
+				s.recordTaskSummary(ownerID, summary)
 				s.recordEvent("sandbox.bulk_cloned", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 60, summary)
 				s.broadcastClusterUpdate()
 			}

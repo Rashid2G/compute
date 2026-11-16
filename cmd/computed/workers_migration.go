@@ -1085,6 +1085,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	actor := getActor(r)
+	callerOwner, _ := s.currentOwnerID(r)
 
 	// Pre-resolve accessible VMs serially (HTTP request auth check) before running workers.
 	type deleteTarget struct {
@@ -1156,7 +1157,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(resp)
+		s.recordQueuedTask(callerOwner, resp)
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -1185,7 +1186,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 					Failed:    failed,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(summary)
+				s.recordTaskSummary(callerOwner, summary)
 				if doReconcile && s.vmMgr != nil {
 					for _, owner := range ownersCopy {
 						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
@@ -1333,7 +1334,7 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	_, isAdmin := s.currentOwnerID(r)
+	callerOwner, isAdmin := s.currentOwnerID(r)
 	actor := getActor(r)
 
 	type actionTarget struct {
@@ -1484,7 +1485,7 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(resp)
+		s.recordQueuedTask(callerOwner, resp)
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -1513,7 +1514,7 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					Failed:    failed,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(summary)
+				s.recordTaskSummary(callerOwner, summary)
 				if doReconcile && s.vmMgr != nil {
 					for _, owner := range ownersCopy {
 						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)

@@ -21,8 +21,9 @@ type taskRecord struct {
 	Succeeded []string              `json:"succeeded"`
 	Failed    []api.BulkVMItemError `json:"failed"`
 	Warnings  []api.BulkVMItemError `json:"warnings,omitempty"`
-	CreatedAt time.Time             `json:"created_at"`
-	UpdatedAt time.Time             `json:"updated_at"`
+	owner     string
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func taskStatusFor(succeeded []string, failed []api.BulkVMItemError) string {
@@ -72,9 +73,10 @@ func (s *Server) saveTask(rec *taskRecord) {
 
 // recordQueuedTask stores the acknowledgement returned when a bulk operation is
 // accepted for background execution.
-func (s *Server) recordQueuedTask(resp api.BulkVMsResponse) {
+func (s *Server) recordQueuedTask(ownerID string, resp api.BulkVMsResponse) {
 	s.saveTask(&taskRecord{
 		ID:        resp.TaskID,
+		owner:     ownerID,
 		Action:    resp.Action,
 		Status:    "queued",
 		Requested: resp.Requested,
@@ -87,13 +89,20 @@ func (s *Server) recordQueuedTask(resp api.BulkVMsResponse) {
 
 // recordTaskSummary stores the terminal state of a bulk operation, carrying
 // over the queued count recorded when the request was accepted.
-func (s *Server) recordTaskSummary(resp api.BulkVMsResponse) {
+func (s *Server) recordTaskSummary(ownerID string, resp api.BulkVMsResponse) {
 	queued := resp.Queued
-	if prev, ok := s.getTask(resp.TaskID); ok && queued == 0 {
-		queued = prev.Queued
+	owner := ownerID
+	if prev, ok := s.getTask(resp.TaskID); ok {
+		if queued == 0 {
+			queued = prev.Queued
+		}
+		if owner == "" {
+			owner = prev.owner
+		}
 	}
 	s.saveTask(&taskRecord{
 		ID:        resp.TaskID,
+		owner:     owner,
 		Action:    resp.Action,
 		Status:    taskStatusFor(resp.Succeeded, resp.Failed),
 		Requested: resp.Requested,
@@ -125,6 +134,12 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	}
 	rec, ok := s.getTask(id)
 	if !ok {
+		httpError(w, "task not found", http.StatusNotFound)
+		return
+	}
+	// Task records describe another tenant's sandbox ids and errors, so hide
+	// them from anyone but the submitter (and admins).
+	if ownerID, isAdmin := s.currentOwnerID(r); !isAdmin && rec.owner != "" && rec.owner != ownerID {
 		httpError(w, "task not found", http.StatusNotFound)
 		return
 	}
