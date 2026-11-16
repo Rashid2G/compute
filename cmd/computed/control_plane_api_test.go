@@ -527,11 +527,16 @@ func TestControlPlane_Environments(t *testing.T) {
 }
 
 func TestControlPlane_PortForwards(t *testing.T) {
-	server := newTestServer(t)
+	server, vmMgr := newTestServerWithVMManager(t)
+	if err := vmMgr.GetStore().SaveVM(context.Background(), &db.VM{
+		ID: "vm-web-1", Name: "vm-web-1", OwnerID: "default",
+		Status: db.StatusRunning, IPAddress: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// 1. Create port forward
 	body, _ := json.Marshal(map[string]interface{}{
-		"host_port":  9080,
 		"vm_id":      "vm-web-1",
 		"guest_port": 80,
 		"protocol":   "tcp",
@@ -547,7 +552,7 @@ func TestControlPlane_PortForwards(t *testing.T) {
 	}
 	var pf db.PortForward
 	_ = json.NewDecoder(resp.Body).Decode(&pf)
-	if pf.HostPort != 9080 || pf.PublicURL != "https://web1.compute.dev" {
+	if pf.HostPort != 0 || pf.Subdomain != "web1" || pf.PublicURL != "http://web1.localhost:18080/" {
 		t.Fatalf("unexpected port forward: %+v", pf)
 	}
 
@@ -615,13 +620,13 @@ func TestControlPlane_IngressOnlyPortExposure(t *testing.T) {
 	_ = json.NewDecoder(resp.Body).Decode(&pf)
 	resp.Body.Close()
 	if pf.HostPort != 0 {
-		t.Fatalf("host_port = %d, want 0 (ingress-only)", pf.HostPort)
+		t.Fatalf("host_port = %d, want 0 (subdomain mode)", pf.HostPort)
 	}
 	if !pf.Public {
 		t.Fatalf("expose should default to public, got %+v", pf)
 	}
-	if !strings.HasPrefix(pf.PublicURL, "/preview/") || !strings.HasSuffix(pf.PublicURL, "/8080/") {
-		t.Fatalf("unexpected preview URL %q", pf.PublicURL)
+	if pf.Subdomain == "" || !strings.HasPrefix(pf.PublicURL, "http://"+pf.Subdomain+".localhost:18080/") {
+		t.Fatalf("unexpected serve URL %q (slug %q)", pf.PublicURL, pf.Subdomain)
 	}
 
 	// 2. Re-exposing the same guest port updates in place instead of creating duplicates.

@@ -65,16 +65,17 @@
         <ul class="nav-list">
           <li><a class="nav-link" href="#distributed-jobs"><span class="nav-num">08</span>Workers, Pools &amp; Jobs</a></li>
           <li><a class="nav-link" href="#multi-node-scheduler"><span class="nav-num">09</span>Load Balancing &amp; Migration</a></li>
-          <li><a class="nav-link" href="#networking-dns-ssh"><span class="nav-num">10</span>Bridge, DNS &amp; SSH</a></li>
+          <li><a class="nav-link" href="#serving"><span class="nav-num">10</span>Serving Apps</a></li>
+          <li><a class="nav-link" href="#networking-dns-ssh"><span class="nav-num">11</span>Bridge, DNS &amp; SSH</a></li>
         </ul>
       </div>
 
       <div class="nav-group">
         <div class="nav-group-title">Interfaces</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#cli-reference"><span class="nav-num">11</span>CLI Reference</a></li>
-          <li><a class="nav-link" href="#rest-api"><span class="nav-num">12</span>REST &amp; WebSocket API</a></li>
-          <li><a class="nav-link" href="#sdks"><span class="nav-num">13</span>TypeScript &amp; Python SDKs</a></li>
+          <li><a class="nav-link" href="#cli-reference"><span class="nav-num">12</span>CLI Reference</a></li>
+          <li><a class="nav-link" href="#rest-api"><span class="nav-num">13</span>REST &amp; WebSocket API</a></li>
+          <li><a class="nav-link" href="#sdks"><span class="nav-num">14</span>TypeScript &amp; Python SDKs</a></li>
         </ul>
       </div>
 
@@ -409,7 +410,7 @@ compute sandbox exec dev-api -- uname -a
 
 # Copy local directory tree into guest /workspace and publish it over HTTP ingress
 compute scp -r ./my-service dev-api:/workspace/
-compute expose dev-api 3000        # -> <daemon-url>/preview/@<user>/dev-api/3000/
+compute expose dev-api 3000        # -> http://dev-api-3000.localhost:18080/ (loopback default)
 compute ports dev-api
 compute unexpose dev-api 3000
 
@@ -614,10 +615,103 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
         </div>
       </section>
 
-      <!-- 10. Networking, DNS & SSH -->
-      <section id="networking-dns-ssh" class="doc-section" data-keywords="network bridge mft3br0 mftap nat dns ssh port forward preview ingress iptables tailscale">
+      <!-- 10. Serving apps from sandboxes -->
+      <section id="serving" class="doc-section" data-keywords="serve expose publish port ingress subdomain localhost wildcard tls tailnet origin redirect spa cookies websocket private token public_url">
         <div class="section-head">
           <span class="section-id">10</span>
+          <h2>Serving Apps at Their Own Origin</h2>
+        </div>
+        <p>
+          Every published guest port gets a dedicated origin instead of a path prefix. The app sees
+          <code>/</code> as its root, so redirects, <code>history.pushState</code>, absolute asset imports,
+          cookies and service workers behave exactly as they do when the app runs locally. No HTML or
+          JavaScript rewriting is involved.
+        </p>
+
+        <div class="code-block">
+          <div class="code-header"><span>publish a port and inspect its origin</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Public: anyone with the URL can reach the app
+compute expose web 8080
+# -> http://web-8080.localhost:18080/            (loopback daemon, no DNS needed)
+
+# Private: owning tenant session or short-lived token
+compute expose web 8080 --private
+
+# Preferred label (made globally unique)
+compute expose web 8080 --subdomain my-app
+
+compute ports web
+compute unexpose web 8080</code></pre>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Mode</th><th>URL shape</th><th>Selected when</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Subdomain</td>
+                <td><code>https://&lt;slug&gt;.&lt;serve-domain&gt;/</code></td>
+                <td><code>COMPUTE_SERVE_DOMAIN</code> is set, or the API binds loopback (domain defaults to <code>localhost</code>). Requires a wildcard DNS record and wildcard certificate for public domains.</td>
+              </tr>
+              <tr>
+                <td>Port</td>
+                <td><code>https://&lt;daemon-host&gt;:&lt;serve-port&gt;/</code></td>
+                <td><code>COMPUTE_PUBLIC_URL</code> points at a non-loopback host, or the API binds a non-loopback address without a serve domain. Listeners are allocated from <code>COMPUTE_SERVE_PORT_START..COMPUTE_SERVE_PORT_END</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note-box">
+          <div class="note-label">Wildcard DNS + TLS for public subdomains</div>
+          Point <code>*.serves.example.com</code> at the daemon and set
+          <code>COMPUTE_SERVE_DOMAIN=serves.example.com</code>. Terminate TLS either at the daemon
+          (<code>COMPUTE_SERVE_TLS_CERT_FILE</code> / <code>COMPUTE_SERVE_TLS_KEY_FILE</code>) or in front of it
+          (Caddy/nginx wildcard). For a tailnet or bare public IP, use port mode: map each allocated port with
+          <code>tailscale serve --bg --tcp=&lt;port&gt; tcp://127.0.0.1:&lt;port&gt;</code> (tailnet-only HTTP) or
+          <code>--https=8443</code> (Tailscale can terminate HTTPS only on 443/8443/10000). Port-mode URLs use
+          <code>http://</code> unless <code>COMPUTE_SERVE_TLS_*</code> is configured.
+        </div>
+
+        <p>
+          <strong>Access control.</strong> A <code>public</code> exposure bypasses tenant authentication.
+          A <code>private</code> exposure accepts the daemon session/bearer credentials, or a short-lived
+          HMAC token minted by <code>POST /api/v1/sandboxes/&lt;id&gt;/serve-token</code>. Browsers are bounced through
+          <code>GET /api/v1/serve/authorize</code>, which exchanges the daemon session for a
+          <code>compute_serve</code> cookie scoped to the serve origin. Tokens are signed with
+          <code>COMPUTE_SERVE_TOKEN_KEY</code> (or a key derived from <code>COMPUTE_ADMIN_SECRET</code>).
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Environment</th><th>Default</th><th>Behavior</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>COMPUTE_PUBLIC_URL</code></td><td>&mdash;</td><td>Externally reachable daemon base URL used in port-mode serve URLs and advertised on <code>/api/v1/version</code>.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_DOMAIN</code></td><td>&mdash;</td><td>Enables subdomain mode: <code>&lt;slug&gt;.&lt;serve-domain&gt;</code>.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_BIND</code></td><td><code>127.0.0.1</code></td><td>Bind address for port-mode listeners; use <code>0.0.0.0</code> for direct public exposure.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_PORT_START</code> / <code>_END</code></td><td><code>18400</code> / <code>18500</code></td><td>Inclusive port range for port-mode serve listeners.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_TLS_CERT_FILE</code> / <code>_KEY_FILE</code></td><td>&mdash;</td><td>Optional TLS for port-mode listeners (falls back to the API listener's certificate).</td></tr>
+              <tr><td><code>COMPUTE_SERVE_TOKEN_KEY</code></td><td>&mdash;</td><td>HMAC key for private-serve tokens. Empty derives from <code>COMPUTE_ADMIN_SECRET</code>, else a random per-process key.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note-box warn">
+          <div class="note-label">Port mode and cookies</div>
+          Distinct ports are distinct origins for storage, service workers and CORS, but browsers scope cookies by
+          host, not port. Use subdomain mode when apps must not share cookies. Apps that hard-code an absolute
+          base URL at build time still need their own base-URL configuration.
+        </div>
+      </section>
+
+      <!-- 11. Networking, DNS & SSH -->
+      <section id="networking-dns-ssh" class="doc-section" data-keywords="network bridge mft3br0 mftap nat dns ssh port forward ingress iptables tailscale">
+        <div class="section-head">
+          <span class="section-id">11</span>
           <h2>Networking, DNS &amp; SSH Routing</h2>
         </div>
         <p>
@@ -649,17 +743,17 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
               </tr>
               <tr>
                 <td>HTTP Edge (<code>:80</code>) &amp; Port Exposures</td>
-                <td>Routes wildcard hostnames and <code>/preview/[@user/]&lt;vm&gt;/&lt;port&gt;/</code> HTTP/SSE/WebSocket traffic directly into guest ports. <code>compute expose &lt;sandbox&gt; &lt;port&gt;</code> publishes a guest port on the daemon URL without binding a host port; <code>--private</code> requires tenant auth. See <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
+                <td>Routes wildcard hostnames to sandboxes. Published ports use their own origin (subdomain or dedicated port) instead of a shared path prefix; see <a href="#serving">Serving Apps</a>, <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- 11. CLI Reference -->
-      <section id="cli-reference" class="doc-section" data-keywords="cli reference commands flags compute sandbox template job auth keys worker pool scp url">
+      <!-- 12. CLI Reference -->
+      <section id="cli-reference" class="doc-section" data-keywords="cli reference commands flags compute sandbox template job auth keys worker pool scp url serve expose">
         <div class="section-head">
-          <span class="section-id">11</span>
+          <span class="section-id">12</span>
           <h2>CLI Reference (<code>compute</code>)</h2>
         </div>
         <div class="table-wrap">
@@ -693,7 +787,7 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
               </tr>
               <tr>
                 <td><code>compute expose|ports|unexpose</code></td>
-                <td><code>expose [--private] [--subdomain &lt;name&gt;] &lt;sandbox&gt; &lt;guest-port&gt;</code>, <code>ports &lt;sandbox&gt;</code>, <code>unexpose &lt;sandbox&gt; &lt;guest-port&gt;</code>.</td>
+                <td><code>expose [--private] [--subdomain &lt;label&gt;] &lt;sandbox&gt; &lt;guest-port&gt;</code> publishes the port at its own origin; <code>ports &lt;sandbox&gt;</code> lists the absolute serve URLs; <code>unexpose &lt;sandbox&gt; &lt;guest-port&gt;</code> removes the exposure and closes its listener.</td>
               </tr>
               <tr>
                 <td><code>compute template</code></td>
@@ -712,10 +806,10 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
         </div>
       </section>
 
-      <!-- 12. REST & WebSocket API Reference -->
-      <section id="rest-api" class="doc-section" data-keywords="rest api endpoints http json vms sandboxes clone save-state resume migrate bulk-delete bulk-action scheduler policy workers pools ws websocket">
+      <!-- 13. REST & WebSocket API Reference -->
+      <section id="rest-api" class="doc-section" data-keywords="rest api endpoints http json vms sandboxes clone save-state resume migrate bulk-delete bulk-action scheduler policy workers pools ws websocket serve expose token">
         <div class="section-head">
-          <span class="section-id">12</span>
+          <span class="section-id">13</span>
           <h2>REST &amp; WebSocket API Reference (<code>/api/v1</code>)</h2>
         </div>
         <p>
@@ -804,6 +898,21 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
                 <td>Read or update cluster load balancer strategy (<code>least_loaded</code>, <code>round_robin</code>, <code>bin_pack</code>, <code>spread</code>), CPU overcommit ratios, RAM/idle SSD rules, and disk limits.</td>
               </tr>
               <tr>
+                <td><span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
+                <td><code>/api/v1/sandboxes/{id}/expose</code> &middot; <code>/ports/{port}</code></td>
+                <td>Publish or remove a guest port. Responses include the absolute <code>public_url</code> for the exposure's own origin.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code>/api/v1/sandboxes/{id}/serve-token</code></td>
+                <td>Mint a short-lived URL for a private exposure (<code>{"guest_port":8080}</code>).</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code>/api/v1/serve/authorize</code></td>
+                <td>Browser auth hop for private serves: exchanges the daemon session for a serve-scoped token.</td>
+              </tr>
+              <tr>
                 <td><span class="method-badge method-get">WS</span></td>
                 <td><code>/api/v1/ws</code></td>
                 <td>Persistent RBAC-scoped WebSocket streaming real-time cluster state snapshots to the Web Dashboard and live clients.</td>
@@ -813,10 +922,10 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
         </div>
       </section>
 
-      <!-- 13. SDKs -->
-      <section id="sdks" class="doc-section" data-keywords="sdk python typescript javascript client programmatic commands files process">
+      <!-- 14. SDKs -->
+      <section id="sdks" class="doc-section" data-keywords="sdk python typescript javascript client programmatic commands files process serve expose">
         <div class="section-head">
-          <span class="section-id">13</span>
+          <span class="section-id">14</span>
           <h2>TypeScript &amp; Python SDKs</h2>
         </div>
         <p>

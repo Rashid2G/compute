@@ -80,3 +80,32 @@ ns1.sandboxes.example.com.  IN A   <public-ip-of-daemon-host>
 ## Option C: Per-sandbox MagicDNS names
 
 If guests join your tailnet directly via Tailscale inside the sandbox, they receive single-label MagicDNS names (`<device>.<tailnet>.ts.net`) without split DNS.
+
+## Serve domains (one origin per published port)
+
+Published sandbox ports use a **separate** wildcard domain from the
+`<sandbox>.<username>.<zone>` naming above. Each exposure is served at
+`https://<slug>.<serve-domain>/`, which gives the app its own origin so
+redirects, cookies, service workers and absolute asset URLs work unchanged.
+
+```dns
+serves.example.com.        IN A   <public-ip-of-daemon-host>
+*.serves.example.com.      IN A   <public-ip-of-daemon-host>
+```
+
+- Wildcard certificates (`*.serves.example.com`) cover exactly one label before
+  the domain, which matches the `<slug>` form. Obtain one with ACME DNS-01 (or
+  from your provider) and point `COMPUTE_SERVE_TLS_CERT_FILE` /
+  `COMPUTE_SERVE_TLS_KEY_FILE` at it, or terminate TLS in Caddy/nginx/Traefik.
+- Set `COMPUTE_SERVE_DOMAIN=serves.example.com` and
+  `COMPUTE_PUBLIC_URL=https://serves.example.com`.
+- On loopback binds the serve domain defaults to `localhost`, so no DNS or
+  certificate work is needed (`http://web-8080.localhost:18080/`).
+- On a tailnet or a bare public IP without a wildcard domain, use port mode:
+  one listener per exposure (`COMPUTE_SERVE_PORT_START.._END`). Map a port with
+  `tailscale serve --bg --https=<port> http://127.0.0.1:<port>` to get
+  `https://<node>.<tailnet>.ts.net:<port>/` with a valid certificate.
+
+Do **not** reuse the DNS zone used for `<sandbox>.<username>.<zone>` unless you
+accept that serve slugs and sandbox hostnames share a namespace; the reserved
+`api`/`gui`/`www` labels are never treated as serve slugs.

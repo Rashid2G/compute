@@ -44,18 +44,20 @@ import (
 )
 
 type Server struct {
-	vmMgr        *vm.Manager
-	cfg          config.GlobalConfig
-	mux          *http.ServeMux
-	workers      *scheduler.WorkerRegistry
-	scheduler    *scheduler.Scheduler
-	jobRunner    *jobs.Runner
-	authMgr      *auth.Manager
-	metaStore    *store.Store
-	fcVersion    string
-	ingressProxy *network.IngressProxy
-	dns          *dnsRuntime
-	guiHandler   http.Handler
+	vmMgr         *vm.Manager
+	cfg           config.GlobalConfig
+	mux           *http.ServeMux
+	workers       *scheduler.WorkerRegistry
+	scheduler     *scheduler.Scheduler
+	jobRunner     *jobs.Runner
+	authMgr       *auth.Manager
+	metaStore     *store.Store
+	fcVersion     string
+	ingressProxy  *network.IngressProxy
+	dns           *dnsRuntime
+	guiHandler    http.Handler
+	servePorts    *servePortRegistry
+	serveTokenKey []byte
 
 	// DNS/ingress caches (daemon-owned, response only).
 	userIndexMu     sync.RWMutex
@@ -356,9 +358,18 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	}
 	domains = append(domains, "preview.localhost", "compute.internal", "compute.dev", "localhost")
 
+	s.serveTokenKey = network.ServeTokenKey(cfg.Server.ServeTokenKey, cfg.Server.AdminSecret)
+	serveDomains := []string{}
+	if d := cfg.ServeDomainResolved(); d != "" {
+		serveDomains = append(serveDomains, d)
+	}
 	s.ingressProxy = network.NewIngressProxy(network.ProxyOptions{
-		BaseDomains: domains,
-		Resolver:    s,
+		BaseDomains:      domains,
+		ServeDomains:     serveDomains,
+		ServeResolver:    s,
+		ServeTokenKey:    s.serveTokenKey,
+		AuthorizeBaseURL: s.authorizeBaseURL(),
+		Resolver:         s,
 		Auth: func(r *http.Request, ownerID string) bool {
 			if !s.authEnabled() {
 				return true
@@ -380,6 +391,10 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 
 	s.configureAuthIntegrations()
 	s.routes()
+	s.servePorts = newServePortRegistry(s)
+	if cfg.ServeMode() == "port" {
+		s.servePorts.restore(context.Background())
+	}
 	return s
 }
 
@@ -589,10 +604,10 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if pf.HostPort > 0 && v.IPAddress != "" && s.vmMgr.NetManager() != nil {
-			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
-		}
 		if deleteRecords {
+			// Deleting the sandbox frees its serve origins; stopping it keeps
+			// them so the URLs stay stable (requests return 503 while stopped).
+			s.releaseServe(pf)
 			_ = st.DeletePortForward(ctx, pf.ID)
 			continue
 		}
@@ -677,6 +692,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/ready", s.handleReady)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
+	s.mux.HandleFunc("/api/v1/serve/authorize", s.wrapAuth(s.handleServeAuthorize))
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
 
@@ -732,7 +748,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ci/repos/", s.wrapAuth(s.handleCIRepoActions))
 	s.mux.HandleFunc("/api/v1/ci/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
-	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
 	s.mux.HandleFunc("/", s.handleRoot)
 
 	// Volumes
@@ -1465,6 +1480,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "ports" || action == "expose" || action == "unexpose" {
 		s.handleVMPorts(w, r, v, action, parts[2:])
+		return
+	}
+	if action == "serve-token" {
+		s.handleServeToken(w, r, v)
 		return
 	}
 	if r.Method != http.MethodPost {

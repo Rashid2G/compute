@@ -134,84 +134,125 @@ The apex and reserved labels are intercepted before the ingress so they can
 never collide with a sandbox, and `api.<zone>` is reserved for the API even
 when the edge is disabled (on the daemon's own port the mux serves both).
 
-## Publishing a sandbox port (public ingress)
+## Serving apps from sandboxes (one origin per exposure)
 
-To serve an app from a sandbox on the daemon's own public URL, expose the
-guest port. Exposure is **ingress-only** by default: the daemon does not bind a
-host port, so publishing does not consume host sockets and scales with the
-number of sandboxes rather than with host port space.
+Path-prefix previews (`/preview/<sandbox>/<port>/`) cannot be made transparent
+for arbitrary apps: redirects, `history.pushState`, absolute asset imports,
+cookies and service workers all assume the app owns its origin. Compute instead
+gives **every exposure its own origin**, so the app sees `/` as its root and no
+response rewriting is involved.
 
 ```bash
 # Public: anyone with the URL can reach the app
 compute expose web 8080
-# -> http://<daemon-host>/preview/@alice/web/8080/
 
-# Private: only authenticated members of the owning tenant
+# Private: only the owning tenant (browser session or short-lived token)
 compute expose web 8080 --private
 
-# Optional DNS subdomain (requires a delegated zone)
-compute expose web 8080 --subdomain app
+# Preferred, DNS-safe label (made unique): <name>.<serve-domain>
+compute expose web 8080 --subdomain my-app
 
-compute ports web        # list exposures
+compute ports web        # list exposures and their URLs
 compute unexpose web 8080
 ```
 
-Requests to the generated URL are reverse-proxied to
-`http://<sandbox-ip>:<guest-port>`, including HTTP/1.1, HTTP/2, Server-Sent
-Events, and WebSockets. HTML responses are rewritten so absolute asset and API
-paths resolve under the preview prefix, and upstream root-relative redirects
-are kept inside the prefix. Apps that emit root-absolute URLs regardless of
-their document location (bundler chunk imports such as `/assets/chunk.js`, or
-API bases derived from `window.location.origin`) are routed back to the same
-sandbox by matching the `Referer` against the preview path, so the app sees the
-URLs it asked for.
+### Two transports
 
-URL forms:
+| Mode | URL | When it is selected |
+| --- | --- | --- |
+| **Subdomain** | `https://<slug>.<serve-domain>/` | `COMPUTE_SERVE_DOMAIN` is set, or the API binds loopback (then the domain defaults to `localhost`) |
+| **Port** | `https://<daemon-host>:<serve-port>/` | `COMPUTE_PUBLIC_URL` points at a non-loopback host, or the API binds a non-loopback address without a serve domain |
 
+Subdomain mode is the fully isolated option (per-origin cookies and storage).
+Port mode is the no-DNS fallback for bare public IPs and tailnets; browsers
+treat a distinct port as a distinct origin for `localStorage`, `sessionStorage`,
+service workers and CORS, though **cookies are still host-scoped** (a cookie
+set by one port is sent to other ports on the same host).
+
+**Localhost needs no setup.** Browsers resolve `*.localhost` to loopback and
+treat it as a secure context, so a loopback daemon on `:18080` publishes
+`http://web-8080.localhost:18080/` with no DNS or certificate work.
+
+**Public domain.** Point a wildcard record at the daemon and configure the
+domain and a wildcard certificate:
+
+```bash
+# DNS: *.serves.example.com  A/AAAA  <daemon public IP>
+COMPUTE_SERVE_DOMAIN=serves.example.com
+COMPUTE_PUBLIC_URL=https://serves.example.com
+# Terminate TLS at the daemon (wildcard cert) or in front of it (Caddy/nginx).
+COMPUTE_SERVE_TLS_CERT_FILE=/etc/compute/wildcard.pem
+COMPUTE_SERVE_TLS_KEY_FILE=/etc/compute/wildcard.key
 ```
-/preview/@<username>/<sandbox>/<port>/   # canonical, tenant-scoped
-/preview/<sandbox>/<port>/               # legacy un-scoped form
-<port>-<sandbox>.<username>.<zone>       # subdomain form (needs DNS)
+
+**Tailnet / bare IP (port mode).** The daemon listens on one port per exposure
+from `COMPUTE_SERVE_PORT_START..COMPUTE_SERVE_PORT_END` (default `18400-18500`)
+on `COMPUTE_SERVE_BIND` (default `127.0.0.1`). Port-mode URLs use `http://`
+unless `COMPUTE_SERVE_TLS_CERT_FILE` / `_KEY_FILE` are configured.
+
+```bash
+# Tailnet-only raw TCP mapping (any port; traffic stays inside WireGuard).
+# -> http://compute-lab.tailb1be99.ts.net:18400/
+tailscale serve --bg --tcp=18400 tcp://127.0.0.1:18400
+
+# HTTPS on the three ports Tailscale can terminate (443/8443/10000):
+# -> https://compute-lab.tailb1be99.ts.net:8443/
+tailscale serve --bg --https=8443 http://127.0.0.1:18400
 ```
 
-The owner-scoped path is used whenever the sandbox has a tenant DNS label. It
-keeps two tenants that both named a sandbox `web` at distinct URLs. The
-un-scoped form resolves a globally unique sandbox ID or a name (legacy
-behaviour) and remains available for existing links.
+For HTTPS on arbitrary ports, terminate TLS in the daemon with a certificate
+for the node name (`tailscale cert <node>.<tailnet>.ts.net`, then point
+`COMPUTE_SERVE_TLS_CERT_FILE` / `_KEY_FILE` at it) and map the port with
+`tailscale serve --tcp`. Or bind `COMPUTE_SERVE_BIND=0.0.0.0` and expose the
+range directly on a public IP. Port-mode listeners also work for sandboxes on
+remote workers: the daemon proxies through the existing outbound worker tunnel.
 
-**Access control.** A `public` exposure bypasses tenant authentication; a
-`private` exposure requires a valid session/API key for the sandbox's owner.
-Exposure checks are scoped to the resolved sandbox's owner, so a public rule
-for one tenant's `web` never unlocks another tenant's `web`.
+### Access control
 
-**Host-port DNAT (optional).** Supplying a host port still installs the legacy
-iptables DNAT rule and reserves that host port; this is useful for non-HTTP
-protocols or when you specifically need `host:port`. Omit it for HTTP services.
+- `public` exposures are reachable by anyone with the URL.
+- `private` exposures accept:
+  - the daemon session cookie or `Authorization: Bearer cmp_...` when the
+    client can send it (port mode shares the host, so the session cookie is
+    sent automatically);
+  - a short-lived signed serve token. Browsers are bounced through
+    `GET /api/v1/serve/authorize` (which holds the daemon session) and return
+    with `?__serve_token=...`, exchanged for an HttpOnly `compute_serve` cookie
+    scoped to the serve origin. CLI/SDK clients use
+    `POST /api/v1/sandboxes/<id>/serve-token` to mint the same URL.
+
+Tokens are HMAC-signed with `COMPUTE_SERVE_TOKEN_KEY` (or a key derived from
+`COMPUTE_ADMIN_SECRET`; otherwise a random per-process key, which resets
+private-serve sessions on restart).
 
 ### API
 
 | Method / path | Purpose |
 | --- | --- |
 | `GET /api/v1/sandboxes/<id>/ports` | list exposures for a sandbox |
-| `POST /api/v1/sandboxes/<id>/expose` | expose `{"guest_port":8080,"public":true}` |
+| `POST /api/v1/sandboxes/<id>/expose` | expose `{"guest_port":8080,"public":true,"subdomain":"my-app"}` |
 | `POST /api/v1/sandboxes/<id>/unexpose` | remove `{"guest_port":8080}` |
+| `POST /api/v1/sandboxes/<id>/serve-token` | mint `{"url":...}` for a private exposure |
 | `PATCH /api/v1/sandboxes/<id>/ports/<port>` | toggle `{"public":false}` |
 | `DELETE /api/v1/sandboxes/<id>/ports/<port>` | remove the exposure |
-| `POST /api/v1/network/port-forwards` | low-level create (optional `host_port`, `public`) |
+| `GET /api/v1/serve/authorize?next=<serve-url>` | browser auth hop for private serves |
+| `POST /api/v1/network/port-forwards` | low-level create (`vm_id`, `guest_port`, `public`) |
 | `GET /api/v1/network/port-forwards?vm_id=<id>` | list/filter all exposure rules |
-| `PATCH /api/v1/network/port-forwards/<id>` | toggle visibility / subdomain |
+| `PATCH /api/v1/network/port-forwards/<id>` | toggle visibility / serve label |
 
-`public_url` in responses is daemon-relative (for example
-`/preview/@alice/web/8080/`) so records stay correct behind a TLS terminator,
-tailnet name, or proxy. Resolve it against the daemon origin you used for the
-API call.
+`public_url` in responses is **absolute** and is the canonical URL for the
+exposure. Set `COMPUTE_PUBLIC_URL` to the externally reachable daemon base URL
+so port-mode URLs use the right host; it is advertised as `public_url` on
+`GET /api/v1/version`.
 
-Set `COMPUTE_PUBLIC_URL` (or `server.public_url` in `daemon.json`) to the
-externally reachable base URL, for example
-`https://compute-lab.tailb1be99.ts.net`. The daemon advertises it as
-`public_url` on `GET /api/v1/version`, and the CLI prints preview links against
-it, so `compute expose`/`compute ports` show URLs that work from other
-machines instead of the loopback address the CLI connects through.
+### Notes and limits
+
+- Re-exposing the same guest port keeps the existing origin (slug/port).
+- A serve label is generated from `<sandbox>-<port>` and made globally unique;
+  `--subdomain` requests a preferred label.
+- Apps that hard-code an absolute URL at build time (`PUBLIC_URL=...`) still
+  need their own base-URL configuration; no proxy can fix that.
+- Legacy `/preview/...` path routes were removed in this design. Use the
+  `public_url` returned by the API.
 
 ## API surface
 

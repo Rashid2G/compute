@@ -1,6 +1,8 @@
 package network
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -71,80 +73,66 @@ func TestParseRouteOwnerWildcardForms(t *testing.T) {
 	}
 }
 
-func TestParseRouteOwnerScopedPath(t *testing.T) {
-	p := NewIngressProxy(ProxyOptions{BaseDomains: []string{"boxes.example.com"}})
-
-	r := httptest.NewRequest("GET", "http://daemon.local/preview/@alice/pr-42/8080/assets/app.js", nil)
-	m := p.ParseRoute(r)
-	if !m.IsMatch {
-		t.Fatalf("owner-scoped preview path should match: %+v", m)
-	}
-	if m.Target != "pr-42" || m.Owner != "alice" || m.Port != 8080 {
-		t.Fatalf("unexpected owner-scoped route: %+v", m)
-	}
-	if m.SubPath != "/assets/app.js" {
-		t.Fatalf("subpath = %q, want /assets/app.js", m.SubPath)
-	}
-	if m.Prefix != "/preview/@alice/pr-42/8080" {
-		t.Fatalf("prefix = %q, want /preview/@alice/pr-42/8080", m.Prefix)
-	}
-
-	// The legacy unscoped form keeps working and carries no owner.
-	m = p.ParseRoute(httptest.NewRequest("GET", "http://daemon.local/preview/pr-42/8080/", nil))
-	if !m.IsMatch || m.Owner != "" || m.Target != "pr-42" || m.Port != 8080 {
-		t.Fatalf("unexpected unscoped route: %+v", m)
-	}
-	if m.Prefix != "/preview/pr-42/8080" {
-		t.Fatalf("unscoped prefix = %q", m.Prefix)
-	}
-
-	// An empty owner segment is rejected rather than treated as a sandbox name.
-	if m := p.ParseRoute(httptest.NewRequest("GET", "http://daemon.local/preview/@/pr-42/8080/", nil)); m.IsMatch {
-		t.Fatalf("empty owner segment should not match: %+v", m)
-	}
+type fakeServeResolver struct {
+	slug   string
+	target *TargetInfo
+	port   int
 }
 
-func TestParseRouteRefererFallbackForRootAssets(t *testing.T) {
-	p := NewIngressProxy(ProxyOptions{BaseDomains: []string{"compute.tail1234.ts.net"}})
+func (f fakeServeResolver) ResolveTarget(ctx context.Context, idOrName string) (*TargetInfo, error) {
+	return f.target, nil
+}
+func (f fakeServeResolver) ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel string) (*TargetInfo, error) {
+	return f.target, nil
+}
+func (f fakeServeResolver) IsPortPublic(ctx context.Context, idOrName string, port int) bool {
+	return true
+}
+func (f fakeServeResolver) ResolveServeSlug(ctx context.Context, slug string) (*TargetInfo, *Exposure, error) {
+	if slug != f.slug {
+		return nil, nil, fmt.Errorf("not found")
+	}
+	return f.target, &Exposure{ID: "pf_1", OwnerID: f.target.OwnerID, Slug: slug, GuestPort: f.port, Public: true}, nil
+}
+func (f fakeServeResolver) ResolveServeExposure(ctx context.Context, id string) (*TargetInfo, *Exposure, error) {
+	if id != "pf_1" {
+		return nil, nil, fmt.Errorf("not found")
+	}
+	return f.target, &Exposure{ID: "pf_1", OwnerID: f.target.OwnerID, Slug: f.slug, GuestPort: f.port, Public: true}, nil
+}
 
-	r := httptest.NewRequest("GET", "https://compute.tail1234.ts.net/assets/chunk-abc.js", nil)
-	r.Host = "compute.tail1234.ts.net"
-	r.Header.Set("Referer", "https://compute.tail1234.ts.net/preview/web/8080/")
+func TestParseRouteServeSubdomain(t *testing.T) {
+	resolver := fakeServeResolver{
+		slug:   "quarry-3773",
+		target: &TargetInfo{ID: "vm_1", Name: "quarry", OwnerID: "user_1", Status: "running", IPAddress: "172.16.0.2"},
+		port:   3773,
+	}
+	p := NewIngressProxy(ProxyOptions{
+		BaseDomains:   []string{"compute.tail1234.ts.net"},
+		ServeDomains:  []string{"serves.example.com"},
+		ServeResolver: resolver,
+	})
+
+	r := httptest.NewRequest("GET", "https://quarry-3773.serves.example.com/assets/chunk.js", nil)
+	r.Host = "quarry-3773.serves.example.com"
 	m := p.ParseRoute(r)
-	if !m.IsMatch || m.Target != "web" || m.Port != 8080 {
-		t.Fatalf("root asset should route to the referer's sandbox: %+v", m)
+	if !m.IsMatch || m.Target != "quarry" || m.Port != 3773 || m.Exposure == nil {
+		t.Fatalf("serve subdomain should match: %+v", m)
 	}
-	if m.SubPath != "/assets/chunk-abc.js" {
-		t.Fatalf("subpath = %q, want the requested path", m.SubPath)
-	}
-	if m.Prefix != "/preview/web/8080" {
-		t.Fatalf("prefix = %q", m.Prefix)
-	}
-
-	// Owner-scoped preview URLs keep the owner so private lookups stay scoped.
-	r = httptest.NewRequest("GET", "https://compute.tail1234.ts.net/api/auth/session", nil)
-	r.Host = "compute.tail1234.ts.net"
-	r.Header.Set("Referer", "https://compute.tail1234.ts.net/preview/@alice/web/8080/index.html")
-	m = p.ParseRoute(r)
-	if !m.IsMatch || m.Owner != "alice" || m.Target != "web" || m.Port != 8080 {
-		t.Fatalf("owner-scoped referer route: %+v", m)
-	}
-	if m.SubPath != "/api/auth/session" {
+	if m.SubPath != "/assets/chunk.js" {
 		t.Fatalf("subpath = %q", m.SubPath)
 	}
 
-	// Referers from another host, or without a preview path, must not route.
-	r = httptest.NewRequest("GET", "https://compute.tail1234.ts.net/assets/app.js", nil)
-	r.Host = "compute.tail1234.ts.net"
-	r.Header.Set("Referer", "https://evil.example/assets/app.js")
-	if m := p.ParseRoute(r); m.IsMatch {
-		t.Fatalf("cross-host referer must not route: %+v", m)
-	}
-
-	r = httptest.NewRequest("GET", "https://compute.tail1234.ts.net/api/v1/version", nil)
-	r.Host = "compute.tail1234.ts.net"
-	r.Header.Set("Referer", "https://compute.tail1234.ts.net/")
-	if m := p.ParseRoute(r); m.IsMatch {
-		t.Fatalf("non-preview referer must not route: %+v", m)
+	// Reserved labels, nested labels and unknown slugs are not serve routes.
+	for _, host := range []string{
+		"api.serves.example.com",
+		"a.b.serves.example.com",
+		"unknown.serves.example.com",
+	} {
+		r := httptest.NewRequest("GET", "https://"+host+"/", nil)
+		r.Host = host
+		if m := p.ParseRoute(r); m.IsMatch {
+			t.Fatalf("host %q should not match: %+v", host, m)
+		}
 	}
 }

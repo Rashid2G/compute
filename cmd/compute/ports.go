@@ -41,16 +41,16 @@ func splitPortArgs(args []string) (flags, positional []string) {
 func printExposeUsage() {
 	fmt.Fprintln(os.Stderr, "Usage: compute expose [flags] <name|id> <guest-port>")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Publish a port from a sandbox on the daemon's ingress URL.")
+	fmt.Fprintln(os.Stderr, "Publish a port from a sandbox at its own origin (subdomain or dedicated port).")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Flags:")
 	fmt.Fprintln(os.Stderr, "  --public            Publish without authentication (default)")
 	fmt.Fprintln(os.Stderr, "  --private           Require tenant authentication")
-	fmt.Fprintln(os.Stderr, "  --subdomain <name>  Serve under <name>.compute.dev when DNS is configured")
+	fmt.Fprintln(os.Stderr, "  --subdomain <name>  Preferred serve label (DNS-safe, made unique)")
 	fmt.Fprintln(os.Stderr, "  --json              Print the port-forward record as JSON")
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Exposure is ingress-only: no host port is bound, so it does not consume")
-	fmt.Fprintln(os.Stderr, "host ports and scales with the number of sandboxes.")
+	fmt.Fprintln(os.Stderr, "Each exposure gets its own origin (subdomain or dedicated serve port), so")
+	fmt.Fprintln(os.Stderr, "apps that redirect or use absolute paths keep working unchanged.")
 }
 
 func printPortsUsage() {
@@ -68,8 +68,8 @@ func printUnexposeUsage() {
 	fmt.Fprintln(os.Stderr, "Remove a sandbox's ingress exposure for a guest port.")
 }
 
-// ingressURL resolves a daemon-relative public_url (e.g. "/preview/web/8080/")
-// against the daemon origin. Absolute URLs are returned unchanged.
+// ingressURL returns an exposure URL. Serve URLs are absolute; legacy relative
+// records are resolved against the daemon's advertised public base URL.
 func ingressURL(client *DaemonClient, publicURL string) string {
 	if publicURL == "" {
 		return ""

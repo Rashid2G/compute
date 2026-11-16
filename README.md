@@ -2,7 +2,7 @@
 
 Compute is an open-source, self-hosted platform for running hardware-isolated **Firecracker microVM sandboxes** and **distributed compute jobs** on Linux hosts with `/dev/kvm`.
 
-- **Sub-Second MicroVMs**: Boot, clone, pause/resume live memory (`save-state`), snapshot templates, stream terminals/exec, and preview guest HTTP ports.
+- **Sub-Second MicroVMs**: Boot, clone, pause/resume live memory (`save-state`), snapshot templates, stream terminals/exec, and serve guest HTTP ports at their own origin (subdomain or dedicated port) so redirects, cookies and SPAs just work.
 - **Multi-Node Workers & Load Balancing**: Enroll remote `compute-worker` nodes over outbound WebSocket RPC/TCP tunnels (zero inbound worker ports) with configurable placement (`least_loaded`, `round_robin`, `bin_pack`, `spread`).
 - **Live Migration & Bulk Operations**: Migrate sandboxes and entire pools across workers (`POST /api/v1/vms/:id/migrate`, `POST /api/v1/pools/:id/migrate`) and run single-request bulk actions/deletes.
 - **Resource Management**: Hard disk ceilings, soft + hard CPU overcommit weights, RAM hard guarantees with idle SSD auto-hibernation (`auto_hibernated`), and HTTP 429 `ResourceLimitError` admission responses.

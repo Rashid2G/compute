@@ -44,6 +44,19 @@ func (s *Server) handleDeploymentsIndex(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Link each sandbox to its published serve origin (prefer port 8080).
+	serveURLs := map[string]string{}
+	if pfs, err := s.vmMgr.GetStore().ListPortForwards(r.Context()); err == nil {
+		for _, pf := range pfs {
+			if pf == nil || pf.PublicURL == "" {
+				continue
+			}
+			if cur, ok := serveURLs[pf.VMID]; !ok || (pf.GuestPort == 8080 && cur != "") {
+				serveURLs[pf.VMID] = pf.PublicURL
+			}
+		}
+	}
+
 	// Docker-based preview stacks register themselves with a manifest file in
 	// <db dir>/../previews/<name>.json (the deployed checkout's ./data/previews).
 	previews := loadPreviewManifests(previewsDirFor(s.cfg.Server.DBPath))
@@ -62,7 +75,7 @@ func (s *Server) handleDeploymentsIndex(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_, _ = fmt.Fprint(w, renderDeploymentsPage(vms, guiURL, previews))
+	_, _ = fmt.Fprint(w, renderDeploymentsPage(vms, guiURL, previews, serveURLs))
 }
 
 // previewsDirFor derives the preview manifest directory from the daemon's DB
@@ -124,7 +137,7 @@ func requestHostOnly(r *http.Request) string {
 // renderDeploymentsPage builds the deployments landing page HTML. It is a pure
 // function of the sandbox list, the main GUI URL, and the docker preview
 // manifests so it can be tested without a live server.
-func renderDeploymentsPage(vms []*db.VM, guiURL string, previews []*previewManifest) string {
+func renderDeploymentsPage(vms []*db.VM, guiURL string, previews []*previewManifest, serveURLs map[string]string) string {
 	sort.Slice(vms, func(i, j int) bool {
 		if (vms[i].Status == db.StatusRunning) != (vms[j].Status == db.StatusRunning) {
 			return vms[i].Status == db.StatusRunning
@@ -178,8 +191,13 @@ a.card:hover{border-color:#d94e1f}
 	for _, v := range vms {
 		status := string(v.Status)
 		if v.Status == db.StatusRunning {
-			url := fmt.Sprintf("/preview/%s/8080/", v.Name)
-			b.WriteString(fmt.Sprintf(`<a class="card" href="%s"><div><div class="name">%s</div><div class="meta">sandbox preview — owner %s</div></div><span class="badge running">%s</span></a>`,
+			url := serveURLs[v.ID]
+			if url == "" {
+				b.WriteString(fmt.Sprintf(`<div class="card" style="opacity:.7"><div><div class="name">%s</div><div class="meta">sandbox — owner %s (no published port)</div></div><span class="badge running">%s</span></div>`,
+					htmlEscape(v.Name), htmlEscape(v.OwnerID), htmlEscape(status)))
+				continue
+			}
+			b.WriteString(fmt.Sprintf(`<a class="card" href="%s"><div><div class="name">%s</div><div class="meta">sandbox serve — owner %s</div></div><span class="badge running">%s</span></a>`,
 				htmlEscape(url), htmlEscape(v.Name), htmlEscape(v.OwnerID), htmlEscape(status)))
 		} else {
 			b.WriteString(fmt.Sprintf(`<div class="card" style="opacity:.55"><div><div class="name">%s</div><div class="meta">sandbox — owner %s</div></div><span class="badge stopped">%s</span></div>`,

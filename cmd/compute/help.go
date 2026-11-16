@@ -144,7 +144,7 @@ The HTTP URL is only printed when the sandbox DNS zone is expected to resolve.
 Names under Tailscale's *.ts.net zone are answered by MagicDNS, so the command
 prints the tailnet DNS name or sandbox IP instead and explains why.`,
 
-	"expose": `Publish a sandbox port on the daemon's ingress URL.
+	"expose": `Publish a sandbox port at its own origin.
 
 Usage:
   compute expose [flags] <name|id> <guest-port>
@@ -152,15 +152,17 @@ Usage:
 Flags:
   --public            Publish without authentication (default)
   --private           Require tenant authentication
-  --subdomain <name>  Serve under <name>.compute.dev when DNS is configured
+  --subdomain <name>  Preferred serve label (DNS-safe, made unique)
   --json              Print the port-forward record as JSON
 
-Exposure is ingress-only: no host port is bound. Requests to
-  <daemon-origin>/preview/@<username>/<sandbox>/<port>/
-are reverse-proxied to the guest service, including WebSockets and SSE.
+Each exposure gets a dedicated origin so the app sees "/" as its root:
+  subdomain mode  https://<sandbox>-<port>.<serve-domain>/
+  port mode       https://<daemon-host>:<serve-port>/
+  localhost       http://<sandbox>-<port>.localhost:<api-port>/
 
-Public URLs are reachable by anyone who knows them. Use --private to keep the
-URL limited to authenticated members of the owning tenant.`,
+Redirects, SPA routing, cookies and WebSockets therefore work without URL
+rewriting. Public URLs are reachable by anyone who knows them; --private
+requires a tenant session or a short-lived serve token.`,
 
 	"ports": `List guest ports exposed on a sandbox.
 

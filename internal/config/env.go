@@ -77,6 +77,13 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_JAILER_DIR", &cfg.Server.JailerBaseDir)
 	env.strInto("COMPUTE_TLS_CERT_FILE", &cfg.Server.TLSCertFile)
 	env.strInto("COMPUTE_TLS_KEY_FILE", &cfg.Server.TLSKeyFile)
+	env.strInto("COMPUTE_SERVE_DOMAIN", &cfg.Server.ServeDomain)
+	env.strInto("COMPUTE_SERVE_BIND", &cfg.Server.ServeBind)
+	env.intInto("COMPUTE_SERVE_PORT_START", &cfg.Server.ServePortStart)
+	env.intInto("COMPUTE_SERVE_PORT_END", &cfg.Server.ServePortEnd)
+	env.strInto("COMPUTE_SERVE_TLS_CERT_FILE", &cfg.Server.ServeTLSCertFile)
+	env.strInto("COMPUTE_SERVE_TLS_KEY_FILE", &cfg.Server.ServeTLSKeyFile)
+	env.strInto("COMPUTE_SERVE_TOKEN_KEY", &cfg.Server.ServeTokenKey)
 
 	// Network.
 	if v := env.str("COMPUTE_NETWORK_MODE"); v != "" {

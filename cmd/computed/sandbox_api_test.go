@@ -113,27 +113,20 @@ func TestSandboxAPI_Processes_Validation(t *testing.T) {
 	}
 }
 
-func TestSandboxAPI_PreviewProxy(t *testing.T) {
+func TestSandboxAPI_ServeProxy(t *testing.T) {
 	s, store := setupTestServerForSandboxAPI(t)
 	ctx := context.Background()
 
-	// 1. Invalid preview URL
-	req := httptest.NewRequest(http.MethodGet, "/preview/bad-url", nil)
+	// 1. Unknown serve host does not proxy to any sandbox.
+	req := httptest.NewRequest(http.MethodGet, "/not-a-daemon-route", nil)
+	req.Host = "unknown.localhost"
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for bad preview url, got %d", rr.Code)
-	}
-
-	// 2. Sandbox not found
-	req = httptest.NewRequest(http.MethodGet, "/preview/missing-sb/3000/", nil)
-	rr = httptest.NewRecorder()
-	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing sandbox in preview, got %d", rr.Code)
+		t.Fatalf("expected 404 for unknown serve host, got %d", rr.Code)
 	}
 
-	// 3. Sandbox stopped -> 503
+	// 2. Stopped sandbox -> 503.
 	vStopped := &db.VM{
 		ID:        "preview-stopped",
 		Name:      "preview-stopped",
@@ -141,14 +134,20 @@ func TestSandboxAPI_PreviewProxy(t *testing.T) {
 		IPAddress: "192.168.100.20",
 	}
 	_ = store.SaveVM(ctx, vStopped)
-	req = httptest.NewRequest(http.MethodGet, "/preview/preview-stopped/3000/", nil)
+	_ = store.SavePortForward(ctx, &db.PortForward{
+		ID: "pf_stopped", VMID: vStopped.ID, VMName: vStopped.Name,
+		GuestPort: 3000, Protocol: "tcp", Subdomain: "preview-stopped",
+		Status: "pending", Public: true,
+	})
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Host = "preview-stopped.localhost"
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 for stopped sandbox in preview, got %d", rr.Code)
+		t.Fatalf("expected 503 for stopped sandbox serve, got %d", rr.Code)
 	}
 
-	// 4. Running sandbox proxy forwarding
+	// 3. Running sandbox proxies to the guest with the request path unchanged.
 	mockGuestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Mock-Guest", "true")
 		fmt.Fprintf(w, "Hello from guest port! Path: %s", r.URL.Path)
@@ -166,12 +165,18 @@ func TestSandboxAPI_PreviewProxy(t *testing.T) {
 		IPAddress: ip,
 	}
 	_ = store.SaveVM(ctx, vRunning)
+	_ = store.SavePortForward(ctx, &db.PortForward{
+		ID: "pf_running", VMID: vRunning.ID, VMName: vRunning.Name,
+		GuestPort: mockPort, Protocol: "tcp", Subdomain: "preview-running",
+		Status: "active", Public: true,
+	})
 
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/preview/preview-running/%d/app/dashboard", mockPort), nil)
+	req = httptest.NewRequest(http.MethodGet, "/app/dashboard", nil)
+	req.Host = "preview-running.localhost"
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 from preview proxy, got %d (body: %s)", rr.Code, rr.Body.String())
+		t.Fatalf("expected 200 from serve proxy, got %d (body: %s)", rr.Code, rr.Body.String())
 	}
 	if rr.Header().Get("X-Mock-Guest") != "true" {
 		t.Fatalf("expected X-Mock-Guest header from proxied response")

@@ -179,7 +179,6 @@ export function InstancesPage({
   );
   const [forwardsLoading, setForwardsLoading] = useState(false);
   const [addForwardOpen, setAddForwardOpen] = useState(false);
-  const [fwHostPort, setFwHostPort] = useState('');
   const [fwGuestPort, setFwGuestPort] = useState('8080');
   const [fwProtocol, setFwProtocol] = useState<'TCP' | 'HTTP/HTTPS'>('TCP');
   const [fwSubdomain, setFwSubdomain] = useState('');
@@ -419,17 +418,15 @@ export function InstancesPage({
   async function handleAddPortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedVM) return;
-    const hostPort = fwHostPort.trim() ? Number(fwHostPort) : 0;
     const guestPort = Number(fwGuestPort);
-    if (hostPort < 0 || !guestPort) {
-      toast.error('A guest port is required (host port is optional)');
+    if (!guestPort) {
+      toast.error('A guest port is required');
       return;
     }
-    const label = hostPort > 0 ? `:${hostPort} → :${guestPort}` : `ingress → :${guestPort}`;
+    const label = `:${guestPort}`;
     const toastID = toast.loading(`Adding port exposure ${label}…`);
     try {
       await api.createPortForward({
-        host_port: hostPort,
         guest_port: guestPort,
         vm_id: selectedVM.id,
         vm_name: selectedVM.name,
@@ -447,7 +444,7 @@ export function InstancesPage({
   }
 
   async function handleDeletePortForward(pf: PortForwardRecord) {
-    const label = pf.host_port > 0 ? `:${pf.host_port}` : `ingress :${pf.guest_port}`;
+    const label = `:${pf.guest_port}`;
     const toastID = toast.loading(`Removing port exposure ${label}…`);
     try {
       await api.deletePortForward(pf.id);
@@ -1777,8 +1774,8 @@ export function InstancesPage({
                       <div className="min-w-0">
                         <div className="text-foreground">
                           {pf.host_port > 0
-                            ? `:${pf.host_port} → :${pf.guest_port}`
-                            : `ingress → :${pf.guest_port}`}{' '}
+                            ? `port :${pf.host_port} → :${pf.guest_port}`
+                            : `subdomain → :${pf.guest_port}`}{' '}
                           <span className="text-[10px] text-muted-foreground">
                             ({pf.protocol}, {pf.public ? 'public' : 'private'})
                           </span>
@@ -1812,21 +1809,7 @@ export function InstancesPage({
                   onSubmit={(e) => void handleAddPortForward(e)}
                   className="space-y-2 border border-border bg-muted/15 p-2.5"
                 >
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Host Port (optional)
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={65535}
-                        value={fwHostPort}
-                        onChange={(e) => setFwHostPort(e.target.value)}
-                        placeholder="ingress-only"
-                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                      />
-                    </div>
+                  <div className="grid grid-cols-2 gap-1.5">
                     <div>
                       <label className="block text-[10px] text-muted-foreground mb-0.5">
                         Guest Port

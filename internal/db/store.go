@@ -2477,6 +2477,30 @@ func (s *Store) SavePortForward(ctx context.Context, pf *PortForward) error {
 }
 
 // GetPortForward retrieves a port forward by ID
+// GetPortForwardBySubdomain resolves an exposure by its serve slug. Slugs are
+// assigned globally unique at exposure time, so this is safe across tenants.
+func (s *Store) GetPortForwardBySubdomain(ctx context.Context, subdomain string) (*PortForward, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	subdomain = strings.ToLower(strings.TrimSpace(subdomain))
+	if subdomain == "" {
+		return nil, nil
+	}
+	pf := new(PortForward)
+	var publicInt int
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE lower(subdomain) = ? LIMIT 1`, subdomain).Scan(
+		&pf.ID, &pf.OwnerID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &publicInt, &pf.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pf.Public = publicInt == 1
+	return pf, nil
+}
+
 func (s *Store) GetPortForward(ctx context.Context, id string) (*PortForward, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

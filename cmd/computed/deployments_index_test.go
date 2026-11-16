@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,87 +11,6 @@ import (
 
 	"github.com/Rashid2G/compute/internal/db"
 )
-
-// TestIngressProxy_HTMLRewriteUnderPreviewPrefix verifies that HTML responses
-// served under /preview/<target>/<port>/ are rewritten for the path prefix:
-// absolute asset URLs are rewritten, a <base href> is injected, and the
-// runtime patch script is added. JSON responses pass through untouched.
-func TestIngressProxy_HTMLRewriteUnderPreviewPrefix(t *testing.T) {
-	env := newMultiTenantServer(t)
-
-	guestListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer guestListener.Close()
-	guestPort := guestListener.Addr().(*net.TCPAddr).Port
-
-	guestMux := http.NewServeMux()
-	guestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<!doctype html><html><head><meta charset="utf-8"><title>App</title>` +
-			`<script type="module" crossorigin src="/app.js"></script>` +
-			`<link rel="stylesheet" crossorigin href="/app.css">` +
-			`</head><body><div id="root"></div></body></html>`))
-	})
-	guestMux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	guestServer := &http.Server{Handler: guestMux}
-	go func() { _ = guestServer.Serve(guestListener) }()
-	defer guestServer.Close()
-
-	mtSignup(t, env.ts, "owner_html@test.local", "ownerhtml", "password123!")
-	token, userAID := mtLogin(t, env.ts, "ownerhtml", "password123!")
-	vmA := &db.VM{
-		ID:        "vm-html",
-		Name:      "vm-html",
-		OwnerID:   userAID,
-		Status:    db.StatusRunning,
-		IPAddress: "127.0.0.1",
-	}
-	if err := env.vmStore.SaveVM(context.Background(), vmA); err != nil {
-		t.Fatal(err)
-	}
-
-	// HTML response must be rewritten.
-	req, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/preview/vm-html/%d/", env.ts.URL, guestPort), nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
-	out := string(body)
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", res.StatusCode, out)
-	}
-	for _, want := range []string{
-		fmt.Sprintf(`<base href="/preview/vm-html/%d/">`, guestPort),
-		fmt.Sprintf(`src="/preview/vm-html/%d/app.js"`, guestPort),
-		fmt.Sprintf(`href="/preview/vm-html/%d/app.css"`, guestPort),
-		fmt.Sprintf(`P="/preview/vm-html/%d/"`, guestPort),
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("expected %q in rewritten HTML, got:\n%s", want, out)
-		}
-	}
-
-	// Non-HTML (JSON) response must pass through unchanged.
-	req2, _ := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/preview/vm-html/%d/api/v1/health", env.ts.URL, guestPort), nil)
-	req2.Header.Set("Authorization", "Bearer "+token)
-	res2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body2, _ := io.ReadAll(res2.Body)
-	res2.Body.Close()
-	if string(body2) != `{"status":"ok"}` {
-		t.Fatalf("JSON response should be untouched, got: %s", string(body2))
-	}
-}
 
 // TestDeploymentsIndexHomepage verifies the landing page at the daemon root:
 // it lists running sandboxes with preview links, links the main GUI, 404s
@@ -123,6 +40,13 @@ func TestDeploymentsIndexHomepage(t *testing.T) {
 	if err := env.vmStore.SaveVM(context.Background(), stopped); err != nil {
 		t.Fatal(err)
 	}
+	if err := env.vmStore.SavePortForward(context.Background(), &db.PortForward{
+		ID: "pf_idx", OwnerID: userAID, VMID: vmA.ID, VMName: vmA.Name,
+		GuestPort: 8080, Protocol: "tcp", Subdomain: "pr-77-8080",
+		PublicURL: "https://pr-77-8080.serves.example.com/", Status: "active", Public: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// No auth header: the homepage is a public landing page.
 	res, err := http.Get(env.ts.URL + "/")
@@ -140,9 +64,8 @@ func TestDeploymentsIndexHomepage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Deployments",
-		`href="/preview/pr-77/8080/"`,
+		`href="https://pr-77-8080.serves.example.com/"`,
 		"pr-78", // listed even when stopped (non-link)
-		":8080/",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected homepage to contain %q, got:\n%s", want, out)
@@ -178,7 +101,7 @@ func TestRenderDeploymentsPageEscapesNames(t *testing.T) {
 		Name:    `<script>alert(1)</script>`,
 		OwnerID: `o<"w"ner`,
 		Status:  db.StatusRunning,
-	}}, "http://127.0.0.1:8080/", nil)
+	}}, "http://127.0.0.1:8080/", nil, nil)
 	if strings.Contains(out, "<script>alert(1)</script>") {
 		t.Errorf("sandbox name must be HTML-escaped, got:\n%s", out)
 	}

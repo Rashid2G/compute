@@ -35,6 +35,14 @@ config explicitly.
 | `COMPUTE_ADMIN_SECRET` | — | Bootstrap admin secret alternative. |
 | `COMPUTE_TLS_CERT_FILE` | — | PEM certificate for native HTTPS. Must be paired with the key. |
 | `COMPUTE_TLS_KEY_FILE` | — | PEM private key for native HTTPS. |
+| `COMPUTE_PUBLIC_URL` | — | Externally reachable daemon base URL (for example `https://compute.example.com`). Used in port-mode serve URLs and advertised on `/api/v1/version`. |
+| `COMPUTE_SERVE_DOMAIN` | `localhost` for loopback binds | Enables subdomain serving: exposures become `https://<slug>.<serve-domain>/`. Requires a wildcard DNS record and wildcard certificate for public domains. |
+| `COMPUTE_SERVE_BIND` | `127.0.0.1` | Bind address for port-mode serve listeners. Use `0.0.0.0` to accept public traffic directly. |
+| `COMPUTE_SERVE_PORT_START` | `18400` | First port of the port-mode serve range. |
+| `COMPUTE_SERVE_PORT_END` | `18500` | Last port of the port-mode serve range. |
+| `COMPUTE_SERVE_TLS_CERT_FILE` | API TLS certificate | Optional PEM certificate for port-mode serve listeners. |
+| `COMPUTE_SERVE_TLS_KEY_FILE` | API TLS key | Optional PEM private key for port-mode serve listeners. |
+| `COMPUTE_SERVE_TOKEN_KEY` | derived from `COMPUTE_ADMIN_SECRET` | HMAC key for private-serve tokens. Empty without an admin secret uses a random per-process key. |
 | `COMPUTE_EDGE_LISTEN` | `:80` when DNS is enabled | HTTP edge listener; `-` disables it. |
 | `COMPUTE_CGROUP_ENFORCE` | `true` | Enforce per-VM cgroup limits. |
 | `COMPUTE_JAILER_ENABLED` | `false` | Run Firecracker under jailer. |

@@ -45,7 +45,6 @@ export function NetworkPage({
     () => portForwardsProp ?? [],
   );
   const [addPfOpen, setAddPfOpen] = useState(false);
-  const [pfHostPort, setPfHostPort] = useState('');
   const [pfGuestPort, setPfGuestPort] = useState(8080);
   const [pfVmId, setPfVmId] = useState('');
   const [pfProto, setPfProto] = useState('tcp');
@@ -107,9 +106,7 @@ export function NetworkPage({
     e.preventDefault();
     if (!pfVmId) return;
     const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
-    const hostPort = pfHostPort.trim() ? Number(pfHostPort) : 0;
     const payload = {
-      host_port: hostPort,
       guest_port: pfGuestPort,
       vm_id: pfVmId,
       vm_name: vmAlloc?.vm_name || pfVmId,
@@ -118,10 +115,7 @@ export function NetworkPage({
     };
     setAddPfOpen(false);
 
-    const label =
-      hostPort > 0
-        ? `:${hostPort} → :${pfGuestPort}`
-        : `ingress → :${pfGuestPort}`;
+    const label = `:${pfGuestPort}`;
     const toastID = toast.loading(`Adding exposure ${label}…`);
     void api
       .createPortForward(payload)
@@ -451,19 +445,6 @@ export function NetworkPage({
                 </div>
                 <div>
                   <label className="block text-[11px] text-muted-foreground mb-1">
-                    Host Port (optional)
-                  </label>
-                  <input
-                    type="number"
-                    aria-label="Host port"
-                    placeholder="ingress-only"
-                    value={pfHostPort}
-                    onChange={(e) => setPfHostPort(e.target.value)}
-                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
                     Guest Port
                   </label>
                   <input
@@ -521,7 +502,7 @@ export function NetworkPage({
               <thead>
                 <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
                   <th className="py-2.5 px-3 font-normal">Protocol</th>
-                  <th className="py-2.5 px-3 font-normal">Host Port</th>
+                  <th className="py-2.5 px-3 font-normal">Serve Port</th>
                   <th className="py-2.5 px-3 font-normal">Sandbox</th>
                   <th className="py-2.5 px-3 font-normal">Guest Port</th>
                   <th className="py-2.5 px-3 font-normal">Access</th>
@@ -549,7 +530,7 @@ export function NetworkPage({
                     <tr key={pf.id} className="hover:bg-muted/30">
                       <td className="py-2.5 px-3">{pf.protocol}</td>
                       <td className="py-2.5 px-3 text-foreground font-medium">
-                        {pf.host_port > 0 ? `:${pf.host_port}` : 'ingress'}
+                        {pf.host_port > 0 ? `:${pf.host_port}` : 'subdomain'}
                       </td>
                       <td className="py-2.5 px-3 text-foreground">
                         {pf.vm_name || pf.vm_id}
