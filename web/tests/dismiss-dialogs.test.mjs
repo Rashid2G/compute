@@ -345,7 +345,7 @@ function createMockServer() {
             succeeded.push(id);
           }
         }
-        return json(200, { action: 'delete', requested: ids.length, succeeded, failed });
+        return json(202, { action: 'delete', status: 'queued', task_id: 'task_test_bulk_delete', requested: ids.length, queued: succeeded.length, succeeded: [], failed: [] });
       }
 
       const vmMatch = p.match(/^\/api\/v1\/vms\/([^/]+)(?:\/(.*))?$/);
@@ -728,8 +728,8 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Delete 2 instances?')`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
-      assert(toastText.includes('Deleting 2 sandbox(es)'), `Expected bulk loading toast, got: ${toastText}`);
-      await waitFor(cdp, `window.__getToastsText().includes('Deleted 2 sandbox(es)')`, 3000, 'bulk delete toast success');
+      assert(toastText.includes('Queueing deletion of 2 sandbox(es)'), `Expected bulk loading toast, got: ${toastText}`);
+      await waitFor(cdp, `window.__getToastsText().includes('Queued deletion of 2 sandbox(es)')`, 3000, 'bulk delete toast success');
       await waitFor(cdp, `!(document.querySelector('tbody')?.innerText || '').includes('sbx-gamma') && !document.querySelector('[role="alertdialog"]')`, 3000, 'bulk delete refresh settled');
       assert.equal(server.bulkDeleteCalls.length, 1, 'Expected single POST /api/v1/vms/bulk-delete request');
       assert.deepEqual(server.bulkDeleteCalls[0].ids, ['vm-gamma', 'vm-delta']);
@@ -799,8 +799,8 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await sleep(70);
       assert.equal(await cdp.evalJS(`document.getElementById('advanced-create-title') === null`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
-      assert(toastText.includes('Provisioning sbx-fast-close'), `Expected Provisioning toast, got: ${toastText}`);
-      await waitFor(cdp, `window.__getToastsText().includes('sbx-fast-close is running')`, 4000, 'create+boot toast success');
+      assert(toastText.includes('Provisioning & booting sbx-fast-close'), `Expected Provisioning toast, got: ${toastText}`);
+      await waitFor(cdp, `window.__getToastsText().includes('sbx-fast-close provisioned')`, 4000, 'create+boot toast success');
     });
 
     await t.test('SSHKeysDialog closes immediately on add and delete with loading toast', async () => {

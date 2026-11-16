@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
   Check,
@@ -66,6 +66,35 @@ const DEFAULT_POLICY: ClusterSchedulingPolicy = {
   disk_hard_enforcement: true,
 };
 
+type PolicyNumericField =
+  | 'cpu_soft_overcommit_ratio'
+  | 'cpu_hard_overcommit_ratio'
+  | 'cpu_share_weight_base'
+  | 'cpu_weight'
+  | 'memory_weight'
+  | 'disk_weight'
+  | 'idle_threshold_seconds'
+  | 'host_reserved_vcpus'
+  | 'host_reserved_memory_mb'
+  | 'host_reserved_disk_mb';
+
+function policyToDraftStrings(
+  p: ClusterSchedulingPolicy,
+): Record<PolicyNumericField, string> {
+  return {
+    cpu_soft_overcommit_ratio: String(p.cpu_soft_overcommit_ratio ?? 1.5),
+    cpu_hard_overcommit_ratio: String(p.cpu_hard_overcommit_ratio ?? 3.0),
+    cpu_share_weight_base: String(p.cpu_share_weight_base ?? 1024),
+    cpu_weight: String(p.cpu_weight ?? 0.4),
+    memory_weight: String(p.memory_weight ?? 0.4),
+    disk_weight: String(p.disk_weight ?? 0.2),
+    idle_threshold_seconds: String(p.idle_threshold_seconds ?? 900),
+    host_reserved_vcpus: String(p.host_reserved_vcpus ?? 1),
+    host_reserved_memory_mb: String(p.host_reserved_memory_mb ?? 512),
+    host_reserved_disk_mb: String(p.host_reserved_disk_mb ?? 4096),
+  };
+}
+
 export function WorkersPage({
   workers: propWorkers,
   pools: propPools,
@@ -85,6 +114,11 @@ export function WorkersPage({
   const [policy, setPolicy] = useState<ClusterSchedulingPolicy>(
     propPolicy ?? DEFAULT_POLICY,
   );
+  const [policyNums, setPolicyNums] = useState<Record<PolicyNumericField, string>>(
+    () => policyToDraftStrings(propPolicy ?? DEFAULT_POLICY),
+  );
+  const [policyDirty, setPolicyDirty] = useState(false);
+  const policyDirtyRef = useRef(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -104,9 +138,9 @@ export function WorkersPage({
   const [editNodeTarget, setEditNodeTarget] = useState<WorkerNodeRecord | null>(null);
   const [editPoolId, setEditPoolId] = useState('default');
   const [editStatus, setEditStatus] = useState('ready');
-  const [editAllocVcpus, setEditAllocVcpus] = useState(0);
-  const [editAllocMemMb, setEditAllocMemMb] = useState(0);
-  const [editAllocDiskGb, setEditAllocDiskGb] = useState(0);
+  const [editAllocVcpus, setEditAllocVcpus] = useState('0');
+  const [editAllocMemMb, setEditAllocMemMb] = useState('0');
+  const [editAllocDiskGb, setEditAllocDiskGb] = useState('0');
 
   // Pool Migration modal state
   const [migratePoolTarget, setMigratePoolTarget] = useState<WorkerPoolRecord | null>(null);
@@ -115,6 +149,11 @@ export function WorkersPage({
   const [migrateWorkersFlag, setMigrateWorkersFlag] = useState(true);
   const [migrateSandboxesFlag, setMigrateSandboxesFlag] = useState(true);
   const [migrateForceFlag, setMigrateForceFlag] = useState(false);
+
+  const applyServerPolicy = useCallback((next: ClusterSchedulingPolicy) => {
+    setPolicy(next);
+    setPolicyNums(policyToDraftStrings(next));
+  }, []);
 
   const loadData = useCallback(async () => {
     if (wsConnected) return;
@@ -129,11 +168,13 @@ export function WorkersPage({
       if (wRes.status === 'fulfilled') setWorkers(wRes.value || []);
       if (pRes.status === 'fulfilled') setPools(pRes.value || []);
       if (tRes.status === 'fulfilled') setTokens(tRes.value || []);
-      if (polRes.status === 'fulfilled' && polRes.value) setPolicy(polRes.value);
+      if (polRes.status === 'fulfilled' && polRes.value && !policyDirtyRef.current) {
+        applyServerPolicy(polRes.value);
+      }
     } finally {
       setLoading(false);
     }
-  }, [isAdmin, wsConnected]);
+  }, [isAdmin, wsConnected, applyServerPolicy]);
 
   useEffect(() => {
     if (propWorkers) setWorkers(propWorkers);
@@ -148,8 +189,10 @@ export function WorkersPage({
   }, [propTokens]);
 
   useEffect(() => {
-    if (propPolicy) setPolicy(propPolicy);
-  }, [propPolicy]);
+    if (propPolicy && !policyDirtyRef.current) {
+      applyServerPolicy(propPolicy);
+    }
+  }, [propPolicy, applyServerPolicy]);
 
   useEffect(() => {
     if (!wsConnected) {
@@ -209,10 +252,10 @@ export function WorkersPage({
     setEditNodeTarget(node);
     setEditPoolId(node.pool_id || 'default');
     setEditStatus(node.status || 'ready');
-    setEditAllocVcpus(node.allocated_vcpus || node.total_vcpus || 0);
-    setEditAllocMemMb(node.allocated_mem_mb || node.total_mem_mb || 0);
+    setEditAllocVcpus(String(node.allocated_vcpus || node.total_vcpus || 0));
+    setEditAllocMemMb(String(node.allocated_mem_mb || node.total_mem_mb || 0));
     setEditAllocDiskGb(
-      Math.round((node.allocated_disk_mb || node.total_disk_mb || 0) / 1024),
+      String(Math.round((node.allocated_disk_mb || node.total_disk_mb || 0) / 1024)),
     );
   }
 
@@ -220,12 +263,15 @@ export function WorkersPage({
     e.preventDefault();
     if (!editNodeTarget) return;
     const node = editNodeTarget;
+    const parsedVcpus = Number(editAllocVcpus);
+    const parsedMem = Number(editAllocMemMb);
+    const parsedDiskGb = Number(editAllocDiskGb);
     const payload = {
       pool_id: editPoolId.trim() || 'default',
       status: editStatus,
-      allocated_vcpus: Math.max(0, editAllocVcpus),
-      allocated_mem_mb: Math.max(0, editAllocMemMb),
-      allocated_disk_mb: Math.max(0, Math.round(editAllocDiskGb * 1024)),
+      allocated_vcpus: Math.max(0, Number.isFinite(parsedVcpus) ? Math.round(parsedVcpus) : 0),
+      allocated_mem_mb: Math.max(0, Number.isFinite(parsedMem) ? Math.round(parsedMem) : 0),
+      allocated_disk_mb: Math.max(0, Number.isFinite(parsedDiskGb) ? Math.round(parsedDiskGb * 1024) : 0),
     };
     setEditNodeTarget(null);
 
@@ -242,13 +288,73 @@ export function WorkersPage({
       });
   }
 
+  function updatePolicyField<K extends keyof ClusterSchedulingPolicy>(
+    field: K,
+    value: ClusterSchedulingPolicy[K],
+  ) {
+    policyDirtyRef.current = true;
+    setPolicyDirty(true);
+    setPolicy((p) => ({ ...p, [field]: value }));
+  }
+
+  function updatePolicyNum(field: PolicyNumericField, value: string) {
+    policyDirtyRef.current = true;
+    setPolicyDirty(true);
+    setPolicyNums((prev) => ({ ...prev, [field]: value }));
+  }
+
+  function resetPolicyDraft() {
+    policyDirtyRef.current = false;
+    setPolicyDirty(false);
+    applyServerPolicy(propPolicy ?? DEFAULT_POLICY);
+  }
+
   async function handleSavePolicy(e: React.FormEvent) {
     e.preventDefault();
+    const numericFields: PolicyNumericField[] = [
+      'cpu_soft_overcommit_ratio',
+      'cpu_hard_overcommit_ratio',
+      'cpu_share_weight_base',
+      'cpu_weight',
+      'memory_weight',
+      'disk_weight',
+      'idle_threshold_seconds',
+      'host_reserved_vcpus',
+      'host_reserved_memory_mb',
+      'host_reserved_disk_mb',
+    ];
+    const parsedNums = {} as Record<PolicyNumericField, number>;
+    for (const key of numericFields) {
+      const raw = policyNums[key]?.trim() ?? '';
+      const n = Number(raw);
+      if (raw === '' || !Number.isFinite(n)) {
+        toast.error(`Please enter a valid number for ${key.replace(/_/g, ' ')}`);
+        return;
+      }
+      parsedNums[key] = n;
+    }
+
+    const payload: ClusterSchedulingPolicy = {
+      ...policy,
+      cpu_soft_overcommit_ratio: parsedNums.cpu_soft_overcommit_ratio,
+      cpu_hard_overcommit_ratio: parsedNums.cpu_hard_overcommit_ratio,
+      cpu_share_weight_base: Math.round(parsedNums.cpu_share_weight_base),
+      cpu_weight: parsedNums.cpu_weight,
+      memory_weight: parsedNums.memory_weight,
+      disk_weight: parsedNums.disk_weight,
+      idle_threshold_seconds: Math.round(parsedNums.idle_threshold_seconds),
+      host_reserved_vcpus: Math.round(parsedNums.host_reserved_vcpus),
+      host_reserved_memory_mb: Math.round(parsedNums.host_reserved_memory_mb),
+      host_reserved_disk_mb: Math.round(parsedNums.host_reserved_disk_mb),
+    };
+
     setSavingPolicy(true);
     const toastID = toast.loading('Saving cluster scheduling policy…');
     try {
-      const saved = await api.updateSchedulingPolicy(policy);
-      setPolicy(saved);
+      const saved = await api.updateSchedulingPolicy(payload);
+      policyDirtyRef.current = false;
+      setPolicyDirty(false);
+      applyServerPolicy(saved);
       toast.success('Scheduling & load-balancer policy updated', { id: toastID });
       onRefresh?.();
     } catch (err) {
@@ -1120,9 +1226,16 @@ export function WorkersPage({
               </p>
             </div>
           </div>
-          <span className="border border-border bg-muted/30 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
-            strategy:{policy.strategy}
-          </span>
+          <div className="flex items-center gap-2">
+            {policyDirty && (
+              <span className="border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[11px] text-amber-400">
+                unsaved changes
+              </span>
+            )}
+            <span className="border border-border bg-muted/30 px-2 py-0.5 font-mono text-[11px] text-muted-foreground">
+              strategy:{policy.strategy}
+            </span>
+          </div>
         </div>
 
         <form
@@ -1139,11 +1252,10 @@ export function WorkersPage({
                 disabled={!isAdmin}
                 value={policy.strategy}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    strategy: e.target
-                      .value as ClusterSchedulingPolicy['strategy'],
-                  }))
+                  updatePolicyField(
+                    'strategy',
+                    e.target.value as ClusterSchedulingPolicy['strategy'],
+                  )
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none disabled:opacity-60"
               >
@@ -1160,15 +1272,13 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="CPU Soft Overcommit Ratio"
                 step="0.1"
                 min="1"
                 disabled={!isAdmin}
-                value={policy.cpu_soft_overcommit_ratio}
+                value={policyNums.cpu_soft_overcommit_ratio}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    cpu_soft_overcommit_ratio: Number(e.target.value) || 1,
-                  }))
+                  updatePolicyNum('cpu_soft_overcommit_ratio', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1180,15 +1290,13 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="CPU Hard Overcommit Ratio"
                 step="0.1"
                 min="1"
                 disabled={!isAdmin}
-                value={policy.cpu_hard_overcommit_ratio}
+                value={policyNums.cpu_hard_overcommit_ratio}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    cpu_hard_overcommit_ratio: Number(e.target.value) || 1,
-                  }))
+                  updatePolicyNum('cpu_hard_overcommit_ratio', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1200,14 +1308,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="CPU Share Weight Base"
                 min="1"
                 disabled={!isAdmin}
-                value={policy.cpu_share_weight_base}
+                value={policyNums.cpu_share_weight_base}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    cpu_share_weight_base: Number(e.target.value) || 1024,
-                  }))
+                  updatePolicyNum('cpu_share_weight_base', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1219,16 +1325,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="CPU Weight"
                 step="0.05"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.cpu_weight}
-                onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    cpu_weight: Number(e.target.value) || 0,
-                  }))
-                }
+                value={policyNums.cpu_weight}
+                onChange={(e) => updatePolicyNum('cpu_weight', e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
             </div>
@@ -1239,16 +1341,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="Memory Weight"
                 step="0.05"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.memory_weight}
-                onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    memory_weight: Number(e.target.value) || 0,
-                  }))
-                }
+                value={policyNums.memory_weight}
+                onChange={(e) => updatePolicyNum('memory_weight', e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
             </div>
@@ -1259,16 +1357,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="Disk Weight"
                 step="0.05"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.disk_weight}
-                onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    disk_weight: Number(e.target.value) || 0,
-                  }))
-                }
+                value={policyNums.disk_weight}
+                onChange={(e) => updatePolicyNum('disk_weight', e.target.value)}
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
             </div>
@@ -1279,14 +1373,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="Idle Hibernate Threshold (sec)"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.idle_threshold_seconds}
+                value={policyNums.idle_threshold_seconds}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    idle_threshold_seconds: Number(e.target.value) || 0,
-                  }))
+                  updatePolicyNum('idle_threshold_seconds', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1298,14 +1390,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="Host Reserved vCPUs"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.host_reserved_vcpus}
+                value={policyNums.host_reserved_vcpus}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    host_reserved_vcpus: Number(e.target.value) || 0,
-                  }))
+                  updatePolicyNum('host_reserved_vcpus', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1317,14 +1407,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="Host Reserved Memory (MB)"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.host_reserved_memory_mb}
+                value={policyNums.host_reserved_memory_mb}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    host_reserved_memory_mb: Number(e.target.value) || 0,
-                  }))
+                  updatePolicyNum('host_reserved_memory_mb', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1336,14 +1424,12 @@ export function WorkersPage({
               </label>
               <input
                 type="number"
+                aria-label="Host Reserved Disk (MB)"
                 min="0"
                 disabled={!isAdmin}
-                value={policy.host_reserved_disk_mb}
+                value={policyNums.host_reserved_disk_mb}
                 onChange={(e) =>
-                  setPolicy((p) => ({
-                    ...p,
-                    host_reserved_disk_mb: Number(e.target.value) || 0,
-                  }))
+                  updatePolicyNum('host_reserved_disk_mb', e.target.value)
                 }
                 className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none disabled:opacity-60"
               />
@@ -1358,10 +1444,7 @@ export function WorkersPage({
                   disabled={!isAdmin}
                   checked={policy.memory_hard_guarantee}
                   onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      memory_hard_guarantee: e.target.checked,
-                    }))
+                    updatePolicyField('memory_hard_guarantee', e.target.checked)
                   }
                   className="accent-primary"
                 />
@@ -1373,10 +1456,10 @@ export function WorkersPage({
                   disabled={!isAdmin}
                   checked={policy.idle_ram_snapshot_enabled}
                   onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      idle_ram_snapshot_enabled: e.target.checked,
-                    }))
+                    updatePolicyField(
+                      'idle_ram_snapshot_enabled',
+                      e.target.checked,
+                    )
                   }
                   className="accent-primary"
                 />
@@ -1388,10 +1471,10 @@ export function WorkersPage({
                   disabled={!isAdmin}
                   checked={policy.auto_reclaim_on_pressure}
                   onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      auto_reclaim_on_pressure: e.target.checked,
-                    }))
+                    updatePolicyField(
+                      'auto_reclaim_on_pressure',
+                      e.target.checked,
+                    )
                   }
                   className="accent-primary"
                 />
@@ -1403,10 +1486,7 @@ export function WorkersPage({
                   disabled={!isAdmin}
                   checked={policy.disk_hard_enforcement}
                   onChange={(e) =>
-                    setPolicy((p) => ({
-                      ...p,
-                      disk_hard_enforcement: e.target.checked,
-                    }))
+                    updatePolicyField('disk_hard_enforcement', e.target.checked)
                   }
                   className="accent-primary"
                 />
@@ -1415,13 +1495,25 @@ export function WorkersPage({
             </div>
 
             {isAdmin && (
-              <button
-                type="submit"
-                disabled={savingPolicy}
-                className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground disabled:opacity-50"
-              >
-                {savingPolicy ? 'Saving…' : 'Save Policy'}
-              </button>
+              <div className="flex items-center gap-2">
+                {policyDirty && (
+                  <button
+                    type="button"
+                    onClick={resetPolicyDraft}
+                    disabled={savingPolicy}
+                    className="h-8 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    Discard
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={savingPolicy}
+                  className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  {savingPolicy ? 'Saving…' : 'Save Policy'}
+                </button>
+              </div>
             )}
           </div>
         </form>
@@ -1629,9 +1721,7 @@ export function WorkersPage({
                       undefined
                     }
                     value={editAllocVcpus}
-                    onChange={(e) =>
-                      setEditAllocVcpus(Number(e.target.value) || 0)
-                    }
+                    onChange={(e) => setEditAllocVcpus(e.target.value)}
                     className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none"
                   />
                 </div>
@@ -1650,9 +1740,7 @@ export function WorkersPage({
                       undefined
                     }
                     value={editAllocMemMb}
-                    onChange={(e) =>
-                      setEditAllocMemMb(Number(e.target.value) || 0)
-                    }
+                    onChange={(e) => setEditAllocMemMb(e.target.value)}
                     className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none"
                   />
                 </div>
@@ -1677,9 +1765,7 @@ export function WorkersPage({
                       ) || undefined
                     }
                     value={editAllocDiskGb}
-                    onChange={(e) =>
-                      setEditAllocDiskGb(Number(e.target.value) || 0)
-                    }
+                    onChange={(e) => setEditAllocDiskGb(e.target.value)}
                     className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground tabular focus:border-primary focus:outline-none"
                   />
                 </div>

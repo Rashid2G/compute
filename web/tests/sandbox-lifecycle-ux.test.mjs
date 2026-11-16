@@ -204,8 +204,13 @@ function createMockServer() {
     },
   ];
   const cloneCalls = [];
+  const bulkCloneCalls = [];
   const launchCalls = [];
   const createCalls = [];
+  const bulkCreateCalls = [];
+  const bulkActionCalls = [];
+  const restartCalls = [];
+  const runCalls = [];
   const migrateCalls = [];
   const workerUpdateCalls = [];
   const policyUpdateCalls = [];
@@ -536,6 +541,48 @@ function createMockServer() {
         vms = vms.filter((v) => !ids.includes(v.id));
         return json(200, { action: 'delete', requested: ids.length, succeeded: ids, failed: [] });
       }
+      if (p === '/api/v1/vms/bulk-clone' && req.method === 'POST') {
+        const names = Array.isArray(body.names) ? body.names : [];
+        bulkCloneCalls.push({
+          source_id: body.source_id,
+          names,
+          vcpus: body.vcpus,
+          memory_mb: body.memory_mb,
+          disk_gb: body.disk_gb,
+          network_isolated: body.network_isolated,
+          description: body.description,
+          auto_start: body.auto_start,
+          async: body.async,
+        });
+        const createdClones = names.map((name, idx) => ({
+          id: `vm-clone-${vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          name,
+          description: body.description || '',
+          status: body.auto_start ? 'running' : 'stopped',
+          vcpus: body.vcpus || src?.vcpus || 2,
+          memory_mb: body.memory_mb || src?.memory_mb || 1024,
+          disk_mb: body.disk_mb || (body.disk_gb ? body.disk_gb * 1024 : (src?.disk_mb || 20480)),
+          ip_address: `172.16.0.${20 + vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          network_isolation: body.network_isolated ? 'isolated' : 'account',
+          mac_address: `02:fc:00:00:00:2${vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          tap_device: `tap2${vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          disk_path: `/var/lib/compute/vms/${name}/disk.ext4`,
+          rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
+          kernel_path: '/var/lib/compute/vmlinux',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+        vms = [...vms, ...createdClones];
+        return json(202, {
+          action: 'clone',
+          status: 'queued',
+          task_id: 'task_test_bulk_clone',
+          requested: names.length,
+          queued: names.length,
+          succeeded: [],
+          failed: [],
+        });
+      }
 
       const vmMatch = p.match(/^\/api\/v1\/vms\/([^/]+)(?:\/(.*))?$/);
       if (vmMatch) {
@@ -688,6 +735,7 @@ function createMockServer() {
     policyUpdateCalls,
     poolMigrateCalls,
     bulkDeleteCalls,
+    bulkCloneCalls,
     setUserRole: (role) => {
       currentUserRole = role;
     },
@@ -777,6 +825,8 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
     workerUpdateCalls,
     policyUpdateCalls,
     poolMigrateCalls,
+    bulkDeleteCalls,
+    bulkCloneCalls,
     setUserRole,
   } = createMockServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -933,11 +983,12 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       `);
       await waitFor(cdp, `document.getElementById('clone-vm-title') === null`, 3000, 'clone modal closed');
       await waitFor(cdp, `document.body.innerText.includes('worker-pool-1') && document.body.innerText.includes('worker-pool-2')`, 4000, 'replicas rendered');
-      assert.equal(cloneCalls.length, 2);
-      assert.equal(cloneCalls[0].body.name, 'worker-pool-1');
-      assert.equal(cloneCalls[1].body.name, 'worker-pool-2');
-      assert.equal(cloneCalls[0].body.vcpus, 4);
-      assert.equal(cloneCalls[0].body.auto_start, true);
+      assert.equal(bulkCloneCalls.length, 1, 'Expected single queued POST /api/v1/vms/bulk-clone request');
+      assert.equal(cloneCalls.length, 0, 'Multi-replica replication must use bulk-clone, not per-VM clone');
+      assert.deepEqual(bulkCloneCalls[0].names, ['worker-pool-1', 'worker-pool-2']);
+      assert.equal(bulkCloneCalls[0].vcpus, 4);
+      assert.equal(bulkCloneCalls[0].auto_start, true);
+      assert.equal(bulkCloneCalls[0].async, true);
     });
 
     await t.test('Pause shows PAUSED (STATE SAVED) badge and Resume restores running', async () => {
