@@ -38,6 +38,13 @@ type TargetResolver interface {
 	IsPortPublic(ctx context.Context, idOrName string, port int) bool
 }
 
+// OwnerPortChecker is an optional extension of TargetResolver that scopes public
+// port exposure checks to the resolved VM's OwnerID, preventing cross-tenant
+// collisions when two tenants use the same sandbox name.
+type OwnerPortChecker interface {
+	IsPortPublicForOwner(ctx context.Context, ownerID, idOrName string, port int) bool
+}
+
 // AuthValidator validates whether an incoming HTTP request is authorized to access the given owner.
 type AuthValidator func(r *http.Request, ownerID string) bool
 
@@ -108,7 +115,7 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 type RouteMatch struct {
 	Target  string // VM ID or VM Name
 	Port    int    // Upstream guest port
-	Owner   string // Username DNS label for "<sandbox>.<username>.<zone>" routes
+	Owner   string // Username DNS label for "<sandbox>.<username>.<zone>" or "/preview/@<username>/<sandbox>/<port>" routes
 	SubPath string // Rewritten path to forward upstream
 	// Prefix is the URL path prefix the request was matched under, for
 	// path-based preview routes (e.g. "/preview/pr-42/8080"). Empty for
@@ -159,6 +166,7 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	// 2. Check Path-Based Routing
 	// Patterns supported:
 	//   /preview/<target>/<port>/*
+	//   /preview/@<owner>/<target>/<port>/*
 	//   /api/v1/sandboxes/<target>/preview/<port>/*
 	//   /api/v1/vms/<target>/preview/<port>/*
 	path := r.URL.Path
@@ -354,11 +362,27 @@ func parsePathRoute(path string) (RouteMatch, bool) {
 		return RouteMatch{}, false
 	}
 
+	// Support optional owner-scoped path form: /preview/@<owner>/<target>/<port>/*
+	ownerLabel := ""
+	rawOwnerSegment := ""
+	if strings.HasPrefix(trimmed, "@") {
+		slashIdx := strings.Index(trimmed, "/")
+		if slashIdx <= 1 {
+			return RouteMatch{}, false
+		}
+		rawOwnerSegment = trimmed[:slashIdx]
+		ownerLabel = strings.ToLower(strings.TrimPrefix(rawOwnerSegment, "@"))
+		trimmed = trimmed[slashIdx+1:]
+	}
+
 	parts := strings.SplitN(trimmed, "/", 3)
 	if len(parts) < 2 {
 		return RouteMatch{}, false
 	}
 	target := parts[0]
+	if target == "" {
+		return RouteMatch{}, false
+	}
 	port, err := strconv.Atoi(parts[1])
 	if err != nil || port <= 0 || port > 65535 {
 		return RouteMatch{}, false
@@ -370,6 +394,7 @@ func parsePathRoute(path string) (RouteMatch, bool) {
 	match := RouteMatch{
 		Target:  target,
 		Port:    port,
+		Owner:   ownerLabel,
 		SubPath: subPath,
 		IsMatch: true,
 	}
@@ -377,7 +402,11 @@ func parsePathRoute(path string) (RouteMatch, bool) {
 	// prefix; the proxy rewrites their HTML so absolute asset/API paths keep
 	// working (see rewriteHTMLForPrefix).
 	if strings.HasPrefix(path, "/preview/") {
-		match.Prefix = "/preview/" + target + "/" + strconv.Itoa(port)
+		if rawOwnerSegment != "" {
+			match.Prefix = "/preview/" + rawOwnerSegment + "/" + target + "/" + strconv.Itoa(port)
+		} else {
+			match.Prefix = "/preview/" + target + "/" + strconv.Itoa(port)
+		}
 	}
 	return match, true
 }
@@ -424,9 +453,15 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine Public vs. Private exposure
-	isPublic := p.resolver.IsPortPublic(ctx, targetInfo.ID, match.Port) ||
-		p.resolver.IsPortPublic(ctx, targetInfo.Name, match.Port)
+	// Determine Public vs. Private exposure (scoped to targetInfo.OwnerID when supported)
+	isPublic := false
+	if ownerChecker, ok := p.resolver.(OwnerPortChecker); ok {
+		isPublic = ownerChecker.IsPortPublicForOwner(ctx, targetInfo.OwnerID, targetInfo.ID, match.Port) ||
+			ownerChecker.IsPortPublicForOwner(ctx, targetInfo.OwnerID, targetInfo.Name, match.Port)
+	} else {
+		isPublic = p.resolver.IsPortPublic(ctx, targetInfo.ID, match.Port) ||
+			p.resolver.IsPortPublic(ctx, targetInfo.Name, match.Port)
+	}
 
 	if !isPublic {
 		// Private (default): enforce tenant authentication and verify caller owns the VM
@@ -445,10 +480,12 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle standard HTTP/1.1, HTTP/2, and Server-Sent Events (SSE)
+	prefix := ""
 	if match.Prefix != "" && previewPrefixIsValid(match.Prefix) {
+		prefix = match.Prefix
 		w = newHTMLPrefixWriter(w, match.Prefix+"/")
 	}
-	p.serveHTTP(w, r, targetInfo, match.Port, match.SubPath)
+	p.serveHTTP(w, r, targetInfo, match.Port, match.SubPath, prefix)
 	if hw, ok := w.(*htmlPrefixWriter); ok {
 		hw.finalize()
 	}
@@ -459,11 +496,14 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // un-rewritten rather than injected into a document.
 func previewPrefixIsValid(prefix string) bool {
 	for _, part := range strings.Split(strings.Trim(prefix, "/"), "/") {
-		if part == "" {
+		if part == "" || part == "." || part == ".." {
 			return false
 		}
 		for i := 0; i < len(part); i++ {
 			c := part[i]
+			if i == 0 && c == '@' && len(part) > 1 {
+				continue
+			}
 			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
 				return false
 			}
@@ -483,10 +523,22 @@ func previewPrefixIsValid(prefix string) bool {
 func rewriteHTMLForPrefix(body []byte, prefix string) []byte {
 	html := string(body)
 	base := strings.TrimSuffix(prefix, "/")
-	attrRe := regexp.MustCompile(`(?i)\b(src|href)\s*=\s*"(/[^/"][^"]*)"`)
-	html = attrRe.ReplaceAllString(html, `$1="`+base+`$2"`)
-	attrSingleRe := regexp.MustCompile(`(?i)\b(src|href)\s*=\s*'(/[^/'][^']*)'`)
-	html = attrSingleRe.ReplaceAllString(html, `$1='`+base+`$2'`)
+	attrRe := regexp.MustCompile(`(?i)\b(src|href|action)\s*=\s*"(/[^/"][^"]*)"`)
+	html = attrRe.ReplaceAllStringFunc(html, func(m string) string {
+		sub := attrRe.FindStringSubmatch(m)
+		if len(sub) == 3 && (sub[2] == base || strings.HasPrefix(sub[2], base+"/")) {
+			return m
+		}
+		return sub[1] + `="` + base + sub[2] + `"`
+	})
+	attrSingleRe := regexp.MustCompile(`(?i)\b(src|href|action)\s*=\s*'(/[^/'][^']*)'`)
+	html = attrSingleRe.ReplaceAllStringFunc(html, func(m string) string {
+		sub := attrSingleRe.FindStringSubmatch(m)
+		if len(sub) == 3 && (sub[2] == base || strings.HasPrefix(sub[2], base+"/")) {
+			return m
+		}
+		return sub[1] + `='` + base + sub[2] + `'`
+	})
 
 	inject := `<base href="` + prefix + `">` + previewRuntimePatch(prefix)
 	lower := strings.ToLower(html)
@@ -505,7 +557,8 @@ func rewriteHTMLForPrefix(body []byte, prefix string) []byte {
 func previewRuntimePatch(prefix string) string {
 	return `<script>(function(){
 var P="` + prefix + `";
-function A(u){return typeof u==="string"&&u.charAt(0)==="/"&&u.charAt(1)!=="/";}
+var B=P.slice(0,-1);
+function A(u){return typeof u==="string"&&u.charAt(0)==="/"&&u.charAt(1)!=="/"&&u!==B&&u.indexOf(P)!==0;}
 var F=window.fetch;
 if(F)window.fetch=function(){if(A(arguments[0]))arguments[0]=P+arguments[0].slice(1);return F.apply(this,arguments);};
 var O=XMLHttpRequest&&XMLHttpRequest.prototype.open;
@@ -646,8 +699,24 @@ func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, ta
 	<-errc
 }
 
+// rewriteRedirectLocation keeps root-relative upstream redirects within the
+// preview path prefix (e.g. "Location: /login" -> "Location: /preview/myvm/8080/login").
+func rewriteRedirectLocation(loc, prefix string) string {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" || loc == "" {
+		return loc
+	}
+	if strings.HasPrefix(loc, "/") && !strings.HasPrefix(loc, "//") {
+		if loc == prefix || strings.HasPrefix(loc, prefix+"/") {
+			return loc
+		}
+		return prefix + loc
+	}
+	return loc
+}
+
 // serveHTTP proxies HTTP/1.1 and HTTP/2 requests with immediate unbuffered flush for streaming/SSE.
-func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target *TargetInfo, port int, subPath string) {
+func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target *TargetInfo, port int, subPath, prefix string) {
 	targetIP := target.IPAddress
 	targetURL, err := url.Parse(fmt.Sprintf("http://%s:%d", targetIP, port))
 	if err != nil {
@@ -669,6 +738,9 @@ func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target 
 			req.Close = true
 		}
 		req.Header.Set("X-Forwarded-Host", r.Host)
+		if prefix != "" {
+			req.Header.Set("X-Forwarded-Prefix", prefix)
+		}
 		if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			req.Header.Set("X-Forwarded-For", clientIP)
 		} else if r.RemoteAddr != "" {
@@ -678,6 +750,15 @@ func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target 
 			req.Header.Set("X-Forwarded-Proto", "https")
 		} else {
 			req.Header.Set("X-Forwarded-Proto", "http")
+		}
+	}
+
+	if prefix != "" {
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			if loc := resp.Header.Get("Location"); loc != "" {
+				resp.Header.Set("Location", rewriteRedirectLocation(loc, prefix))
+			}
+			return nil
 		}
 	}
 

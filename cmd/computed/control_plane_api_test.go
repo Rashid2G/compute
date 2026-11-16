@@ -575,6 +575,127 @@ func TestControlPlane_PortForwards(t *testing.T) {
 	}
 }
 
+func TestControlPlane_IngressOnlyPortExposure(t *testing.T) {
+	server, vmMgr := newTestServerWithVMManager(t)
+	ctx := context.Background()
+
+	makeVM := func(id, name string) *db.VM {
+		t.Helper()
+		v := &db.VM{
+			ID:        id,
+			Name:      name,
+			OwnerID:   "default",
+			Status:    db.StatusRunning,
+			IPAddress: "127.0.0.1",
+		}
+		if err := vmMgr.GetStore().SaveVM(ctx, v); err != nil {
+			t.Fatalf("SaveVM(%s): %v", id, err)
+		}
+		return v
+	}
+	vmA := makeVM("vm-expose-a", "expose-a")
+	_ = makeVM("vm-expose-b", "expose-b")
+
+	expose := func(vmID string, payload map[string]interface{}) *http.Response {
+		t.Helper()
+		body, _ := json.Marshal(payload)
+		resp, err := http.Post(server.URL+"/api/v1/sandboxes/"+vmID+"/expose", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("POST expose: %v", err)
+		}
+		return resp
+	}
+
+	// 1. Ingress-only exposure: no host port is allocated.
+	resp := expose(vmA.ID, map[string]interface{}{"guest_port": 8080})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expose status = %d, want 201", resp.StatusCode)
+	}
+	var pf db.PortForward
+	_ = json.NewDecoder(resp.Body).Decode(&pf)
+	resp.Body.Close()
+	if pf.HostPort != 0 {
+		t.Fatalf("host_port = %d, want 0 (ingress-only)", pf.HostPort)
+	}
+	if !pf.Public {
+		t.Fatalf("expose should default to public, got %+v", pf)
+	}
+	if !strings.HasPrefix(pf.PublicURL, "/preview/") || !strings.HasSuffix(pf.PublicURL, "/8080/") {
+		t.Fatalf("unexpected preview URL %q", pf.PublicURL)
+	}
+
+	// 2. Re-exposing the same guest port updates in place instead of creating duplicates.
+	resp = expose(vmA.ID, map[string]interface{}{"guest_port": 8080, "public": false})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("re-expose status = %d, want 200", resp.StatusCode)
+	}
+	var updated db.PortForward
+	_ = json.NewDecoder(resp.Body).Decode(&updated)
+	resp.Body.Close()
+	if updated.ID != pf.ID || updated.Public {
+		t.Fatalf("re-expose should update the existing record, got %+v (original %+v)", updated, pf)
+	}
+
+	// 3. A second sandbox can expose the same guest port; ingress-only rows do not
+	//    collide on the partial unique host_port index.
+	resp = expose("vm-expose-b", map[string]interface{}{"guest_port": 8080})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("second sandbox expose status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 4. List is scoped to the sandbox.
+	respList, err := http.Get(server.URL + "/api/v1/sandboxes/" + vmA.ID + "/ports")
+	if err != nil {
+		t.Fatalf("GET ports: %v", err)
+	}
+	defer respList.Body.Close()
+	var ports []*db.PortForward
+	_ = json.NewDecoder(respList.Body).Decode(&ports)
+	if len(ports) != 1 || ports[0].GuestPort != 8080 {
+		t.Fatalf("expected exactly one exposed port, got %+v", ports)
+	}
+
+	// 5. Toggle visibility via PATCH.
+	reqPatch, _ := http.NewRequest(http.MethodPatch, server.URL+"/api/v1/sandboxes/"+vmA.ID+"/ports/8080", bytes.NewReader([]byte(`{"public":true}`)))
+	respPatch, err := http.DefaultClient.Do(reqPatch)
+	if err != nil {
+		t.Fatalf("PATCH port: %v", err)
+	}
+	var patched db.PortForward
+	_ = json.NewDecoder(respPatch.Body).Decode(&patched)
+	respPatch.Body.Close()
+	if respPatch.StatusCode != http.StatusOK || !patched.Public {
+		t.Fatalf("PATCH visibility failed: status=%d body=%+v", respPatch.StatusCode, patched)
+	}
+
+	// 6. Unexpose removes the mapping.
+	reqDel, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/sandboxes/"+vmA.ID+"/ports/8080", nil)
+	respDel, err := http.DefaultClient.Do(reqDel)
+	if err != nil {
+		t.Fatalf("DELETE port: %v", err)
+	}
+	respDel.Body.Close()
+	if respDel.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE port status = %d", respDel.StatusCode)
+	}
+	respList, err = http.Get(server.URL + "/api/v1/sandboxes/" + vmA.ID + "/ports")
+	if err != nil {
+		t.Fatalf("GET ports after delete: %v", err)
+	}
+	defer respList.Body.Close()
+	var after []*db.PortForward
+	_ = json.NewDecoder(respList.Body).Decode(&after)
+	if len(after) != 0 {
+		t.Fatalf("expected no exposed ports after unexpose, got %+v", after)
+	}
+	// The other sandbox's exposure is untouched.
+	pfsB, err := vmMgr.GetStore().ListPortForwardsForVM(ctx, "default", "vm-expose-b", "expose-b")
+	if err != nil || len(pfsB) != 1 {
+		t.Fatalf("second sandbox exposure should remain, got %+v (err %v)", pfsB, err)
+	}
+}
+
 func TestControlPlane_WorkerActionsAndTokens(t *testing.T) {
 	server := newTestServer(t)
 

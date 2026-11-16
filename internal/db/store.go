@@ -572,6 +572,14 @@ func (s *Store) initSchema() error {
 	_ = s.migrateTableColumns("volumes", []string{"owner_id"})
 	_ = s.migrateTableColumns("port_forwards", []string{"owner_id", "public"})
 
+	// Migrate idx_port_forwards_host_port to a partial unique index (WHERE host_port > 0)
+	// so ingress-only port exposures (host_port = 0) do not collide on host_port.
+	var pfIdxSQL string
+	_ = s.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_port_forwards_host_port'`).Scan(&pfIdxSQL)
+	if pfIdxSQL != "" && !strings.Contains(strings.ToLower(pfIdxSQL), "where") {
+		_, _ = s.db.Exec(`DROP INDEX IF EXISTS idx_port_forwards_host_port`)
+	}
+
 	indexes := `
 	CREATE INDEX IF NOT EXISTS idx_vms_internal_id ON vms(internal_id);
 	CREATE INDEX IF NOT EXISTS idx_vms_id ON vms(id);
@@ -610,7 +618,7 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(timestamp DESC);
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_vm ON port_forwards(vm_id);
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_owner ON port_forwards(owner_id);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_port_forwards_host_port ON port_forwards(host_port);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_port_forwards_host_port ON port_forwards(host_port) WHERE host_port > 0;
 	`
 	_, err := s.db.Exec(indexes)
 	return err
@@ -2518,11 +2526,41 @@ func (s *Store) ListPortForwardsByOwner(ctx context.Context, ownerID string) ([]
 
 // IsPortForwardPublic checks whether a given guest port on a VM is exposed as public.
 func (s *Store) IsPortForwardPublic(ctx context.Context, vmIDOrName string, guestPort int) bool {
+	return s.IsPortForwardPublicForOwner(ctx, "", vmIDOrName, guestPort)
+}
+
+// IsPortForwardPublicForOwner checks whether a given guest port on a VM owned by ownerID
+// (or any owner when ownerID is empty) is exposed as public.
+func (s *Store) IsPortForwardPublicForOwner(ctx context.Context, ownerID, vmIDOrName string, guestPort int) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var count int
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM port_forwards WHERE (vm_id = ? OR vm_name = ?) AND guest_port = ? AND public = 1`, vmIDOrName, vmIDOrName, guestPort).Scan(&count)
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM port_forwards WHERE (? = '' OR owner_id = ?) AND (vm_id = ? OR vm_name = ?) AND guest_port = ? AND public = 1`, ownerID, ownerID, vmIDOrName, vmIDOrName, guestPort).Scan(&count)
 	return count > 0
+}
+
+// ListPortForwardsForVM returns all port forwarding/exposure mappings for a VM owned by ownerID.
+func (s *Store) ListPortForwardsForVM(ctx context.Context, ownerID, vmID, vmName string) ([]*PortForward, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE (? = '' OR owner_id = ?) AND (vm_id = ? OR (? != '' AND vm_name = ?)) ORDER BY guest_port ASC, created_at DESC`, ownerID, ownerID, vmID, vmName, vmName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*PortForward
+	for rows.Next() {
+		pf := new(PortForward)
+		var publicInt int
+		if err := rows.Scan(
+			&pf.ID, &pf.OwnerID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &publicInt, &pf.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		pf.Public = publicInt == 1
+		out = append(out, pf)
+	}
+	return out, rows.Err()
 }
 
 // DeletePortForward deletes a port forward mapping by ID

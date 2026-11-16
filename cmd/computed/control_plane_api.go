@@ -1222,6 +1222,47 @@ func (s *Server) handleEnvironmentActions(w http.ResponseWriter, r *http.Request
 
 // ===== Network Port Forwards API =====
 
+// previewURLForPortForward returns the daemon-relative ingress path for a
+// sandbox port. The path is intentionally relative: the same record stays
+// correct when the daemon is reached over a different hostname, TLS terminator,
+// or tailnet name, and browsers resolve it against the daemon origin.
+func previewURLForPortForward(vmName, vmID string, guestPort int) string {
+	target := strings.TrimSpace(vmName)
+	if target == "" {
+		target = strings.TrimSpace(vmID)
+	}
+	if target == "" || guestPort <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("/preview/%s/%d/", target, guestPort)
+}
+
+// previewURLForVM prefers the owner-scoped path form
+// "/preview/@<username>/<sandbox>/<port>/" whenever the sandbox has a tenant
+// DNS label. That keeps two tenants that both named a sandbox "web" reachable
+// at distinct URLs. Falls back to the legacy un-scoped form otherwise.
+func (s *Server) previewURLForVM(v *db.VM, guestPort int) string {
+	if v == nil || guestPort <= 0 {
+		return ""
+	}
+	if host := s.vmHostname(v); host != "" {
+		labels := strings.Split(host, ".")
+		if len(labels) >= 3 {
+			owner := strings.ToLower(strings.TrimSpace(labels[1]))
+			if owner != "" {
+				target := strings.TrimSpace(v.Name)
+				if target == "" {
+					target = strings.TrimSpace(v.ID)
+				}
+				if target != "" {
+					return fmt.Sprintf("/preview/@%s/%s/%d/", owner, target, guestPort)
+				}
+			}
+		}
+	}
+	return previewURLForPortForward(v.Name, v.ID, guestPort)
+}
+
 func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
@@ -1232,6 +1273,10 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		vmFilter := strings.TrimSpace(r.URL.Query().Get("vm_id"))
+		if vmFilter == "" {
+			vmFilter = strings.TrimSpace(r.URL.Query().Get("sandbox"))
+		}
 		var pfs []*db.PortForward
 		var err error
 		if _, isAdmin := s.currentOwnerID(r); isAdmin {
@@ -1257,6 +1302,15 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if vmFilter != "" {
+			filtered := make([]*db.PortForward, 0, len(pfs))
+			for _, pf := range pfs {
+				if pf != nil && (strings.EqualFold(pf.VMID, vmFilter) || strings.EqualFold(pf.VMName, vmFilter)) {
+					filtered = append(filtered, pf)
+				}
+			}
+			pfs = filtered
+		}
 		if pfs == nil {
 			pfs = []*db.PortForward{}
 		}
@@ -1281,13 +1335,13 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if req.HostPort <= 0 || req.HostPort > 65535 || req.GuestPort <= 0 || req.GuestPort > 65535 {
-			httpError(w, "host_port and guest_port must be between 1 and 65535", http.StatusBadRequest)
+		if req.HostPort < 0 || req.HostPort > 65535 || req.GuestPort <= 0 || req.GuestPort > 65535 {
+			httpError(w, "guest_port must be between 1 and 65535 and host_port between 0 and 65535", http.StatusBadRequest)
 			return
 		}
 
-		// Anti-collision guard: privileged host ports (< 1024) require administrator privileges
-		if req.HostPort < 1024 && !isAdmin {
+		// Anti-collision guard: privileged host ports (1..1023) require administrator privileges
+		if req.HostPort > 0 && req.HostPort < 1024 && !isAdmin {
 			httpError(w, fmt.Sprintf("privileged host port %d requires administrator privileges", req.HostPort), http.StatusForbidden)
 			return
 		}
@@ -1296,25 +1350,27 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		s.portForwardMu.Lock()
 		defer s.portForwardMu.Unlock()
 
-		// Conflict detection: ensure host port is not already allocated in SQLite
 		allPFs, err := st.ListPortForwards(ctx)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		for _, existing := range allPFs {
-			if existing.HostPort == req.HostPort {
-				httpError(w, fmt.Sprintf("port conflict: host port %d is already allocated by port forward %s (sandbox: %s)", req.HostPort, existing.ID, existing.VMName), http.StatusConflict)
+		if req.HostPort > 0 {
+			// Conflict detection: ensure host port is not already allocated in SQLite
+			for _, existing := range allPFs {
+				if existing.HostPort == req.HostPort {
+					httpError(w, fmt.Sprintf("port conflict: host port %d is already allocated by port forward %s (sandbox: %s)", req.HostPort, existing.ID, existing.VMName), http.StatusConflict)
+					return
+				}
+			}
+
+			// Anti-collision guard: check if host port is currently bound or in use by a host service
+			if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", req.HostPort)); err == nil {
+				_ = ln.Close()
+			} else {
+				httpError(w, fmt.Sprintf("port conflict: host port %d is already in use by a host service: %v", req.HostPort, err), http.StatusConflict)
 				return
 			}
-		}
-
-		// Anti-collision guard: check if host port is currently bound or in use by a host service
-		if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", req.HostPort)); err == nil {
-			_ = ln.Close()
-		} else {
-			httpError(w, fmt.Sprintf("port conflict: host port %d is already in use by a host service: %v", req.HostPort, err), http.StatusConflict)
-			return
 		}
 
 		vmName := req.VMName
@@ -1348,21 +1404,6 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		if protocol == "" {
 			protocol = "tcp"
 		}
-		publicURL := ""
-		if req.Subdomain != "" {
-			publicURL = fmt.Sprintf("https://%s.compute.dev", req.Subdomain)
-		} else {
-			publicURL = fmt.Sprintf("http://localhost:%d", req.HostPort)
-		}
-
-		status := "pending"
-		if targetVM != nil && targetVM.IPAddress != "" {
-			if err := s.vmMgr.NetManager().AddPortForward(ctx, protocol, req.HostPort, targetVM.IPAddress, req.GuestPort); err != nil {
-				httpError(w, "failed to install host forwarding rule: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			status = "active"
-		}
 
 		pfOwner := ownerID
 		if targetVM != nil && targetVM.OwnerID != "" {
@@ -1372,6 +1413,58 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		isPublic := false
 		if req.Public != nil && *req.Public {
 			isPublic = true
+		}
+
+		publicURL := ""
+		if req.Subdomain != "" {
+			publicURL = fmt.Sprintf("https://%s.compute.dev", req.Subdomain)
+		} else if targetVM != nil {
+			publicURL = s.previewURLForVM(targetVM, req.GuestPort)
+		}
+		if publicURL == "" {
+			publicURL = previewURLForPortForward(vmName, req.VMID, req.GuestPort)
+			if publicURL == "" && req.HostPort > 0 {
+				publicURL = fmt.Sprintf("http://localhost:%d", req.HostPort)
+			}
+		}
+
+		status := "pending"
+		if targetVM != nil && (targetVM.Status == db.StatusRunning || targetVM.IPAddress != "") {
+			if req.HostPort > 0 && targetVM.IPAddress != "" && s.vmMgr.NetManager() != nil {
+				if err := s.vmMgr.NetManager().AddPortForward(ctx, protocol, req.HostPort, targetVM.IPAddress, req.GuestPort); err != nil {
+					httpError(w, "failed to install host forwarding rule: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			if targetVM.Status == db.StatusRunning || req.HostPort > 0 {
+				status = "active"
+			}
+		}
+
+		// When host_port == 0 (ingress-only exposure), update any existing ingress-only
+		// rule for the same owner/VM/guest_port/protocol in-place instead of creating duplicates.
+		if req.HostPort == 0 {
+			for _, existing := range allPFs {
+				if existing == nil || existing.HostPort != 0 || existing.OwnerID != pfOwner || existing.GuestPort != req.GuestPort || !strings.EqualFold(existing.Protocol, protocol) {
+					continue
+				}
+				if (req.VMID != "" && existing.VMID == req.VMID) || (vmName != "" && existing.VMName == vmName) {
+					existing.Public = isPublic
+					if req.Subdomain != "" {
+						existing.Subdomain = req.Subdomain
+					}
+					existing.PublicURL = publicURL
+					existing.Status = status
+					if err := st.SavePortForward(ctx, existing); err != nil {
+						httpError(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					s.recordEvent("port_forward.updated", getActor(r), fmt.Sprintf("ingress->%d", existing.GuestPort), "delivered", 15, existing)
+					w.WriteHeader(http.StatusOK)
+					json.NewEncoder(w).Encode(existing)
+					return
+				}
+			}
 		}
 
 		pf := &db.PortForward{
@@ -1431,14 +1524,58 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 		}
 		json.NewEncoder(w).Encode(pf)
 
+	case http.MethodPatch, http.MethodPut:
+		pf, err := st.GetPortForward(ctx, id)
+		if err != nil || pf == nil || !s.canAccessOwner(r, pf.OwnerID) {
+			httpError(w, "port forward not found", http.StatusNotFound)
+			return
+		}
+		var req struct {
+			Public    *bool   `json:"public,omitempty"`
+			Subdomain *string `json:"subdomain,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var targetVM *db.VM
+		if pf.VMID != "" {
+			targetVM, _ = st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID)
+		}
+		if req.Public != nil {
+			pf.Public = *req.Public
+		}
+		if req.Subdomain != nil {
+			pf.Subdomain = strings.TrimSpace(*req.Subdomain)
+			if pf.Subdomain != "" {
+				pf.PublicURL = fmt.Sprintf("https://%s.compute.dev", pf.Subdomain)
+			} else if targetVM != nil {
+				pf.PublicURL = s.previewURLForVM(targetVM, pf.GuestPort)
+			} else {
+				pf.PublicURL = previewURLForPortForward(pf.VMName, pf.VMID, pf.GuestPort)
+			}
+		}
+		if pf.PublicURL == "" {
+			pf.PublicURL = previewURLForPortForward(pf.VMName, pf.VMID, pf.GuestPort)
+			if pf.PublicURL == "" && pf.HostPort > 0 {
+				pf.PublicURL = fmt.Sprintf("http://localhost:%d", pf.HostPort)
+			}
+		}
+		if err := st.SavePortForward(ctx, pf); err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("port_forward.updated", getActor(r), id, "delivered", 15, pf)
+		json.NewEncoder(w).Encode(pf)
+
 	case http.MethodDelete:
 		pf, err := st.GetPortForward(ctx, id)
 		if err != nil || pf == nil || !s.canAccessOwner(r, pf.OwnerID) {
 			httpError(w, "port forward not found", http.StatusNotFound)
 			return
 		}
-		if pf != nil {
-			if v, _ := st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID); v != nil && v.IPAddress != "" {
+		if pf != nil && pf.HostPort > 0 {
+			if v, _ := st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID); v != nil && v.IPAddress != "" && s.vmMgr.NetManager() != nil {
 				_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 			}
 		}
@@ -1452,4 +1589,150 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleVMPorts manages exposed ports for a specific sandbox:
+//   - GET    /api/v1/sandboxes/<id>/ports          -> list exposed ports for sandbox
+//   - POST   /api/v1/sandboxes/<id>/ports          -> expose/update a guest port
+//   - POST   /api/v1/sandboxes/<id>/expose         -> expose/update a guest port
+//   - PATCH  /api/v1/sandboxes/<id>/ports/<port>   -> update visibility (public/private)
+//   - DELETE /api/v1/sandboxes/<id>/ports/<port>   -> unexpose a guest port
+//   - POST   /api/v1/sandboxes/<id>/unexpose       -> unexpose a guest port
+func (s *Server) handleVMPorts(w http.ResponseWriter, r *http.Request, v *db.VM, action string, subParts []string) {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
+		httpError(w, "store not available", http.StatusInternalServerError)
+		return
+	}
+	ctx := r.Context()
+	st := s.vmMgr.GetStore()
+
+	// Unexpose via POST /api/v1/sandboxes/<id>/unexpose or DELETE /api/v1/sandboxes/<id>/ports/<port>
+	if action == "unexpose" || r.Method == http.MethodDelete {
+		targetPort := 0
+		if len(subParts) > 0 && subParts[0] != "" {
+			if p, err := strconv.Atoi(subParts[0]); err == nil {
+				targetPort = p
+			}
+		}
+		if targetPort == 0 && r.URL.Query().Get("port") != "" {
+			if p, err := strconv.Atoi(r.URL.Query().Get("port")); err == nil {
+				targetPort = p
+			}
+		}
+		if targetPort == 0 && r.Body != nil {
+			var req struct {
+				Port      int `json:"port"`
+				GuestPort int `json:"guest_port"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.GuestPort > 0 {
+				targetPort = req.GuestPort
+			} else if req.Port > 0 {
+				targetPort = req.Port
+			}
+		}
+		if targetPort <= 0 || targetPort > 65535 {
+			httpError(w, "valid guest port (1-65535) is required", http.StatusBadRequest)
+			return
+		}
+		pfs, err := st.ListPortForwardsForVM(ctx, v.OwnerID, v.ID, v.Name)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		removed := 0
+		for _, pf := range pfs {
+			if pf != nil && pf.GuestPort == targetPort {
+				if pf.HostPort > 0 && v.IPAddress != "" && s.vmMgr.NetManager() != nil {
+					_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
+				}
+				if err := st.DeletePortForward(ctx, pf.ID); err == nil {
+					removed++
+				}
+			}
+		}
+		if removed == 0 {
+			httpError(w, fmt.Sprintf("port %d is not exposed on sandbox %s", targetPort, v.Name), http.StatusNotFound)
+			return
+		}
+		s.recordEvent("sandbox.port_unexposed", getActor(r), fmt.Sprintf("%s:%d", v.Name, targetPort), "delivered", 15, map[string]interface{}{
+			"vm_id":      v.ID,
+			"vm_name":    v.Name,
+			"guest_port": targetPort,
+		})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":     "ok",
+			"vm_id":      v.ID,
+			"vm_name":    v.Name,
+			"guest_port": targetPort,
+		})
+		return
+	}
+
+	if action == "ports" && r.Method == http.MethodGet {
+		pfs, err := st.ListPortForwardsForVM(ctx, v.OwnerID, v.ID, v.Name)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if pfs == nil {
+			pfs = []*db.PortForward{}
+		}
+		json.NewEncoder(w).Encode(pfs)
+		return
+	}
+
+	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Port      int    `json:"port"`
+		GuestPort int    `json:"guest_port"`
+		HostPort  int    `json:"host_port"`
+		Protocol  string `json:"protocol"`
+		Subdomain string `json:"subdomain"`
+		Public    *bool  `json:"public,omitempty"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	guestPort := req.GuestPort
+	if guestPort == 0 {
+		guestPort = req.Port
+	}
+	if guestPort == 0 && len(subParts) > 0 && subParts[0] != "" {
+		if p, err := strconv.Atoi(subParts[0]); err == nil {
+			guestPort = p
+		}
+	}
+	if guestPort <= 0 || guestPort > 65535 {
+		httpError(w, "guest_port must be between 1 and 65535", http.StatusBadRequest)
+		return
+	}
+
+	// Default to public=true when exposing via /expose unless explicitly set to false
+	isPublic := true
+	if req.Public != nil {
+		isPublic = *req.Public
+	}
+
+	// Delegate to handlePortForwards by synthesizing the canonical request body
+	forwardPayload, _ := json.Marshal(map[string]interface{}{
+		"host_port":  req.HostPort,
+		"vm_id":      v.ID,
+		"vm_name":    v.Name,
+		"guest_port": guestPort,
+		"protocol":   req.Protocol,
+		"subdomain":  req.Subdomain,
+		"public":     isPublic,
+	})
+	cloneReq := r.Clone(ctx)
+	cloneReq.Method = http.MethodPost
+	cloneReq.Body = io.NopCloser(bytes.NewReader(forwardPayload))
+	s.handlePortForwards(w, cloneReq)
 }

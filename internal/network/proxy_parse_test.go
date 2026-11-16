@@ -70,3 +70,36 @@ func TestParseRouteOwnerWildcardForms(t *testing.T) {
 		t.Fatalf("deep nesting should not match: %+v", m)
 	}
 }
+
+func TestParseRouteOwnerScopedPath(t *testing.T) {
+	p := NewIngressProxy(ProxyOptions{BaseDomains: []string{"boxes.example.com"}})
+
+	r := httptest.NewRequest("GET", "http://daemon.local/preview/@alice/pr-42/8080/assets/app.js", nil)
+	m := p.ParseRoute(r)
+	if !m.IsMatch {
+		t.Fatalf("owner-scoped preview path should match: %+v", m)
+	}
+	if m.Target != "pr-42" || m.Owner != "alice" || m.Port != 8080 {
+		t.Fatalf("unexpected owner-scoped route: %+v", m)
+	}
+	if m.SubPath != "/assets/app.js" {
+		t.Fatalf("subpath = %q, want /assets/app.js", m.SubPath)
+	}
+	if m.Prefix != "/preview/@alice/pr-42/8080" {
+		t.Fatalf("prefix = %q, want /preview/@alice/pr-42/8080", m.Prefix)
+	}
+
+	// The legacy unscoped form keeps working and carries no owner.
+	m = p.ParseRoute(httptest.NewRequest("GET", "http://daemon.local/preview/pr-42/8080/", nil))
+	if !m.IsMatch || m.Owner != "" || m.Target != "pr-42" || m.Port != 8080 {
+		t.Fatalf("unexpected unscoped route: %+v", m)
+	}
+	if m.Prefix != "/preview/pr-42/8080" {
+		t.Fatalf("unscoped prefix = %q", m.Prefix)
+	}
+
+	// An empty owner segment is rejected rather than treated as a sandbox name.
+	if m := p.ParseRoute(httptest.NewRequest("GET", "http://daemon.local/preview/@/pr-42/8080/", nil)); m.IsMatch {
+		t.Fatalf("empty owner segment should not match: %+v", m)
+	}
+}

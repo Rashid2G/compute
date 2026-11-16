@@ -248,6 +248,42 @@ func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, e
 	return &cfg, err
 }
 
+// ExposePort publishes a guest port on the daemon's ingress proxy. A host port
+// is not required (host_port is left at 0), so exposure does not consume host
+// ports and scales with the number of sandboxes rather than host sockets.
+func (c *DaemonClient) ExposePort(ctx context.Context, vmID string, guestPort int, public bool, subdomain string) (*db.PortForward, error) {
+	payload := map[string]interface{}{
+		"guest_port": guestPort,
+		"public":     public,
+	}
+	if subdomain != "" {
+		payload["subdomain"] = subdomain
+	}
+	var pf db.PortForward
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(vmID)+"/expose", payload, &pf)
+	return &pf, err
+}
+
+func (c *DaemonClient) ListPortForwards(ctx context.Context, vmID string) ([]*db.PortForward, error) {
+	path := "/api/v1/network/port-forwards"
+	if vmID != "" {
+		path += "?vm_id=" + url.QueryEscape(vmID)
+	}
+	var pfs []*db.PortForward
+	err := c.doRequest(ctx, http.MethodGet, path, nil, &pfs)
+	return pfs, err
+}
+
+func (c *DaemonClient) UnexposePort(ctx context.Context, vmID string, guestPort int) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(vmID)+"/unexpose", map[string]int{"guest_port": guestPort}, nil)
+}
+
+func (c *DaemonClient) SetPortForwardPublic(ctx context.Context, pfID string, public bool) (*db.PortForward, error) {
+	var pf db.PortForward
+	err := c.doRequest(ctx, http.MethodPatch, "/api/v1/network/port-forwards/"+url.PathEscape(pfID), map[string]bool{"public": public}, &pf)
+	return &pf, err
+}
+
 func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {
 	var cfg config.GlobalConfig
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/config", nil, &cfg)
@@ -432,6 +468,13 @@ func (c *DaemonClient) Host() string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+// BaseURL returns the daemon origin used for API calls, e.g.
+// "http://127.0.0.1:18080". It is also the origin that path-based ingress
+// preview URLs are served from.
+func (c *DaemonClient) BaseURL() string {
+	return strings.TrimSuffix(c.baseURL, "/")
 }
 
 func (c *DaemonClient) ListKeys(ctx context.Context) ([]*db.SSHKey, error) {

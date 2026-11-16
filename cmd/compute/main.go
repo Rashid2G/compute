@@ -70,6 +70,18 @@ func main() {
 		handleSandboxURL(ctx, client, os.Args[2:])
 		return
 
+	case "expose":
+		handleExposeCommand(ctx, client, os.Args[2:])
+		return
+
+	case "ports":
+		handlePortsCommand(ctx, client, os.Args[2:])
+		return
+
+	case "unexpose":
+		handleUnexposeCommand(ctx, client, os.Args[2:])
+		return
+
 	case "auth":
 		handleAuthCommand(ctx, client, os.Args[2:])
 		return
@@ -212,6 +224,9 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  process, ps        List, start, and kill processes inside sandboxes")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
+	fmt.Fprintln(w, "  expose             Publish a sandbox port on the daemon ingress URL (--private, --subdomain)")
+	fmt.Fprintln(w, "  ports              List guest ports exposed on a sandbox")
+	fmt.Fprintln(w, "  unexpose           Remove a sandbox port exposure")
 	fmt.Fprintln(w, "  doctor, check      Print daemon readiness checks with remediation for failures")
 	fmt.Fprintln(w, "  version, -v        Display version, build, and release information (--client, --short, --json)")
 	fmt.Fprintln(w, "  gui, web, ui       Launch the Web UI dashboard (--port, --addr, --daemon)")
@@ -590,6 +605,15 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 
 	case "url":
 		handleSandboxURL(ctx, client, subArgs)
+
+	case "expose":
+		handleExposeCommand(ctx, client, subArgs)
+
+	case "ports":
+		handlePortsCommand(ctx, client, subArgs)
+
+	case "unexpose":
+		handleUnexposeCommand(ctx, client, subArgs)
 
 	case "protect":
 		if len(subArgs) < 1 {

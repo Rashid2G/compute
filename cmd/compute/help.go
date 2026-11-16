@@ -19,6 +19,9 @@ Usage:
   compute sandbox network-isolation <name|id> <account|isolated>
   compute sandbox info <name|id|hostname>
   compute sandbox url [flags] <name|id|hostname>
+  compute sandbox expose [flags] <name|id> <guest-port>
+  compute sandbox ports <name|id>
+  compute sandbox unexpose <name|id> <guest-port>
   compute sandbox file <read|write|list|mkdir|remove> <sandbox> [args...]
   compute sandbox cp <src> <dst>
   compute sandbox process <list|start|kill> <sandbox> [args...]
@@ -43,6 +46,9 @@ Commands:
   process, ps              Inspect and manage background processes (list, start, kill).
   info, inspect, show      Display sandbox details, hostname, SSH command and URLs.
   url                      Print the best HTTP URL, or the SSH name when no URL resolves.
+  expose                   Publish a sandbox port on the daemon ingress URL.
+  ports                    List guest ports exposed on a sandbox.
+  unexpose                 Remove a sandbox port exposure.
   exec                     Execute a command inside a sandbox, streaming output live.
   ssh                      Open an SSH session to a sandbox.
 
@@ -137,6 +143,37 @@ Flags:
 The HTTP URL is only printed when the sandbox DNS zone is expected to resolve.
 Names under Tailscale's *.ts.net zone are answered by MagicDNS, so the command
 prints the tailnet DNS name or sandbox IP instead and explains why.`,
+
+	"expose": `Publish a sandbox port on the daemon's ingress URL.
+
+Usage:
+  compute expose [flags] <name|id> <guest-port>
+
+Flags:
+  --public            Publish without authentication (default)
+  --private           Require tenant authentication
+  --subdomain <name>  Serve under <name>.compute.dev when DNS is configured
+  --json              Print the port-forward record as JSON
+
+Exposure is ingress-only: no host port is bound. Requests to
+  <daemon-origin>/preview/@<username>/<sandbox>/<port>/
+are reverse-proxied to the guest service, including WebSockets and SSE.
+
+Public URLs are reachable by anyone who knows them. Use --private to keep the
+URL limited to authenticated members of the owning tenant.`,
+
+	"ports": `List guest ports exposed on a sandbox.
+
+Usage:
+  compute ports <name|id>
+
+Flags:
+  --json              Print the port-forward records as JSON`,
+
+	"unexpose": `Remove a sandbox port exposure.
+
+Usage:
+  compute unexpose <name|id> <guest-port>`,
 
 	"job": `Run and monitor distributed jobs.
 

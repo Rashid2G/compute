@@ -544,8 +544,10 @@ func (s *Server) mountAttachedVolumes(ctx context.Context, v *db.VM) {
 
 // applyPortForwardsForVM installs every host forwarding rule that belongs to v.
 // It is safe to call repeatedly; AddPortForward is idempotent.
+// Ingress-only port exposures (HostPort <= 0) do not bind a host DNAT port and
+// simply transition to "active" once the sandbox is running.
 func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
-	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || s.vmMgr.NetManager() == nil || v == nil || v.IPAddress == "" {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil || v.IPAddress == "" {
 		return
 	}
 	st := s.vmMgr.GetStore()
@@ -558,9 +560,11 @@ func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
-			log.Printf("[computed] port-forward %s (%d->%d): %v", pf.ID, pf.HostPort, pf.GuestPort, err)
-			continue
+		if pf.HostPort > 0 && s.vmMgr.NetManager() != nil {
+			if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
+				log.Printf("[computed] port-forward %s (%d->%d): %v", pf.ID, pf.HostPort, pf.GuestPort, err)
+				continue
+			}
 		}
 		if pf.Status != "active" {
 			pf.Status = "active"
@@ -585,7 +589,7 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if v.IPAddress != "" && s.vmMgr.NetManager() != nil {
+		if pf.HostPort > 0 && v.IPAddress != "" && s.vmMgr.NetManager() != nil {
 			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
 		}
 		if deleteRecords {
@@ -853,6 +857,17 @@ func (s *Server) ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel
 func (s *Server) IsPortPublic(ctx context.Context, idOrName string, port int) bool {
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
 		if s.vmMgr.GetStore().IsPortForwardPublic(ctx, idOrName, port) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPortPublicForOwner checks whether a given guest port on a VM owned by ownerID
+// is configured for public exposure.
+func (s *Server) IsPortPublicForOwner(ctx context.Context, ownerID, idOrName string, port int) bool {
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		if s.vmMgr.GetStore().IsPortForwardPublicForOwner(ctx, ownerID, idOrName, port) {
 			return true
 		}
 	}
@@ -1438,6 +1453,10 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "processes" || action == "process" {
 		s.handleVMProcesses(w, r, vmID, parts[2:])
+		return
+	}
+	if action == "ports" || action == "expose" || action == "unexpose" {
+		s.handleVMPorts(w, r, v, action, parts[2:])
 		return
 	}
 	if r.Method != http.MethodPost {

@@ -305,6 +305,75 @@ func TestIngressProxy_PublicVsPrivateAuth(t *testing.T) {
 	}
 }
 
+func TestIngressProxy_OwnerScopedPathIsolation(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	guestListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guestListener.Close()
+	guestPort := guestListener.Addr().(*net.TCPAddr).Port
+
+	guestMux := http.NewServeMux()
+	guestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("tenant app"))
+	})
+	guestServer := &http.Server{Handler: guestMux}
+	go guestServer.Serve(guestListener)
+	defer guestServer.Close()
+
+	mtSignup(t, env.ts, "carol@test.local", "carol", "password123!")
+	_, carolID := mtLogin(t, env.ts, "carol", "password123!")
+	mtSignup(t, env.ts, "dave@test.local", "dave", "password123!")
+	_, daveID := mtLogin(t, env.ts, "dave", "password123!")
+
+	// Both tenants use the same sandbox name. Only Carol's is public.
+	carolVM := &db.VM{ID: "vm-carol-web", Name: "web", OwnerID: carolID, Status: db.StatusRunning, IPAddress: "127.0.0.1"}
+	daveVM := &db.VM{ID: "vm-dave-web", Name: "web", OwnerID: daveID, Status: db.StatusRunning, IPAddress: "127.0.0.1"}
+	for _, v := range []*db.VM{carolVM, daveVM} {
+		if err := env.vmStore.SaveVM(context.Background(), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := env.vmStore.SavePortForward(context.Background(), &db.PortForward{
+		ID:        "pf_carol_public",
+		OwnerID:   carolID,
+		VMID:      carolVM.ID,
+		VMName:    carolVM.Name,
+		GuestPort: guestPort,
+		Protocol:  "tcp",
+		Public:    true,
+		Status:    "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	carolURL := fmt.Sprintf("%s/preview/@carol/web/%d/", env.ts.URL, guestPort)
+	daveURL := fmt.Sprintf("%s/preview/@dave/web/%d/", env.ts.URL, guestPort)
+
+	// Public exposure applies only to Carol's sandbox.
+	resCarols, err := http.Get(carolURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resCarols.Body.Close()
+	if resCarols.StatusCode != http.StatusOK {
+		t.Fatalf("carol's public owner-scoped preview: got %d, want 200", resCarols.StatusCode)
+	}
+
+	// Dave's same-named sandbox stays private despite Carol's public rule.
+	resDaves, err := http.Get(daveURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resDaves.Body.Close()
+	if resDaves.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("dave's private owner-scoped preview: got %d, want 401", resDaves.StatusCode)
+	}
+}
+
 func TestIngressProxy_WebSocketUpgrade(t *testing.T) {
 	env := newMultiTenantServer(t)
 
