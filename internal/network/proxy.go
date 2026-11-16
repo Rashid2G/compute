@@ -555,21 +555,27 @@ func rewriteHTMLForPrefix(body []byte, prefix string) []byte {
 }
 
 // previewRuntimePatch returns the inline script that patches browser APIs to
-// honor the preview prefix for runtime-issued requests (SPA code typically
-// fetches "/api/v1/..." with absolute paths that bypass <base>).
+// honor the preview prefix for runtime-issued requests. SPA code typically
+// fetches "/api/v1/..." with absolute paths that bypass <base>, and many apps
+// derive their API base from window.location.origin, which yields fully
+// qualified same-origin URLs. Both forms are redirected under the prefix.
 func previewRuntimePatch(prefix string) string {
 	return `<script>(function(){
 var P="` + prefix + `";
 var B=P.slice(0,-1);
-function A(u){return typeof u==="string"&&u.charAt(0)==="/"&&u.charAt(1)!=="/"&&u!==B&&u.indexOf(P)!==0;}
+var O=location.origin;
+var WO=(location.protocol==="https:"?"wss://":"ws://")+location.host;
+function D(u){return typeof u==="string"&&(u.indexOf(O+"/")===0||u.indexOf(WO+"/")===0);}
+function A(u){if(typeof u!=="string")return false;if(u.indexOf(O+P.slice(1))===0||u.indexOf(WO+P.slice(1))===0)return false;if(D(u))return true;return u.charAt(0)==="/"&&u.charAt(1)!=="/"&&u!==B&&u.indexOf(P)!==0;}
+function R(u){if(u.indexOf(O+"/")===0)return O+P+u.slice(O.length+1);if(u.indexOf(WO+"/")===0)return WO+P+u.slice(WO.length+1);return P+u.slice(1);}
 var F=window.fetch;
-if(F)window.fetch=function(){if(A(arguments[0]))arguments[0]=P+arguments[0].slice(1);return F.apply(this,arguments);};
-var O=XMLHttpRequest&&XMLHttpRequest.prototype.open;
-if(O)XMLHttpRequest.prototype.open=function(){if(A(arguments[1]))arguments[1]=P+arguments[1].slice(1);return O.apply(this,arguments);};
+if(F)window.fetch=function(){if(A(arguments[0]))arguments[0]=R(arguments[0]);return F.apply(this,arguments);};
+var X=XMLHttpRequest&&XMLHttpRequest.prototype.open;
+if(X)XMLHttpRequest.prototype.open=function(){if(A(arguments[1]))arguments[1]=R(arguments[1]);return X.apply(this,arguments);};
 var E=window.EventSource;
-if(E){window.EventSource=function(u){if(A(u))u=P+u.slice(1);return new E(u);};window.EventSource.prototype=E.prototype;}
+if(E){window.EventSource=function(u){if(A(u))u=R(u);return new E(u);};window.EventSource.prototype=E.prototype;}
 var W=window.WebSocket;
-if(W){window.WebSocket=function(u,p){if(A(u))u=(location.protocol==="https:"?"wss://":"ws://")+location.host+P+u.slice(1);return p!==undefined?new W(u,p):new W(u);};window.WebSocket.prototype=W.prototype;window.WebSocket.CONNECTING=W.CONNECTING;window.WebSocket.OPEN=W.OPEN;window.WebSocket.CLOSING=W.CLOSING;window.WebSocket.CLOSED=W.CLOSED;}
+if(W){window.WebSocket=function(u,p){if(A(u))u=R(u);return p!==undefined?new W(u,p):new W(u);};window.WebSocket.prototype=W.prototype;window.WebSocket.CONNECTING=W.CONNECTING;window.WebSocket.OPEN=W.OPEN;window.WebSocket.CLOSING=W.CLOSING;window.WebSocket.CLOSED=W.CLOSED;}
 })();</script>`
 }
 

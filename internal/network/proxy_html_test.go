@@ -255,6 +255,22 @@ func TestAcceptsRewritableHTML(t *testing.T) {
 	}
 }
 
+func TestPreviewRuntimePatchRewritesSameOriginAbsoluteURLs(t *testing.T) {
+	patch := previewRuntimePatch("/preview/vm/8080/")
+	// Apps that derive their API base from window.location.origin issue fully
+	// qualified same-origin URLs; those must be redirected under the prefix too.
+	for _, want := range []string{
+		`var O=location.origin`,
+		`var WO=(location.protocol==="https:"?"wss://":"ws://")+location.host`,
+		`O+P+u.slice(O.length+1)`,
+		`WO+P+u.slice(WO.length+1)`,
+	} {
+		if !strings.Contains(patch, want) {
+			t.Errorf("runtime patch missing %q:\n%s", want, patch)
+		}
+	}
+}
+
 func TestDecodeHTMLBodyRejectsUnsupportedEncoding(t *testing.T) {
 	if _, err := decodeHTMLBody([]byte("x"), "br"); err == nil {
 		t.Fatal("expected error for unsupported content encoding")
