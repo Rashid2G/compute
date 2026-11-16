@@ -112,6 +112,13 @@ export default function App() {
       ),
     [cluster.vms],
   );
+  const liveInspectTarget = useMemo(
+    () =>
+      inspectTarget
+        ? cluster.vms.find((v) => v.id === inspectTarget.id) ?? inspectTarget
+        : null,
+    [cluster.vms, inspectTarget],
+  );
   const currentPage = PAGES.find((item) => item.id === page) ?? PAGES[0];
 
   useEffect(() => {
@@ -391,16 +398,31 @@ export default function App() {
   async function bulkDeleteVMs(ids: string[]) {
     const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
     try {
-      await Promise.all(
-        ids.map(async (id) => {
-          await api.deleteVM(id);
-          if (inspectTarget?.id === id) setInspectTarget(null);
-        }),
-      );
-      toast.success(`Deleted ${ids.length} sandbox(es)`, {
-        id: toastID,
-        description: 'Processes, network leases, and overlay disks removed.',
-      });
+      const res = await api.bulkDeleteVMs(ids);
+      if (inspectTarget && res.succeeded.includes(inspectTarget.id)) {
+        setInspectTarget(null);
+      }
+      if (res.failed.length === 0) {
+        toast.success(`Deleted ${res.succeeded.length} sandbox(es)`, {
+          id: toastID,
+          description: 'Processes, network leases, and overlay disks removed.',
+        });
+      } else if (res.succeeded.length > 0) {
+        toast.warning(
+          `Deleted ${res.succeeded.length} of ${res.requested} sandbox(es)`,
+          {
+            id: toastID,
+            description: res.failed
+              .map((f) => `${f.id}: ${f.error}`)
+              .join('; '),
+          },
+        );
+      } else {
+        toast.error('Failed to delete sandboxes', {
+          id: toastID,
+          description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; '),
+        });
+      }
       await cluster.refresh(true);
     } catch (error) {
       toast.error('Failed to delete sandboxes', {
@@ -420,8 +442,13 @@ export default function App() {
         return (
           <InstancesPage
             vms={visibleVMs}
+            workers={cluster.workers}
+            pools={cluster.pools}
+            volumes={cluster.volumes}
+            portForwards={cluster.portForwards}
             events={cluster.events}
             isLoading={cluster.isLoading}
+            isAdmin={isAdmin}
             onNew={openNew}
             onRun={startVM}
             onStop={stopVM}
@@ -438,6 +465,8 @@ export default function App() {
         return (
           <ImagesTemplatesPage
             vms={visibleVMs}
+            templates={cluster.templates}
+            images={cluster.images}
             mode="snapshots"
             onLaunchVM={openNew}
             onNavigate={navigate}
@@ -449,6 +478,7 @@ export default function App() {
           <StoragePage
             volumes={cluster.volumes}
             vms={visibleVMs}
+            pools={cluster.pools}
             config={cluster.config}
             onRefresh={() => void cluster.refresh(true)}
           />
@@ -465,10 +495,15 @@ export default function App() {
         return (
           <WorkersPage
             workers={cluster.workers}
+            pools={cluster.pools}
+            workerTokens={cluster.workerTokens}
+            schedulingPolicy={cluster.schedulingPolicy}
             stats={cluster.stats}
             vms={visibleVMs}
             volumes={cluster.volumes}
             config={cluster.config}
+            isAdmin={isAdmin}
+            wsConnected={cluster.wsConnected}
             onRefresh={() => void cluster.refresh(true)}
           />
         );
@@ -480,6 +515,8 @@ export default function App() {
             workers={cluster.workers}
             volumes={cluster.volumes}
             config={cluster.config}
+            resources={cluster.resources}
+            wsConnected={cluster.wsConnected}
             currentUser={authUser}
             authEnabled={authEnabled}
           />
@@ -500,6 +537,10 @@ export default function App() {
             volumes={cluster.volumes}
             allocations={cluster.allocations}
             networkConfig={cluster.networkConfig}
+            portForwards={cluster.portForwards}
+            workerTokens={cluster.workerTokens}
+            templates={cluster.templates}
+            images={cluster.images}
             events={cluster.events}
             currentUser={authUser}
             onRefresh={() => void cluster.refresh(true)}
@@ -666,6 +707,10 @@ export default function App() {
           open={createOpen}
           onOpenChange={setCreateOpen}
           config={cluster.config}
+          workers={cluster.workers}
+          pools={cluster.pools}
+          templates={cluster.templates}
+          stats={cluster.stats}
           onCreate={createVM}
         />
 
@@ -675,7 +720,6 @@ export default function App() {
           onNavigate={navigate}
           onNewSandbox={openNew}
           onOpenKeys={() => setKeysOpen(true)}
-          onRefresh={() => void cluster.refresh()}
           vms={visibleVMs}
           isAdmin={isAdmin}
         />
@@ -683,8 +727,11 @@ export default function App() {
         <SSHKeysDialog open={keysOpen} onOpenChange={setKeysOpen} />
 
         <InspectVMDialog
-          vm={inspectTarget}
-          open={inspectTarget !== null}
+          vm={liveInspectTarget}
+          workers={cluster.workers}
+          pools={cluster.pools}
+          isAdmin={isAdmin}
+          open={liveInspectTarget !== null}
           onOpenChange={(open) => !open && setInspectTarget(null)}
           onUpdated={() => void cluster.refresh(true)}
         />
