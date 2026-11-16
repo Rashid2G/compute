@@ -429,17 +429,31 @@ export const api = {
   },
 
   createPortForward(payload: {
-    host_port: number;
+    host_port?: number;
     vm_id: string;
     vm_name?: string;
     guest_port: number;
     protocol?: string;
     subdomain?: string;
+    public?: boolean;
   }): Promise<PortForwardRecord> {
     return request<PortForwardRecord>('/network/port-forwards', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  setPortForwardPublic(
+    id: string,
+    isPublic: boolean,
+  ): Promise<PortForwardRecord> {
+    return request<PortForwardRecord>(
+      `/network/port-forwards/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ public: isPublic }),
+      },
+    );
   },
 
   deletePortForward(id: string): Promise<{ status: string }> {

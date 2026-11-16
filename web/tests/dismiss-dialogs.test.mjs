@@ -926,7 +926,7 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await waitFor(cdp, `document.body.innerText.includes('DNAT Port Forwarding')`, 3000, 'network page');
       await cdp.evalJS(`window.__clickButtonByText('DNAT Port Forwarding')`);
       await waitFor(cdp, `window.__clickButtonByText('Add Port Rule')`, 3000, 'add port rule button');
-      await waitFor(cdp, `document.body.innerText.includes('Add DNAT Port Forward Rule')`, 3000, 'pf drawer open');
+      await waitFor(cdp, `document.body.innerText.includes('Add Port Exposure')`, 3000, 'pf drawer open');
       await cdp.evalJS(`
         (() => {
           const sel = document.querySelector('select[aria-label="Sandbox to forward"]');
@@ -938,9 +938,9 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await sleep(50);
       await cdp.evalJS(`document.querySelector('select[aria-label="Sandbox to forward"]').closest('form').requestSubmit()`);
       await sleep(70);
-      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Add DNAT Port Forward Rule')`), true);
-      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding DNAT port forward'));
-      await waitFor(cdp, `window.__getToastsText().includes('Added DNAT port forward')`, 3000, 'pf toast success');
+      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Add Port Exposure')`), true);
+      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding exposure'));
+      await waitFor(cdp, `window.__getToastsText().includes('Added exposure')`, 3000, 'pf toast success');
     });
 
     await t.test('Workers Create Pool form closes immediately while loading toast shows', async () => {

@@ -716,6 +716,7 @@ export interface PortForwardRecord {
   protocol: 'TCP' | 'HTTP/HTTPS' | string;
   subdomain: string;
   public_url: string;
+  public: boolean;
   status: 'active' | 'inactive' | string;
   created_at: string;
 }
