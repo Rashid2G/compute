@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -460,6 +461,9 @@ func (r *servePortRegistry) ensure(pf *db.PortForward) (int, error) {
 			r.server.ingressProxy.ServeExposure(w, rq, id)
 		})
 		srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+		// WebSocket upgrades require HTTP/1.1 hijacking; disable HTTP/2 on
+		// serve listeners so browsers do not negotiate extended CONNECT.
+		srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
 		entry := &servePortEntry{port: port, srv: srv, ln: ln}
 		r.entries[id] = entry
 		cert, key := r.server.serveTLSPaths()

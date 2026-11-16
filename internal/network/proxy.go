@@ -582,10 +582,11 @@ func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, ta
 	}
 	defer clientConn.Close()
 
-	// Rewrite request URL path and target Host for upstream
+	// Forward the public Host (as with HTTP requests) and the upstream path.
 	outReq := r.Clone(r.Context())
 	outReq.URL.Path = subPath
-	outReq.Host = targetAddr
+	outReq.Host = r.Host
+	outReq.Header.Set("X-Forwarded-Host", r.Host)
 
 	// Forward client handshake to backend
 	if err := outReq.Write(backendConn); err != nil {
