@@ -9,7 +9,7 @@ import {
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { Loader2, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
+import { Loader2, RotateCcw, Trash2, Wifi, WifiOff } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { getStoredToken } from '@/lib/api';
@@ -268,7 +268,7 @@ export const SSHTerminal = forwardRef<SSHTerminalHandle, SSHTerminalProps>(
                 title="Reconnect SSH terminal"
                 className="h-6 w-6 border-zinc-700 bg-zinc-900/80 text-zinc-300 hover:bg-zinc-800"
               >
-                <RefreshCw className="h-3 w-3" />
+                <RotateCcw className="h-3 w-3" />
               </Button>
             )}
 

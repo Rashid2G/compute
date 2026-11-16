@@ -8,7 +8,6 @@ import {
   Play,
   Plus,
   Radio,
-  RefreshCw,
   Search,
   Send,
   Trash2,
@@ -237,14 +236,6 @@ export function EventsPage({
         )}
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void loadAll()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
           <button
             type="button"
             onClick={() => {

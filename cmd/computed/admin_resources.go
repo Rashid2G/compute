@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -699,16 +700,7 @@ func (s *Server) collectHostMetrics() (adminCPUMetrics, adminMemoryMetrics, admi
 	return cpu, mem, diskSpace, diskIO, netMetrics, sys
 }
 
-func (s *Server) handleAdminResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !s.requireAdminAccess(w, r) {
-		return
-	}
-	ctx := r.Context()
-
+func (s *Server) computeAdminResources(ctx context.Context) adminResourcesResponse {
 	cpu, mem, diskSpace, diskIO, netMetrics, sys := s.collectHostMetrics()
 
 	var sandboxAlloc adminSandboxAllocations
@@ -870,7 +862,7 @@ func (s *Server) handleAdminResources(w http.ResponseWriter, r *http.Request) {
 		warnings = append(warnings, fmt.Sprintf("Allocated disk nearing configured limit: %d/%d MB", totalDiskMB, limits.MaxTotalDiskMB))
 	}
 
-	resp := adminResourcesResponse{
+	return adminResourcesResponse{
 		Timestamp: time.Now().UTC(),
 		CPU:       cpu,
 		Memory:    mem,
@@ -898,6 +890,38 @@ func (s *Server) handleAdminResources(w http.ResponseWriter, r *http.Request) {
 		},
 		CapacityWarnings: warnings,
 	}
+}
+
+func (s *Server) getCachedAdminResources(ctx context.Context) *adminResourcesResponse {
+	const ttl = 1500 * time.Millisecond
+	s.adminResourcesMu.Lock()
+	defer s.adminResourcesMu.Unlock()
+
+	if s.adminResourcesCache != nil && time.Since(s.adminResourcesAt) < ttl {
+		copyResp := *s.adminResourcesCache
+		return &copyResp
+	}
+
+	resp := s.computeAdminResources(ctx)
+	s.adminResourcesCache = &resp
+	s.adminResourcesAt = time.Now()
+	copyResp := resp
+	return &copyResp
+}
+
+func (s *Server) handleAdminResources(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireAdminAccess(w, r) {
+		return
+	}
+	resp := s.computeAdminResources(r.Context())
+	s.adminResourcesMu.Lock()
+	s.adminResourcesCache = &resp
+	s.adminResourcesAt = time.Now()
+	s.adminResourcesMu.Unlock()
 
 	json.NewEncoder(w).Encode(resp)
 }

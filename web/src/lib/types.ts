@@ -44,6 +44,11 @@ export interface VM {
   pid?: number;
   socket_path?: string;
   protected?: boolean;
+  pool_id?: string;
+  worker_id?: string;
+  last_activity_at?: string | null;
+  auto_hibernated?: boolean;
+  hibernate_reason?: string;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +98,8 @@ export interface CreateVMRequest {
   clone_from?: string;
   image?: string;
   template?: string;
+  pool_id?: string;
+  worker_id?: string;
   ip_address?: string;
   mac_address?: string;
   public_ip?: boolean;
@@ -315,6 +322,18 @@ export interface WorkerNodeRecord {
   total_vcpus: number;
   total_mem_mb: number;
   total_disk_mb: number;
+  allocated_vcpus?: number;
+  allocated_mem_mb?: number;
+  allocated_disk_mb?: number;
+  physical_vcpus?: number;
+  physical_mem_mb?: number;
+  physical_disk_mb?: number;
+  used_vcpus?: number;
+  used_mem_mb?: number;
+  used_disk_mb?: number;
+  running_vms?: number;
+  available_mem_mb?: number;
+  available_disk_mb?: number;
   labels_json: string;
   capabilities_json: string;
   agent_version: string;
@@ -746,4 +765,100 @@ export interface AuthMeResponse {
   role?: string;
   auth_type?: string;
   scopes?: string[];
+}
+
+export interface ImageListItem {
+  id: string;
+  name: string;
+  description?: string;
+  base_image?: string;
+  packages?: string[];
+  size_mb: number;
+  status: string;
+  kind: 'base' | 'custom' | string;
+  created_at?: string;
+}
+
+export type SchedulingStrategy = 'least_loaded' | 'round_robin' | 'bin_pack' | 'spread';
+
+export interface ClusterSchedulingPolicy {
+  strategy: SchedulingStrategy | string;
+  cpu_weight: number;
+  memory_weight: number;
+  disk_weight: number;
+  cpu_soft_overcommit_ratio: number;
+  cpu_hard_overcommit_ratio: number;
+  cpu_share_weight_base: number;
+  memory_hard_guarantee: boolean;
+  idle_ram_snapshot_enabled: boolean;
+  idle_threshold_seconds: number;
+  auto_reclaim_on_pressure: boolean;
+  host_reserved_vcpus: number;
+  host_reserved_memory_mb: number;
+  host_reserved_disk_mb: number;
+  disk_hard_enforcement: boolean;
+}
+
+export interface UpdateWorkerRequest {
+  pool_id?: string;
+  allocated_vcpus?: number;
+  allocated_mem_mb?: number;
+  allocated_disk_mb?: number;
+  labels?: Record<string, string>;
+  status?: 'ready' | 'cordoned' | 'draining' | 'offline' | string;
+}
+
+export interface MigrateVMRequest {
+  target_worker_id?: string;
+  target_pool_id?: string;
+  force?: boolean;
+}
+
+export interface MigratePoolRequest {
+  target_pool_id?: string;
+  target_worker_id?: string;
+  migrate_workers?: boolean;
+  migrate_sandboxes?: boolean;
+  force?: boolean;
+}
+
+export interface PoolMigrationResponse {
+  source_pool_id: string;
+  target_pool_id: string;
+  workers_moved: number;
+  workers_failed: number;
+  sandboxes_migrated: number;
+  sandboxes_failed: number;
+  moved_worker_ids: string[];
+  migrated_vm_ids: string[];
+  errors?: string[];
+}
+
+export interface BulkVMsRequest {
+  ids: string[];
+  action?: 'start' | 'stop' | 'save-state' | 'snapshot' | 'resume' | 'delete' | string;
+}
+
+export interface BulkVMItemError {
+  id: string;
+  error: string;
+}
+
+export interface BulkVMsResponse {
+  action?: string;
+  requested: number;
+  succeeded: string[];
+  failed: BulkVMItemError[];
+}
+
+export interface ResourceLimitErrorDetails {
+  code?: string;
+  resource?: 'cpu' | 'memory' | 'disk' | string;
+  limit_type?: 'hard' | 'soft' | string;
+  node_id?: string;
+  requested?: number;
+  available?: number;
+  limit?: number;
+  error?: string;
+  suggestion?: string;
 }

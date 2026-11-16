@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Rashid2G/compute/internal/db"
+	"github.com/Rashid2G/compute/internal/vm"
 	"github.com/Rashid2G/compute/pkg/api"
 	"github.com/coder/websocket"
 )
@@ -20,15 +22,32 @@ import (
 type Client struct {
 	Config     Config
 	Supervisor WorkloadSupervisor
+	VMManager  *vm.Manager
 	mu         sync.Mutex
 	conn       *websocket.Conn
 	workerID   string
 	seq        int64
+
+	tunMu   sync.Mutex
+	tunnels map[string]*clientTunnel
+}
+
+func (c *Client) getVMManager() *vm.Manager {
+	if c.VMManager != nil {
+		return c.VMManager
+	}
+	if sup, ok := c.Supervisor.(*MicroVMSupervisor); ok {
+		return sup.VMManager()
+	}
+	return nil
 }
 
 func (c *Client) send(ctx context.Context, v interface{}) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.conn == nil {
+		return fmt.Errorf("worker connection not active")
+	}
 	c.seq++
 	b, e := json.Marshal(v)
 	if e != nil {
@@ -36,9 +55,70 @@ func (c *Client) send(ctx context.Context, v interface{}) error {
 	}
 	return c.conn.Write(ctx, websocket.MessageText, b)
 }
+
+func (c *Client) buildCapabilities() map[string]interface{} {
+	caps := DetectCapabilities()
+	if c.Config.MaxVCPUs > 0 {
+		caps["max_vcpus"] = c.Config.MaxVCPUs
+	}
+	if c.Config.MaxMemoryMB > 0 {
+		caps["max_memory_mb"] = c.Config.MaxMemoryMB
+	}
+	if c.Config.MaxDiskMB > 0 {
+		caps["max_disk_mb"] = c.Config.MaxDiskMB
+	}
+	return caps
+}
+
+func (c *Client) buildMetrics(ctx context.Context) map[string]interface{} {
+	caps := DetectCapabilities()
+	metrics := map[string]interface{}{
+		"used_vcpus":   0,
+		"used_mem_mb":  0,
+		"used_disk_mb": 0,
+		"running_vms":  0,
+	}
+	if availMem, ok := caps["memory_available_mb"]; ok {
+		metrics["memory_available_mb"] = availMem
+	}
+	if availDisk, ok := caps["disk_available_mb"]; ok {
+		metrics["disk_available_mb"] = availDisk
+	}
+	mgr := c.getVMManager()
+	if mgr == nil {
+		return metrics
+	}
+	vms, err := mgr.ListVMs(ctx)
+	if err != nil {
+		return metrics
+	}
+	var usedVCPUs, usedMemMB, usedDiskMB, runningVMs int
+	for _, v := range vms {
+		if v == nil {
+			continue
+		}
+		usedDiskMB += v.DiskMB
+		if v.Status == db.StatusRunning {
+			runningVMs++
+			usedVCPUs += v.VCPUs
+			usedMemMB += v.MemoryMB
+		}
+	}
+	metrics["used_vcpus"] = usedVCPUs
+	metrics["used_mem_mb"] = usedMemMB
+	metrics["used_disk_mb"] = usedDiskMB
+	metrics["running_vms"] = runningVMs
+	return metrics
+}
+
 func (c *Client) Run(ctx context.Context) error {
 	backoff := time.Second
+	attempt := 0
 	for {
+		if attempt > 0 {
+			log.Printf("[worker] attempting reconnect to %s", c.Config.ControlPlaneURL)
+		}
+		attempt++
 		err := c.runOnce(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -86,19 +166,31 @@ func (c *Client) runOnce(ctx context.Context) error {
 		}
 		dialOpts = &websocket.DialOptions{HTTPHeader: headers}
 	}
+	log.Printf("[worker] connecting to control plane %s (name=%s pool=%s)", u.String(), c.Config.Name, c.Config.PoolID)
 	conn, _, e := websocket.Dial(ctx, u.String(), dialOpts)
 	if e != nil {
 		return e
 	}
+	conn.SetReadLimit(16 << 20)
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
-	defer conn.Close(websocket.StatusNormalClosure, "")
+	defer func() {
+		c.closeAllTunnels()
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}()
 	workerMsgID := c.Config.Name
 	if workerMsgID == "" {
 		workerMsgID = "hello"
 	}
-	hello := api.WorkerHello{WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.hello", ID: workerMsgID}, Token: c.Config.Token, Name: c.Config.Name, Architecture: runtimeArch(), Capabilities: DetectCapabilities()}
+	hello := api.WorkerHello{
+		WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.hello", ID: workerMsgID},
+		Token:         c.Config.Token,
+		Name:          c.Config.Name,
+		PoolID:        c.Config.PoolID,
+		Architecture:  runtimeArch(),
+		Capabilities:  c.buildCapabilities(),
+	}
 	if e = c.send(ctx, hello); e != nil {
 		return e
 	}
@@ -114,6 +206,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		return fmt.Errorf("worker handshake rejected")
 	}
 	c.workerID = ack.WorkerID
+	log.Printf("[worker] enrolled id=%s pool=%s", ack.WorkerID, ack.PoolID)
 
 	connCtx, cancelConn := context.WithCancel(ctx)
 	defer cancelConn()
@@ -136,13 +229,33 @@ func (c *Client) runOnce(ctx context.Context) error {
 		switch head.Type {
 		case "worker.assignment":
 			var a api.WorkerAssignment
-			json.Unmarshal(b, &a)
+			_ = json.Unmarshal(b, &a)
 			c.assignment(ctx, a)
 		case "worker.cancel":
 			var x api.WorkerCancel
-			json.Unmarshal(b, &x)
+			_ = json.Unmarshal(b, &x)
 			if cancel := activeCancel(x.AttemptID); cancel != nil {
 				cancel()
+			}
+		case "worker.rpc.req":
+			var req api.WorkerRPCRequest
+			if err := json.Unmarshal(b, &req); err == nil {
+				go c.handleRPC(connCtx, req)
+			}
+		case "worker.tunnel.open":
+			var open api.WorkerTunnelOpen
+			if err := json.Unmarshal(b, &open); err == nil {
+				go c.handleTunnelOpen(connCtx, open)
+			}
+		case "worker.tunnel.data":
+			var frame api.WorkerTunnelData
+			if err := json.Unmarshal(b, &frame); err == nil {
+				c.handleTunnelData(frame)
+			}
+		case "worker.tunnel.close":
+			var frame api.WorkerTunnelClose
+			if err := json.Unmarshal(b, &frame); err == nil {
+				c.handleTunnelClose(frame)
 			}
 		}
 	}
@@ -152,12 +265,21 @@ func runtimeArch() string { return runtime.GOARCH }
 func (c *Client) heartbeat(ctx context.Context) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
+	first := true
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = c.send(ctx, api.WorkerHeartbeat{WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.heartbeat", WorkerID: c.workerID}, Status: "ready", Capabilities: DetectCapabilities()})
+			if err := c.send(ctx, api.WorkerHeartbeat{
+				WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.heartbeat", WorkerID: c.workerID},
+				Status:        "ready",
+				Capabilities:  c.buildCapabilities(),
+				Metrics:       c.buildMetrics(ctx),
+			}); err == nil && first {
+				log.Printf("[worker] first heartbeat sent worker_id=%s", c.workerID)
+				first = false
+			}
 		}
 	}
 }

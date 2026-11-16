@@ -3,7 +3,6 @@ import {
   Database,
   KeyRound,
   Play,
-  RefreshCw,
   Search,
   Server,
   X,
@@ -20,7 +19,6 @@ interface CommandPaletteProps {
   onNavigate: (page: PageId) => void;
   onNewSandbox: () => void;
   onOpenKeys: () => void;
-  onRefresh: () => void;
   vms: VM[];
   onSelectVM?: (vm: VM) => void;
   isAdmin?: boolean;
@@ -32,7 +30,6 @@ export function CommandPalette({
   onNavigate,
   onNewSandbox,
   onOpenKeys,
-  onRefresh,
   vms,
   onSelectVM,
   isAdmin = true,
@@ -95,17 +92,6 @@ export function CommandPalette({
           onOpenKeys();
         },
       },
-      {
-        id: 'act-refresh',
-        group: 'Quick Actions',
-        label: 'Reconcile Cluster State & Refresh Telemetry',
-        shortcut: 'R',
-        icon: RefreshCw,
-        run: () => {
-          onOpenChange(false);
-          onRefresh();
-        },
-      },
       ...PAGES.filter((p) => !p.adminOnly || isAdmin).map((p) => ({
         id: `nav-${p.id}`,
         group: 'Navigation',
@@ -130,7 +116,7 @@ export function CommandPalette({
         },
       })),
     ],
-    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onRefresh, onSelectVM, vms],
+    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onSelectVM, vms],
   );
 
   const filtered = useMemo(() => {

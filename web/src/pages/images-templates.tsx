@@ -12,7 +12,6 @@ import {
   Pencil,
   Play,
   Plus,
-  RefreshCw,
   ShieldCheck,
   Star,
   Trash2,
@@ -26,6 +25,7 @@ import { formatMemory, formatRelativeTime } from '@/lib/format';
 import type { PageId } from '@/lib/navigation';
 import type {
   EnvironmentProfileRecord,
+  ImageListItem,
   Template,
   VM,
 } from '@/lib/types';
@@ -33,6 +33,8 @@ import { cn } from '@/lib/utils';
 
 interface ImagesTemplatesPageProps {
   vms: VM[];
+  templates?: Template[];
+  images?: ImageListItem[];
   mode?: 'environment' | 'snapshots';
   onLaunchVM: () => void;
   onNavigate?: (page: PageId) => void;
@@ -42,6 +44,8 @@ interface ImagesTemplatesPageProps {
 
 export function ImagesTemplatesPage({
   vms,
+  templates: propTemplates,
+  images: _propImages,
   mode = 'environment',
   onLaunchVM: _onLaunchVM,
   onNavigate,
@@ -66,8 +70,8 @@ export function ImagesTemplatesPage({
   const [revealSecrets, setRevealSecrets] = useState(false);
   const [savingEnv, setSavingEnv] = useState(false);
 
-  // Snapshots & Templates state backed by /api/v1/templates
-  const [templates, setTemplates] = useState<Template[]>([]);
+  // Snapshots & Templates state backed by /api/v1/templates (WS synced)
+  const [templates, setTemplates] = useState<Template[]>(propTemplates || []);
   const [loadingAssets, setLoadingAssets] = useState(false);
 
   // Create Snapshot modal state
@@ -119,9 +123,17 @@ export function ImagesTemplatesPage({
   }, []);
 
   useEffect(() => {
+    if (propTemplates) {
+      setTemplates(propTemplates);
+    }
+  }, [propTemplates]);
+
+  useEffect(() => {
     void loadEnvironments();
-    void loadSnapshots();
-  }, [loadEnvironments, loadSnapshots]);
+    if (propTemplates === undefined) {
+      void loadSnapshots();
+    }
+  }, [loadEnvironments, loadSnapshots, propTemplates]);
 
   async function handleSaveEnvironment() {
     setSavingEnv(true);
@@ -596,14 +608,6 @@ export function ImagesTemplatesPage({
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void loadSnapshots()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
           <button
             type="button"
             onClick={() => setCreateSnapOpen(true)}

@@ -78,6 +78,10 @@ func (s *Server) handleVMFiles(w http.ResponseWriter, r *http.Request, vmID stri
 		httpError(w, "sandbox is not running", http.StatusConflict)
 		return
 	}
+	if vm.IsRemoteVM(v) {
+		s.proxyRemoteFiles(w, r, v, subParts)
+		return
+	}
 
 	subAction := ""
 	if len(subParts) > 0 {
@@ -313,6 +317,10 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 	}
 	if v.Status != db.StatusRunning {
 		httpError(w, "sandbox is not running", http.StatusConflict)
+		return
+	}
+	if vm.IsRemoteVM(v) {
+		s.proxyRemoteProcesses(w, r, v, subParts)
 		return
 	}
 
