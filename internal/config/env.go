@@ -69,6 +69,7 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_ADMIN_USERNAME", &cfg.Server.AdminUsername)
 	env.strInto("COMPUTE_ADMIN_EMAIL", &cfg.Server.AdminEmail)
 	env.strInto("COMPUTE_ADMIN_PASSWORD", &cfg.Server.AdminPassword)
+	env.strInto("COMPUTE_PUBLIC_URL", &cfg.Server.PublicURL)
 	env.strInto("COMPUTE_EDGE_LISTEN", &cfg.Server.EdgeListen)
 	env.boolInto("COMPUTE_CGROUP_ENFORCE", &cfg.Server.CgroupEnforce)
 	env.boolInto("COMPUTE_JAILER_ENABLED", &cfg.Server.JailerEnabled)

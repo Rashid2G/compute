@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -31,6 +32,17 @@ type DaemonClient struct {
 	apiKey       string
 	httpClient   *http.Client
 	streamClient *http.Client
+
+	publicURLMu      sync.Mutex
+	publicURL        string
+	publicURLFetched bool
+}
+
+// DaemonVersion is the daemon's /api/v1/version payload. PublicURL is the
+// externally reachable base URL the daemon advertises (empty when unset).
+type DaemonVersion struct {
+	version.Info
+	PublicURL string `json:"public_url,omitempty"`
 }
 
 type QueueResponse struct {
@@ -679,13 +691,48 @@ func (c *DaemonClient) GetReadiness(ctx context.Context) (*doctor.Report, error)
 	return &report, nil
 }
 
-func (c *DaemonClient) GetVersion(ctx context.Context) (*version.Info, error) {
-	var info version.Info
+func (c *DaemonClient) GetVersion(ctx context.Context) (*DaemonVersion, error) {
+	var info DaemonVersion
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/version", nil, &info)
 	if err != nil {
 		return nil, err
 	}
 	return &info, nil
+}
+
+// DiscoverPublicURL learns the daemon's advertised public base URL once, so
+// preview links can be printed as absolute public URLs. Failures are ignored:
+// links then fall back to the daemon address the CLI connected to.
+func (c *DaemonClient) DiscoverPublicURL(ctx context.Context) {
+	c.publicURLMu.Lock()
+	if c.publicURLFetched {
+		c.publicURLMu.Unlock()
+		return
+	}
+	c.publicURLFetched = true
+	c.publicURLMu.Unlock()
+
+	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	info, err := c.GetVersion(qctx)
+	if err != nil || info == nil {
+		return
+	}
+	c.publicURLMu.Lock()
+	c.publicURL = strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
+	c.publicURLMu.Unlock()
+}
+
+// ingressBaseURL is where preview links should point: the daemon's advertised
+// public URL when known, otherwise the address this client uses.
+func (c *DaemonClient) ingressBaseURL() string {
+	c.publicURLMu.Lock()
+	public := c.publicURL
+	c.publicURLMu.Unlock()
+	if public != "" {
+		return public
+	}
+	return c.BaseURL()
 }
 
 func (c *DaemonClient) SSHWebSocketURL(vmID string, query url.Values) string {

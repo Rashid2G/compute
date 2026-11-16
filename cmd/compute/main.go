@@ -1916,7 +1916,7 @@ func handleVersionCommand(ctx context.Context, client *DaemonClient, args []stri
 		return
 	}
 
-	var daemonInfo *version.Info
+	var daemonInfo *DaemonVersion
 	var daemonErr error
 	if !*clientOnly && client != nil {
 		queryCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)

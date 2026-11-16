@@ -78,6 +78,9 @@ func ingressURL(client *DaemonClient, publicURL string) string {
 		return publicURL
 	}
 	base := client.BaseURL()
+	if public := client.ingressBaseURL(); public != "" {
+		base = public
+	}
 	if base == "" {
 		return publicURL
 	}
@@ -143,6 +146,7 @@ func handleExposeCommand(ctx context.Context, client *DaemonClient, args []strin
 		return
 	}
 	fmt.Printf("Exposed %s:%d (%s)\n", v.Name, guestPort, visibilityLabel(pf))
+	client.DiscoverPublicURL(ctx)
 	if url := ingressURL(client, pf.PublicURL); url != "" {
 		fmt.Println(url)
 	}
@@ -189,6 +193,7 @@ func handlePortsCommand(ctx context.Context, client *DaemonClient, args []string
 		fmt.Fprintf(os.Stderr, "No ports are exposed on sandbox %s.\n", v.Name)
 		return
 	}
+	client.DiscoverPublicURL(ctx)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 	fmt.Fprintln(tw, "PORT\tVISIBILITY\tHOST PORT\tURL")
 	for _, pf := range pfs {

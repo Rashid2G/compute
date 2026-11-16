@@ -160,7 +160,11 @@ Requests to the generated URL are reverse-proxied to
 `http://<sandbox-ip>:<guest-port>`, including HTTP/1.1, HTTP/2, Server-Sent
 Events, and WebSockets. HTML responses are rewritten so absolute asset and API
 paths resolve under the preview prefix, and upstream root-relative redirects
-are kept inside the prefix.
+are kept inside the prefix. Apps that emit root-absolute URLs regardless of
+their document location (bundler chunk imports such as `/assets/chunk.js`, or
+API bases derived from `window.location.origin`) are routed back to the same
+sandbox by matching the `Referer` against the preview path, so the app sees the
+URLs it asked for.
 
 URL forms:
 
@@ -201,6 +205,13 @@ protocols or when you specifically need `host:port`. Omit it for HTTP services.
 `/preview/@alice/web/8080/`) so records stay correct behind a TLS terminator,
 tailnet name, or proxy. Resolve it against the daemon origin you used for the
 API call.
+
+Set `COMPUTE_PUBLIC_URL` (or `server.public_url` in `daemon.json`) to the
+externally reachable base URL, for example
+`https://compute-lab.tailb1be99.ts.net`. The daemon advertises it as
+`public_url` on `GET /api/v1/version`, and the CLI prints preview links against
+it, so `compute expose`/`compute ports` show URLs that work from other
+machines instead of the loopback address the CLI connects through.
 
 ## API surface
 

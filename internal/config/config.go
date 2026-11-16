@@ -164,6 +164,12 @@ type ServerConfig struct {
 	JailerBinary   string `json:"jailer_binary,omitempty"`
 	JailerBaseDir  string `json:"jailer_base_dir,omitempty"`
 	CgroupEnforce  bool   `json:"cgroup_enforce,omitempty"`
+	// PublicURL is the externally reachable base URL of this daemon, for
+	// example "https://compute-lab.tailb1be99.ts.net". Clients use it to print
+	// absolute preview links instead of the address they connected through
+	// (which may be a loopback or container-internal endpoint). Empty means
+	// "resolve links against the daemon address the client used".
+	PublicURL string `json:"public_url,omitempty"`
 	// EdgeListen optionally starts an HTTP edge listener (default ":80" when
 	// DNS is enabled) that dispatches by Host header: the reserved "api" and
 	// apex/gui/www subdomains of the base domain are served by the daemon
@@ -174,6 +180,20 @@ type ServerConfig struct {
 	// listener. Leave empty to terminate TLS in a reverse proxy or Tailscale.
 	TLSCertFile string `json:"tls_cert_file,omitempty"`
 	TLSKeyFile  string `json:"tls_key_file,omitempty"`
+}
+
+// NormalizedPublicURL returns the configured externally reachable base URL
+// without a trailing slash. Values without a scheme are assumed to be HTTPS
+// (the common case for a reverse proxy or tailnet name).
+func (c ServerConfig) NormalizedPublicURL() string {
+	u := strings.TrimSpace(c.PublicURL)
+	if u == "" {
+		return ""
+	}
+	if !strings.Contains(u, "://") {
+		u = "https://" + u
+	}
+	return strings.TrimRight(u, "/")
 }
 
 // DefaultsConfig holds default microVM specifications

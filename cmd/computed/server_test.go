@@ -1271,3 +1271,25 @@ func TestExecStreamMissingVM(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
 	}
 }
+
+func TestVersionEndpointAdvertisesPublicURL(t *testing.T) {
+	s := &Server{cfg: config.GlobalConfig{Server: config.ServerConfig{PublicURL: "compute-lab.tailb1be99.ts.net/"}}}
+	rec := httptest.NewRecorder()
+	s.handleVersion(rec, httptest.NewRequest(http.MethodGet, "/api/v1/version", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var got struct {
+		Version   string `json:"version"`
+		PublicURL string `json:"public_url"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.PublicURL != "https://compute-lab.tailb1be99.ts.net" {
+		t.Fatalf("public_url = %q", got.PublicURL)
+	}
+	if got.Version != version.Version {
+		t.Fatalf("version = %q", got.Version)
+	}
+}

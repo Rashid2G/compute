@@ -915,7 +915,15 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	info := version.Get("computed", "Compute Daemon")
+	// Advertise the externally reachable base URL so CLI clients can print
+	// absolute preview links even when they reach the daemon over loopback.
+	info := struct {
+		version.Info
+		PublicURL string `json:"public_url,omitempty"`
+	}{
+		Info:      version.Get("computed", "Compute Daemon"),
+		PublicURL: s.cfg.Server.NormalizedPublicURL(),
+	}
 	_ = json.NewEncoder(w).Encode(info)
 }
 

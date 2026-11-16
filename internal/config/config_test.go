@@ -253,3 +253,20 @@ func TestResolveConfigPath(t *testing.T) {
 		t.Fatalf("expected cfg.ConfigPath %s, got %s", customPath, cfg.ConfigPath)
 	}
 }
+
+func TestServerConfigNormalizedPublicURL(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"https://compute-lab.tailb1be99.ts.net/", "https://compute-lab.tailb1be99.ts.net"},
+		{"http://127.0.0.1:18080", "http://127.0.0.1:18080"},
+		{"compute-lab.tailb1be99.ts.net", "https://compute-lab.tailb1be99.ts.net"},
+		{"  https://example.com/base/  ", "https://example.com/base"},
+	}
+	for _, tc := range cases {
+		if got := (ServerConfig{PublicURL: tc.in}).NormalizedPublicURL(); got != tc.want {
+			t.Errorf("NormalizedPublicURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

@@ -94,3 +94,34 @@ func TestDaemonClientExposePort(t *testing.T) {
 		t.Fatalf("unexpose body = %+v", gotBody)
 	}
 }
+
+func TestIngressURLUsesAdvertisedPublicURL(t *testing.T) {
+	client := &DaemonClient{baseURL: "http://127.0.0.1:18080", publicURL: "https://compute-lab.tailb1be99.ts.net"}
+	if got, want := ingressURL(client, "/preview/web/8080/"), "https://compute-lab.tailb1be99.ts.net/preview/web/8080/"; got != want {
+		t.Fatalf("ingressURL = %q, want %q", got, want)
+	}
+	if got, want := ingressURL(client, "https://web.compute.dev/"), "https://web.compute.dev/"; got != want {
+		t.Fatalf("absolute url = %q, want %q", got, want)
+	}
+}
+
+func TestDiscoverPublicURLFromDaemon(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"public_url": "https://compute-lab.tailb1be99.ts.net/"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	client := NewDaemonClient(strings.TrimPrefix(ts.URL, "http://"))
+	client.DiscoverPublicURL(context.Background())
+	if got, want := ingressURL(client, "/preview/web/8080/"), "https://compute-lab.tailb1be99.ts.net/preview/web/8080/"; got != want {
+		t.Fatalf("ingressURL = %q, want %q", got, want)
+	}
+
+	// Discovery is one-shot; a failing daemon must not clear the cached value.
+	client.DiscoverPublicURL(context.Background())
+	if got := ingressURL(client, "/preview/web/8080/"); got == "" {
+		t.Fatal("cached public url was lost")
+	}
+}
