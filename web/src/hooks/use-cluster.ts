@@ -2,16 +2,23 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '@/lib/api';
 import type {
+  AdminResourcesResponse,
   AuditEventRecord,
+  ClusterSchedulingPolicy,
   DaemonConfig,
+  ImageListItem,
   JobRecord,
   NetworkAllocation,
   NetworkConfig,
+  PortForwardRecord,
   QueueResult,
   StatsResult,
+  Template,
   VM,
   VolumeRecord,
   WorkerNodeRecord,
+  WorkerPoolRecord,
+  WorkerTokenRecord,
 } from '@/lib/types';
 
 export interface ClusterSnapshot {
@@ -22,6 +29,13 @@ export interface ClusterSnapshot {
   config: DaemonConfig | null;
   queue: QueueResult | null;
   workers: WorkerNodeRecord[];
+  pools: WorkerPoolRecord[];
+  workerTokens: WorkerTokenRecord[];
+  schedulingPolicy: ClusterSchedulingPolicy | null;
+  resources: AdminResourcesResponse | null;
+  templates: Template[];
+  images: ImageListItem[];
+  portForwards: PortForwardRecord[];
   jobs: JobRecord[];
   volumes: VolumeRecord[];
   events: AuditEventRecord[];
@@ -43,6 +57,16 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
   const [config, setConfig] = useState<DaemonConfig | null>(null);
   const [queue, setQueue] = useState<QueueResult | null>(null);
   const [workers, setWorkers] = useState<WorkerNodeRecord[]>([]);
+  const [pools, setPools] = useState<WorkerPoolRecord[]>([]);
+  const [workerTokens, setWorkerTokens] = useState<WorkerTokenRecord[]>([]);
+  const [schedulingPolicy, setSchedulingPolicy] =
+    useState<ClusterSchedulingPolicy | null>(null);
+  const [resources, setResources] = useState<AdminResourcesResponse | null>(
+    null,
+  );
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [images, setImages] = useState<ImageListItem[]>([]);
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [volumes, setVolumes] = useState<VolumeRecord[]>([]);
   const [events, setEvents] = useState<AuditEventRecord[]>([]);
@@ -58,6 +82,7 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
   const queuedRefresh = useRef(false);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
+  const wsConnectedRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   const applySnapshotData = useCallback(
@@ -70,6 +95,13 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
       config?: DaemonConfig;
       queue?: QueueResult;
       workers?: WorkerNodeRecord[];
+      pools?: WorkerPoolRecord[];
+      worker_tokens?: WorkerTokenRecord[];
+      scheduling_policy?: ClusterSchedulingPolicy;
+      resources?: AdminResourcesResponse;
+      templates?: Template[];
+      images?: ImageListItem[];
+      port_forwards?: PortForwardRecord[];
       jobs?: JobRecord[];
       volumes?: VolumeRecord[];
       events?: AuditEventRecord[];
@@ -84,6 +116,13 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
       if (data.config) setConfig(data.config);
       if (data.queue) setQueue(data.queue);
       if (data.workers) setWorkers(data.workers);
+      if (data.pools) setPools(data.pools);
+      if (data.worker_tokens) setWorkerTokens(data.worker_tokens);
+      if (data.scheduling_policy) setSchedulingPolicy(data.scheduling_policy);
+      if (data.resources) setResources(data.resources);
+      if (data.templates) setTemplates(data.templates);
+      if (data.images) setImages(data.images);
+      if (data.port_forwards) setPortForwards(data.port_forwards);
       if (data.jobs) setJobs(data.jobs);
       if (data.volumes) setVolumes(data.volumes);
       if (data.events) setEvents(data.events);
@@ -101,6 +140,9 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
     [],
   );
 
+  const applySnapshotDataRef = useRef(applySnapshotData);
+  applySnapshotDataRef.current = applySnapshotData;
+
   const refresh = useCallback(
     async (silent = false) => {
       if (!enabled) return;
@@ -108,8 +150,9 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         try {
           wsRef.current.send(JSON.stringify({ type: 'refresh' }));
+          return;
         } catch {
-          // Fall through to HTTP fetch
+          // Fall through to HTTP fetch if send failed
         }
       }
 
@@ -133,6 +176,13 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
               configRes,
               queueRes,
               workersRes,
+              poolsRes,
+              tokensRes,
+              policyRes,
+              resourcesRes,
+              templatesRes,
+              imagesRes,
+              portForwardsRes,
               jobsRes,
               volumesRes,
               eventsRes,
@@ -145,6 +195,13 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
               api.config(),
               api.queue(),
               api.listWorkers(),
+              api.listPools(),
+              api.listWorkerTokens(),
+              api.getSchedulingPolicy(),
+              api.adminResources(),
+              api.listTemplates(),
+              api.listImages(),
+              api.listPortForwards(),
               api.listJobs(),
               api.listVolumes(),
               api.listEvents(),
@@ -153,7 +210,7 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
             if (health.status === 'fulfilled') {
               setDaemonOnline(true);
               setLatency(health.value.latencyMs);
-            } else if (!wsConnected) {
+            } else if (!wsConnectedRef.current) {
               setDaemonOnline(false);
               setLatency(null);
             }
@@ -165,6 +222,13 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
             if (configRes.status === 'fulfilled') setConfig(configRes.value);
             if (queueRes.status === 'fulfilled') setQueue(queueRes.value);
             if (workersRes.status === 'fulfilled') setWorkers(workersRes.value);
+            if (poolsRes.status === 'fulfilled') setPools(poolsRes.value);
+            if (tokensRes.status === 'fulfilled') setWorkerTokens(tokensRes.value);
+            if (policyRes.status === 'fulfilled') setSchedulingPolicy(policyRes.value);
+            if (resourcesRes.status === 'fulfilled') setResources(resourcesRes.value);
+            if (templatesRes.status === 'fulfilled') setTemplates(templatesRes.value);
+            if (imagesRes.status === 'fulfilled') setImages(imagesRes.value);
+            if (portForwardsRes.status === 'fulfilled') setPortForwards(portForwardsRes.value);
             if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value);
             if (volumesRes.status === 'fulfilled') setVolumes(volumesRes.value);
             if (eventsRes.status === 'fulfilled') setEvents(eventsRes.value);
@@ -178,6 +242,8 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
                 configRes,
                 queueRes,
                 workersRes,
+                poolsRes,
+                templatesRes,
                 jobsRes,
                 volumesRes,
                 eventsRes,
@@ -197,11 +263,15 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
       inFlightPromise.current = run;
       return run;
     },
-    [enabled, wsConnected],
+    [enabled],
   );
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   useEffect(() => {
     if (!enabled) {
+      wsConnectedRef.current = false;
       setWsConnected(false);
       setIsLoading(false);
       if (wsRef.current) {
@@ -217,7 +287,16 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
 
     let unmounted = false;
     let reconnectTimer: number | null = null;
+    let fallbackTimer: number | null = null;
     let retryAttempt = 0;
+    let receivedSnapshot = false;
+
+    function triggerFallbackRefresh() {
+      if (unmounted) return;
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        void refreshRef.current(true);
+      }
+    }
 
     function connect() {
       if (unmounted) return;
@@ -232,7 +311,12 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
 
         ws.onopen = () => {
           if (unmounted) return;
+          if (fallbackTimer !== null) {
+            clearTimeout(fallbackTimer);
+            fallbackTimer = null;
+          }
           retryAttempt = 0;
+          wsConnectedRef.current = true;
           setWsConnected(true);
           setDaemonOnline(true);
           setIsLoading(false);
@@ -242,7 +326,8 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
           if (unmounted) return;
           try {
             const data = JSON.parse(event.data);
-            applySnapshotData(data);
+            receivedSnapshot = true;
+            applySnapshotDataRef.current(data);
           } catch {
             // Ignore malformed WS frames
           }
@@ -250,8 +335,18 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
 
         ws.onclose = () => {
           if (unmounted) return;
+          wsConnectedRef.current = false;
           setWsConnected(false);
-          wsRef.current = null;
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
+          if (!receivedSnapshot) {
+            if (fallbackTimer !== null) {
+              clearTimeout(fallbackTimer);
+              fallbackTimer = null;
+            }
+            void refreshRef.current(true);
+          }
           const delay = Math.min(10000, 1000 * Math.pow(1.5, retryAttempt));
           retryAttempt += 1;
           reconnectTimer = window.setTimeout(connect, delay);
@@ -259,6 +354,7 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
 
         ws.onerror = () => {
           if (unmounted) return;
+          wsConnectedRef.current = false;
           setWsConnected(false);
           try {
             ws.close();
@@ -268,6 +364,9 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
         };
       } catch {
         if (!unmounted) {
+          if (!receivedSnapshot) {
+            void refreshRef.current(true);
+          }
           const delay = Math.min(10000, 1000 * Math.pow(1.5, retryAttempt));
           retryAttempt += 1;
           reconnectTimer = window.setTimeout(connect, delay);
@@ -276,12 +375,14 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
     }
 
     setIsLoading(true);
-    void refresh(true);
+    fallbackTimer = window.setTimeout(triggerFallbackRefresh, 400);
     connect();
 
     return () => {
       unmounted = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+      wsConnectedRef.current = false;
       if (wsRef.current) {
         try {
           wsRef.current.close();
@@ -291,7 +392,7 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
         wsRef.current = null;
       }
     };
-  }, [applySnapshotData, enabled, refresh]);
+  }, [enabled]);
 
   return {
     stats,
@@ -301,6 +402,13 @@ export function useCluster(options: { enabled?: boolean } = {}): ClusterSnapshot
     config,
     queue,
     workers,
+    pools,
+    workerTokens,
+    schedulingPolicy,
+    resources,
+    templates,
+    images,
+    portForwards,
     jobs,
     volumes,
     events,

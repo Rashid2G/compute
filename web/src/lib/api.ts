@@ -2,7 +2,10 @@ import type {
   AccessAPIKeyRecord,
   AdminResourcesResponse,
   AuditEventRecord,
+  BulkVMsRequest,
+  BulkVMsResponse,
   CloneVMOptions,
+  ClusterSchedulingPolicy,
   CreateCIRepoRequest,
   CreateTemplateRequest,
   CreateVMRequest,
@@ -12,22 +15,28 @@ import type {
   FileReadResponse,
   GitHubConnectionRecord,
   HealthResult,
+  ImageListItem,
   JobLogRecord,
   JobRecord,
   LaunchTemplateRequest,
+  MigratePoolRequest,
+  MigrateVMRequest,
   NetworkAllocation,
   NetworkConfig,
   NetworkInspectResult,
   NetworkIsolationMode,
   OTelConfigRecord,
+  PoolMigrationResponse,
   PortForwardRecord,
   ProcessInfo,
   QueueResult,
+  ResourceLimitErrorDetails,
   SSHKey,
   StatsResult,
   Template,
   TriggerCIRepoRequest,
   UpdateCIRepoRequest,
+  UpdateWorkerRequest,
   VM,
   VMTier,
   VolumeRecord,
@@ -49,11 +58,20 @@ const AUTH_USER_KEY = 'compute_auth_user';
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
+  details?: ResourceLimitErrorDetails;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: ResourceLimitErrorDetails,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -142,12 +160,46 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
+    let errorCode: string | undefined;
+    let details: ResourceLimitErrorDetails | undefined;
     try {
-      const body = (await response.json()) as { error?: string; message?: string };
+      const body = (await response.json()) as {
+        error?: string;
+        message?: string;
+        code?: string;
+        resource?: string;
+        limit_type?: string;
+        node_id?: string;
+        requested?: number;
+        available?: number;
+        limit?: number;
+        suggestion?: string;
+      };
+      if (body.code) {
+        errorCode = body.code;
+      }
       if (body.message) {
         message = body.message;
       } else if (body.error) {
         message = body.error;
+      }
+      if (
+        body.code === 'RESOURCE_LIMIT_EXCEEDED' ||
+        body.resource ||
+        body.suggestion ||
+        body.limit_type
+      ) {
+        details = {
+          code: body.code,
+          resource: body.resource,
+          limit_type: body.limit_type,
+          node_id: body.node_id,
+          requested: body.requested,
+          available: body.available,
+          limit: body.limit,
+          error: body.error || body.message,
+          suggestion: body.suggestion,
+        };
       }
     } catch {
       // Keep the status-based message when the body is not JSON.
@@ -163,7 +215,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       notifyUnauthorized();
     }
 
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, errorCode, details);
   }
 
   if (response.status === 204) {
@@ -253,6 +305,27 @@ export const api = {
   deleteVM(id: string): Promise<{ status: string; id: string }> {
     return request<{ status: string; id: string }>(`/vms/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    });
+  },
+
+  bulkDeleteVMs(ids: string[]): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  bulkActionVMs(payload: BulkVMsRequest): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-action', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  migrateVM(id: string, payload: MigrateVMRequest): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/migrate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 
@@ -510,6 +583,13 @@ export const api = {
     });
   },
 
+  updateWorker(id: string, payload: UpdateWorkerRequest): Promise<WorkerNodeRecord> {
+    return request<WorkerNodeRecord>(`/workers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
   listPools(): Promise<WorkerPoolRecord[]> {
     return request<WorkerPoolRecord[]>('/pools');
   },
@@ -519,6 +599,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  migratePool(id: string, payload: MigratePoolRequest): Promise<PoolMigrationResponse> {
+    return request<PoolMigrationResponse>(`/pools/${encodeURIComponent(id)}/migrate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getSchedulingPolicy(): Promise<ClusterSchedulingPolicy> {
+    return request<ClusterSchedulingPolicy>('/scheduler/policy');
+  },
+
+  updateSchedulingPolicy(
+    payload: Partial<ClusterSchedulingPolicy>,
+  ): Promise<ClusterSchedulingPolicy> {
+    return request<ClusterSchedulingPolicy>('/scheduler/policy', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  listImages(): Promise<ImageListItem[]> {
+    return request<ImageListItem[]>('/images');
   },
 
   listWorkerTokens(): Promise<WorkerTokenRecord[]> {
@@ -841,6 +945,33 @@ export const api = {
 
 
 export function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const base = error.message || `Request failed (${error.status})`;
+    const d = error.details;
+    if (d) {
+      const parts: string[] = [base];
+      if (d.node_id && !base.includes(d.node_id)) {
+        parts.push(`[node: ${d.node_id}]`);
+      }
+      if (
+        d.resource &&
+        d.requested !== undefined &&
+        d.available !== undefined &&
+        !base.includes(String(d.requested))
+      ) {
+        parts.push(
+          `(${d.resource}: requested ${d.requested}, available ${d.available}${
+            d.limit !== undefined ? `, limit ${d.limit}` : ''
+          })`,
+        );
+      }
+      if (d.suggestion && !base.includes(d.suggestion)) {
+        parts.push(`— ${d.suggestion}`);
+      }
+      return parts.join(' ');
+    }
+    return base;
+  }
   if (error instanceof Error && error.message) return error.message;
   return String(error);
 }

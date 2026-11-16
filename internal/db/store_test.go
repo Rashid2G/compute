@@ -1117,3 +1117,168 @@ func TestStore_NetworkIsolationPersistenceAndMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestStore_Milestone1ModelsAndPolicy(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "m1.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Default scheduling policy
+	pol, err := store.GetSchedulingPolicy(ctx)
+	if err != nil {
+		t.Fatalf("GetSchedulingPolicy default: %v", err)
+	}
+	if pol.CPUSoftOvercommitRatio != 1.5 || pol.CPUHardOvercommitRatio != 2.0 || !pol.MemoryHardGuarantee || !pol.DiskHardEnforcement {
+		t.Fatalf("unexpected default scheduling policy: %+v", pol)
+	}
+
+	// Custom scheduling policy round-trip
+	pol.CPUSoftOvercommitRatio = 1.25
+	pol.IdleThresholdSeconds = 300
+	if err := store.SaveSchedulingPolicy(ctx, pol); err != nil {
+		t.Fatalf("SaveSchedulingPolicy: %v", err)
+	}
+	gotPol, err := store.GetSchedulingPolicy(ctx)
+	if err != nil {
+		t.Fatalf("GetSchedulingPolicy reload: %v", err)
+	}
+	if gotPol.CPUSoftOvercommitRatio != 1.25 || gotPol.IdleThresholdSeconds != 300 {
+		t.Fatalf("reloaded policy mismatch: %+v", gotPol)
+	}
+
+	// GetWorkerToken
+	tok := &WorkerToken{
+		Token:     "tok-pool-1",
+		Name:      "worker-a",
+		PoolID:    "pool-gpu",
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := store.SaveWorkerToken(ctx, tok); err != nil {
+		t.Fatalf("SaveWorkerToken: %v", err)
+	}
+	gotTok, err := store.GetWorkerToken(ctx, "tok-pool-1")
+	if err != nil || gotTok == nil || gotTok.PoolID != "pool-gpu" {
+		t.Fatalf("GetWorkerToken failed: %+v err=%v", gotTok, err)
+	}
+
+	// WorkerNode physical + allocated fields
+	now := time.Now().UTC()
+	wn := &WorkerNode{
+		ID:              "nod_1",
+		Name:            "worker-a",
+		PoolID:          "pool-gpu",
+		Role:            "worker",
+		Status:          "ready",
+		Arch:            "amd64",
+		TotalVCPUs:      16,
+		TotalMemMB:      32768,
+		TotalDiskMB:     500000,
+		AllocatedVCPUs:  14,
+		AllocatedMemMB:  30720,
+		AllocatedDiskMB: 450000,
+		PhysicalVCPUs:   16,
+		PhysicalMemMB:   32768,
+		PhysicalDiskMB:  500000,
+		LastHeartbeat:   &now,
+	}
+	if err := store.SaveWorkerNode(ctx, wn); err != nil {
+		t.Fatalf("SaveWorkerNode: %v", err)
+	}
+	gotWN, err := store.GetWorkerNode(ctx, "nod_1")
+	if err != nil || gotWN == nil {
+		t.Fatalf("GetWorkerNode: %+v err=%v", gotWN, err)
+	}
+	if gotWN.AllocatedVCPUs != 14 || gotWN.AllocatedMemMB != 30720 || gotWN.AllocatedDiskMB != 450000 ||
+		gotWN.PhysicalVCPUs != 16 || gotWN.PhysicalMemMB != 32768 || gotWN.PhysicalDiskMB != 500000 {
+		t.Fatalf("WorkerNode capacity fields not persisted: %+v", gotWN)
+	}
+	wns, err := store.ListWorkerNodes(ctx)
+	if err != nil || len(wns) != 1 || wns[0].AllocatedDiskMB != 450000 {
+		t.Fatalf("ListWorkerNodes capacity mismatch: %+v err=%v", wns, err)
+	}
+
+	// VM placement & auto-hibernation fields + TouchVMActivity
+	act := now.Add(-10 * time.Minute)
+	vm := &VM{
+		ID:              "vm-m1",
+		Name:            "vm-m1",
+		OwnerID:         "usr_1",
+		Status:          StatusPaused,
+		VCPUs:           2,
+		MemoryMB:        1024,
+		DiskMB:          10240,
+		PoolID:          "pool-gpu",
+		WorkerID:        "nod_1",
+		LastActivityAt:  &act,
+		AutoHibernated:  true,
+		HibernateReason: "idle_memory_reclaim",
+	}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatalf("SaveVM: %v", err)
+	}
+	gotVM, err := store.GetVMByOwner(ctx, "usr_1", "vm-m1")
+	if err != nil || gotVM == nil {
+		t.Fatalf("GetVMByOwner: %+v err=%v", gotVM, err)
+	}
+	if gotVM.PoolID != "pool-gpu" || gotVM.WorkerID != "nod_1" || !gotVM.AutoHibernated || gotVM.HibernateReason != "idle_memory_reclaim" || gotVM.LastActivityAt == nil {
+		t.Fatalf("VM milestone 1 fields lost: %+v", gotVM)
+	}
+	if err := store.TouchVMActivity(ctx, "vm-m1"); err != nil {
+		t.Fatalf("TouchVMActivity: %v", err)
+	}
+	touched, _ := store.GetVM(ctx, "vm-m1")
+	if touched.LastActivityAt == nil || !touched.LastActivityAt.After(act) {
+		t.Fatalf("expected LastActivityAt to advance after TouchVMActivity, got %v", touched.LastActivityAt)
+	}
+}
+
+func TestStore_MigratesPoolWorkerAndHibernateColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-m1.db")
+	s, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ctx := context.Background()
+	if err := s.SaveVM(ctx, &VM{ID: "vm-old", Name: "vm-old", Status: StatusStopped}); err != nil {
+		t.Fatalf("SaveVM: %v", err)
+	}
+	if err := s.SaveWorkerNode(ctx, &WorkerNode{ID: "nod-old", Name: "nod-old", PoolID: "default", Status: "ready"}); err != nil {
+		t.Fatalf("SaveWorkerNode: %v", err)
+	}
+	for _, stmt := range []string{
+		"ALTER TABLE vms DROP COLUMN pool_id",
+		"ALTER TABLE vms DROP COLUMN worker_id",
+		"ALTER TABLE vms DROP COLUMN last_activity_at",
+		"ALTER TABLE vms DROP COLUMN auto_hibernated",
+		"ALTER TABLE vms DROP COLUMN hibernate_reason",
+		"ALTER TABLE worker_nodes DROP COLUMN allocated_vcpus",
+		"ALTER TABLE worker_nodes DROP COLUMN allocated_mem_mb",
+		"ALTER TABLE worker_nodes DROP COLUMN allocated_disk_mb",
+		"ALTER TABLE worker_nodes DROP COLUMN physical_vcpus",
+		"ALTER TABLE worker_nodes DROP COLUMN physical_mem_mb",
+		"ALTER TABLE worker_nodes DROP COLUMN physical_disk_mb",
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("%s failed: %v", stmt, err)
+		}
+	}
+	_ = s.Close()
+
+	reopened, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen NewStore: %v", err)
+	}
+	defer reopened.Close()
+
+	vmGot, err := reopened.GetVM(ctx, "vm-old")
+	if err != nil || vmGot == nil {
+		t.Fatalf("GetVM after migration: %+v err=%v", vmGot, err)
+	}
+	wnGot, err := reopened.GetWorkerNode(ctx, "nod-old")
+	if err != nil || wnGot == nil {
+		t.Fatalf("GetWorkerNode after migration: %+v err=%v", wnGot, err)
+	}
+}

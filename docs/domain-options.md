@@ -79,4 +79,4 @@ ns1.sandboxes.example.com.  IN A   <public-ip-of-daemon-host>
 
 ## Option C: Per-sandbox MagicDNS names
 
-Enable Tailscale provisioning for sandboxes (`COMPUTE_TAILSCALE_ENABLED=true`, `COMPUTE_TAILSCALE_API_KEY`, `COMPUTE_TAILSCALE_SANDBOX_TAG`) so each sandbox joins the tailnet as an ephemeral device and receives a single-label MagicDNS name (`compute-<vmid>.<tailnet>.ts.net`).
+If guests join your tailnet directly via Tailscale inside the sandbox, they receive single-label MagicDNS names (`<device>.<tailnet>.ts.net`) without split DNS.

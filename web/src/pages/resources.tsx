@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -6,7 +6,6 @@ import {
   HardDrive,
   MemoryStick,
   Network,
-  RefreshCw,
   Server,
   Shield,
 } from 'lucide-react';
@@ -30,6 +29,8 @@ interface ResourcesPageProps {
   workers: WorkerNodeRecord[];
   volumes: VolumeRecord[];
   config: DaemonConfig | null;
+  resources?: AdminResourcesResponse | null;
+  wsConnected?: boolean;
   currentUser: AuthUser | null;
   authEnabled: boolean;
 }
@@ -75,38 +76,45 @@ export function ResourcesPage({
   workers,
   volumes,
   config,
+  resources: propResources = null,
+  wsConnected = false,
   currentUser,
   authEnabled,
 }: ResourcesPageProps) {
   const isAdmin = !authEnabled || currentUser?.role === 'admin';
 
-  const [telemetry, setTelemetry] = useState<AdminResourcesResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [telemetry, setTelemetry] = useState<AdminResourcesResponse | null>(
+    propResources,
+  );
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  const loadResources = useCallback(async () => {
-    if (!isAdmin) return;
-    try {
-      const data = await api.adminResources();
-      setTelemetry(data);
+  useEffect(() => {
+    if (propResources) {
+      setTelemetry(propResources);
       setFetchError(null);
-    } catch (err) {
-      setFetchError(err instanceof Error ? err.message : 'Telemetry unavailable');
-    } finally {
-      setLoading(false);
     }
-  }, [isAdmin]);
+  }, [propResources]);
 
   useEffect(() => {
-    if (!isAdmin) return;
-    void loadResources();
-    if (!autoRefresh) return;
-    const timer = window.setInterval(() => {
-      void loadResources();
-    }, 4000);
-    return () => window.clearInterval(timer);
-  }, [isAdmin, autoRefresh, loadResources]);
+    if (!isAdmin || propResources) return;
+    let cancelled = false;
+    api
+      .adminResources()
+      .then((data) => {
+        if (!cancelled) {
+          setTelemetry(data);
+          setFetchError(null);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setFetchError(err instanceof Error ? err.message : 'Telemetry unavailable');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin, propResources]);
 
   if (!isAdmin) {
     return (
@@ -198,23 +206,22 @@ export function ResourcesPage({
               Updated {formatTimestamp(telemetry.timestamp)}
             </span>
           )}
-          <label className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-muted-foreground cursor-pointer">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="h-3.5 w-3.5 accent-primary"
-            />
-            <span>Auto-refresh (4s)</span>
-          </label>
-          <button
-            type="button"
-            onClick={() => void loadResources()}
-            className="inline-flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
+          <span
+            className={cn(
+              'inline-flex h-8 items-center gap-1.5 border px-2.5 font-mono text-[11px]',
+              wsConnected
+                ? 'border-success/40 bg-success/10 text-success'
+                : 'border-border bg-background text-muted-foreground',
+            )}
           >
-            <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-            <span>Refresh</span>
-          </button>
+            <span
+              className={cn(
+                'h-1.5 w-1.5',
+                wsConnected ? 'bg-success' : 'bg-muted-foreground',
+              )}
+            />
+            <span>Live · WS</span>
+          </span>
         </div>
       </div>
 

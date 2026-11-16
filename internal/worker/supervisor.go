@@ -45,6 +45,14 @@ func NewMicroVMSupervisor(vmMgr *vm.Manager, bootTimeout time.Duration) *MicroVM
 	}
 }
 
+// VMManager returns the underlying worker-local VM manager.
+func (s *MicroVMSupervisor) VMManager() *vm.Manager {
+	if s == nil {
+		return nil
+	}
+	return s.vmMgr
+}
+
 func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment, streamLog LogStreamFunc) (int, error) {
 	if s.vmMgr == nil {
 		return 1, fmt.Errorf("vm manager is nil")

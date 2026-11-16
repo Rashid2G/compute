@@ -5,7 +5,6 @@ import {
   HardDrive,
   Link2,
   Plus,
-  RefreshCw,
   Search,
   Trash2,
   Unlink,
@@ -15,12 +14,18 @@ import { toast } from 'sonner';
 
 import { api, errorMessage } from '@/lib/api';
 import { formatRelativeTime } from '@/lib/format';
-import type { DaemonConfig, VM, VolumeRecord } from '@/lib/types';
+import type {
+  DaemonConfig,
+  VM,
+  VolumeRecord,
+  WorkerPoolRecord,
+} from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface StoragePageProps {
   volumes?: VolumeRecord[];
   vms?: VM[];
+  pools?: WorkerPoolRecord[];
   config?: DaemonConfig | null;
   onRefresh?: () => void;
 }
@@ -28,6 +33,7 @@ interface StoragePageProps {
 export function StoragePage({
   volumes: propVolumes,
   vms = [],
+  pools: propPools,
   config,
   onRefresh,
 }: StoragePageProps) {
@@ -42,7 +48,10 @@ export function StoragePage({
   const [volPool, setVolPool] = useState('default');
   const [volFs, setVolFs] = useState('ext4');
   const [volAttachVM, setVolAttachVM] = useState('');
-  const [pools, setPools] = useState<string[]>(['default']);
+  const [pools, setPools] = useState<string[]>(() => {
+    const names = (propPools || []).map((p) => p.name || p.id).filter(Boolean);
+    return names.length ? names : ['default'];
+  });
 
   const [attachModalVol, setAttachModalVol] = useState<VolumeRecord | null>(
     null,
@@ -66,10 +75,23 @@ export function StoragePage({
   }, [propVolumes]);
 
   useEffect(() => {
-    void loadVolumes();
-  }, [loadVolumes]);
+    if (propPools && propPools.length > 0) {
+      const names = propPools.map((p) => p.name || p.id).filter(Boolean);
+      if (names.length) {
+        setPools(names);
+        setVolPool((current) => (names.includes(current) ? current : names[0]));
+      }
+    }
+  }, [propPools]);
 
   useEffect(() => {
+    if (propVolumes === undefined) {
+      void loadVolumes();
+    }
+  }, [propVolumes, loadVolumes]);
+
+  useEffect(() => {
+    if (propPools !== undefined) return;
     void api
       .listPools()
       .then((res) => {
@@ -80,7 +102,7 @@ export function StoragePage({
         }
       })
       .catch(() => setPools(['default']));
-  }, []);
+  }, [propPools]);
 
   const filteredVolumes = useMemo(() => {
     return volumes.filter((v) => {
@@ -223,14 +245,6 @@ export function StoragePage({
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void loadVolumes()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
           <button
             type="button"
             onClick={() => setCreateOpen((v) => !v)}

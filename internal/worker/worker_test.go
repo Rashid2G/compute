@@ -130,3 +130,97 @@ func TestWorkerClientHandshake(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectCapabilities_IncludesAvailableAndCPUUsage(t *testing.T) {
+	caps := DetectCapabilities()
+	for _, k := range []string{"architecture", "vcpus", "cpus", "memory_mb", "memory_available_mb", "disk_mb", "disk_available_mb", "virtualization", "cpu_usage_percent"} {
+		if _, ok := caps[k]; !ok {
+			t.Fatalf("expected capability %q to be present, got %+v", k, caps)
+		}
+	}
+}
+
+func TestLoadConfig_AppliesDefaultsBeforeControlPlaneError(t *testing.T) {
+	t.Setenv("COMPUTE_CONTROL_PLANE", "")
+	t.Setenv("COMPUTE_WORKER_NAME", "")
+	t.Setenv("COMPUTE_WORKER_MAX_VCPUS", "4")
+	t.Setenv("COMPUTE_WORKER_MAX_MEMORY_MB", "4096")
+	t.Setenv("COMPUTE_WORKER_MAX_DISK_MB", "20480")
+
+	c, err := LoadConfig("")
+	if err == nil {
+		t.Fatalf("expected error when control plane URL is unset")
+	}
+	if c.Name == "" || c.StateDir == "" || c.VMsDir == "" || c.BootTimeout <= 0 {
+		t.Fatalf("expected defaults to be applied even when ControlPlaneURL is missing, got %+v", c)
+	}
+	if c.MaxVCPUs != 4 || c.MaxMemoryMB != 4096 || c.MaxDiskMB != 20480 {
+		t.Fatalf("expected max resource env vars parsed, got %+v", c)
+	}
+}
+
+func TestWorkerClient_SendsPoolIDAndMaxCaps(t *testing.T) {
+	gotHello := make(chan api.WorkerHello, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_, b, err := conn.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var hello api.WorkerHello
+		if err := json.Unmarshal(b, &hello); err == nil {
+			select {
+			case gotHello <- hello:
+			default:
+			}
+		}
+		ack := api.WorkerHelloAck{
+			WorkerMessage: api.WorkerMessage{Version: 1, Type: "worker.hello_ack", WorkerID: "nod_pool"},
+			Accepted:      true,
+			WorkerID:      "nod_pool",
+			PoolID:        "gpu-pool",
+		}
+		raw, _ := json.Marshal(ack)
+		_ = conn.Write(r.Context(), websocket.MessageText, raw)
+		<-r.Context().Done()
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	client := &Client{
+		Config: Config{
+			ControlPlaneURL: srv.URL,
+			Name:            "gpu-worker-1",
+			PoolID:          "gpu-pool",
+			Token:           "tok-1",
+			MaxVCPUs:        8,
+			MaxMemoryMB:     16384,
+			MaxDiskMB:       102400,
+		},
+	}
+	go func() { _ = client.Run(ctx) }()
+
+	select {
+	case h := <-gotHello:
+		if h.PoolID != "gpu-pool" {
+			t.Fatalf("expected hello.PoolID=gpu-pool, got %q", h.PoolID)
+		}
+		if v, _ := h.Capabilities["max_vcpus"].(float64); int(v) != 8 {
+			t.Fatalf("expected max_vcpus=8 in capabilities, got %+v", h.Capabilities)
+		}
+		if v, _ := h.Capabilities["max_memory_mb"].(float64); int(v) != 16384 {
+			t.Fatalf("expected max_memory_mb=16384, got %+v", h.Capabilities)
+		}
+		if v, _ := h.Capabilities["max_disk_mb"].(float64); int(v) != 102400 {
+			t.Fatalf("expected max_disk_mb=102400, got %+v", h.Capabilities)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for WorkerHello")
+	}
+}

@@ -4,7 +4,6 @@ import {
   Copy,
   KeyRound,
   Plus,
-  RefreshCw,
   Shield,
   Terminal,
   Trash2,
@@ -32,18 +31,22 @@ type AccessTab =
 
 interface AccessPageProps {
   currentUser?: AuthUser | null;
+  workerTokens?: WorkerTokenRecord[];
   embedded?: boolean;
 }
 
 export function AccessPage({
   currentUser: currentUserProp,
+  workerTokens: workerTokensProp,
   embedded = false,
 }: AccessPageProps = {}) {
   const [tab, setTab] = useState<AccessTab>('api-keys');
 
   const [apiKeys, setApiKeys] = useState<AccessAPIKeyRecord[]>([]);
   const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
-  const [workerTokens, setWorkerTokens] = useState<WorkerTokenRecord[]>([]);
+  const [workerTokens, setWorkerTokens] = useState<WorkerTokenRecord[]>(
+    () => workerTokensProp ?? [],
+  );
   const [users, setUsers] = useState<AuthUser[]>([]);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse | null>(null);
   const [meUser, setMeUser] = useState<AuthUser | null>(
@@ -56,6 +59,12 @@ export function AccessPage({
       setMeUser(currentUserProp);
     }
   }, [currentUserProp]);
+
+  useEffect(() => {
+    if (workerTokensProp !== undefined) {
+      setWorkerTokens(workerTokensProp);
+    }
+  }, [workerTokensProp]);
 
   const effectiveUser = meUser ?? currentUserProp ?? api.getAuthUser();
   const isAdmin = Boolean(
@@ -92,18 +101,22 @@ export function AccessPage({
   const [userPassword, setUserPassword] = useState('');
   const [userRole, setUserRole] = useState<'user' | 'admin'>('user');
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async (forceWorkerTokens = false) => {
     setLoading(true);
     try {
+      const fetchWorkerTokens =
+        forceWorkerTokens || workerTokensProp === undefined;
       const [akRes, skRes, wtRes, authRes] = await Promise.allSettled([
         api.listAPIKeys(),
         api.listKeys(),
-        api.listWorkerTokens(),
+        fetchWorkerTokens ? api.listWorkerTokens() : Promise.resolve(null),
         api.authStatus(),
       ]);
       if (akRes.status === 'fulfilled') setApiKeys(akRes.value || []);
       if (skRes.status === 'fulfilled') setSshKeys(skRes.value || []);
-      if (wtRes.status === 'fulfilled') setWorkerTokens(wtRes.value || []);
+      if (wtRes.status === 'fulfilled' && wtRes.value !== null) {
+        setWorkerTokens(wtRes.value || []);
+      }
 
       const statusVal = authRes.status === 'fulfilled' ? authRes.value : null;
       if (statusVal) {
@@ -137,7 +150,7 @@ export function AccessPage({
     } finally {
       setLoading(false);
     }
-  }, [currentUserProp]);
+  }, [currentUserProp, workerTokensProp]);
 
   useEffect(() => {
     void loadAll();
@@ -208,7 +221,7 @@ export function AccessPage({
       });
       setCreatedWorkerToken(created.token);
       toast.success('Generated worker bootstrap token');
-      await loadAll();
+      await loadAll(true);
     } catch (err) {
       toast.error(errorMessage(err));
     }
@@ -276,14 +289,6 @@ export function AccessPage({
         )}
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void loadAll()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
           {tab === 'api-keys' && (
             <button
               type="button"
@@ -754,7 +759,7 @@ export function AccessPage({
               ) : (
                 <tbody className="divide-y divide-border font-mono text-[11.5px]">
                   {workerTokens.map((wt) => (
-                    <tr key={wt.token} className="hover:bg-muted/30">
+                    <tr key={wt.id || wt.token} className="hover:bg-muted/30">
                       <td className="py-2.5 px-3 text-foreground">
                         {wt.prefix || wt.token.slice(0, 12)}…
                       </td>
@@ -769,10 +774,10 @@ export function AccessPage({
                           type="button"
                           onClick={() => {
                             void api
-                              .deleteWorkerToken(wt.token)
+                              .deleteWorkerToken(wt.id || wt.token)
                               .then(() => {
                                 toast.success('Revoked worker token');
-                                void loadAll();
+                                void loadAll(true);
                               })
                               .catch((err) => toast.error(errorMessage(err)));
                           }}

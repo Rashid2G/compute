@@ -23,7 +23,10 @@ type TargetInfo struct {
 	OwnerID   string `json:"owner_id"`
 	Status    string `json:"status"`
 	IPAddress string `json:"ip_address"`
+	WorkerID  string `json:"worker_id,omitempty"`
 }
+
+type targetInfoCtxKey struct{}
 
 // TargetResolver resolves a VM ID or name to its target information and port exposure.
 type TargetResolver interface {
@@ -38,11 +41,15 @@ type TargetResolver interface {
 // AuthValidator validates whether an incoming HTTP request is authorized to access the given owner.
 type AuthValidator func(r *http.Request, ownerID string) bool
 
+// DialTargetFunc dials a backend sandbox address, optionally tunneling through a remote worker.
+type DialTargetFunc func(ctx context.Context, target *TargetInfo, network, addr string) (net.Conn, error)
+
 // ProxyOptions configures the IngressProxy.
 type ProxyOptions struct {
 	BaseDomains []string // e.g. "preview.localhost", "compute.internal", "localhost"
 	Resolver    TargetResolver
 	Auth        AuthValidator
+	DialTarget  DialTargetFunc
 	Transport   http.RoundTripper
 	Timeout     time.Duration
 }
@@ -53,6 +60,7 @@ type IngressProxy struct {
 	baseDomains []string
 	resolver    TargetResolver
 	auth        AuthValidator
+	dialTarget  DialTargetFunc
 	transport   http.RoundTripper
 	mu          sync.RWMutex
 }
@@ -63,14 +71,22 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 	if len(domains) == 0 {
 		domains = []string{"preview.localhost", "compute.internal", "compute.dev", "localhost"}
 	}
+	baseDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	tr := opts.Transport
 	if tr == nil {
 		tr = &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if opts.DialTarget != nil {
+					if target, ok := ctx.Value(targetInfoCtxKey{}).(*TargetInfo); ok && target != nil && target.WorkerID != "" && target.WorkerID != "nod_host_local" {
+						return opts.DialTarget(ctx, target, network, addr)
+					}
+				}
+				return baseDialer.DialContext(ctx, network, addr)
+			},
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
@@ -83,6 +99,7 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 		baseDomains: domains,
 		resolver:    opts.Resolver,
 		auth:        opts.Auth,
+		dialTarget:  opts.DialTarget,
 		transport:   tr,
 	}
 }
@@ -419,9 +436,11 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	r = r.WithContext(context.WithValue(r.Context(), targetInfoCtxKey{}, targetInfo))
+
 	// Handle WebSocket Upgrade
 	if isWebSocketUpgrade(r) {
-		p.serveWebSocket(w, r, targetInfo.IPAddress, match.Port, match.SubPath)
+		p.serveWebSocket(w, r, targetInfo, match.Port, match.SubPath)
 		return
 	}
 
@@ -429,7 +448,7 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if match.Prefix != "" && previewPrefixIsValid(match.Prefix) {
 		w = newHTMLPrefixWriter(w, match.Prefix+"/")
 	}
-	p.serveHTTP(w, r, targetInfo.IPAddress, match.Port, match.SubPath)
+	p.serveHTTP(w, r, targetInfo, match.Port, match.SubPath)
 	if hw, ok := w.(*htmlPrefixWriter); ok {
 		hw.finalize()
 	}
@@ -574,16 +593,22 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // serveWebSocket performs bidirectional raw TCP tunneling / hijacking for WebSocket traffic.
-func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, targetIP string, port int, subPath string) {
+func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, target *TargetInfo, port int, subPath string) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "websocket hijacking not supported by server", http.StatusInternalServerError)
 		return
 	}
 
-	targetAddr := net.JoinHostPort(targetIP, strconv.Itoa(port))
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	backendConn, err := dialer.DialContext(r.Context(), "tcp", targetAddr)
+	targetAddr := net.JoinHostPort(target.IPAddress, strconv.Itoa(port))
+	var backendConn net.Conn
+	var err error
+	if p.dialTarget != nil && target.WorkerID != "" && target.WorkerID != "nod_host_local" {
+		backendConn, err = p.dialTarget(r.Context(), target, "tcp", targetAddr)
+	} else {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		backendConn, err = dialer.DialContext(r.Context(), "tcp", targetAddr)
+	}
 	if err != nil {
 		http.Error(w, "failed to connect to upstream websocket service: "+err.Error(), http.StatusBadGateway)
 		return
@@ -622,7 +647,8 @@ func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, ta
 }
 
 // serveHTTP proxies HTTP/1.1 and HTTP/2 requests with immediate unbuffered flush for streaming/SSE.
-func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, targetIP string, port int, subPath string) {
+func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target *TargetInfo, port int, subPath string) {
+	targetIP := target.IPAddress
 	targetURL, err := url.Parse(fmt.Sprintf("http://%s:%d", targetIP, port))
 	if err != nil {
 		http.Error(w, "failed to parse upstream url: "+err.Error(), http.StatusInternalServerError)
@@ -639,6 +665,9 @@ func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, targetI
 		originalDirector(req)
 		req.URL.Path = subPath
 		req.Host = fmt.Sprintf("%s:%d", targetIP, port)
+		if target.WorkerID != "" && target.WorkerID != "nod_host_local" {
+			req.Close = true
+		}
 		req.Header.Set("X-Forwarded-Host", r.Host)
 		if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			req.Header.Set("X-Forwarded-For", clientIP)

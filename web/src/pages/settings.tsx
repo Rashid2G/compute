@@ -5,7 +5,6 @@ import {
   Network,
   Palette,
   Radio,
-  RefreshCw,
   Server,
   Sliders,
   Sun,
@@ -17,11 +16,15 @@ import type {
   AuditEventRecord,
   AuthUser,
   DaemonConfig,
+  ImageListItem,
   NetworkAllocation,
   NetworkConfig,
+  PortForwardRecord,
   StatsResult,
+  Template,
   VM,
   VolumeRecord,
+  WorkerTokenRecord,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { AccessPage } from '@/pages/access';
@@ -44,6 +47,10 @@ interface SettingsPageProps {
   volumes?: VolumeRecord[];
   allocations?: NetworkAllocation[];
   networkConfig?: NetworkConfig | null;
+  portForwards?: PortForwardRecord[];
+  workerTokens?: WorkerTokenRecord[];
+  templates?: Template[];
+  images?: ImageListItem[];
   events?: AuditEventRecord[];
   currentUser?: AuthUser | null;
   onRefresh?: () => void;
@@ -77,6 +84,10 @@ export function SettingsPage({
   volumes = [],
   allocations = [],
   networkConfig = null,
+  portForwards,
+  workerTokens,
+  templates,
+  images,
   events = [],
   currentUser = null,
   onRefresh,
@@ -259,21 +270,11 @@ export function SettingsPage({
                   Maintenance &amp; Diagnostics
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Reconcile live control-plane state, refresh cluster telemetry,
-                  or jump to worker quotas.
+                  Live control-plane telemetry streams automatically over WebSocket.
+                  Jump to workers to manage pool capacity and quotas.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {onRefresh && (
-                  <button
-                    type="button"
-                    onClick={onRefresh}
-                    className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-foreground hover:border-primary transition-colors"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Refresh Cluster State</span>
-                  </button>
-                )}
                 {onNavigate && (
                   <button
                     type="button"
@@ -403,7 +404,11 @@ export function SettingsPage({
       {/* TAB 3: Access & Keys */}
       {activeTab === 'access' && (
         <div className="space-y-8">
-          <AccessPage currentUser={currentUser} embedded />
+          <AccessPage
+            currentUser={currentUser}
+            workerTokens={workerTokens}
+            embedded
+          />
           <ApiPage config={config} embedded />
         </div>
       )}
@@ -412,6 +417,8 @@ export function SettingsPage({
       {activeTab === 'environment' && (
         <ImagesTemplatesPage
           vms={vms}
+          templates={templates}
+          images={images}
           mode="environment"
           onLaunchVM={onLaunchVM ?? (() => {})}
           onNavigate={onNavigate}
@@ -425,6 +432,7 @@ export function SettingsPage({
         <NetworkPage
           allocations={allocations}
           networkConfig={networkConfig}
+          portForwards={portForwards}
           onRefresh={onRefresh ?? (() => {})}
           embedded
         />
