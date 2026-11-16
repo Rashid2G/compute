@@ -103,3 +103,48 @@ func TestParseRouteOwnerScopedPath(t *testing.T) {
 		t.Fatalf("empty owner segment should not match: %+v", m)
 	}
 }
+
+func TestParseRouteRefererFallbackForRootAssets(t *testing.T) {
+	p := NewIngressProxy(ProxyOptions{BaseDomains: []string{"compute.tail1234.ts.net"}})
+
+	r := httptest.NewRequest("GET", "https://compute.tail1234.ts.net/assets/chunk-abc.js", nil)
+	r.Host = "compute.tail1234.ts.net"
+	r.Header.Set("Referer", "https://compute.tail1234.ts.net/preview/web/8080/")
+	m := p.ParseRoute(r)
+	if !m.IsMatch || m.Target != "web" || m.Port != 8080 {
+		t.Fatalf("root asset should route to the referer's sandbox: %+v", m)
+	}
+	if m.SubPath != "/assets/chunk-abc.js" {
+		t.Fatalf("subpath = %q, want the requested path", m.SubPath)
+	}
+	if m.Prefix != "/preview/web/8080" {
+		t.Fatalf("prefix = %q", m.Prefix)
+	}
+
+	// Owner-scoped preview URLs keep the owner so private lookups stay scoped.
+	r = httptest.NewRequest("GET", "https://compute.tail1234.ts.net/api/auth/session", nil)
+	r.Host = "compute.tail1234.ts.net"
+	r.Header.Set("Referer", "https://compute.tail1234.ts.net/preview/@alice/web/8080/index.html")
+	m = p.ParseRoute(r)
+	if !m.IsMatch || m.Owner != "alice" || m.Target != "web" || m.Port != 8080 {
+		t.Fatalf("owner-scoped referer route: %+v", m)
+	}
+	if m.SubPath != "/api/auth/session" {
+		t.Fatalf("subpath = %q", m.SubPath)
+	}
+
+	// Referers from another host, or without a preview path, must not route.
+	r = httptest.NewRequest("GET", "https://compute.tail1234.ts.net/assets/app.js", nil)
+	r.Host = "compute.tail1234.ts.net"
+	r.Header.Set("Referer", "https://evil.example/assets/app.js")
+	if m := p.ParseRoute(r); m.IsMatch {
+		t.Fatalf("cross-host referer must not route: %+v", m)
+	}
+
+	r = httptest.NewRequest("GET", "https://compute.tail1234.ts.net/api/v1/version", nil)
+	r.Host = "compute.tail1234.ts.net"
+	r.Header.Set("Referer", "https://compute.tail1234.ts.net/")
+	if m := p.ParseRoute(r); m.IsMatch {
+		t.Fatalf("non-preview referer must not route: %+v", m)
+	}
+}

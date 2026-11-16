@@ -205,6 +205,77 @@ func TestIngressProxy_PreviewHTMLSurvivesCompressedUpstream(t *testing.T) {
 	assertRewrittenHTML("gzip upstream", res, body)
 }
 
+func TestIngressProxy_RefererRoutesRootAbsoluteAssets(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	guestListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guestListener.Close()
+	guestPort := guestListener.Addr().(*net.TCPAddr).Port
+
+	guestMux := http.NewServeMux()
+	guestMux.HandleFunc("/assets/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript")
+		_, _ = w.Write([]byte("console.log('sandbox asset')"))
+	})
+	guestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head></head><body>app</body></html>`))
+	})
+	guestServer := &http.Server{Handler: guestMux}
+	go guestServer.Serve(guestListener)
+	defer guestServer.Close()
+
+	mtSignup(t, env.ts, "assets@test.local", "assets", "password123!")
+	token, userID := mtLogin(t, env.ts, "assets", "password123!")
+	vm := &db.VM{
+		ID:        "asset-app",
+		Name:      "asset-app",
+		OwnerID:   userID,
+		Status:    db.StatusRunning,
+		IPAddress: "127.0.0.1",
+	}
+	if err := env.vmStore.SaveVM(context.Background(), vm); err != nil {
+		t.Fatal(err)
+	}
+
+	previewPath := fmt.Sprintf("/preview/%s/%d/", vm.Name, guestPort)
+	previewURL := env.ts.URL + previewPath
+
+	// Sanity check: the document itself loads through the preview path.
+	reqDoc, _ := http.NewRequest(http.MethodGet, previewURL, nil)
+	reqDoc.Header.Set("Authorization", "Bearer "+token)
+	resDoc, err := http.DefaultClient.Do(reqDoc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resDoc.Body.Close()
+	if resDoc.StatusCode != http.StatusOK {
+		t.Fatalf("preview document status = %d", resDoc.StatusCode)
+	}
+
+	// Root-absolute asset request (as emitted by bundlers that assume they are
+	// served from "/") carries the preview page as Referer and must be routed
+	// back to the same sandbox.
+	reqAsset, _ := http.NewRequest(http.MethodGet, env.ts.URL+"/assets/app.js", nil)
+	reqAsset.Header.Set("Authorization", "Bearer "+token)
+	reqAsset.Header.Set("Referer", previewURL)
+	resAsset, err := http.DefaultClient.Do(reqAsset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resAsset.Body)
+	resAsset.Body.Close()
+	if resAsset.StatusCode != http.StatusOK {
+		t.Fatalf("asset status = %d: %s", resAsset.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "sandbox asset") {
+		t.Fatalf("asset was not served by the sandbox: %s", body)
+	}
+}
+
 func TestIngressProxy_SubdomainRouting(t *testing.T) {
 	env := newMultiTenantServer(t)
 

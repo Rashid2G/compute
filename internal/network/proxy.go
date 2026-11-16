@@ -177,7 +177,57 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 		return m
 	}
 
+	// 3. Fall back to the preview context advertised by the Referer. Apps that
+	// build URLs from their origin (root-absolute dynamic imports such as
+	// "/assets/chunk.js", or API bases derived from window.location.origin)
+	// request paths outside the prefix. Browsers send the full page URL as the
+	// Referer for same-origin subresources, so route those requests back to the
+	// sandbox that served the page.
+	if m, ok := parseRefererPreviewRoute(r); ok {
+		return m
+	}
+
 	return RouteMatch{IsMatch: false}
+}
+
+// parseRefererPreviewRoute derives a preview route from a same-origin Referer
+// whose path points at a preview URL. The request's own path becomes the
+// upstream subpath so the sandbox sees the URL it actually asked for.
+func parseRefererPreviewRoute(r *http.Request) (RouteMatch, bool) {
+	ref := strings.TrimSpace(r.Header.Get("Referer"))
+	if ref == "" {
+		return RouteMatch{}, false
+	}
+	u, err := url.Parse(ref)
+	if err != nil || u.Host == "" {
+		return RouteMatch{}, false
+	}
+	if !strings.EqualFold(stripPort(u.Host), stripPort(r.Host)) {
+		return RouteMatch{}, false
+	}
+	refMatch, ok := parsePathRoute(u.Path)
+	if !ok || refMatch.Prefix == "" {
+		return RouteMatch{}, false
+	}
+	subPath := r.URL.Path
+	if subPath == "" {
+		subPath = "/"
+	}
+	return RouteMatch{
+		Target:  refMatch.Target,
+		Port:    refMatch.Port,
+		Owner:   refMatch.Owner,
+		SubPath: subPath,
+		Prefix:  refMatch.Prefix,
+		IsMatch: true,
+	}, true
+}
+
+func stripPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
 }
 
 // parseSubdomain parses the labels preceding a base domain. A single label is
@@ -565,9 +615,10 @@ var P="` + prefix + `";
 var B=P.slice(0,-1);
 var O=location.origin;
 var WO=(location.protocol==="https:"?"wss://":"ws://")+location.host;
-function D(u){return typeof u==="string"&&(u.indexOf(O+"/")===0||u.indexOf(WO+"/")===0);}
-function A(u){if(typeof u!=="string")return false;if(u.indexOf(O+P.slice(1))===0||u.indexOf(WO+P.slice(1))===0)return false;if(D(u))return true;return u.charAt(0)==="/"&&u.charAt(1)!=="/"&&u!==B&&u.indexOf(P)!==0;}
-function R(u){if(u.indexOf(O+"/")===0)return O+P+u.slice(O.length+1);if(u.indexOf(WO+"/")===0)return WO+P+u.slice(WO.length+1);return P+u.slice(1);}
+function T(u){return u instanceof URL?u.toString():typeof u==="string"?u:"";}
+function D(u){u=T(u);return u!==""&&(u.indexOf(O+"/")===0||u.indexOf(WO+"/")===0);}
+function A(u){u=T(u);if(u==="")return false;if(u.indexOf(O+P.slice(1))===0||u.indexOf(WO+P.slice(1))===0)return false;if(D(u))return true;return u.charAt(0)==="/"&&u.charAt(1)!=="/"&&u!==B&&u.indexOf(P)!==0;}
+function R(u){u=T(u);if(u.indexOf(O+"/")===0)return O+P+u.slice(O.length+1);if(u.indexOf(WO+"/")===0)return WO+P+u.slice(WO.length+1);return P+u.slice(1);}
 var F=window.fetch;
 if(F)window.fetch=function(){if(A(arguments[0]))arguments[0]=R(arguments[0]);return F.apply(this,arguments);};
 var X=XMLHttpRequest&&XMLHttpRequest.prototype.open;
