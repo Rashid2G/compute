@@ -836,7 +836,18 @@ export interface PoolMigrationResponse {
 
 export interface BulkVMsRequest {
   ids: string[];
-  action?: 'start' | 'stop' | 'save-state' | 'snapshot' | 'resume' | 'delete' | string;
+  action?:
+    | 'start'
+    | 'stop'
+    | 'restart'
+    | 'save-state'
+    | 'snapshot'
+    | 'resume'
+    | 'protect'
+    | 'unprotect'
+    | 'delete'
+    | string;
+  async?: boolean;
 }
 
 export interface BulkVMItemError {
@@ -846,9 +857,39 @@ export interface BulkVMItemError {
 
 export interface BulkVMsResponse {
   action?: string;
+  status?: 'queued' | 'completed' | string;
+  task_id?: string;
+  queued?: number;
   requested: number;
   succeeded: string[];
   failed: BulkVMItemError[];
+}
+
+export interface BulkCreateVMsRequest {
+  items: CreateVMRequest[];
+  async?: boolean;
+}
+
+export interface BulkCloneItem extends CreateVMRequest {
+  source_id: string;
+}
+
+export interface BulkCloneVMsRequest {
+  source_id?: string;
+  names?: string[];
+  items?: BulkCloneItem[];
+  description?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  disk_mb?: number;
+  disk_gb?: number;
+  network_isolation?: NetworkIsolationMode;
+  network_isolated?: boolean;
+  auto_start?: boolean;
+  protected?: boolean;
+  worker_id?: string;
+  pool_id?: string;
+  async?: boolean;
 }
 
 export interface ResourceLimitErrorDetails {

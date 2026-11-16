@@ -266,9 +266,14 @@ export function InstancesPage({
     setTimeout(() => setCopiedId(null), 1500);
   };
 
+  const hasPropVolumesRef = useRef(propVolumes !== undefined);
+  const hasPropPortForwardsRef = useRef(propPortForwards !== undefined);
+  hasPropVolumesRef.current = propVolumes !== undefined;
+  hasPropPortForwardsRef.current = propPortForwards !== undefined;
+
   const loadSandboxConnectivity = useCallback(async (force = false) => {
-    const needVolumes = force || propVolumes === undefined;
-    const needForwards = force || propPortForwards === undefined;
+    const needVolumes = force || !hasPropVolumesRef.current;
+    const needForwards = force || !hasPropPortForwardsRef.current;
     if (!needVolumes && !needForwards) return;
 
     if (needVolumes) setVolumesLoading(true);
@@ -285,7 +290,7 @@ export function InstancesPage({
     }
     setVolumesLoading(false);
     setForwardsLoading(false);
-  }, [propVolumes, propPortForwards]);
+  }, []);
 
   const selectedVMKey = selectedVM?.id ?? null;
 
@@ -373,8 +378,7 @@ export function InstancesPage({
     setRestartingId(vm.id);
     const toastID = toast.loading(`Restarting ${vmName}…`);
     try {
-      await api.stopVM(vm.id);
-      await api.runVM(vm.id);
+      await api.restartVM(vm.id);
       toast.success(`${vmName} restarted`, { id: toastID });
       await onRefresh?.();
     } catch (err) {
@@ -456,14 +460,40 @@ export function InstancesPage({
     }
   }
 
-  function confirmStop() {
+  async function confirmStop() {
     const targets = stopConfirmTargets ?? [];
     if (targets.length === 0) return;
     setStopConfirmTargets(null);
     setSelectedIds((prev) =>
       prev.filter((id) => !targets.some((vm) => vm.id === id)),
     );
-    void Promise.allSettled(targets.map((vm) => Promise.resolve(onStop(vm))));
+    if (targets.length === 1) {
+      await Promise.resolve(onStop(targets[0])).catch(() => {});
+      return;
+    }
+    const toastID = toast.loading(`Queueing stop for ${targets.length} sandboxes…`);
+    try {
+      const res = await api.bulkActionVMs({
+        ids: targets.map((vm) => vm.id),
+        action: 'stop',
+        async: true,
+      });
+      if (res.status === 'queued') {
+        toast.success(`Queued stop for ${res.queued ?? targets.length} sandboxes`, {
+          id: toastID,
+        });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Stopped ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Stopped ${res.succeeded.length} sandboxes`, { id: toastID });
+      }
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Stop failed: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   async function handleBatchStart() {
@@ -474,8 +504,34 @@ export function InstancesPage({
       toast.info('None of the selected sandboxes can be started.');
       return;
     }
-    await Promise.all(toStart.map((vm) => onRun(vm)));
     setSelectedIds([]);
+    if (toStart.length === 1) {
+      await onRun(toStart[0]);
+      return;
+    }
+    const toastID = toast.loading(`Queueing start for ${toStart.length} sandboxes…`);
+    try {
+      const res = await api.bulkActionVMs({
+        ids: toStart.map((vm) => vm.id),
+        action: 'start',
+        async: true,
+      });
+      if (res.status === 'queued') {
+        toast.success(`Queued start for ${res.queued ?? toStart.length} sandboxes`, {
+          id: toastID,
+        });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Started ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Started ${res.succeeded.length} sandboxes`, { id: toastID });
+      }
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Start failed: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   function requestBatchStop() {
@@ -497,31 +553,91 @@ export function InstancesPage({
       toast.info('Only running sandboxes can be snapshotted.');
       return;
     }
-    await Promise.all(toSnap.map((vm) => onSnapshot(vm)));
     setSelectedIds([]);
+    if (toSnap.length === 1) {
+      await onSnapshot(toSnap[0]);
+      return;
+    }
+    const toastID = toast.loading(`Queueing pause/snapshot for ${toSnap.length} sandboxes…`);
+    try {
+      const res = await api.bulkActionVMs({
+        ids: toSnap.map((vm) => vm.id),
+        action: 'snapshot',
+        async: true,
+      });
+      if (res.status === 'queued') {
+        toast.success(`Queued pause for ${res.queued ?? toSnap.length} sandboxes`, {
+          id: toastID,
+        });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Paused ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Paused ${res.succeeded.length} sandboxes`, { id: toastID });
+      }
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Snapshot failed: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   async function handleBatchClone() {
     if (selectedIds.length === 0) return;
-    const toastID = toast.loading(`Cloning ${selectedIds.length} sandbox(es)…`);
+    const idsToClone = [...selectedIds];
+    setSelectedIds([]);
+    if (idsToClone.length === 1) {
+      const id = idsToClone[0];
+      const source = vms.find((v) => v.id === id);
+      const cloneName = source
+        ? `${source.name}-clone`
+        : `sbx-clone-${id.slice(0, 6)}`;
+      const toastID = toast.loading(`Cloning ${source?.name || id}…`);
+      try {
+        await api.cloneVM(id, {
+          name: cloneName,
+          vcpus: source?.vcpus || 2,
+          memory_mb: source?.memory_mb,
+        });
+        toast.success(`Cloned ${cloneName}`, { id: toastID });
+        await onRefresh?.();
+      } catch (err) {
+        toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
+        await onRefresh?.();
+      }
+      return;
+    }
+
+    const toastID = toast.loading(`Queueing clone of ${idsToClone.length} sandboxes…`);
     try {
-      await Promise.all(
-        selectedIds.map(async (id) => {
-          const source = vms.find((v) => v.id === id);
-          const cloneName = source
-            ? `${source.name}-clone`
-            : `sbx-clone-${id.slice(0, 6)}`;
-          await api.cloneVM(id, {
-            name: cloneName,
-            vcpus: source?.vcpus || 2,
-            memory_mb: source?.memory_mb,
-          });
-        }),
-      );
-      toast.success(`Successfully cloned ${selectedIds.length} sandbox(es)`, {
-        id: toastID,
+      const items = idsToClone.map((id) => {
+        const source = vms.find((v) => v.id === id);
+        const cloneName = source
+          ? `${source.name}-clone`
+          : `sbx-clone-${id.slice(0, 6)}`;
+        return {
+          source_id: id,
+          name: cloneName,
+          vcpus: source?.vcpus || 2,
+          memory_mb: source?.memory_mb,
+        };
       });
-      setSelectedIds([]);
+      const res = await api.bulkCloneVMs({ items, async: true });
+      if (res.status === 'queued') {
+        toast.success(`Queued clone of ${res.queued ?? idsToClone.length} sandboxes`, {
+          id: toastID,
+        });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Cloned ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Successfully cloned ${res.succeeded.length} sandboxes`, {
+          id: toastID,
+        });
+      }
       await onRefresh?.();
     } catch (err) {
       toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
@@ -552,16 +668,30 @@ export function InstancesPage({
     const toastID = toast.loading(
       targets.length === 1
         ? 'Disabling protection…'
-        : `Disabling protection for ${targets.length} sandboxes…`,
+        : `Queueing protection removal for ${targets.length} sandboxes…`,
     );
     try {
-      await Promise.all(ids.map((id) => api.unprotectVM(id)));
-      if (targets.length === 1) {
-        toast.success(`Sandbox ${targets[0].name} protection disabled`, { id: toastID });
-      } else {
-        toast.success(`Protection disabled for ${targets.length} sandboxes`, {
+      if (ids.length === 1) {
+        await api.unprotectVM(ids[0]);
+        toast.success(`Sandbox ${targets[0]?.name || ids[0]} protection disabled`, {
           id: toastID,
         });
+      } else {
+        const res = await api.bulkActionVMs({
+          ids,
+          action: 'unprotect',
+          async: true,
+        });
+        if (res.status === 'queued') {
+          toast.success(
+            `Queued protection removal for ${res.queued ?? ids.length} sandboxes`,
+            { id: toastID },
+          );
+        } else {
+          toast.success(`Protection disabled for ${res.succeeded.length} sandboxes`, {
+            id: toastID,
+          });
+        }
       }
       onRefresh?.();
     } catch (err) {
@@ -608,10 +738,17 @@ export function InstancesPage({
     if (onBulkDelete) {
       await onBulkDelete(ids);
     } else {
-      const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
+      const toastID = toast.loading(`Queueing deletion of ${ids.length} sandbox(es)…`);
       try {
-        await Promise.all(ids.map((id) => api.deleteVM(id)));
-        toast.success(`Deleted ${ids.length} sandbox(es)`, { id: toastID });
+        const res = await api.bulkDeleteVMs(ids, { async: true });
+        if (res.status === 'queued') {
+          toast.success(`Queued deletion of ${res.queued ?? ids.length} sandbox(es)`, {
+            id: toastID,
+          });
+        } else {
+          toast.success(`Deleted ${res.succeeded.length} sandbox(es)`, { id: toastID });
+        }
+        await onRefresh?.();
       } catch (err) {
         toast.error(`Delete failed: ${errorMessage(err)}`, { id: toastID });
         throw err;

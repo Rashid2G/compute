@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ChevronDown, Play, Shield, X } from 'lucide-react';
 
 import { api } from '@/lib/api';
@@ -23,6 +23,7 @@ interface CreateVMDialogProps {
   templates?: Template[];
   stats?: StatsResult | null;
   onCreate: (payload: CreateVMRequest, autoStart: boolean) => Promise<void>;
+  onBulkCreate?: (payloads: CreateVMRequest[], autoStart: boolean) => Promise<void>;
 }
 
 type PlacementMode = 'auto' | 'pool' | 'worker';
@@ -58,11 +59,12 @@ export function CreateVMDialog({
   templates: propTemplates,
   stats: propStats,
   onCreate,
+  onBulkCreate,
 }: CreateVMDialogProps) {
   const [vcpus, setVcpus] = useState<1 | 2 | 4>(1);
-  const [memoryMb, setMemoryMb] = useState(512);
-  const [diskGb, setDiskGb] = useState<number>(DEFAULT_DISK_GB);
-  const [count, setCount] = useState<number>(1);
+  const [memoryMbInput, setMemoryMbInput] = useState('512');
+  const [diskGbInput, setDiskGbInput] = useState(String(DEFAULT_DISK_GB));
+  const [countInput, setCountInput] = useState('1');
   const [sandboxName, setSandboxName] = useState('');
   const [fromSource, setFromSource] = useState('fresh');
   const [placementMode, setPlacementMode] = useState<PlacementMode>('auto');
@@ -80,6 +82,16 @@ export function CreateVMDialog({
   const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
   const [fetchedStats, setFetchedStats] = useState<StatsResult | null>(null);
 
+  const memoryTouchedRef = useRef(false);
+  const hasPropTemplatesRef = useRef(Boolean(propTemplates && propTemplates.length > 0));
+  const hasPropWorkersRef = useRef(Boolean(propWorkers && propWorkers.length > 0));
+  const hasPropPoolsRef = useRef(Boolean(propPools && propPools.length > 0));
+  const hasPropStatsRef = useRef(Boolean(propStats));
+  hasPropTemplatesRef.current = Boolean(propTemplates && propTemplates.length > 0);
+  hasPropWorkersRef.current = Boolean(propWorkers && propWorkers.length > 0);
+  hasPropPoolsRef.current = Boolean(propPools && propPools.length > 0);
+  hasPropStatsRef.current = Boolean(propStats);
+
   const templates = useMemo(
     () => (propTemplates && propTemplates.length > 0 ? propTemplates : fetchedTemplates),
     [propTemplates, fetchedTemplates],
@@ -96,19 +108,19 @@ export function CreateVMDialog({
 
   useEffect(() => {
     if (!open) return;
-    if (!propTemplates || propTemplates.length === 0) {
+    if (!hasPropTemplatesRef.current) {
       void api
         .listTemplates()
         .then((res) => setFetchedTemplates(res || []))
         .catch(() => setFetchedTemplates([]));
     }
-    if (!propWorkers || propWorkers.length === 0) {
+    if (!hasPropWorkersRef.current) {
       void api
         .listWorkers()
         .then((res) => setFetchedWorkers(res || []))
         .catch(() => setFetchedWorkers([]));
     }
-    if (!propPools || propPools.length === 0) {
+    if (!hasPropPoolsRef.current) {
       void api
         .listPools()
         .then((res) => setFetchedPools(res || []))
@@ -118,13 +130,13 @@ export function CreateVMDialog({
       .listKeys()
       .then((res) => setSshKeys(res || []))
       .catch(() => setSshKeys([]));
-    if (!propStats) {
+    if (!hasPropStatsRef.current) {
       void api
         .stats()
         .then((res) => setFetchedStats(res))
         .catch(() => setFetchedStats(null));
     }
-  }, [open, propTemplates, propWorkers, propPools, propStats]);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -140,8 +152,8 @@ export function CreateVMDialog({
     [workers, selectedWorkerId],
   );
 
-  // Keep the default memory inside the host's actual headroom so the first
-  // click does not immediately queue the sandbox for lack of RAM.
+  // Keep the default memory inside the host's actual headroom on initial open
+  // without overwriting user edits when live stats refresh.
   const maxUsableMb = useMemo(() => {
     const available = stats?.host_memory_available_mb ?? 0;
     if (!available) return null;
@@ -149,22 +161,27 @@ export function CreateVMDialog({
   }, [stats]);
 
   useEffect(() => {
-    if (!open || !maxUsableMb) return;
-    setMemoryMb((current) => Math.min(current, maxUsableMb));
+    if (!open || !maxUsableMb || memoryTouchedRef.current) return;
+    setMemoryMbInput((current) => {
+      const n = Number(current);
+      if (!Number.isFinite(n) || n <= 0) return current;
+      return String(Math.min(n, maxUsableMb));
+    });
   }, [open, maxUsableMb]);
 
   // Never keep a typed password or stale inputs in memory after the dialog closes.
   useEffect(() => {
     if (!open) {
+      memoryTouchedRef.current = false;
       setSandboxName('');
       setVcpus(1);
-      setMemoryMb(512);
-      setCount(1);
+      setMemoryMbInput('512');
+      setCountInput('1');
       setProtectedVM(false);
       setSshPassword('');
       setSshKeyId('');
       setNetworkIsolation('account');
-      setDiskGb(DEFAULT_DISK_GB);
+      setDiskGbInput(String(DEFAULT_DISK_GB));
       setFromSource('fresh');
       setPlacementMode('auto');
       setSelectedPoolId('');
@@ -173,6 +190,10 @@ export function CreateVMDialog({
   }, [open]);
 
   if (!open) return null;
+
+  const memoryMb = Math.max(128, Math.round(Number(memoryMbInput) || 512));
+  const diskGb = Math.max(1, Math.round(Number(diskGbInput) || DEFAULT_DISK_GB));
+  const count = Math.max(1, Math.min(20, Math.round(Number(countInput) || 1)));
 
   const willQueue = maxUsableMb !== null && memoryMb > maxUsableMb;
   const defaultKey = sshKeys.find((k) => k.is_default) ?? null;
@@ -221,18 +242,32 @@ export function CreateVMDialog({
     });
 
     onOpenChange(false);
+    memoryTouchedRef.current = false;
     setSandboxName('');
     setSshPassword('');
     setNetworkIsolation('account');
     setProtectedVM(false);
-    setDiskGb(DEFAULT_DISK_GB);
+    setDiskGbInput(String(DEFAULT_DISK_GB));
+    setMemoryMbInput('512');
     setFromSource('fresh');
     setPlacementMode('auto');
     setSelectedPoolId('');
     setSelectedWorkerId('');
-    setCount(1);
+    setCountInput('1');
 
-    void Promise.allSettled(payloads.map((payload) => onCreate(payload, true)));
+    if (payloads.length > 1) {
+      if (onBulkCreate) {
+        void onBulkCreate(payloads, true).catch(() => {});
+      } else {
+        void api.bulkCreateVMs({
+          items: payloads.map((p) => ({ ...p, auto_start: true })),
+          async: true,
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    void onCreate(payloads[0], true).catch(() => {});
   }
 
   return (
@@ -302,7 +337,7 @@ export function CreateVMDialog({
                   <button
                     key={qty}
                     type="button"
-                    onClick={() => setCount(qty)}
+                    onClick={() => setCountInput(String(qty))}
                     className={cn(
                       'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                       count === qty
@@ -320,10 +355,8 @@ export function CreateVMDialog({
               aria-label="Quantity of sandboxes to create"
               min={1}
               max={20}
-              value={count}
-              onChange={(e) =>
-                setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))
-              }
+              value={countInput}
+              onChange={(e) => setCountInput(e.target.value)}
               className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
             />
           </div>
@@ -340,12 +373,9 @@ export function CreateVMDialog({
                     key={preset.vcpus}
                     type="button"
                     onClick={() => {
+                      memoryTouchedRef.current = true;
                       setVcpus(preset.vcpus);
-                      setMemoryMb(
-                        maxUsableMb
-                          ? Math.min(preset.defaultMemoryMb, maxUsableMb)
-                          : preset.defaultMemoryMb,
-                      );
+                      setMemoryMbInput(String(preset.defaultMemoryMb));
                     }}
                     className={cn(
                       'flex flex-col items-center justify-center border py-2.5 px-1.5 text-center transition-colors',
@@ -376,10 +406,11 @@ export function CreateVMDialog({
                 aria-label="Memory in megabytes"
                 min={128}
                 step={128}
-                value={memoryMb}
-                onChange={(e) =>
-                  setMemoryMb(Math.max(128, Number(e.target.value) || 128))
-                }
+                value={memoryMbInput}
+                onChange={(e) => {
+                  memoryTouchedRef.current = true;
+                  setMemoryMbInput(e.target.value);
+                }}
                 className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>
@@ -393,7 +424,7 @@ export function CreateVMDialog({
                     <button
                       key={preset}
                       type="button"
-                      onClick={() => setDiskGb(preset)}
+                      onClick={() => setDiskGbInput(String(preset))}
                       className={cn(
                         'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                         diskGb === preset
@@ -412,10 +443,8 @@ export function CreateVMDialog({
                   aria-label="Disk size in GB"
                   min={1}
                   max={2048}
-                  value={diskGb}
-                  onChange={(e) =>
-                    setDiskGb(Math.max(1, Number(e.target.value) || DEFAULT_DISK_GB))
-                  }
+                  value={diskGbInput}
+                  onChange={(e) => setDiskGbInput(e.target.value)}
                   className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
                 />
                 <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">

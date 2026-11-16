@@ -2,6 +2,8 @@ import type {
   AccessAPIKeyRecord,
   AdminResourcesResponse,
   AuditEventRecord,
+  BulkCloneVMsRequest,
+  BulkCreateVMsRequest,
   BulkVMsRequest,
   BulkVMsResponse,
   CloneVMOptions,
@@ -148,8 +150,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     authHeaders['Authorization'] = `Bearer ${token}`;
   }
 
+  const method = (options.method || 'GET').toUpperCase();
+  const canKeepalive =
+    method !== 'GET' &&
+    method !== 'HEAD' &&
+    typeof options.body === 'string' &&
+    options.body.length < 60000;
+
   const response = await fetch(`${BASE_PATH}${path}`, {
     credentials: 'include',
+    keepalive: options.keepalive ?? canKeepalive,
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -269,10 +279,24 @@ export const api = {
     });
   },
 
+  bulkCreateVMs(payload: BulkCreateVMsRequest): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-create', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   cloneVM(id: string, nameOrOptions: string | CloneVMOptions | CreateVMRequest): Promise<VM> {
     const payload =
       typeof nameOrOptions === 'string' ? { name: nameOrOptions } : nameOrOptions;
     return request<VM>(`/vms/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  bulkCloneVMs(payload: BulkCloneVMsRequest): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-clone', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -284,6 +308,10 @@ export const api = {
 
   stopVM(id: string): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+  },
+
+  restartVM(id: string): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/restart`, { method: 'POST' });
   },
 
   snapshotVM(id: string): Promise<VM> {
@@ -308,10 +336,13 @@ export const api = {
     });
   },
 
-  bulkDeleteVMs(ids: string[]): Promise<BulkVMsResponse> {
+  bulkDeleteVMs(
+    ids: string[],
+    opts?: { async?: boolean },
+  ): Promise<BulkVMsResponse> {
     return request<BulkVMsResponse>('/vms/bulk-delete', {
       method: 'POST',
-      body: JSON.stringify({ ids }),
+      body: JSON.stringify({ ids, async: opts?.async ?? false }),
     });
   },
 
