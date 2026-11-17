@@ -44,18 +44,20 @@ import (
 )
 
 type Server struct {
-	vmMgr        *vm.Manager
-	cfg          config.GlobalConfig
-	mux          *http.ServeMux
-	workers      *scheduler.WorkerRegistry
-	scheduler    *scheduler.Scheduler
-	jobRunner    *jobs.Runner
-	authMgr      *auth.Manager
-	metaStore    *store.Store
-	fcVersion    string
-	ingressProxy *network.IngressProxy
-	dns          *dnsRuntime
-	guiHandler   http.Handler
+	vmMgr         *vm.Manager
+	cfg           config.GlobalConfig
+	mux           *http.ServeMux
+	workers       *scheduler.WorkerRegistry
+	scheduler     *scheduler.Scheduler
+	jobRunner     *jobs.Runner
+	authMgr       *auth.Manager
+	metaStore     *store.Store
+	fcVersion     string
+	ingressProxy  *network.IngressProxy
+	dns           *dnsRuntime
+	guiHandler    http.Handler
+	servePorts    *servePortRegistry
+	serveTokenKey []byte
 
 	// DNS/ingress caches (daemon-owned, response only).
 	userIndexMu     sync.RWMutex
@@ -368,9 +370,18 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	}
 	domains = append(domains, "preview.localhost", "compute.internal", "compute.dev", "localhost")
 
+	s.serveTokenKey = network.ServeTokenKey(cfg.Server.ServeTokenKey, cfg.Server.AdminSecret)
+	serveDomains := []string{}
+	if d := cfg.ServeDomainResolved(); d != "" {
+		serveDomains = append(serveDomains, d)
+	}
 	s.ingressProxy = network.NewIngressProxy(network.ProxyOptions{
-		BaseDomains: domains,
-		Resolver:    s,
+		BaseDomains:      domains,
+		ServeDomains:     serveDomains,
+		ServeResolver:    s,
+		ServeTokenKey:    s.serveTokenKey,
+		AuthorizeBaseURL: s.authorizeBaseURL(),
+		Resolver:         s,
 		Auth: func(r *http.Request, ownerID string) bool {
 			if !s.authEnabled() {
 				return true
@@ -392,6 +403,10 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 
 	s.configureAuthIntegrations()
 	s.routes()
+	s.servePorts = newServePortRegistry(s)
+	if cfg.ServeMode() == "port" {
+		s.servePorts.restore(context.Background())
+	}
 	return s
 }
 
@@ -554,25 +569,33 @@ func (s *Server) mountAttachedVolumes(ctx context.Context, v *db.VM) {
 	}
 }
 
-// applyPortForwardsForVM installs every host forwarding rule that belongs to v.
-// It is safe to call repeatedly; AddPortForward is idempotent.
+// applyPortForwardsForVM reopens the serve origins that belong to v after it
+// starts (or after a daemon restart). HostPort holds the dedicated port-mode
+// listener port; it is not a host DNAT port.
 func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
-	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || s.vmMgr.NetManager() == nil || v == nil || v.IPAddress == "" {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
 		return
 	}
 	st := s.vmMgr.GetStore()
 	pfs, err := st.ListPortForwards(ctx)
 	if err != nil {
-		log.Printf("[computed] port-forward reconcile: list failed: %v", err)
+		log.Printf("[computed] serve reconcile: list failed: %v", err)
 		return
 	}
 	for _, pf := range pfs {
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
-			log.Printf("[computed] port-forward %s (%d->%d): %v", pf.ID, pf.HostPort, pf.GuestPort, err)
-			continue
+		if s.cfg.ServeMode() == "port" && s.servePorts != nil && pf.HostPort > 0 {
+			port, err := s.servePorts.ensure(pf)
+			if err != nil {
+				log.Printf("[computed] serve %s: %v", pf.ID, err)
+				continue
+			}
+			if port != pf.HostPort || pf.PublicURL == "" {
+				pf.HostPort = port
+				pf.PublicURL = s.serveURLFor("", port)
+			}
 		}
 		if pf.Status != "active" {
 			pf.Status = "active"
@@ -597,10 +620,10 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if v.IPAddress != "" && s.vmMgr.NetManager() != nil {
-			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
-		}
 		if deleteRecords {
+			// Deleting the sandbox frees its serve origins; stopping it keeps
+			// them so the URLs stay stable (requests return 503 while stopped).
+			s.releaseServe(pf)
 			_ = st.DeletePortForward(ctx, pf.ID)
 			continue
 		}
@@ -685,6 +708,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/ready", s.handleReady)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
+	s.mux.HandleFunc("/api/v1/serve/authorize", s.wrapAuth(s.handleServeAuthorize))
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
 
@@ -747,7 +771,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ci/repos/", s.wrapAuth(s.handleCIRepoActions))
 	s.mux.HandleFunc("/api/v1/ci/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
-	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
 	s.mux.HandleFunc("/", s.handleRoot)
 
 	// Volumes
@@ -878,6 +901,17 @@ func (s *Server) IsPortPublic(ctx context.Context, idOrName string, port int) bo
 	return false
 }
 
+// IsPortPublicForOwner checks whether a given guest port on a VM owned by ownerID
+// is configured for public exposure.
+func (s *Server) IsPortPublicForOwner(ctx context.Context, ownerID, idOrName string, port int) bool {
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		if s.vmMgr.GetStore().IsPortForwardPublicForOwner(ctx, ownerID, idOrName, port) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.ingressProxy != nil && s.ingressProxy.ShouldHandle(r) {
 		s.ingressProxy.ServeHTTP(w, r)
@@ -919,7 +953,15 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	info := version.Get("computed", "Compute Daemon")
+	// Advertise the externally reachable base URL so CLI clients can print
+	// absolute preview links even when they reach the daemon over loopback.
+	info := struct {
+		version.Info
+		PublicURL string `json:"public_url,omitempty"`
+	}{
+		Info:      version.Get("computed", "Compute Daemon"),
+		PublicURL: s.cfg.Server.NormalizedPublicURL(),
+	}
 	_ = json.NewEncoder(w).Encode(info)
 }
 
@@ -1358,6 +1400,14 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "processes" || action == "process" {
 		s.handleVMProcesses(w, r, vmID, parts[2:])
+		return
+	}
+	if action == "ports" || action == "expose" || action == "unexpose" {
+		s.handleVMPorts(w, r, v, action, parts[2:])
+		return
+	}
+	if action == "serve-token" {
+		s.handleServeToken(w, r, v)
 		return
 	}
 	if r.Method != http.MethodPost {

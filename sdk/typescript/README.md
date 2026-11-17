@@ -30,7 +30,7 @@ async function main() {
   console.log(code);
 
   // 4. Ingress preview URL
-  const previewUrl = sandbox.getPreviewURL(3000);
+  const { url: serveUrl } = await sandbox.exposePort(3000);
   console.log('Preview:', previewUrl);
 
   // 5. Clean up

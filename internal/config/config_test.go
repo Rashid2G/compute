@@ -253,3 +253,91 @@ func TestResolveConfigPath(t *testing.T) {
 		t.Fatalf("expected cfg.ConfigPath %s, got %s", customPath, cfg.ConfigPath)
 	}
 }
+
+func TestServerConfigNormalizedPublicURL(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"https://compute-lab.tailb1be99.ts.net/", "https://compute-lab.tailb1be99.ts.net"},
+		{"http://127.0.0.1:18080", "http://127.0.0.1:18080"},
+		{"compute-lab.tailb1be99.ts.net", "https://compute-lab.tailb1be99.ts.net"},
+		{"  https://example.com/base/  ", "https://example.com/base"},
+	}
+	for _, tc := range cases {
+		if got := (ServerConfig{PublicURL: tc.in}).NormalizedPublicURL(); got != tc.want {
+			t.Errorf("NormalizedPublicURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestServeModeSelection(t *testing.T) {
+	cases := []struct {
+		name   string
+		server ServerConfig
+		mode   string
+		domain string
+	}{
+		{
+			name:   "explicit serve domain",
+			server: ServerConfig{ListenAddr: "0.0.0.0:18080", ServeDomain: "serves.example.com"},
+			mode:   "subdomain",
+			domain: "serves.example.com",
+		},
+		{
+			name:   "loopback defaults to localhost subdomains",
+			server: ServerConfig{ListenAddr: "127.0.0.1:18080"},
+			mode:   "subdomain",
+			domain: "localhost",
+		},
+		{
+			name:   "public URL forces port mode",
+			server: ServerConfig{ListenAddr: "127.0.0.1:18080", PublicURL: "https://compute-lab.tailb1be99.ts.net"},
+			mode:   "port",
+			domain: "",
+		},
+		{
+			name:   "non-loopback bind without a domain uses ports",
+			server: ServerConfig{ListenAddr: "0.0.0.0:18080"},
+			mode:   "port",
+			domain: "",
+		},
+	}
+	for _, tc := range cases {
+		cfg := GlobalConfig{Server: tc.server}
+		if got := cfg.ServeMode(); got != tc.mode {
+			t.Errorf("%s: ServeMode() = %q, want %q", tc.name, got, tc.mode)
+		}
+		if got := cfg.ServeDomainResolved(); got != tc.domain {
+			t.Errorf("%s: ServeDomainResolved() = %q, want %q", tc.name, got, tc.domain)
+		}
+	}
+}
+
+func TestServePortRangeAndScheme(t *testing.T) {
+	cfg := GlobalConfig{Server: ServerConfig{}}
+	start, end := cfg.ServePortRange()
+	if start != 18400 || end != 18500 {
+		t.Fatalf("default range = %d-%d", start, end)
+	}
+
+	cfg.Server.ServePortStart = 20000
+	cfg.Server.ServePortEnd = 19999
+	start, end = cfg.ServePortRange()
+	if start != 20000 || end != 20000 {
+		t.Fatalf("clamped range = %d-%d", start, end)
+	}
+
+	if got := (GlobalConfig{Server: ServerConfig{ServeDomain: "serves.example.com"}}).ServeScheme(); got != "https" {
+		t.Fatalf("subdomain scheme = %q, want https", got)
+	}
+	if got := (GlobalConfig{Server: ServerConfig{PublicURL: "https://compute.example.com"}}).ServeScheme(); got != "http" {
+		t.Fatalf("port-mode scheme = %q, want http without serve TLS", got)
+	}
+	if got := (GlobalConfig{Server: ServerConfig{}}).ServeScheme(); got != "http" {
+		t.Fatalf("scheme = %q, want http", got)
+	}
+	if got := (GlobalConfig{Server: ServerConfig{ServeTLSCertFile: "/cert"}}).ServeScheme(); got != "https" {
+		t.Fatalf("scheme with serve TLS = %q, want https", got)
+	}
+}

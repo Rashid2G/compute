@@ -181,10 +181,10 @@ export function InstancesPage({
   );
   const [forwardsLoading, setForwardsLoading] = useState(false);
   const [addForwardOpen, setAddForwardOpen] = useState(false);
-  const [fwHostPort, setFwHostPort] = useState('8080');
   const [fwGuestPort, setFwGuestPort] = useState('8080');
   const [fwProtocol, setFwProtocol] = useState<'TCP' | 'HTTP/HTTPS'>('TCP');
   const [fwSubdomain, setFwSubdomain] = useState('');
+  const [fwPublic, setFwPublic] = useState(true);
 
   useEffect(() => {
     if (propVolumes) setVolumes(propVolumes);
@@ -424,41 +424,40 @@ export function InstancesPage({
   async function handleAddPortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedVM) return;
-    const hostPort = Number(fwHostPort);
     const guestPort = Number(fwGuestPort);
-    if (!hostPort || !guestPort) {
-      toast.error('Host and guest ports are required');
+    if (!guestPort) {
+      toast.error('A guest port is required');
       return;
     }
-    const toastID = toast.loading(`Adding port forward :${hostPort} → :${guestPort}…`);
+    const label = `:${guestPort}`;
+    const toastID = toast.loading(`Adding port exposure ${label}…`);
     try {
       await api.createPortForward({
-        host_port: hostPort,
         guest_port: guestPort,
         vm_id: selectedVM.id,
         vm_name: selectedVM.name,
         protocol: fwProtocol,
         subdomain: fwSubdomain.trim() || undefined,
+        public: fwPublic,
       });
-      toast.success(`Forwarding :${hostPort} → ${selectedVM.name}:${guestPort}`, {
-        id: toastID,
-      });
+      toast.success(`Exposed ${label}`, { id: toastID });
       setAddForwardOpen(false);
       setFwSubdomain('');
       await loadSandboxConnectivity(true);
     } catch (err) {
-      toast.error(`Failed to add forward: ${errorMessage(err)}`, { id: toastID });
+      toast.error(`Failed to add exposure: ${errorMessage(err)}`, { id: toastID });
     }
   }
 
   async function handleDeletePortForward(pf: PortForwardRecord) {
-    const toastID = toast.loading(`Removing port forward :${pf.host_port}…`);
+    const label = `:${pf.guest_port}`;
+    const toastID = toast.loading(`Removing port exposure ${label}…`);
     try {
       await api.deletePortForward(pf.id);
-      toast.success(`Removed port forward :${pf.host_port}`, { id: toastID });
+      toast.success(`Removed port exposure ${label}`, { id: toastID });
       await loadSandboxConnectivity(true);
     } catch (err) {
-      toast.error(`Failed to remove forward: ${errorMessage(err)}`, { id: toastID });
+      toast.error(`Failed to remove exposure: ${errorMessage(err)}`, { id: toastID });
     }
   }
 
@@ -1903,11 +1902,11 @@ export function InstancesPage({
 
               {forwardsLoading && vmPortForwards.length === 0 ? (
                 <div className="font-mono text-[11px] text-muted-foreground">
-                  Loading port forwards…
+                  Loading port exposures…
                 </div>
               ) : vmPortForwards.length === 0 ? (
                 <div className="text-[11.5px] text-muted-foreground">
-                  No custom port forwards configured.
+                  No ports exposed yet.
                 </div>
               ) : (
                 <div className="divide-y divide-border border border-border">
@@ -1918,21 +1917,28 @@ export function InstancesPage({
                     >
                       <div className="min-w-0">
                         <div className="text-foreground">
-                          :{pf.host_port} → :{pf.guest_port}{' '}
+                          {pf.host_port > 0
+                            ? `port :${pf.host_port} → :${pf.guest_port}`
+                            : `subdomain → :${pf.guest_port}`}{' '}
                           <span className="text-[10px] text-muted-foreground">
-                            ({pf.protocol})
+                            ({pf.protocol}, {pf.public ? 'public' : 'private'})
                           </span>
                         </div>
                         {pf.public_url && (
-                          <div className="truncate text-[10px] text-[color:var(--link)]">
+                          <a
+                            href={pf.public_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="block truncate text-[10px] text-[color:var(--link)] hover:underline"
+                          >
                             {pf.public_url}
-                          </div>
+                          </a>
                         )}
                       </div>
                       <button
                         type="button"
                         onClick={() => void handleDeletePortForward(pf)}
-                        aria-label={`Remove forward ${pf.host_port}`}
+                        aria-label={`Remove exposure for guest port ${pf.guest_port}`}
                         className="flex h-6 w-6 shrink-0 items-center justify-center border border-border text-muted-foreground hover:border-destructive hover:text-destructive"
                       >
                         <Trash2 className="h-3 w-3" />
@@ -1947,20 +1953,7 @@ export function InstancesPage({
                   onSubmit={(e) => void handleAddPortForward(e)}
                   className="space-y-2 border border-border bg-muted/15 p-2.5"
                 >
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Host Port
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={65535}
-                        value={fwHostPort}
-                        onChange={(e) => setFwHostPort(e.target.value)}
-                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                      />
-                    </div>
+                  <div className="grid grid-cols-2 gap-1.5">
                     <div>
                       <label className="block text-[10px] text-muted-foreground mb-0.5">
                         Guest Port
@@ -1999,6 +1992,15 @@ export function InstancesPage({
                       className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
                     />
                   )}
+                  <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={fwPublic}
+                      onChange={(e) => setFwPublic(e.target.checked)}
+                      className="h-3.5 w-3.5 border border-border"
+                    />
+                    Public URL (anyone with the link can reach it)
+                  </label>
                   <div className="flex justify-end gap-1.5">
                     <button
                       type="button"
@@ -2011,7 +2013,7 @@ export function InstancesPage({
                       type="submit"
                       className="h-6.5 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
                     >
-                      Add Forward
+                      Expose Port
                     </button>
                   </div>
                 </form>

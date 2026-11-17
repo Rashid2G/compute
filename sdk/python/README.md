@@ -30,7 +30,7 @@ pid = sandbox.process.start("python3 -m http.server 8080", cwd="/workspace")
 print(f"Server running with PID {pid}")
 
 # 5. Access Ingress Preview URL
-preview_url = sandbox.get_preview_url(8080)
+serve = sandbox.expose_port(8080)  # {"url": ..., "public": True}
 print(f"Preview URL: {preview_url}")
 
 # 6. Terminate sandbox
