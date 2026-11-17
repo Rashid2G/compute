@@ -24,11 +24,13 @@ export function CloneVMDialog({
   const [replicaCount, setReplicaCount] = useState(1);
   const [vcpus, setVcpus] = useState(2);
   const [memoryMb, setMemoryMb] = useState(2048);
-  const [diskGb, setDiskGb] = useState(20);
+  const [diskGbInput, setDiskGbInput] = useState('20');
   const [networkIsolation, setNetworkIsolation] =
     useState<NetworkIsolationMode>('account');
   const [description, setDescription] = useState('');
   const [autoStart, setAutoStart] = useState(false);
+
+  const vmId = vm?.id ?? null;
 
   useEffect(() => {
     if (!open || !vm) return;
@@ -36,11 +38,12 @@ export function CloneVMDialog({
     setReplicaCount(1);
     setVcpus(vm.vcpus || 2);
     setMemoryMb(vm.memory_mb || 2048);
-    setDiskGb(Math.max(1, Math.round((vm.disk_mb || 20480) / 1024)));
+    setDiskGbInput(String(Math.max(1, Math.round((vm.disk_mb || 20480) / 1024))));
     setNetworkIsolation(vm.network_isolation || 'account');
     setDescription(vm.description || '');
     setAutoStart(false);
-  }, [open, vm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, vmId]);
 
   if (!open || !vm) return null;
 
@@ -62,11 +65,12 @@ export function CloneVMDialog({
     const names = Array.from({ length: count }, (_, idx) =>
       count > 1 ? `${cleanBase}-${idx + 1}` : cleanBase,
     );
+    const parsedDiskGb = Math.max(1, Math.round(Number(diskGbInput) || sourceDiskGb));
 
     const payloadBase = {
       vcpus,
       memory_mb: memoryMb,
-      disk_gb: diskGb,
+      disk_gb: parsedDiskGb,
       network_isolated: networkIsolation === 'isolated',
       description: description.trim() || undefined,
       auto_start: autoStart,
@@ -76,25 +80,52 @@ export function CloneVMDialog({
 
     const toastID = toast.loading(
       count > 1
-        ? `Replicating ${count} sandboxes from ${sourceVM.name}…`
+        ? `Queueing ${count} replicas from ${sourceVM.name}…`
         : `Replicating ${sourceVM.name} as ${names[0]}…`,
     );
 
-    void Promise.all(
-      names.map((name) =>
-        api.cloneVM(sourceVM.id, {
-          name,
+    if (count === 1) {
+      void api
+        .cloneVM(sourceVM.id, {
+          name: names[0],
           ...payloadBase,
-        }),
-      ),
-    )
-      .then(() => {
-        toast.success(
-          count > 1
-            ? `Created ${count} replicas (${names[0]} … ${names[names.length - 1]})`
-            : `Replicated ${names[0]}`,
-          { id: toastID },
-        );
+        })
+        .then(() => {
+          toast.success(`Replicated ${names[0]}`, { id: toastID });
+          onCloned?.();
+        })
+        .catch((err) => {
+          toast.error(`Replication failed: ${errorMessage(err)}`, {
+            id: toastID,
+          });
+          onCloned?.();
+        });
+      return;
+    }
+
+    void api
+      .bulkCloneVMs({
+        source_id: sourceVM.id,
+        names,
+        ...payloadBase,
+        async: true,
+      })
+      .then((res) => {
+        if (res.status === 'queued') {
+          toast.success(
+            `Queued ${res.queued ?? count} replicas (${names[0]} … ${names[names.length - 1]})`,
+            {
+              id: toastID,
+              description:
+                'Replication is queued on the backend and continues even if you refresh.',
+            },
+          );
+        } else {
+          toast.success(
+            `Created ${res.succeeded?.length ?? count} replicas (${names[0]} … ${names[names.length - 1]})`,
+            { id: toastID },
+          );
+        }
         onCloned?.();
       })
       .catch((err) => {
@@ -259,10 +290,8 @@ export function CloneVMDialog({
                 aria-label="Replica disk GB"
                 min={1}
                 max={2000}
-                value={diskGb}
-                onChange={(e) =>
-                  setDiskGb(Math.max(1, Number(e.target.value) || 10))
-                }
+                value={diskGbInput}
+                onChange={(e) => setDiskGbInput(e.target.value)}
                 className="h-9 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>

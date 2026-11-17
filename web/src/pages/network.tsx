@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Network,
@@ -50,6 +50,9 @@ export function NetworkPage({
   const [pfVmId, setPfVmId] = useState('');
   const [pfProto, setPfProto] = useState('tcp');
 
+  const hasPortForwardsPropRef = useRef(portForwardsProp !== undefined);
+  hasPortForwardsPropRef.current = portForwardsProp !== undefined;
+
   useEffect(() => {
     if (portForwardsProp !== undefined) {
       setPortForwards(portForwardsProp);
@@ -57,14 +60,14 @@ export function NetworkPage({
   }, [portForwardsProp]);
 
   const loadPortForwards = useCallback(async (force = false) => {
-    if (!force && portForwardsProp !== undefined) return;
+    if (!force && hasPortForwardsPropRef.current) return;
     try {
       const list = await api.listPortForwards();
       setPortForwards(list || []);
     } catch {
       // Ignore if empty
     }
-  }, [portForwardsProp]);
+  }, []);
 
   useEffect(() => {
     void loadPortForwards();

@@ -13,12 +13,14 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/scheduler"
 	"github.com/Rashid2G/compute/internal/vm"
 	"github.com/Rashid2G/compute/pkg/api"
+	"github.com/google/uuid"
 )
 
 const migrationChunkBytes = 4 * 1024 * 1024 // 4 MiB
@@ -492,7 +494,22 @@ func (s *Server) handleVMMigrate(w http.ResponseWriter, r *http.Request, v *db.V
 		}
 	}
 
-	migrated, err := s.migrateSingleVM(r.Context(), v, req)
+	actor := getActor(r)
+	migrated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+		m, mErr := s.migrateSingleVM(bgCtx, v, req)
+		if mErr == nil && m != nil {
+			s.recordEvent("sandbox.migrated", actor, m.Name, "delivered", 100, map[string]interface{}{
+				"vm_id":     m.ID,
+				"worker_id": m.WorkerID,
+				"pool_id":   m.PoolID,
+			})
+			s.broadcastClusterUpdate()
+		}
+		return m, mErr
+	})
+	if disconnected {
+		return
+	}
 	if err != nil {
 		if writeResourceLimitError(w, r, err) {
 			return
@@ -513,11 +530,6 @@ func (s *Server) handleVMMigrate(w http.ResponseWriter, r *http.Request, v *db.V
 		httpError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.recordEvent("sandbox.migrated", getActor(r), migrated.Name, "delivered", 100, map[string]interface{}{
-		"vm_id":     migrated.ID,
-		"worker_id": migrated.WorkerID,
-		"pool_id":   migrated.PoolID,
-	})
 	s.encodeVM(w, migrated)
 }
 
@@ -829,148 +841,151 @@ func (s *Server) handlePoolMigrate(w http.ResponseWriter, r *http.Request, poolI
 		return
 	}
 
-	ctx := r.Context()
-	st := s.vmMgr.GetStore()
-	allVMs, err := st.ListVMs(ctx)
-	if err != nil {
-		httpError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Build worker->pool map before moving workers so VMs with empty PoolID resolve accurately.
-	nodes, _ := st.ListWorkerNodes(ctx)
-	workerPoolBefore := make(map[string]string, len(nodes))
-	for _, n := range nodes {
-		if n != nil {
-			workerPoolBefore[n.ID] = n.PoolID
+	actor := getActor(r)
+	resp, err, disconnected := runDetached(r, func(bgCtx context.Context) (api.PoolMigrationResponse, error) {
+		st := s.vmMgr.GetStore()
+		allVMs, err := st.ListVMs(bgCtx)
+		if err != nil {
+			return api.PoolMigrationResponse{}, err
 		}
-	}
 
-	var candidates []*db.VM
-	for _, v := range allVMs {
-		if v == nil {
-			continue
-		}
-		effectivePool := v.PoolID
-		if effectivePool == "" {
-			wid := v.WorkerID
-			if wid == "" {
-				wid = "nod_host_local"
-			}
-			effectivePool = workerPoolBefore[wid]
-		}
-		if effectivePool == poolID {
-			candidates = append(candidates, v)
-		}
-	}
-
-	resp := api.PoolMigrationResponse{
-		SourcePoolID:   poolID,
-		TargetPoolID:   req.TargetPoolID,
-		MovedWorkerIDs: []string{},
-		MigratedVMIDs:  []string{},
-	}
-
-	// 1. Move workers FIRST so newly moved workers are available in TargetPoolID
-	// for subsequent sandbox migrations (e.g. migrating into an empty pool).
-	movedWorkerSet := make(map[string]bool)
-	if migrateWorkers && req.TargetPoolID != "" {
+		// Build worker->pool map before moving workers so VMs with empty PoolID resolve accurately.
+		nodes, _ := st.ListWorkerNodes(bgCtx)
+		workerPoolBefore := make(map[string]string, len(nodes))
 		for _, n := range nodes {
-			if n == nil || n.PoolID != poolID {
-				continue
+			if n != nil {
+				workerPoolBefore[n.ID] = n.PoolID
 			}
-			n.PoolID = req.TargetPoolID
-			if err := st.SaveWorkerNode(ctx, n); err != nil {
-				resp.WorkersFailed++
-				resp.Errors = append(resp.Errors, fmt.Sprintf("worker %s: %v", n.ID, err))
-				continue
-			}
-			if s.workers != nil {
-				if live, ok := s.workers.Get(n.ID); ok {
-					live.PoolID = req.TargetPoolID
-				}
-			}
-			movedWorkerSet[n.ID] = true
-			resp.WorkersMoved++
-			resp.MovedWorkerIDs = append(resp.MovedWorkerIDs, n.ID)
 		}
 
-		// Update VM.PoolID for VMs residing on moved workers when not migrating VMs away.
-		if !migrateSandboxes {
-			for _, v := range allVMs {
-				if v == nil {
-					continue
-				}
+		var candidates []*db.VM
+		for _, v := range allVMs {
+			if v == nil {
+				continue
+			}
+			effectivePool := v.PoolID
+			if effectivePool == "" {
 				wid := v.WorkerID
 				if wid == "" {
 					wid = "nod_host_local"
 				}
-				if movedWorkerSet[wid] && v.PoolID != req.TargetPoolID {
-					v.PoolID = req.TargetPoolID
-					v.UpdatedAt = time.Now().UTC()
-					if serr := s.vmMgr.SaveVMRecord(ctx, v); serr != nil {
-						resp.Errors = append(resp.Errors, fmt.Sprintf("update pool_id for vm %s: %v", v.ID, serr))
+				effectivePool = workerPoolBefore[wid]
+			}
+			if effectivePool == poolID {
+				candidates = append(candidates, v)
+			}
+		}
+
+		out := api.PoolMigrationResponse{
+			SourcePoolID:   poolID,
+			TargetPoolID:   req.TargetPoolID,
+			MovedWorkerIDs: []string{},
+			MigratedVMIDs:  []string{},
+		}
+
+		movedWorkerSet := make(map[string]bool)
+		if migrateWorkers && req.TargetPoolID != "" {
+			for _, n := range nodes {
+				if n == nil || n.PoolID != poolID {
+					continue
+				}
+				n.PoolID = req.TargetPoolID
+				if err := st.SaveWorkerNode(bgCtx, n); err != nil {
+					out.WorkersFailed++
+					out.Errors = append(out.Errors, fmt.Sprintf("worker %s: %v", n.ID, err))
+					continue
+				}
+				if s.workers != nil {
+					if live, ok := s.workers.Get(n.ID); ok {
+						live.PoolID = req.TargetPoolID
+					}
+				}
+				movedWorkerSet[n.ID] = true
+				out.WorkersMoved++
+				out.MovedWorkerIDs = append(out.MovedWorkerIDs, n.ID)
+			}
+
+			if !migrateSandboxes {
+				for _, v := range allVMs {
+					if v == nil {
+						continue
+					}
+					wid := v.WorkerID
+					if wid == "" {
+						wid = "nod_host_local"
+					}
+					if movedWorkerSet[wid] && v.PoolID != req.TargetPoolID {
+						v.PoolID = req.TargetPoolID
+						v.UpdatedAt = time.Now().UTC()
+						if serr := s.vmMgr.SaveVMRecord(bgCtx, v); serr != nil {
+							out.Errors = append(out.Errors, fmt.Sprintf("update pool_id for vm %s: %v", v.ID, serr))
+						}
 					}
 				}
 			}
 		}
-	}
 
-	// 2. Migrate sandboxes if requested.
-	if migrateSandboxes {
-		var toMigrate []*db.VM
-		for _, v := range candidates {
-			wid := v.WorkerID
-			if wid == "" {
-				wid = "nod_host_local"
-			}
-			// If this VM's worker just moved into TargetPoolID and no distinct TargetWorkerID
-			// was requested, keep it on its moved worker and refresh its PoolID.
-			if movedWorkerSet[wid] && (req.TargetWorkerID == "" || req.TargetWorkerID == wid) {
-				if v.PoolID != req.TargetPoolID {
-					v.PoolID = req.TargetPoolID
-					v.UpdatedAt = time.Now().UTC()
-					if serr := s.vmMgr.SaveVMRecord(ctx, v); serr != nil {
-						resp.SandboxesFailed++
-						resp.Errors = append(resp.Errors, fmt.Sprintf("vm %s: %v", v.ID, serr))
+		if migrateSandboxes {
+			var toMigrate []*db.VM
+			for _, v := range candidates {
+				wid := v.WorkerID
+				if wid == "" {
+					wid = "nod_host_local"
+				}
+				if movedWorkerSet[wid] && (req.TargetWorkerID == "" || req.TargetWorkerID == wid) {
+					if v.PoolID != req.TargetPoolID {
+						v.PoolID = req.TargetPoolID
+						v.UpdatedAt = time.Now().UTC()
+						if serr := s.vmMgr.SaveVMRecord(bgCtx, v); serr != nil {
+							out.SandboxesFailed++
+							out.Errors = append(out.Errors, fmt.Sprintf("vm %s: %v", v.ID, serr))
+						}
 					}
+					continue
 				}
-				continue
+				toMigrate = append(toMigrate, v)
 			}
-			toMigrate = append(toMigrate, v)
+
+			if len(toMigrate) > 0 {
+				if err := s.preflightPoolMigrationCapacity(bgCtx, toMigrate, req); err != nil {
+					var rle *api.ResourceLimitError
+					if errors.As(err, &rle) {
+						return out, err
+					}
+					if strings.Contains(err.Error(), "not found") {
+						return out, &httpStatusError{code: http.StatusNotFound, err: err}
+					}
+					return out, &httpStatusError{code: http.StatusBadRequest, err: err}
+				}
+			}
+
+			for _, v := range toMigrate {
+				_, merr := s.migrateSingleVM(bgCtx, v, api.MigrateVMRequest{
+					TargetWorkerID: req.TargetWorkerID,
+					TargetPoolID:   req.TargetPoolID,
+					Force:          req.Force,
+				})
+				if merr != nil {
+					out.SandboxesFailed++
+					out.Errors = append(out.Errors, fmt.Sprintf("vm %s: %v", v.ID, merr))
+				} else {
+					out.SandboxesMigrated++
+					out.MigratedVMIDs = append(out.MigratedVMIDs, v.ID)
+				}
+			}
 		}
 
-		if len(toMigrate) > 0 {
-			if err := s.preflightPoolMigrationCapacity(ctx, toMigrate, req); err != nil {
-				if writeResourceLimitError(w, r, err) {
-					return
-				}
-				if strings.Contains(err.Error(), "not found") {
-					httpError(w, err.Error(), http.StatusNotFound)
-					return
-				}
-				httpError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-
-		for _, v := range toMigrate {
-			_, merr := s.migrateSingleVM(ctx, v, api.MigrateVMRequest{
-				TargetWorkerID: req.TargetWorkerID,
-				TargetPoolID:   req.TargetPoolID,
-				Force:          req.Force,
-			})
-			if merr != nil {
-				resp.SandboxesFailed++
-				resp.Errors = append(resp.Errors, fmt.Sprintf("vm %s: %v", v.ID, merr))
-			} else {
-				resp.SandboxesMigrated++
-				resp.MigratedVMIDs = append(resp.MigratedVMIDs, v.ID)
-			}
-		}
+		s.recordEvent("pool.migrated", actor, poolID, "delivered", 100, out)
+		s.broadcastClusterUpdate()
+		return out, nil
+	})
+	if disconnected {
+		return
 	}
-
-	s.recordEvent("pool.migrated", getActor(r), poolID, "delivered", 100, resp)
+	if err != nil {
+		writeDetachedError(w, r, err)
+		return
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -1063,9 +1078,14 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "ids is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.IDs) > maxBulkRequestItems {
+		httpError(w, fmt.Sprintf("too many ids: %d (max %d per request)", len(req.IDs), maxBulkRequestItems), http.StatusBadRequest)
+		return
+	}
 
 	ctx := r.Context()
-	_, isAdmin := s.currentOwnerID(r)
+	actor := getActor(r)
+	callerOwner, _ := s.currentOwnerID(r)
 
 	// Pre-resolve accessible VMs serially (HTTP request auth check) before running workers.
 	type deleteTarget struct {
@@ -1074,6 +1094,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		resolveErr  string
 	}
 	targets := make([]deleteTarget, len(req.IDs))
+	validCount := 0
 	for i, id := range req.IDs {
 		v, err := s.resolveAccessibleVM(ctx, r, id)
 		if err != nil {
@@ -1093,82 +1114,192 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		targets[i] = deleteTarget{requestedID: id, vm: v}
+		validCount++
 	}
 
-	const maxBulkWorkers = 4
-	sem := make(chan struct{}, maxBulkWorkers)
-	var wg sync.WaitGroup
-	var resMu sync.Mutex
-
-	resp := api.BulkVMsResponse{
-		Action:    "delete",
-		Requested: len(req.IDs),
-		Succeeded: []string{},
-		Failed:    []api.BulkVMItemError{},
-	}
-	reconcileOwners := make(map[string]bool)
-	localDeleted := false
-
-	for _, t := range targets {
-		if t.resolveErr != "" {
-			resMu.Lock()
-			resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
-			resMu.Unlock()
-			continue
-		}
-		wg.Add(1)
-		go func(t deleteTarget) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			v := t.vm
-			vmKey := vmIdentifier(v)
-			s.removePortForwardsForVM(ctx, v, true)
-
-			var delErr error
-			if vm.IsRemoteVM(v) {
-				if s.workers != nil {
-					delErr = s.workers.CallRPC(ctx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: vmKey}, nil)
-					if delErr != nil && strings.Contains(strings.ToLower(delErr.Error()), "not found") {
-						delErr = nil
-					}
-				}
-				if delErr == nil {
-					delErr = s.vmMgr.DeleteVMRecord(ctx, vmKey)
-				}
-			} else {
-				_ = isAdmin
-				delErr = s.vmMgr.DeleteVMDeferred(ctx, vmKey)
-			}
-
-			resMu.Lock()
-			if delErr != nil {
-				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: delErr.Error()})
-			} else {
-				resp.Succeeded = append(resp.Succeeded, t.requestedID)
-				if !vm.IsRemoteVM(v) {
-					localDeleted = true
-					owner := v.OwnerID
-					if owner == "" {
-						owner = "default"
-					}
-					reconcileOwners[owner] = true
+	execOneDelete := func(bgCtx context.Context, v *db.VM) error {
+		vmKey := vmIdentifier(v)
+		s.removePortForwardsForVM(bgCtx, v, true)
+		var delErr error
+		if vm.IsRemoteVM(v) {
+			if s.workers != nil {
+				delErr = s.workers.CallRPC(bgCtx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: s.remoteVMTargetID(v)}, nil)
+				if delErr != nil && strings.Contains(strings.ToLower(delErr.Error()), "not found") {
+					delErr = nil
 				}
 			}
-			resMu.Unlock()
-		}(t)
-	}
-	wg.Wait()
-
-	if localDeleted && s.vmMgr != nil {
-		for owner := range reconcileOwners {
-			s.vmMgr.ReconcileAccountNetworkIsolation(ctx, owner)
+			if delErr == nil {
+				delErr = s.vmMgr.DeleteVMRecord(bgCtx, vmKey)
+			}
+		} else {
+			delErr = s.vmMgr.DeleteVMDeferred(bgCtx, vmKey)
 		}
-		s.vmMgr.ProcessQueue(ctx)
+		return delErr
 	}
 
-	s.recordEvent("sandbox.bulk_deleted", getActor(r), fmt.Sprintf("%d sandboxes", len(resp.Succeeded)), "delivered", 50, resp)
+	if req.Async {
+		taskID := "task_" + uuid.NewString()[:8]
+		resp := api.BulkVMsResponse{
+			Action:    "delete",
+			Status:    "queued",
+			TaskID:    taskID,
+			Requested: len(req.IDs),
+			Queued:    validCount,
+			Succeeded: []string{},
+			Failed:    []api.BulkVMItemError{},
+		}
+		for _, t := range targets {
+			if t.resolveErr != "" {
+				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
+			}
+		}
+		if validCount > 0 && s.ensureOpQueue().wouldExceed(validCount) {
+			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
+			return
+		}
+		s.recordQueuedTask(callerOwner, resp)
+		if validCount > 0 {
+			var remaining atomic.Int64
+			remaining.Store(int64(validCount))
+			var mu sync.Mutex
+			succeeded := make([]string, 0, validCount)
+			failed := append([]api.BulkVMItemError{}, resp.Failed...)
+			reconcileOwners := make(map[string]bool)
+			localDeleted := false
+
+			finish := func(bgCtx context.Context) {
+				if remaining.Add(-1) != 0 {
+					return
+				}
+				mu.Lock()
+				ownersCopy := make([]string, 0, len(reconcileOwners))
+				for owner := range reconcileOwners {
+					ownersCopy = append(ownersCopy, owner)
+				}
+				doReconcile := localDeleted
+				summary := api.BulkVMsResponse{
+					Action:    "delete",
+					Status:    "completed",
+					TaskID:    taskID,
+					Requested: len(req.IDs),
+					Succeeded: succeeded,
+					Failed:    failed,
+				}
+				mu.Unlock()
+				s.recordTaskSummary(callerOwner, summary)
+				if doReconcile && s.vmMgr != nil {
+					for _, owner := range ownersCopy {
+						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
+					}
+					s.vmMgr.ProcessQueue(bgCtx)
+				}
+				s.recordEvent("sandbox.bulk_deleted", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 50, summary)
+				s.broadcastClusterUpdate()
+			}
+
+			for _, t := range targets {
+				if t.resolveErr != "" {
+					continue
+				}
+				target := t
+				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
+					delErr := execOneDelete(bgCtx, target.vm)
+					mu.Lock()
+					if delErr != nil {
+						failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: delErr.Error()})
+					} else {
+						succeeded = append(succeeded, target.requestedID)
+						if !vm.IsRemoteVM(target.vm) {
+							localDeleted = true
+							owner := target.vm.OwnerID
+							if owner == "" {
+								owner = "default"
+							}
+							reconcileOwners[owner] = true
+						}
+					}
+					mu.Unlock()
+					s.broadcastClusterUpdate()
+					finish(bgCtx)
+				})
+				if enqErr != nil {
+					mu.Lock()
+					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
+					mu.Unlock()
+					finish(context.Background())
+				}
+			}
+		}
+		s.recordEvent("sandbox.bulk_queued", actor, fmt.Sprintf("delete %d sandboxes", validCount), "queued", 0, resp)
+		s.broadcastClusterUpdate()
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	resp, _, disconnected := runDetached(r, func(bgCtx context.Context) (api.BulkVMsResponse, error) {
+		const maxBulkWorkers = 4
+		sem := make(chan struct{}, maxBulkWorkers)
+		var wg sync.WaitGroup
+		var resMu sync.Mutex
+
+		out := api.BulkVMsResponse{
+			Action:    "delete",
+			Requested: len(req.IDs),
+			Succeeded: []string{},
+			Failed:    []api.BulkVMItemError{},
+		}
+		reconcileOwners := make(map[string]bool)
+		localDeleted := false
+
+		for _, t := range targets {
+			if t.resolveErr != "" {
+				resMu.Lock()
+				out.Failed = append(out.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
+				resMu.Unlock()
+				continue
+			}
+			wg.Add(1)
+			go func(t deleteTarget) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				delErr := execOneDelete(bgCtx, t.vm)
+
+				resMu.Lock()
+				if delErr != nil {
+					out.Failed = append(out.Failed, api.BulkVMItemError{ID: t.requestedID, Error: delErr.Error()})
+				} else {
+					out.Succeeded = append(out.Succeeded, t.requestedID)
+					if !vm.IsRemoteVM(t.vm) {
+						localDeleted = true
+						owner := t.vm.OwnerID
+						if owner == "" {
+							owner = "default"
+						}
+						reconcileOwners[owner] = true
+					}
+				}
+				resMu.Unlock()
+			}(t)
+		}
+		wg.Wait()
+
+		if localDeleted && s.vmMgr != nil {
+			for owner := range reconcileOwners {
+				s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
+			}
+			s.vmMgr.ProcessQueue(bgCtx)
+		}
+
+		s.recordEvent("sandbox.bulk_deleted", actor, fmt.Sprintf("%d sandboxes", len(out.Succeeded)), "delivered", 50, out)
+		s.broadcastClusterUpdate()
+		return out, nil
+	})
+	if disconnected {
+		return
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -1190,21 +1321,29 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "ids is required", http.StatusBadRequest)
 		return
 	}
+	if len(req.IDs) > maxBulkRequestItems {
+		httpError(w, fmt.Sprintf("too many ids: %d (max %d per request)", len(req.IDs), maxBulkRequestItems), http.StatusBadRequest)
+		return
+	}
 	action := strings.ToLower(strings.TrimSpace(req.Action))
 	switch action {
-	case "start", "run", "stop", "save-state", "snapshot", "resume", "delete":
+	case "start", "run", "stop", "restart", "save-state", "snapshot", "resume", "protect", "unprotect", "delete":
 	default:
-		httpError(w, fmt.Sprintf("unsupported bulk action %q (allowed: start, stop, save-state, snapshot, resume, delete)", req.Action), http.StatusBadRequest)
+		httpError(w, fmt.Sprintf("unsupported bulk action %q (allowed: start, stop, restart, save-state, snapshot, resume, protect, unprotect, delete)", req.Action), http.StatusBadRequest)
 		return
 	}
 
 	ctx := r.Context()
+	callerOwner, isAdmin := s.currentOwnerID(r)
+	actor := getActor(r)
+
 	type actionTarget struct {
 		requestedID string
 		vm          *db.VM
 		resolveErr  string
 	}
 	targets := make([]actionTarget, len(req.IDs))
+	validCount := 0
 	for i, id := range req.IDs {
 		v, err := s.resolveAccessibleVM(ctx, r, id)
 		if err != nil {
@@ -1224,119 +1363,271 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if action == "start" || action == "run" || action == "resume" {
-			if qErr := s.enforceRunQuota(ctx, r, v); qErr != nil {
+			if qErr := s.enforceRunQuotaWithAdmin(ctx, isAdmin, v); qErr != nil {
 				targets[i] = actionTarget{requestedID: id, resolveErr: qErr.Error()}
 				continue
 			}
 		}
 		targets[i] = actionTarget{requestedID: id, vm: v}
+		validCount++
 	}
 
-	const maxBulkWorkers = 4
-	sem := make(chan struct{}, maxBulkWorkers)
-	var wg sync.WaitGroup
-	var resMu sync.Mutex
+	execOneAction := func(bgCtx context.Context, v *db.VM) error {
+		vmKey := vmIdentifier(v)
+		switch action {
+		case "delete":
+			s.removePortForwardsForVM(bgCtx, v, true)
+			if vm.IsRemoteVM(v) {
+				var opErr error
+				if s.workers != nil {
+					opErr = s.workers.CallRPC(bgCtx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: s.remoteVMTargetID(v)}, nil)
+					if opErr != nil && strings.Contains(strings.ToLower(opErr.Error()), "not found") {
+						opErr = nil
+					}
+				}
+				if opErr == nil {
+					opErr = s.vmMgr.DeleteVMRecord(bgCtx, vmKey)
+				}
+				return opErr
+			}
+			return s.vmMgr.DeleteVMDeferred(bgCtx, vmKey)
 
-	resp := api.BulkVMsResponse{
-		Action:    action,
-		Requested: len(req.IDs),
-		Succeeded: []string{},
-		Failed:    []api.BulkVMItemError{},
-	}
-	reconcileOwners := make(map[string]bool)
-	localNeedsReconcile := false
+		case "protect":
+			t := true
+			_, opErr := s.vmMgr.UpdateVMConfig(bgCtx, vmKey, vm.UpdateVMConfigRequest{Protected: &t})
+			return opErr
 
-	for _, t := range targets {
-		if t.resolveErr != "" {
-			resMu.Lock()
-			resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
-			resMu.Unlock()
-			continue
+		case "unprotect":
+			f := false
+			_, opErr := s.vmMgr.UpdateVMConfig(bgCtx, vmKey, vm.UpdateVMConfigRequest{Protected: &f})
+			return opErr
+
+		case "restart":
+			_, opErr := s.restartSingleVM(bgCtx, isAdmin, v, false)
+			return opErr
 		}
-		wg.Add(1)
-		go func(t actionTarget) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
 
-			v := t.vm
-			vmKey := vmIdentifier(v)
-			var opErr error
+		if vm.IsRemoteVM(v) {
+			var method string
+			switch action {
+			case "start", "run":
+				method = "vm.start"
+			case "stop":
+				method = "vm.stop"
+			case "save-state", "snapshot":
+				method = "vm.save_state"
+			case "resume":
+				method = "vm.resume"
+			}
+			_, opErr := s.callRemoteVMLifecycle(bgCtx, v, method)
+			if opErr == nil && action == "stop" {
+				s.removePortForwardsForVM(bgCtx, v, false)
+			}
+			return opErr
+		}
 
-			if action == "delete" {
-				s.removePortForwardsForVM(ctx, v, true)
-				if vm.IsRemoteVM(v) {
-					if s.workers != nil {
-						opErr = s.workers.CallRPC(ctx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: vmKey}, nil)
-						if opErr != nil && strings.Contains(strings.ToLower(opErr.Error()), "not found") {
-							opErr = nil
+		switch action {
+		case "start", "run":
+			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				return qErr
+			}
+			opErr := s.vmMgr.RunVM(bgCtx, vmKey)
+			if opErr == nil {
+				if refreshed, gErr := s.vmMgr.GetVM(bgCtx, vmKey); gErr == nil && refreshed != nil && refreshed.Status == db.StatusRunning {
+					s.mountAttachedVolumes(bgCtx, refreshed)
+					s.applyEnvironment(bgCtx, refreshed)
+					s.applyPortForwardsForVM(bgCtx, refreshed)
+				}
+			}
+			return opErr
+		case "stop":
+			opErr := s.vmMgr.StopVMDeferred(bgCtx, vmKey)
+			if opErr == nil {
+				s.removePortForwardsForVM(bgCtx, v, false)
+			}
+			return opErr
+		case "save-state", "snapshot":
+			return s.vmMgr.SaveState(bgCtx, vmKey)
+		case "resume":
+			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				return qErr
+			}
+			opErr := s.vmMgr.ResumeVM(bgCtx, vmKey)
+			if opErr == nil {
+				if refreshed, gErr := s.vmMgr.GetVM(bgCtx, vmKey); gErr == nil && refreshed != nil && refreshed.Status == db.StatusRunning {
+					s.mountAttachedVolumes(bgCtx, refreshed)
+					s.applyEnvironment(bgCtx, refreshed)
+					s.applyPortForwardsForVM(bgCtx, refreshed)
+				}
+			}
+			return opErr
+		}
+		return nil
+	}
+
+	if req.Async {
+		taskID := "task_" + uuid.NewString()[:8]
+		resp := api.BulkVMsResponse{
+			Action:    action,
+			Status:    "queued",
+			TaskID:    taskID,
+			Requested: len(req.IDs),
+			Queued:    validCount,
+			Succeeded: []string{},
+			Failed:    []api.BulkVMItemError{},
+		}
+		for _, t := range targets {
+			if t.resolveErr != "" {
+				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
+			}
+		}
+		if validCount > 0 && s.ensureOpQueue().wouldExceed(validCount) {
+			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
+			return
+		}
+		s.recordQueuedTask(callerOwner, resp)
+		if validCount > 0 {
+			var remaining atomic.Int64
+			remaining.Store(int64(validCount))
+			var mu sync.Mutex
+			succeeded := make([]string, 0, validCount)
+			failed := append([]api.BulkVMItemError{}, resp.Failed...)
+			reconcileOwners := make(map[string]bool)
+			localNeedsReconcile := false
+
+			finish := func(bgCtx context.Context) {
+				if remaining.Add(-1) != 0 {
+					return
+				}
+				mu.Lock()
+				ownersCopy := make([]string, 0, len(reconcileOwners))
+				for owner := range reconcileOwners {
+					ownersCopy = append(ownersCopy, owner)
+				}
+				doReconcile := localNeedsReconcile
+				summary := api.BulkVMsResponse{
+					Action:    action,
+					Status:    "completed",
+					TaskID:    taskID,
+					Requested: len(req.IDs),
+					Succeeded: succeeded,
+					Failed:    failed,
+				}
+				mu.Unlock()
+				s.recordTaskSummary(callerOwner, summary)
+				if doReconcile && s.vmMgr != nil {
+					for _, owner := range ownersCopy {
+						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
+					}
+					s.vmMgr.ProcessQueue(bgCtx)
+				}
+				s.recordEvent("sandbox.bulk_"+action, actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 50, summary)
+				s.broadcastClusterUpdate()
+			}
+
+			for _, t := range targets {
+				if t.resolveErr != "" {
+					continue
+				}
+				target := t
+				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
+					opErr := execOneAction(bgCtx, target.vm)
+					mu.Lock()
+					if opErr != nil {
+						failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: opErr.Error()})
+					} else {
+						succeeded = append(succeeded, target.requestedID)
+						if !vm.IsRemoteVM(target.vm) && (action == "stop" || action == "delete") {
+							localNeedsReconcile = true
+							owner := target.vm.OwnerID
+							if owner == "" {
+								owner = "default"
+							}
+							reconcileOwners[owner] = true
 						}
 					}
-					if opErr == nil {
-						opErr = s.vmMgr.DeleteVMRecord(ctx, vmKey)
-					}
-				} else {
-					opErr = s.vmMgr.DeleteVMDeferred(ctx, vmKey)
-				}
-			} else if vm.IsRemoteVM(v) {
-				var method string
-				switch action {
-				case "start", "run":
-					method = "vm.start"
-				case "stop":
-					method = "vm.stop"
-				case "save-state", "snapshot":
-					method = "vm.save_state"
-				case "resume":
-					method = "vm.resume"
-				}
-				_, opErr = s.callRemoteVMLifecycle(ctx, v, method)
-				if opErr == nil && action == "stop" {
-					s.removePortForwardsForVM(ctx, v, false)
-				}
-			} else {
-				switch action {
-				case "start", "run":
-					opErr = s.vmMgr.RunVM(ctx, vmKey)
-				case "stop":
-					opErr = s.vmMgr.StopVMDeferred(ctx, vmKey)
-					if opErr == nil {
-						s.removePortForwardsForVM(ctx, v, false)
-					}
-				case "save-state", "snapshot":
-					opErr = s.vmMgr.SaveState(ctx, vmKey)
-				case "resume":
-					opErr = s.vmMgr.ResumeVM(ctx, vmKey)
+					mu.Unlock()
+					s.broadcastClusterUpdate()
+					finish(bgCtx)
+				})
+				if enqErr != nil {
+					mu.Lock()
+					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
+					mu.Unlock()
+					finish(context.Background())
 				}
 			}
-
-			resMu.Lock()
-			if opErr != nil {
-				resp.Failed = append(resp.Failed, api.BulkVMItemError{ID: t.requestedID, Error: opErr.Error()})
-			} else {
-				resp.Succeeded = append(resp.Succeeded, t.requestedID)
-				if !vm.IsRemoteVM(v) && (action == "stop" || action == "delete") {
-					localNeedsReconcile = true
-					owner := v.OwnerID
-					if owner == "" {
-						owner = "default"
-					}
-					reconcileOwners[owner] = true
-				}
-			}
-			resMu.Unlock()
-		}(t)
-	}
-	wg.Wait()
-
-	if localNeedsReconcile && s.vmMgr != nil {
-		for owner := range reconcileOwners {
-			s.vmMgr.ReconcileAccountNetworkIsolation(ctx, owner)
 		}
-		s.vmMgr.ProcessQueue(ctx)
+		s.recordEvent("sandbox.bulk_queued", actor, fmt.Sprintf("%s %d sandboxes", action, validCount), "queued", 0, resp)
+		s.broadcastClusterUpdate()
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(resp)
+		return
 	}
 
-	s.recordEvent("sandbox.bulk_"+action, getActor(r), fmt.Sprintf("%d sandboxes", len(resp.Succeeded)), "delivered", 50, resp)
+	resp, _, disconnected := runDetached(r, func(bgCtx context.Context) (api.BulkVMsResponse, error) {
+		const maxBulkWorkers = 4
+		sem := make(chan struct{}, maxBulkWorkers)
+		var wg sync.WaitGroup
+		var resMu sync.Mutex
+
+		out := api.BulkVMsResponse{
+			Action:    action,
+			Requested: len(req.IDs),
+			Succeeded: []string{},
+			Failed:    []api.BulkVMItemError{},
+		}
+		reconcileOwners := make(map[string]bool)
+		localNeedsReconcile := false
+
+		for _, t := range targets {
+			if t.resolveErr != "" {
+				resMu.Lock()
+				out.Failed = append(out.Failed, api.BulkVMItemError{ID: t.requestedID, Error: t.resolveErr})
+				resMu.Unlock()
+				continue
+			}
+			wg.Add(1)
+			go func(t actionTarget) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				opErr := execOneAction(bgCtx, t.vm)
+
+				resMu.Lock()
+				if opErr != nil {
+					out.Failed = append(out.Failed, api.BulkVMItemError{ID: t.requestedID, Error: opErr.Error()})
+				} else {
+					out.Succeeded = append(out.Succeeded, t.requestedID)
+					if !vm.IsRemoteVM(t.vm) && (action == "stop" || action == "delete") {
+						localNeedsReconcile = true
+						owner := t.vm.OwnerID
+						if owner == "" {
+							owner = "default"
+						}
+						reconcileOwners[owner] = true
+					}
+				}
+				resMu.Unlock()
+			}(t)
+		}
+		wg.Wait()
+
+		if localNeedsReconcile && s.vmMgr != nil {
+			for owner := range reconcileOwners {
+				s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
+			}
+			s.vmMgr.ProcessQueue(bgCtx)
+		}
+
+		s.recordEvent("sandbox.bulk_"+action, actor, fmt.Sprintf("%d sandboxes", len(out.Succeeded)), "delivered", 50, out)
+		s.broadcastClusterUpdate()
+		return out, nil
+	})
+	if disconnected {
+		return
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 

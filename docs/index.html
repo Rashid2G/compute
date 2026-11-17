@@ -394,8 +394,14 @@ COMPUTE_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
           a MAC/IP lease on <code>mft3br0</code>, a dedicated TAP interface (<code>mftap-*</code>), and an interactive SSH/exec target.
           Pin placement to a specific pool or node using <code>pool_id</code> / <code>worker_id</code> in <code>POST /api/v1/vms</code>
           or the Web UI (the scheduler selects automatically otherwise).
-          Bulk lifecycle operations run concurrently in a single request via <code>POST /api/v1/vms/bulk-delete</code> and
-          <code>POST /api/v1/vms/bulk-action</code> (<code>start</code>, <code>stop</code>, <code>save-state</code>, <code>resume</code>, <code>delete</code>).
+          Bulk lifecycle operations run concurrently in a single request via <code>POST /api/v1/vms/bulk-create</code>,
+          <code>POST /api/v1/vms/bulk-clone</code>, <code>POST /api/v1/vms/bulk-delete</code>, and
+          <code>POST /api/v1/vms/bulk-action</code> (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>,
+          <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>).
+          Send <code>"async": true</code> to queue the work on the daemon: it returns <code>202</code> with a
+          <code>task_id</code> and keeps running even if the browser refreshes or disconnects. Poll
+          <code>GET /api/v1/tasks/{id}</code> for the final per-item outcome. Requests are capped at 100 items and
+          rejected with <code>429</code> when the backend queue is saturated.
         </p>
 
         <div class="code-block">
@@ -411,11 +417,21 @@ compute sandbox exec dev-api -- uname -a
 compute scp -r ./my-service dev-api:/workspace/
 compute url --port 3000 dev-api
 
-# Single-request bulk stop / delete across multiple sandboxes
+# Single-request bulk stop across multiple sandboxes (synchronous by default)
 curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/bulk-action \
   -H "Authorization: Bearer $COMPUTE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"ids":["dev-api","staging-box"],"action":"stop"}'</code></pre>
+  -d '{"ids":["dev-api","staging-box"],"action":"stop"}'
+
+# Queue 10 sandboxes for durable creation; work survives a refresh/disconnect
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/bulk-create \
+  -H "Authorization: Bearer $COMPUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"async":true,"items":[{"name":"worker-1","vcpus":2,"memory_mb":2048,"auto_start":true}]}'
+
+# Resolve the queued task: queued | completed | partial | failed
+curl -fsS http://127.0.0.1:18080/api/v1/tasks/task_1a2b3c4d \
+  -H "Authorization: Bearer $COMPUTE_API_KEY"</code></pre>
         </div>
       </section>
 
@@ -774,8 +790,8 @@ curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/vms/bulk-delete</code> &middot; <code>/bulk-action</code></td>
-                <td>Single-request bulk delete or lifecycle action (<code>start</code>, <code>stop</code>, <code>save-state</code>, <code>resume</code>, <code>delete</code>) across multiple IDs.</td>
+                <td><code>/api/v1/vms/bulk-create</code> &middot; <code>/bulk-clone</code> &middot; <code>/bulk-delete</code> &middot; <code>/bulk-action</code></td>
+                <td>Single-request bulk create, clone, delete, or lifecycle action (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>, <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>). Send <code>"async": true</code> to queue durably and resolve via <code>GET /api/v1/tasks/{id}</code>.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>

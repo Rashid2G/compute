@@ -204,8 +204,11 @@ function createMockServer() {
     },
   ];
   const cloneCalls = [];
+  const bulkCloneCalls = [];
   const launchCalls = [];
   const createCalls = [];
+  const bulkCreateCalls = [];
+  const bulkActionCalls = [];
   const migrateCalls = [];
   const workerUpdateCalls = [];
   const policyUpdateCalls = [];
@@ -530,11 +533,100 @@ function createMockServer() {
         vms = [...vms, created];
         return json(201, created);
       }
+      if (p === '/api/v1/vms/bulk-create' && req.method === 'POST') {
+        bulkCreateCalls.push(body);
+        const items = Array.isArray(body.items) ? body.items : [];
+        const createdBulk = items.map((item, idx) => ({
+          id: `vm-bulk-${vms.length + idx + 1}`,
+          name: item.name || `sbx-bulk-${idx + 1}`,
+          status: item.auto_start ? 'running' : 'stopped',
+          vcpus: item.vcpus || 1,
+          memory_mb: item.memory_mb || 512,
+          disk_mb: item.disk_mb || 20480,
+          ip_address: `172.16.0.${100 + idx}`,
+          mac_address: `02:fc:00:00:01:${String(idx).padStart(2, '0')}`,
+          tap_device: `tap1${idx}`,
+          disk_path: `/var/lib/compute/vms/${item.name}/disk.ext4`,
+          rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
+          kernel_path: '/var/lib/compute/vmlinux',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+        vms = [...vms, ...createdBulk];
+        return json(202, {
+          action: 'create',
+          status: 'queued',
+          task_id: 'task_test_bulk_create',
+          requested: items.length,
+          queued: items.length,
+          succeeded: [],
+          failed: [],
+        });
+      }
+      if (p === '/api/v1/vms/bulk-action' && req.method === 'POST') {
+        bulkActionCalls.push(body);
+        const ids = Array.isArray(body.ids) ? body.ids : [];
+        return json(202, {
+          action: body.action,
+          status: 'queued',
+          task_id: 'task_test_bulk_action',
+          requested: ids.length,
+          queued: ids.length,
+          succeeded: [],
+          failed: [],
+        });
+      }
+      if (p.startsWith('/api/v1/tasks/') && req.method === 'GET') {
+        // No task registry in the mock: resolveQueuedTask keeps the queued toast.
+        return json(404, { error: 'task not found' });
+      }
       if (p === '/api/v1/vms/bulk-delete' && req.method === 'POST') {
         bulkDeleteCalls.push(body);
         const ids = Array.isArray(body.ids) ? body.ids : (Array.isArray(body.vm_ids) ? body.vm_ids : []);
         vms = vms.filter((v) => !ids.includes(v.id));
         return json(200, { action: 'delete', requested: ids.length, succeeded: ids, failed: [] });
+      }
+      if (p === '/api/v1/vms/bulk-clone' && req.method === 'POST') {
+        const names = Array.isArray(body.names) ? body.names : [];
+        bulkCloneCalls.push({
+          source_id: body.source_id,
+          names,
+          vcpus: body.vcpus,
+          memory_mb: body.memory_mb,
+          disk_gb: body.disk_gb,
+          network_isolated: body.network_isolated,
+          description: body.description,
+          auto_start: body.auto_start,
+          async: body.async,
+        });
+        const createdClones = names.map((name, idx) => ({
+          id: `vm-clone-${vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          name,
+          description: body.description || '',
+          status: body.auto_start ? 'running' : 'stopped',
+          vcpus: body.vcpus || src?.vcpus || 2,
+          memory_mb: body.memory_mb || src?.memory_mb || 1024,
+          disk_mb: body.disk_mb || (body.disk_gb ? body.disk_gb * 1024 : (src?.disk_mb || 20480)),
+          ip_address: `172.16.0.${20 + vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          network_isolation: body.network_isolated ? 'isolated' : 'account',
+          mac_address: `02:fc:00:00:00:2${vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          tap_device: `tap2${vms.filter((v) => v.id.startsWith('vm-clone-')).length + idx + 1}`,
+          disk_path: `/var/lib/compute/vms/${name}/disk.ext4`,
+          rootfs_path: '/var/lib/compute/images/ubuntu.ext4',
+          kernel_path: '/var/lib/compute/vmlinux',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+        vms = [...vms, ...createdClones];
+        return json(202, {
+          action: 'clone',
+          status: 'queued',
+          task_id: 'task_test_bulk_clone',
+          requested: names.length,
+          queued: names.length,
+          succeeded: [],
+          failed: [],
+        });
       }
 
       const vmMatch = p.match(/^\/api\/v1\/vms\/([^/]+)(?:\/(.*))?$/);
@@ -688,6 +780,9 @@ function createMockServer() {
     policyUpdateCalls,
     poolMigrateCalls,
     bulkDeleteCalls,
+    bulkCloneCalls,
+    bulkCreateCalls,
+    bulkActionCalls,
     setUserRole: (role) => {
       currentUserRole = role;
     },
@@ -777,6 +872,10 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
     workerUpdateCalls,
     policyUpdateCalls,
     poolMigrateCalls,
+    bulkDeleteCalls,
+    bulkCloneCalls,
+    bulkCreateCalls,
+    bulkActionCalls,
     setUserRole,
   } = createMockServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -933,11 +1032,12 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       `);
       await waitFor(cdp, `document.getElementById('clone-vm-title') === null`, 3000, 'clone modal closed');
       await waitFor(cdp, `document.body.innerText.includes('worker-pool-1') && document.body.innerText.includes('worker-pool-2')`, 4000, 'replicas rendered');
-      assert.equal(cloneCalls.length, 2);
-      assert.equal(cloneCalls[0].body.name, 'worker-pool-1');
-      assert.equal(cloneCalls[1].body.name, 'worker-pool-2');
-      assert.equal(cloneCalls[0].body.vcpus, 4);
-      assert.equal(cloneCalls[0].body.auto_start, true);
+      assert.equal(bulkCloneCalls.length, 1, 'Expected single queued POST /api/v1/vms/bulk-clone request');
+      assert.equal(cloneCalls.length, 0, 'Multi-replica replication must use bulk-clone, not per-VM clone');
+      assert.deepEqual(bulkCloneCalls[0].names, ['worker-pool-1', 'worker-pool-2']);
+      assert.equal(bulkCloneCalls[0].vcpus, 4);
+      assert.equal(bulkCloneCalls[0].auto_start, true);
+      assert.equal(bulkCloneCalls[0].async, true);
     });
 
     await t.test('Pause shows PAUSED (STATE SAVED) badge and Resume restores running', async () => {
@@ -1158,6 +1258,70 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       await waitFor(cdp, `window.__getToastsText().includes('Migrated pool')`, 3000, 'migrate pool toast');
       assert.equal(poolMigrateCalls.length, 1);
       assert.equal(poolMigrateCalls[0].body.target_pool_id, 'gpu-pool');
+    });
+
+    await t.test('Create Sandbox count > 1 sends ONE queued bulk-create request', async () => {
+      await cdp.evalJS(`window.location.hash = '#/instances'`);
+      await waitFor(cdp, `window.location.hash === '#/instances' && document.body.innerText.includes('sbx-alpha')`, 4000, 'instances loaded for bulk create');
+      await cdp.evalJS(`window.__clickButtonByText('New')`);
+      await waitFor(cdp, `document.getElementById('advanced-create-title') !== null`, 3000, 'create modal open');
+      await cdp.evalJS(`(() => {
+        const input = document.querySelector('input[aria-label="Sandbox name"]');
+        window.__setReactInput(input, 'pool-node');
+      })()`);
+      await cdp.evalJS(`Array.from(document.querySelectorAll('button')).find(b => b.innerText.trim() === '3x').click()`);
+      await sleep(60);
+      await cdp.evalJS(`document.querySelector('input[aria-label="Sandbox name"]').closest('form').requestSubmit()`);
+      await waitFor(cdp, `window.__getToastsText().includes('Queued creation of 3 sandboxes')`, 4000, 'bulk create queued toast');
+      assert.equal(bulkCreateCalls.length, 1, 'Expected ONE POST /api/v1/vms/bulk-create');
+      assert.equal(bulkCreateCalls[0].async, true, 'Bulk create must be queued on the backend (async: true)');
+      assert.equal(bulkCreateCalls[0].items.length, 3, 'All three items must travel in the single request');
+      assert.deepEqual(
+        bulkCreateCalls[0].items.map((item) => item.name),
+        ['pool-node-1', 'pool-node-2', 'pool-node-3'],
+      );
+      await waitFor(cdp, `document.body.innerText.includes('pool-node-1')`, 4000, 'bulk-created sandboxes rendered');
+    });
+
+    await t.test('Bulk pause sends ONE queued bulk-action request', async () => {
+      await cdp.evalJS(`window.location.hash = '#/instances'`);
+      await waitFor(
+        cdp,
+        `document.querySelector('input[aria-label="Select pool-node-1"]') !== null && document.querySelector('input[aria-label="Select pool-node-2"]') !== null`,
+        4000,
+        'bulk-created rows selectable',
+      );
+      await cdp.evalJS(`document.querySelector('input[aria-label="Select pool-node-1"]').click()`);
+      await cdp.evalJS(`document.querySelector('input[aria-label="Select pool-node-2"]').click()`);
+      await waitFor(cdp, `document.body.innerText.includes('2 selected')`, 3000, 'bulk action bar');
+      await cdp.evalJS(`(() => {
+        const bar = Array.from(document.querySelectorAll('div')).find(d => d.innerText.includes('2 selected') && d.querySelector('button'));
+        Array.from(bar.querySelectorAll('button')).find(b => b.innerText.trim() === 'Pause').click();
+      })()`);
+      await waitFor(cdp, `window.__getToastsText().includes('Queued pause for 2 sandboxes')`, 4000, 'bulk pause queued toast');
+      assert.equal(bulkActionCalls.length, 1, 'Expected ONE POST /api/v1/vms/bulk-action');
+      assert.equal(bulkActionCalls[0].action, 'snapshot');
+      assert.equal(bulkActionCalls[0].async, true, 'Bulk action must be queued on the backend (async: true)');
+      assert.equal(bulkActionCalls[0].ids.length, 2, 'Both selected sandboxes must travel in one request');
+    });
+
+    await t.test('Live cluster refresh does not overwrite a typed policy value', async () => {
+      await cdp.evalJS(`window.location.hash = '#/workers'`);
+      await waitFor(cdp, `document.querySelector('input[aria-label="CPU Weight"]') !== null`, 5000, 'workers policy fields');
+      await cdp.evalJS(`(() => {
+        const input = document.querySelector('input[aria-label="CPU Weight"]');
+        window.__setReactInput(input, '42');
+      })()`);
+      await sleep(50);
+      const before = await cdp.evalJS(`document.querySelector('input[aria-label="CPU Weight"]').value`);
+      assert.equal(String(before), '42', 'Typed value must be captured before the refresh');
+      // The websocket fallback triggers a REST cluster refresh (which pushes a
+      // fresh scheduling_policy prop) within a couple of seconds. The draft
+      // must survive that push.
+      await sleep(4000);
+      const after = await cdp.evalJS(`document.querySelector('input[aria-label="CPU Weight"]').value`);
+      assert.equal(String(after), '42', 'Live refresh must not overwrite a typed policy value');
+      await cdp.evalJS(`window.location.hash = '#/instances'`);
     });
 
     await t.test('Instances shows SSD Hibernated badge and Migrate Sandbox modal', async () => {

@@ -91,8 +91,10 @@ export function InspectVMDialog({
   const [targetPoolId, setTargetPoolId] = useState('');
   const [migrateForce, setMigrateForce] = useState(false);
 
+  const vmId = vm?.id ?? null;
+
   useEffect(() => {
-    if (!open || !vm) return;
+    if (!open || !vmId) return;
 
     let cancelled = false;
     setInspecting(true);
@@ -103,7 +105,7 @@ export function InspectVMDialog({
     setMigrateForce(false);
 
     api
-      .inspectNetwork(vm.id)
+      .inspectNetwork(vmId)
       .then((result) => {
         if (!cancelled) setNetwork(result);
       })
@@ -117,7 +119,7 @@ export function InspectVMDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, vm]);
+  }, [open, vmId]);
 
   if (!vm) return null;
 

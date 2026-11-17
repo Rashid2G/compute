@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Check,
   Copy,
@@ -101,11 +101,16 @@ export function AccessPage({
   const [userPassword, setUserPassword] = useState('');
   const [userRole, setUserRole] = useState<'user' | 'admin'>('user');
 
+  const currentUserPropRef = useRef(currentUserProp);
+  const hasWorkerTokensPropRef = useRef(workerTokensProp !== undefined);
+  currentUserPropRef.current = currentUserProp;
+  hasWorkerTokensPropRef.current = workerTokensProp !== undefined;
+
   const loadAll = useCallback(async (forceWorkerTokens = false) => {
     setLoading(true);
     try {
       const fetchWorkerTokens =
-        forceWorkerTokens || workerTokensProp === undefined;
+        forceWorkerTokens || !hasWorkerTokensPropRef.current;
       const [akRes, skRes, wtRes, authRes] = await Promise.allSettled([
         api.listAPIKeys(),
         api.listKeys(),
@@ -124,7 +129,7 @@ export function AccessPage({
       }
 
       const authEnabled = statusVal ? statusVal.auth_enabled : true;
-      let resolvedUser = currentUserProp ?? api.getAuthUser();
+      let resolvedUser = currentUserPropRef.current ?? api.getAuthUser();
       if (authEnabled) {
         try {
           const meRes = await api.me();
@@ -150,7 +155,7 @@ export function AccessPage({
     } finally {
       setLoading(false);
     }
-  }, [currentUserProp, workerTokensProp]);
+  }, []);
 
   useEffect(() => {
     void loadAll();

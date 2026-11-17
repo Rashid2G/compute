@@ -331,7 +331,8 @@ type PoolMigrationResponse struct {
 type BulkVMsRequest struct {
 	IDs    []string `json:"ids"`
 	VMIDs  []string `json:"vm_ids,omitempty"`
-	Action string   `json:"action,omitempty"` // "start", "stop", "delete"
+	Action string   `json:"action,omitempty"` // "start", "stop", "save-state", "snapshot", "resume", "restart", "protect", "unprotect", "delete"
+	Async  bool     `json:"async,omitempty"`
 }
 
 // BulkVMItemError reports a single failure in a bulk operation.
@@ -343,7 +344,13 @@ type BulkVMItemError struct {
 // BulkVMsResponse summarizes the outcome of a bulk VM operation.
 type BulkVMsResponse struct {
 	Action    string            `json:"action,omitempty"`
+	Status    string            `json:"status,omitempty"`
+	TaskID    string            `json:"task_id,omitempty"`
 	Requested int               `json:"requested"`
+	Queued    int               `json:"queued,omitempty"`
 	Succeeded []string          `json:"succeeded"`
 	Failed    []BulkVMItemError `json:"failed"`
+	// Warnings reports items that were created but could not fully start, so a
+	// queued bulk create does not silently look like a clean success.
+	Warnings []BulkVMItemError `json:"warnings,omitempty"`
 }
