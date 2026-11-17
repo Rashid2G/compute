@@ -451,13 +451,3 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
-
-// handlePreviewProxy handles reverse-proxying HTTP/WebSocket traffic to microVM ports via unified IngressProxy.
-// URL pattern: /preview/:sandbox_id/:port/*
-func (s *Server) handlePreviewProxy(w http.ResponseWriter, r *http.Request) {
-	if s.ingressProxy != nil {
-		s.ingressProxy.ServeHTTP(w, r)
-		return
-	}
-	http.Error(w, "ingress proxy not initialized", http.StatusInternalServerError)
-}

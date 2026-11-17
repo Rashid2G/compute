@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -31,6 +32,17 @@ type DaemonClient struct {
 	apiKey       string
 	httpClient   *http.Client
 	streamClient *http.Client
+
+	publicURLMu      sync.Mutex
+	publicURL        string
+	publicURLFetched bool
+}
+
+// DaemonVersion is the daemon's /api/v1/version payload. PublicURL is the
+// externally reachable base URL the daemon advertises (empty when unset).
+type DaemonVersion struct {
+	version.Info
+	PublicURL string `json:"public_url,omitempty"`
 }
 
 type QueueResponse struct {
@@ -248,6 +260,42 @@ func (c *DaemonClient) GetNetworkConfig(ctx context.Context) (*network.Config, e
 	return &cfg, err
 }
 
+// ExposePort publishes a guest port on the daemon's ingress proxy. A host port
+// is not required (host_port is left at 0), so exposure does not consume host
+// ports and scales with the number of sandboxes rather than host sockets.
+func (c *DaemonClient) ExposePort(ctx context.Context, vmID string, guestPort int, public bool, subdomain string) (*db.PortForward, error) {
+	payload := map[string]interface{}{
+		"guest_port": guestPort,
+		"public":     public,
+	}
+	if subdomain != "" {
+		payload["subdomain"] = subdomain
+	}
+	var pf db.PortForward
+	err := c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(vmID)+"/expose", payload, &pf)
+	return &pf, err
+}
+
+func (c *DaemonClient) ListPortForwards(ctx context.Context, vmID string) ([]*db.PortForward, error) {
+	path := "/api/v1/network/port-forwards"
+	if vmID != "" {
+		path += "?vm_id=" + url.QueryEscape(vmID)
+	}
+	var pfs []*db.PortForward
+	err := c.doRequest(ctx, http.MethodGet, path, nil, &pfs)
+	return pfs, err
+}
+
+func (c *DaemonClient) UnexposePort(ctx context.Context, vmID string, guestPort int) error {
+	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(vmID)+"/unexpose", map[string]int{"guest_port": guestPort}, nil)
+}
+
+func (c *DaemonClient) SetPortForwardPublic(ctx context.Context, pfID string, public bool) (*db.PortForward, error) {
+	var pf db.PortForward
+	err := c.doRequest(ctx, http.MethodPatch, "/api/v1/network/port-forwards/"+url.PathEscape(pfID), map[string]bool{"public": public}, &pf)
+	return &pf, err
+}
+
 func (c *DaemonClient) GetConfig(ctx context.Context) (*config.GlobalConfig, error) {
 	var cfg config.GlobalConfig
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/config", nil, &cfg)
@@ -432,6 +480,13 @@ func (c *DaemonClient) Host() string {
 		return ""
 	}
 	return u.Hostname()
+}
+
+// BaseURL returns the daemon origin used for API calls, e.g.
+// "http://127.0.0.1:18080". It is also the origin that path-based ingress
+// preview URLs are served from.
+func (c *DaemonClient) BaseURL() string {
+	return strings.TrimSuffix(c.baseURL, "/")
 }
 
 func (c *DaemonClient) ListKeys(ctx context.Context) ([]*db.SSHKey, error) {
@@ -636,13 +691,48 @@ func (c *DaemonClient) GetReadiness(ctx context.Context) (*doctor.Report, error)
 	return &report, nil
 }
 
-func (c *DaemonClient) GetVersion(ctx context.Context) (*version.Info, error) {
-	var info version.Info
+func (c *DaemonClient) GetVersion(ctx context.Context) (*DaemonVersion, error) {
+	var info DaemonVersion
 	err := c.doRequest(ctx, http.MethodGet, "/api/v1/version", nil, &info)
 	if err != nil {
 		return nil, err
 	}
 	return &info, nil
+}
+
+// DiscoverPublicURL learns the daemon's advertised public base URL once, so
+// preview links can be printed as absolute public URLs. Failures are ignored:
+// links then fall back to the daemon address the CLI connected to.
+func (c *DaemonClient) DiscoverPublicURL(ctx context.Context) {
+	c.publicURLMu.Lock()
+	if c.publicURLFetched {
+		c.publicURLMu.Unlock()
+		return
+	}
+	c.publicURLFetched = true
+	c.publicURLMu.Unlock()
+
+	qctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	info, err := c.GetVersion(qctx)
+	if err != nil || info == nil {
+		return
+	}
+	c.publicURLMu.Lock()
+	c.publicURL = strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
+	c.publicURLMu.Unlock()
+}
+
+// ingressBaseURL is where preview links should point: the daemon's advertised
+// public URL when known, otherwise the address this client uses.
+func (c *DaemonClient) ingressBaseURL() string {
+	c.publicURLMu.Lock()
+	public := c.publicURL
+	c.publicURLMu.Unlock()
+	if public != "" {
+		return public
+	}
+	return c.BaseURL()
 }
 
 func (c *DaemonClient) SSHWebSocketURL(vmID string, query url.Values) string {

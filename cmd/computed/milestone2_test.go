@@ -473,10 +473,21 @@ func TestMilestone2_IngressProxyAndTunnelOverWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previewURL := fmt.Sprintf("%s/preview/%s/%d/hello?k=m2", h.ts.URL, remoteVM.ID, guestPort)
-	resp, err := http.Get(previewURL)
+	if err := h.store.SavePortForward(context.Background(), &db.PortForward{
+		ID: "pf_remote_web", VMID: remoteVM.ID, VMName: remoteVM.Name,
+		GuestPort: guestPort, Protocol: "tcp", Subdomain: "remote-web",
+		Status: "active", Public: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, h.ts.URL+"/hello?k=m2", nil)
 	if err != nil {
-		t.Fatalf("GET preview failed: %v", err)
+		t.Fatal(err)
+	}
+	req.Host = "remote-web.localhost"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET serve URL failed: %v", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()

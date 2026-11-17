@@ -45,10 +45,10 @@ export function NetworkPage({
     () => portForwardsProp ?? [],
   );
   const [addPfOpen, setAddPfOpen] = useState(false);
-  const [pfHostPort, setPfHostPort] = useState(18081);
   const [pfGuestPort, setPfGuestPort] = useState(8080);
   const [pfVmId, setPfVmId] = useState('');
   const [pfProto, setPfProto] = useState('tcp');
+  const [pfPublic, setPfPublic] = useState(true);
 
   const hasPortForwardsPropRef = useRef(portForwardsProp !== undefined);
   hasPortForwardsPropRef.current = portForwardsProp !== undefined;
@@ -110,24 +110,20 @@ export function NetworkPage({
     if (!pfVmId) return;
     const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
     const payload = {
-      host_port: pfHostPort,
       guest_port: pfGuestPort,
       vm_id: pfVmId,
       vm_name: vmAlloc?.vm_name || pfVmId,
       protocol: pfProto,
+      public: pfPublic,
     };
     setAddPfOpen(false);
 
-    const toastID = toast.loading(
-      `Adding DNAT port forward :${payload.host_port} -> :${payload.guest_port}…`,
-    );
+    const label = `:${pfGuestPort}`;
+    const toastID = toast.loading(`Adding exposure ${label}…`);
     void api
       .createPortForward(payload)
       .then(async () => {
-        toast.success(
-          `Added DNAT port forward :${payload.host_port} -> :${payload.guest_port}`,
-          { id: toastID },
-        );
+        toast.success(`Added exposure ${label}`, { id: toastID });
         await loadPortForwards(true);
       })
       .catch((err) => {
@@ -428,7 +424,7 @@ export function NetworkPage({
               className="border border-border bg-muted/15 p-4 space-y-3"
             >
               <div className="text-[13px] font-medium text-foreground">
-                Add DNAT Port Forward Rule
+                Add Port Exposure
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
                 <div>
@@ -449,18 +445,6 @@ export function NetworkPage({
                       </option>
                     ))}
                   </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
-                    Host Port
-                  </label>
-                  <input
-                    type="number"
-                    aria-label="Host port"
-                    value={pfHostPort}
-                    onChange={(e) => setPfHostPort(Number(e.target.value))}
-                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-                  />
                 </div>
                 <div>
                   <label className="block text-[11px] text-muted-foreground mb-1">
@@ -489,6 +473,15 @@ export function NetworkPage({
                   </select>
                 </div>
               </div>
+              <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={pfPublic}
+                  onChange={(e) => setPfPublic(e.target.checked)}
+                  className="h-3.5 w-3.5 border border-border"
+                />
+                Public URL (anyone with the link can reach it)
+              </label>
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
@@ -501,7 +494,7 @@ export function NetworkPage({
                   type="submit"
                   className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
                 >
-                  Save Rule
+                  Save Exposure
                 </button>
               </div>
             </form>
@@ -512,9 +505,10 @@ export function NetworkPage({
               <thead>
                 <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
                   <th className="py-2.5 px-3 font-normal">Protocol</th>
-                  <th className="py-2.5 px-3 font-normal">Host Port</th>
+                  <th className="py-2.5 px-3 font-normal">Serve Port</th>
                   <th className="py-2.5 px-3 font-normal">Sandbox</th>
                   <th className="py-2.5 px-3 font-normal">Guest Port</th>
+                  <th className="py-2.5 px-3 font-normal">Access</th>
                   <th className="py-2.5 px-3 font-normal">Public URL</th>
                   <th className="py-2.5 px-3 font-normal">Created</th>
                   <th className="py-2.5 px-3 text-right font-normal">
@@ -526,10 +520,10 @@ export function NetworkPage({
                 <tbody>
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={8}
                       className="py-12 text-center text-muted-foreground"
                     >
-                      No custom DNAT port-forwarding rules configured.
+                      No port exposures configured.
                     </td>
                   </tr>
                 </tbody>
@@ -539,13 +533,16 @@ export function NetworkPage({
                     <tr key={pf.id} className="hover:bg-muted/30">
                       <td className="py-2.5 px-3">{pf.protocol}</td>
                       <td className="py-2.5 px-3 text-foreground font-medium">
-                        :{pf.host_port}
+                        {pf.host_port > 0 ? `:${pf.host_port}` : 'subdomain'}
                       </td>
                       <td className="py-2.5 px-3 text-foreground">
                         {pf.vm_name || pf.vm_id}
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         :{pf.guest_port}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {pf.public ? 'public' : 'private'}
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         {pf.public_url ? (

@@ -134,6 +134,126 @@ The apex and reserved labels are intercepted before the ingress so they can
 never collide with a sandbox, and `api.<zone>` is reserved for the API even
 when the edge is disabled (on the daemon's own port the mux serves both).
 
+## Serving apps from sandboxes (one origin per exposure)
+
+Path-prefix previews (`/preview/<sandbox>/<port>/`) cannot be made transparent
+for arbitrary apps: redirects, `history.pushState`, absolute asset imports,
+cookies and service workers all assume the app owns its origin. Compute instead
+gives **every exposure its own origin**, so the app sees `/` as its root and no
+response rewriting is involved.
+
+```bash
+# Public: anyone with the URL can reach the app
+compute expose web 8080
+
+# Private: only the owning tenant (browser session or short-lived token)
+compute expose web 8080 --private
+
+# Preferred, DNS-safe label (made unique): <name>.<serve-domain>
+compute expose web 8080 --subdomain my-app
+
+compute ports web        # list exposures and their URLs
+compute unexpose web 8080
+```
+
+### Two transports
+
+| Mode | URL | When it is selected |
+| --- | --- | --- |
+| **Subdomain** | `https://<slug>.<serve-domain>/` | `COMPUTE_SERVE_DOMAIN` is set, or the API binds loopback (then the domain defaults to `localhost`) |
+| **Port** | `https://<daemon-host>:<serve-port>/` | `COMPUTE_PUBLIC_URL` points at a non-loopback host, or the API binds a non-loopback address without a serve domain |
+
+Subdomain mode is the fully isolated option (per-origin cookies and storage).
+Port mode is the no-DNS fallback for bare public IPs and tailnets; browsers
+treat a distinct port as a distinct origin for `localStorage`, `sessionStorage`,
+service workers and CORS, though **cookies are still host-scoped** (a cookie
+set by one port is sent to other ports on the same host).
+
+**Localhost needs no setup.** Browsers resolve `*.localhost` to loopback and
+treat it as a secure context, so a loopback daemon on `:18080` publishes
+`http://web-8080.localhost:18080/` with no DNS or certificate work.
+
+**Public domain.** Point a wildcard record at the daemon and configure the
+domain and a wildcard certificate:
+
+```bash
+# DNS: *.serves.example.com  A/AAAA  <daemon public IP>
+COMPUTE_SERVE_DOMAIN=serves.example.com
+COMPUTE_PUBLIC_URL=https://serves.example.com
+# Terminate TLS at the daemon (wildcard cert) or in front of it (Caddy/nginx).
+COMPUTE_SERVE_TLS_CERT_FILE=/etc/compute/wildcard.pem
+COMPUTE_SERVE_TLS_KEY_FILE=/etc/compute/wildcard.key
+```
+
+**Tailnet / bare IP (port mode).** The daemon listens on one port per exposure
+from `COMPUTE_SERVE_PORT_START..COMPUTE_SERVE_PORT_END` (default `18400-18500`)
+on `COMPUTE_SERVE_BIND` (default `127.0.0.1`). Port-mode URLs use `http://`
+unless `COMPUTE_SERVE_TLS_CERT_FILE` / `_KEY_FILE` are configured.
+
+```bash
+# Tailnet-only raw TCP mapping (any port; traffic stays inside WireGuard).
+# -> http://compute-lab.tailb1be99.ts.net:18400/
+tailscale serve --bg --tcp=18400 tcp://127.0.0.1:18400
+
+# HTTPS on the three ports Tailscale can terminate (443/8443/10000):
+# -> https://compute-lab.tailb1be99.ts.net:8443/
+tailscale serve --bg --https=8443 http://127.0.0.1:18400
+```
+
+For HTTPS on arbitrary ports, terminate TLS in the daemon with a certificate
+for the node name (`tailscale cert <node>.<tailnet>.ts.net`, then point
+`COMPUTE_SERVE_TLS_CERT_FILE` / `_KEY_FILE` at it) and map the port with
+`tailscale serve --tcp`. Or bind `COMPUTE_SERVE_BIND=0.0.0.0` and expose the
+range directly on a public IP. Port-mode listeners also work for sandboxes on
+remote workers: the daemon proxies through the existing outbound worker tunnel.
+
+### Access control
+
+- `public` exposures are reachable by anyone with the URL.
+- `private` exposures accept:
+  - the daemon session cookie or `Authorization: Bearer cmp_...` when the
+    client can send it (port mode shares the host, so the session cookie is
+    sent automatically);
+  - a short-lived signed serve token. Browsers are bounced through
+    `GET /api/v1/serve/authorize` (which holds the daemon session) and return
+    with `?__serve_token=...`, exchanged for an HttpOnly `compute_serve` cookie
+    scoped to the serve origin. CLI/SDK clients use
+    `POST /api/v1/sandboxes/<id>/serve-token` to mint the same URL.
+
+Tokens are HMAC-signed with `COMPUTE_SERVE_TOKEN_KEY` (or a key derived from
+`COMPUTE_ADMIN_SECRET`; otherwise a random per-process key, which resets
+private-serve sessions on restart).
+
+### API
+
+| Method / path | Purpose |
+| --- | --- |
+| `GET /api/v1/sandboxes/<id>/ports` | list exposures for a sandbox |
+| `POST /api/v1/sandboxes/<id>/expose` | expose `{"guest_port":8080,"public":true,"subdomain":"my-app"}` |
+| `POST /api/v1/sandboxes/<id>/unexpose` | remove `{"guest_port":8080}` |
+| `POST /api/v1/sandboxes/<id>/serve-token` | mint `{"url":...}` for a private exposure |
+| `PATCH /api/v1/sandboxes/<id>/ports/<port>` | toggle `{"public":false}` |
+| `DELETE /api/v1/sandboxes/<id>/ports/<port>` | remove the exposure |
+| `GET /api/v1/serve/authorize?next=<serve-url>` | browser auth hop for private serves |
+| `POST /api/v1/network/port-forwards` | low-level create (`vm_id`, `guest_port`, `public`) |
+| `GET /api/v1/network/port-forwards?vm_id=<id>` | list/filter all exposure rules |
+| `PATCH /api/v1/network/port-forwards/<id>` | toggle visibility / serve label |
+
+`public_url` in responses is **absolute** and is the canonical URL for the
+exposure. Set `COMPUTE_PUBLIC_URL` to the externally reachable daemon base URL
+so port-mode URLs use the right host; it is advertised as `public_url` on
+`GET /api/v1/version`.
+
+### Notes and limits
+
+- Re-exposing the same guest port keeps the existing origin (slug/port).
+- A serve label is generated from `<sandbox>-<port>` and made globally unique;
+  `--subdomain` requests a preferred label.
+- Apps that hard-code an absolute URL at build time (`PUBLIC_URL=...`) still
+  need their own base-URL configuration; no proxy can fix that.
+- Legacy `/preview/...` path routes were removed in this design. Use the
+  `public_url` returned by the API.
+
 ## API surface
 
 - `GET /api/v1/dns/status` — responder state (enabled, listen address, zones,

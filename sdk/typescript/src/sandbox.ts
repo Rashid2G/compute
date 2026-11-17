@@ -162,8 +162,25 @@ export class Sandbox {
     return new Sandbox(id, normalizedHost, apiKey);
   }
 
-  getPreviewURL(port: number): string {
-    return `${this.host}/preview/${this.id}/${port}/`;
+  /**
+   * Publish a guest port and return its serve URL. Every exposure gets its own
+   * origin (a subdomain or a dedicated port), so apps that redirect or use
+   * absolute paths work unchanged. Private exposures return a short-lived
+   * token URL.
+   */
+  async exposePort(
+    port: number,
+    options: { public?: boolean; subdomain?: string } = {}
+  ): Promise<{ url: string; public_url: string; public: boolean; expires_at?: string }> {
+    const body: Record<string, unknown> = { guest_port: port };
+    if (options.public !== undefined) body.public = options.public;
+    if (options.subdomain) body.subdomain = options.subdomain;
+    const pf = await (await this.request('POST', `/api/v1/sandboxes/${this.id}/expose`, body)).json();
+    if (pf && pf.public === false) {
+      const token = await this.request('POST', `/api/v1/sandboxes/${this.id}/serve-token`, { guest_port: port });
+      return token.json();
+    }
+    return { url: pf.public_url, public_url: pf.public_url, public: true };
   }
 
   async setNetworkIsolation(mode: NetworkIsolationMode): Promise<any> {

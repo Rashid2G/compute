@@ -198,9 +198,22 @@ class Sandbox:
         resolved_key = api_key or os.getenv("COMPUTE_API_KEY")
         return cls(sandbox_id=sandbox_id, host=resolved_host, api_key=resolved_key)
 
-    def get_preview_url(self, port: int) -> str:
-        """Return the public preview URL to access an HTTP/WebSocket server running on a port inside the sandbox."""
-        return f"{self._host}/preview/{self.id}/{port}/"
+    def expose_port(self, port: int, public: bool = True, subdomain: str = "") -> Dict[str, Any]:
+        """Publish a guest port and return its serve URL.
+
+        Every exposure gets its own origin (a subdomain or a dedicated port), so
+        apps that redirect or use absolute paths work unchanged. Private
+        exposures return a short-lived token URL.
+        """
+        payload: Dict[str, Any] = {"guest_port": port, "public": public}
+        if subdomain:
+            payload["subdomain"] = subdomain
+        pf = self._request("POST", f"/api/v1/sandboxes/{self.id}/expose", json=payload).json()
+        if pf.get("public") is False:
+            return self._request(
+                "POST", f"/api/v1/sandboxes/{self.id}/serve-token", json={"guest_port": port}
+            ).json()
+        return {"url": pf.get("public_url"), "public_url": pf.get("public_url"), "public": True}
 
     def set_network_isolation(self, mode: str) -> Dict[str, Any]:
         """Set sandbox network isolation mode ('account' or 'isolated')."""
