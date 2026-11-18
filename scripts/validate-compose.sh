@@ -86,9 +86,10 @@ with open(path, encoding="utf-8") as fh:
 
 problems = []
 services = doc.get("services") or {}
-for name in ("compute-init", "computed"):
-    if name not in services:
-        problems.append(f"missing service {name}")
+if "computed" not in services:
+    problems.append("missing service computed")
+if "compute-init" in services:
+    problems.append("compute-init must not be in docker-compose.yml; host/image bootstrap belongs in scripts/install.sh")
 for name, svc in services.items():
     if isinstance(svc, dict) and svc.get("env_file"):
         problems.append(f"{name} must not require env_file (.env should remain optional)")
@@ -96,12 +97,8 @@ for name in ("computed", "compute-worker"):
     svc = services.get(name) or {}
     if svc.get("network_mode") != "host":
         problems.append(f"{name} must use network_mode: host")
-for name in ("compute-init", "computed"):
-    if (services.get(name) or {}).get("privileged") is not True:
-        problems.append(f"{name} must be privileged")
-init = services.get("compute-init") or {}
-if not init.get("command"):
-    problems.append("compute-init must override command to init --images")
+if (services.get("computed") or {}).get("privileged") is not True:
+    problems.append("computed must be privileged")
 computed_env = (services.get("computed") or {}).get("environment") or {}
 if computed_env.get("COMPUTE_ADMIN_PASSWORD") != "${COMPUTE_ADMIN_PASSWORD-admin}":
     problems.append("computed COMPUTE_ADMIN_PASSWORD must use ${COMPUTE_ADMIN_PASSWORD-admin}")
@@ -111,8 +108,8 @@ missing_env = sorted(v for v in env_vars if v not in computed_env)
 if missing_env:
     problems.append(f"computed environment missing internal/config/env.go vars: {', '.join(missing_env)}")
 dep = (services.get("computed") or {}).get("depends_on") or {}
-if (dep.get("compute-init") or {}).get("condition") != "service_completed_successfully":
-    problems.append("computed must wait for compute-init completion")
+if "compute-init" in dep:
+    problems.append("computed must not depend on compute-init")
 health = (services.get("computed") or {}).get("healthcheck") or {}
 test = health.get("test") or []
 if not any("/api/v1/ready" in str(part) for part in test):
@@ -141,7 +138,10 @@ else
 fi
 
 printf '\n==> Shell syntax\n'
-for script in scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/build-rootfs-chroot.sh scripts/validate-compose.sh; do
+if [ ! -x "scripts/install.sh" ]; then
+    say_fail "scripts/install.sh is missing or not executable"
+fi
+for script in scripts/install.sh scripts/preflight.sh scripts/host-prepare.sh scripts/setup-host.sh scripts/build-kernel.sh scripts/build-rootfs.sh scripts/build-rootfs-chroot.sh scripts/validate-compose.sh; do
     if [ -f "${script}" ] && bash -n "${script}"; then
         say_ok "bash -n ${script}"
     fi

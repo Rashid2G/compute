@@ -12,15 +12,21 @@ Compute is an open-source, self-hosted platform for running hardware-isolated **
 
 ## Quickstart (Docker Compose)
 
-Requires Linux (`x86_64` or `arm64`) with `/dev/kvm`, cgroup v2, and rootful Docker Engine 24+ / Compose v2.20+. Firecracker, Jailer, and image tooling are bundled inside the container.
+Requires Linux (`x86_64` or `arm64`) with `/dev/kvm`, cgroup v2, and rootful Docker Engine 24+ / Compose v2.20+. Firecracker and Jailer are bundled inside the daemon container.
 
-1. **Start the stack** (`compute-init` auto-downloads `vmlinux`, builds `ubuntu-24.04.ext4`, and generates the SSH key):
+1. **Prepare the host & build base images** (loads kernel modules, verifies host readiness, downloads `vmlinux`, builds `ubuntu-24.04.ext4`, and generates `./data/images/ssh/id_ed25519` with live terminal progress):
+
+   ```bash
+   ./scripts/install.sh
+   ```
+
+2. **Start the daemon** (or run `make up`, which automatically runs `./scripts/install.sh` first if `./data/images` is not yet populated):
 
    ```bash
    docker compose up -d
    ```
 
-2. **Verify readiness & open the embedded Web UI**:
+3. **Verify readiness & open the embedded Web UI**:
 
    ```bash
    curl -fsS http://127.0.0.1:18080/api/v1/health
@@ -29,10 +35,9 @@ Requires Linux (`x86_64` or `arm64`) with `/dev/kvm`, cgroup v2, and rootful Doc
 
    Port `:18080` serves **both** the REST/WebSocket API and the embedded Web Dashboard (`http://127.0.0.1:18080/`, default loopback login `admin` / `admin`). The standalone `compute-gui` service (`:8080`) is strictly optional and disabled by default.
 
-3. **Configure `.env` before exposing beyond loopback**:
+4. **Configure `.env` before exposing beyond loopback**:
 
    ```bash
-   ./scripts/preflight.sh
    cp .env.example .env && chmod 600 .env
    ```
 
