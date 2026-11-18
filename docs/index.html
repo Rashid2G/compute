@@ -216,7 +216,7 @@
       </section>
 
       <!-- 02. Quickstart -->
-      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs kernel build auto prebuilt vmlinux compute-gui embedded ui">
+      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs kernel build auto prebuilt vmlinux compute-gui embedded ui credentials default password user login admin compute">
         <div class="section-head">
           <span class="section-id">02</span>
           <h2>Host Setup, Images &amp; Boot</h2>
@@ -282,6 +282,70 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
           Run <code>./scripts/install.sh</code> (or <code>make up</code>) on a fresh host before starting <code>docker compose up -d</code>.
           It prepares host kernel modules, downloads and SHA-256-verifies <code>vmlinux</code>, generates <code>./data/images/ssh/id_ed25519</code>,
           and builds <code>./data/images/ubuntu-24.04.ext4</code> with live terminal progress so Docker Compose runs only <code>computed</code> without a blocking init container.
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Default Value</th>
+                <th>Quickstart Usage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Web Dashboard URL</strong></td>
+                <td><code>http://127.0.0.1:18080/</code></td>
+                <td>Embedded Web UI served directly on loopback (no extra container).</td>
+              </tr>
+              <tr>
+                <td><strong>Default User</strong></td>
+                <td><code>admin</code></td>
+                <td>Initial system administrator username (<code>COMPUTE_ADMIN_USERNAME</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>Default Password</strong></td>
+                <td><code>admin</code></td>
+                <td>Initial administrator password on loopback (<code>COMPUTE_ADMIN_PASSWORD</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>Admin Email</strong></td>
+                <td><code>admin@compute.local</code></td>
+                <td>Default admin email address (<code>COMPUTE_ADMIN_EMAIL</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>CLI Login</strong></td>
+                <td><code>compute auth login --username admin --password admin</code></td>
+                <td>Logs in against local daemon at <code>http://127.0.0.1:18080</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox Guest User</strong></td>
+                <td><code>compute</code></td>
+                <td>Default guest user (UID 1000) with passwordless <code>sudo</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox Root User</strong></td>
+                <td><code>root</code></td>
+                <td>Guest root account (UID 0); switch via <code>sudo su -</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox SSH Key</strong></td>
+                <td><code>./data/images/ssh/id_ed25519</code></td>
+                <td>Ed25519 key generated during install; used by <code>compute sandbox ssh &lt;name&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox Password Auth</strong></td>
+                <td><em>Disabled by default</em></td>
+                <td>sshd key-only by default; opt-in with <code>--ssh-password &lt;pass&gt;</code> on create.</td>
+              </tr>
+              <tr>
+                <td><strong>Base Image &amp; Kernel</strong></td>
+                <td><code>ubuntu-24</code> / <code>vmlinux</code></td>
+                <td>Ubuntu 24.04 LTS (<code>ubuntu-24.04.ext4</code>) with 1 vCPU, 2048 MB RAM, 50 GB disk.</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
         <p>
