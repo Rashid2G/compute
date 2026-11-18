@@ -115,6 +115,9 @@ export interface CreateVMRequest {
   ssh_password?: string;
   /** Opts out of embedding the account's default key when no ssh_key_id is set. */
   ssh_no_default_key?: boolean;
+  command?: string;
+  build_command?: string;
+  exec_user?: string;
 }
 
 export interface CloneVMOptions {
@@ -944,4 +947,24 @@ export interface ResourceLimitErrorDetails {
   limit?: number;
   error?: string;
   suggestion?: string;
+}
+
+export interface ExecVMRequest {
+  command: string;
+  user?: string;
+  timeout?: number;
+}
+
+export interface ExecVMResponse {
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  duration_ms: number;
+}
+
+export interface ExecStreamEvent {
+  stream?: 'stdout' | 'stderr' | string;
+  data?: string;
+  error?: string;
+  exit_code?: number;
 }

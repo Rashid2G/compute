@@ -81,6 +81,7 @@ export function CreateVMDialog({
   const [networkIsolation, setNetworkIsolation] =
     useState<NetworkIsolationMode>('account');
   const [protectedVM, setProtectedVM] = useState(false);
+  const [buildCommand, setBuildCommand] = useState('');
 
   const [fetchedTemplates, setFetchedTemplates] = useState<Template[]>([]);
   const [fetchedWorkers, setFetchedWorkers] = useState<WorkerNodeRecord[]>([]);
@@ -275,6 +276,8 @@ export function CreateVMDialog({
         ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
         ssh_no_default_key: sshKeyId === 'none' || undefined,
         ssh_password: sshPassword || undefined,
+        command: buildCommand.trim() || undefined,
+        build_command: buildCommand.trim() || undefined,
       };
 
       if (placementMode === 'pool' && selectedPoolId) {
@@ -300,6 +303,7 @@ export function CreateVMDialog({
     onOpenChange(false);
     memoryTouchedRef.current = false;
     setSandboxName('');
+    setBuildCommand('');
     setSshPassword('');
     setNetworkIsolation('account');
     setProtectedVM(false);
@@ -729,6 +733,23 @@ export function CreateVMDialog({
                 </span>
               </button>
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Command on build (optional)
+            </label>
+            <input
+              type="text"
+              aria-label="Command on build"
+              value={buildCommand}
+              onChange={(e) => setBuildCommand(e.target.value)}
+              placeholder="e.g. uname -a && echo ready > /ready.txt"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+            />
+            <p className="text-[10.5px] text-muted-foreground">
+              Automatically executes inside the sandbox upon initial creation and boot.
+            </p>
           </div>
 
           <div className="flex items-center gap-2 pt-1 pb-1">

@@ -169,3 +169,19 @@ func TestRootfsPackagesAndPingConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestBuilder_CustomBuildCommands(t *testing.T) {
+	req := BuildRequest{
+		Name:     "node-custom",
+		Packages: []string{"nodejs", "npm"},
+		Command:  "npm install -g pnpm && pnpm --version",
+		Commands: []string{"echo build-stage-1 > /etc/stage"},
+	}
+	dockerfile := buildDockerfile(req)
+	if !strings.Contains(dockerfile, "npm install -g pnpm") {
+		t.Fatalf("expected custom command in dockerfile, got: %s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "echo build-stage-1") {
+		t.Fatalf("expected custom commands array in dockerfile, got: %s", dockerfile)
+	}
+}

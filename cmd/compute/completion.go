@@ -20,7 +20,7 @@ _compute_completion() {
     fi
     local completion_command="${words[0]}"
 
-    local commands="sandbox vm ssh job jobs worker workers pool pools image images template templates url gui completion help scp"
+    local commands="sandbox vm exec ssh job jobs worker workers pool pools image images template templates url gui completion help scp"
     local sandbox_subcommands="list create start stop delete exec ssh info url"
     local job_subcommands="run list info logs cancel"
     local worker_subcommands="token list info cordon drain delete"
@@ -36,6 +36,11 @@ _compute_completion() {
 
     local cmd="${words[1]}"
     case "$cmd" in
+        exec)
+            local vms=$("$completion_command" __complete vms 2>/dev/null)
+            COMPREPLY=( $(compgen -W "$vms --user --timeout --no-stream --json --help" -- "$cur") )
+            return 0
+            ;;
         ssh)
             local vms=$("$completion_command" __complete vms 2>/dev/null)
             COMPREPLY=( $(compgen -W "$vms --user -u --password -p -t -T --help" -- "$cur") )
@@ -48,7 +53,7 @@ _compute_completion() {
             fi
             if [[ $cword -ge 3 ]]; then
                 case "${words[2]}" in
-                    create) COMPREPLY=( $(compgen -W "--name --tier --vcpus --memory --disk --image --template --ssh-key --help" -- "$cur") ) ;;
+                    create) COMPREPLY=( $(compgen -W "--name --tier --vcpus --memory --disk --image --template --ssh-key --command --build-command --user --help" -- "$cur") ) ;;
                     ssh)
                         local vms=$("$completion_command" __complete vms 2>/dev/null)
                         COMPREPLY=( $(compgen -W "$vms --user -u --password -p -t -T --help" -- "$cur") )
@@ -131,6 +136,7 @@ _compute() {
     commands=(
         'sandbox:Manage isolated compute sandboxes'
         'vm:Manage isolated compute sandboxes (alias for sandbox)'
+        'exec:Execute commands inside a sandbox with streaming output'
         'job:Run and monitor distributed compute jobs'
         'worker:Manage worker nodes and enrollments'
         'pool:Manage worker pools'
@@ -167,10 +173,11 @@ _compute "$@"
 `
 
 const fishCompletionScript = `# fish completion for compute
-set -l commands sandbox vm job jobs worker workers pool pools image images template templates url gui completion help scp
+set -l commands sandbox vm exec ssh job jobs worker workers pool pools image images template templates url gui completion help scp
 
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a sandbox -d "Manage isolated compute sandboxes"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a vm -d "Manage isolated compute sandboxes (alias)"
+complete -c compute -n "not __fish_seen_subcommand_from $commands" -a exec -d "Execute commands inside a sandbox with streaming output"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a job -d "Run and monitor distributed compute jobs"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a worker -d "Manage worker nodes and enrollments"
 complete -c compute -n "not __fish_seen_subcommand_from $commands" -a pool -d "Manage worker pools"

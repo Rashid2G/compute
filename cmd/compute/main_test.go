@@ -520,6 +520,12 @@ func TestBoatStyleCLICommands(t *testing.T) {
 		}
 	})
 
+	// Exec
+	mux.HandleFunc("/api/v1/vms/sbx-1/exec", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"stdout":"Linux build machine feedback\n","stderr":"","exit_code":0,"duration_ms":42}`)
+	})
+
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -569,6 +575,14 @@ func TestBoatStyleCLICommands(t *testing.T) {
 	out, err = cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "job-101") {
 		t.Fatalf("job list failed: %v, out: %s", err, string(out))
+	}
+
+	// 7. compute exec top-level
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "exec --no-stream sbx-1 -- echo hello")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "Linux build machine feedback") {
+		t.Fatalf("compute exec failed: %v, out: %s", err, string(out))
 	}
 }
 

@@ -30,7 +30,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --command <cmd>, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -240,17 +240,29 @@ Commands:
   create                   Create a new worker pool.
   delete, rm               Delete an existing worker pool.`,
 
+	"exec": `Execute commands inside a sandbox with live streaming output.
+
+Usage:
+  compute exec [flags] [user@]<name|id> [--] <command...>
+
+Flags:
+  --no-stream              Buffer output and print it only when the command finishes.
+  --json                   Print the buffered result as JSON (implies --no-stream).
+  --timeout <seconds>      Command timeout in seconds (0 = no timeout while streaming).
+  --user <username>        SSH user (default: compute, or user@target prefix).
+`,
+
 	"image": `Manage base and custom rootfs images.
 
 Usage:
   compute image list
-  compute image build --name <name> [--base <image>] [--packages <a,b>] [--size <MiB>] [--desc <text>]
+  compute image build --name <name> [--base <image>] [--packages <a,b>] [--command <cmd>] [--size <MiB>] [--desc <text>]
   compute image inspect <name|id>
   compute image delete <name|id>
 
 Commands:
   list, ls                 List all available base and custom images.
-  build, create            Build a custom rootfs image with preinstalled packages.
+  build, create            Build a custom rootfs image with preinstalled packages and optional build command.
   inspect, show            Display image details and installed packages.
   delete, rm               Delete an image.`,
 

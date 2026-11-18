@@ -67,6 +67,10 @@ func main() {
 		handleSandboxSSH(context.Background(), client, os.Args[2:])
 		return
 
+	case "exec":
+		handleExecCommand(ctx, client, os.Args[2:])
+		return
+
 	case "url":
 		handleSandboxURL(ctx, client, os.Args[2:])
 		return
@@ -223,6 +227,7 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  cp                 Copy files between local host and sandboxes")
 	fmt.Fprintln(w, "  scp                Copy files/directories to and from sandboxes (scp-style, -r for directories)")
 	fmt.Fprintln(w, "  process, ps        List, start, and kill processes inside sandboxes")
+	fmt.Fprintln(w, "  exec               Execute commands on a sandbox with live streaming feedback (--user, --timeout, --no-stream, --json)")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
 	fmt.Fprintln(w, "  expose             Publish a sandbox port on the daemon ingress URL (--private, --subdomain)")
@@ -305,6 +310,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		networkIsolation := createCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' (communicate with account sandboxes) or 'isolated' (own sandbox only)")
 		isolated := createCmd.Bool("isolated", false, "Isolate this sandbox on its own network (shorthand for --network-isolation isolated)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
+		buildCommand := createCmd.String("command", "", "Command to execute inside the sandbox on build/start")
+		createCmd.StringVar(buildCommand, "build-command", "", "Alias for --command")
+		execUser := createCmd.String("user", "compute", "User to run the build command as (default: compute)")
 		startNow := createCmd.Bool("start", false, "Immediately boot/start the sandbox after creation")
 		bootNow := createCmd.Bool("boot", false, "Alias for --start")
 		createCmd.Parse(subArgs)
@@ -364,6 +372,8 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			SSHNoDefaultKey:  *noSSHKey,
 			SSHPassword:      password,
 			Protected:        protected,
+			Command:          *buildCommand,
+			ExecUser:         *execUser,
 			NetworkIsolation: *networkIsolation,
 			Isolated:         isolatedPtr,
 		})
@@ -400,6 +410,54 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			if v.Status == db.StatusQueued {
 				printQueuedHint(ctx, client, v)
 			}
+		}
+
+		if *buildCommand != "" {
+			if !(*startNow || *bootNow) {
+				fmt.Printf("Booting sandbox %s for build command execution...\n", v.Name)
+				runningVM, err := client.RunVM(ctx, v.ID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error booting sandbox %s: %v\n", v.Name, err)
+					os.Exit(1)
+				}
+				v = runningVM
+				fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s\n",
+					v.ID, v.Name, v.IPAddress, v.Status)
+			}
+			fmt.Printf("Executing build command on %s (%s):\n", v.Name, *buildCommand)
+			exitCode := 0
+			streamErr := ""
+			err := client.ExecVMStream(ctx, v.ID, vm.ExecRequest{
+				Command: *buildCommand,
+				User:    *execUser,
+			}, func(ev vm.ExecStreamEvent) error {
+				if ev.Data != "" {
+					if ev.Stream == "stderr" {
+						fmt.Fprint(os.Stderr, ev.Data)
+					} else {
+						fmt.Fprint(os.Stdout, ev.Data)
+					}
+				}
+				if ev.Error != "" {
+					streamErr = ev.Error
+				}
+				if ev.ExitCode != nil {
+					exitCode = *ev.ExitCode
+				}
+				return nil
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Build command error: %v\n", err)
+				os.Exit(1)
+			}
+			if streamErr != "" {
+				fmt.Fprintf(os.Stderr, "Build command error: %s\n", streamErr)
+			}
+			if exitCode != 0 {
+				fmt.Fprintf(os.Stderr, "Build command exited with code %d\n", exitCode)
+				os.Exit(exitCode)
+			}
+			fmt.Printf("Build command completed successfully (exit 0).\n")
 		}
 
 	case "start", "run":
@@ -1015,6 +1073,9 @@ func handleExecCommand(ctx context.Context, client *DaemonClient, args []string)
 		user = parts[0]
 		vmID = parts[1]
 	}
+	if resolved, err := resolveSandboxReference(ctx, client, vmID); err == nil && resolved != nil {
+		vmID = resolved.ID
+	}
 
 	cmdArgs := rest[1:]
 	if len(cmdArgs) > 0 && cmdArgs[0] == "--" {
@@ -1561,10 +1622,12 @@ func handleImageCommand(ctx context.Context, client *DaemonClient, args []string
 		base := buildCmd.String("base", "ubuntu-24", "Base image to derive from")
 		size := buildCmd.Int("size", 2048, "Image disk size in MiB")
 		desc := buildCmd.String("desc", "", "Optional description")
+		cmdFlag := buildCmd.String("command", "", "Optional build command or script to execute during image build")
+		buildCmd.StringVar(cmdFlag, "run", "", "Alias for --command")
 		buildCmd.Parse(args[1:])
 
 		if *name == "" {
-			printCommandError("--name is required to build an image.", "Usage: compute image build --name <name> [--base <image>] [--packages <a,b>] [--size <MiB>] [--desc <text>]", "image")
+			printCommandError("--name is required to build an image.", "Usage: compute image build --name <name> [--base <image>] [--packages <a,b>] [--command <cmd>] [--size <MiB>] [--desc <text>]", "image")
 		}
 		var pkgList []string
 		if *pkgs != "" {
@@ -1580,6 +1643,7 @@ func handleImageCommand(ctx context.Context, client *DaemonClient, args []string
 			Name:        *name,
 			BaseImage:   *base,
 			Packages:    pkgList,
+			Command:     *cmdFlag,
 			SizeMB:      *size,
 			Description: *desc,
 		})

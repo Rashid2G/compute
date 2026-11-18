@@ -87,6 +87,7 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole?: (vm: VM) => void;
+  onExec?: (vm: VM, initialCommand?: string) => void;
   onRefresh?: () => void | Promise<void>;
 }
 
@@ -130,6 +131,7 @@ export function InstancesPage({
   onDelete,
   onBulkDelete,
   onInspect,
+  onExec,
   onRefresh,
 }: InstancesPageProps) {
   const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
@@ -1425,6 +1427,10 @@ export function InstancesPage({
                                 <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
                                 Options &amp; Settings
                               </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => onExec?.(vm)}>
+                                <Play className="h-3.5 w-3.5" />
+                                Execute Command
+                              </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onSelect={() =>
@@ -1630,6 +1636,10 @@ export function InstancesPage({
                   <DropdownMenuItem onSelect={() => setOptionsTarget(selectedVM)}>
                     <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
                     All Options &amp; Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => onExec?.(selectedVM)}>
+                    <Play className="h-3.5 w-3.5" />
+                    Execute Command
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   {selectedVM.status === 'running' ? (

@@ -22,6 +22,8 @@ type BuildRequest struct {
 	Description string   `json:"description,omitempty"`
 	BaseImage   string   `json:"base_image,omitempty"` // defaults to "ubuntu-24.04"
 	Packages    []string `json:"packages,omitempty"`
+	Command     string   `json:"command,omitempty"`
+	Commands    []string `json:"commands,omitempty"`
 	Dockerfile  string   `json:"dockerfile,omitempty"`
 	Script      string   `json:"script,omitempty"`
 	SizeMB      int      `json:"size_mb,omitempty"` // defaults to 2048 MB
@@ -585,7 +587,26 @@ RUN mkdir -p /var/run/sshd /root/.ssh /home/compute/.ssh && \
     echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
     echo "UsePAM no" >> /etc/ssh/sshd_config && \
     echo "StrictModes no" >> /etc/ssh/sshd_config
-`, baseDockerImage, pkgsArg)
+%s`, baseDockerImage, pkgsArg, formatCustomCommands(req))
+}
+
+func formatCustomCommands(req BuildRequest) string {
+	allCommands := append([]string{}, req.Commands...)
+	if strings.TrimSpace(req.Command) != "" {
+		allCommands = append(allCommands, strings.TrimSpace(req.Command))
+	}
+	if len(allCommands) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	for _, c := range allCommands {
+		c = strings.TrimSpace(c)
+		if c != "" {
+			b.WriteString(fmt.Sprintf("RUN /bin/bash -c %q\n", c))
+		}
+	}
+	return b.String()
 }
 
 func defaultInitScript() string {
