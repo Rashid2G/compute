@@ -16,7 +16,10 @@ if [ "$(id -u)" -ne 0 ]; then
     fi
 fi
 
-mkdir -p "${DEST_DIR}" "${KEY_DIR}"
+mkdir -p "${DEST_DIR}" "${KEY_DIR}" 2>/dev/null || $SUDO mkdir -p "${DEST_DIR}" "${KEY_DIR}"
+if [ "$(id -u)" -ne 0 ] && { [ ! -w "${DEST_DIR}" ] || [ ! -w "${KEY_DIR}" ]; }; then
+    $SUDO chown -R "$(id -u):$(id -g)" "${DEST_DIR}" 2>/dev/null || true
+fi
 chmod 700 "${KEY_DIR}" 2>/dev/null || true
 
 is_valid_ext4() {
@@ -114,9 +117,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
-mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /run/sshd /run/lock
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+chmod 1777 /dev/shm /tmp /var/tmp /run/lock 2>/dev/null || true
 chmod 0755 /run/sshd
 mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
 

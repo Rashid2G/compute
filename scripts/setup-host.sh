@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="${PATH}:/usr/local/sbin:/usr/sbin:/sbin"
+
 # Compute Host Readiness & Setup Script
 # Configures host bridge networking, sysctl, firecracker prerequisites,
 # directories, and validates virtualization readiness.
@@ -94,7 +96,7 @@ elif [ -x /usr/local/bin/firecracker ]; then
     echo "  [OK] Firecracker binary found: /usr/local/bin/firecracker"
 else
     echo "  [INFO] Firecracker not in PATH or /usr/local/bin."
-    echo "         Download release: curl -L https://github.com/firecracker-microvm/firecracker/releases/latest/download/firecracker-v1.7.0-x86_64.tgz | tar -xz"
+    echo "         Download release: curl -L https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz | tar -xz"
 fi
 
 if command -v jailer >/dev/null 2>&1; then

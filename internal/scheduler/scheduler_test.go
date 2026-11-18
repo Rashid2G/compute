@@ -176,6 +176,54 @@ func TestSchedulerLocalFallback(t *testing.T) {
 	}
 }
 
+func TestSchedulerLocalFallbackWithRemoteWorkers(t *testing.T) {
+	reg := NewWorkerRegistry()
+	store := newMockStore()
+	sched := NewScheduler(reg, store)
+	local := &mockLocalExecutor{}
+	sched.SetLocalExecutor(local)
+
+	// Register a worker in a different pool ("gpu-pool") so it cannot take default pool jobs
+	reg.mu.Lock()
+	reg.workers["w-gpu"] = &Worker{
+		ID:     "w-gpu",
+		PoolID: "gpu-pool",
+		Status: "ready",
+		Capabilities: map[string]interface{}{
+			"architecture": "amd64",
+			"vcpus":        8,
+			"memory_mb":    16384,
+		},
+	}
+	reg.mu.Unlock()
+
+	specJSON, _ := json.Marshal(api.JobSpec{
+		Architecture: "amd64",
+		VCPUs:        2,
+		MemoryMB:     2048,
+		Command:      []string{"echo", "hello"},
+	})
+	store.jobs = append(store.jobs, &db.Job{
+		ID:       "job-default-pool",
+		PoolID:   "default",
+		Type:     "command",
+		State:    "queued",
+		SpecJSON: string(specJSON),
+		QueuedAt: time.Now().UTC(),
+	})
+
+	assigned, err := sched.ScheduleNext(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if assigned != 1 {
+		t.Fatalf("expected 1 assigned via local fallback when remote worker is in another pool, got %d", assigned)
+	}
+	if len(local.started) != 1 || local.started[0] != "job-default-pool" {
+		t.Fatalf("expected local executor to start job-default-pool, got %v", local.started)
+	}
+}
+
 func TestSchedulerMatching(t *testing.T) {
 	reg := NewWorkerRegistry()
 	store := newMockStore()

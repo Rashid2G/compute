@@ -165,12 +165,12 @@ Open the embedded Web Dashboard at <http://127.0.0.1:18080/>.
 
 ## 4. First Sandbox
 
-Point the CLI at the daemon and log in:
+Point the CLI at the daemon and log in (if you deployed via Docker Compose without building `./bin/compute` on the host, run `alias compute="docker compose exec computed /usr/local/bin/compute"` first):
 
 ```bash
 export COMPUTE_DAEMON=127.0.0.1:18080
 ./bin/compute auth login --username admin
-./bin/compute sandbox create --name demo --image ubuntu-24
+./bin/compute sandbox create --name demo --image ubuntu-24 --start
 ./bin/compute sandbox ssh demo -- uname -a
 ./bin/compute sandbox delete demo
 ```

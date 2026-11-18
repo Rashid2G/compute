@@ -141,6 +141,9 @@ func TestRootfsPackagesAndPingConfig(t *testing.T) {
 	if !strings.Contains(initScript, "ping_group_range") || !strings.Contains(initScript, "0 2147483647") {
 		t.Fatal("builder /sbin/init missing ping_group_range configuration")
 	}
+	if !strings.Contains(initScript, "/sbin/getty") || !strings.Contains(initScript, "/sbin/agetty") {
+		t.Fatal("builder /sbin/init should support both /sbin/getty and /sbin/agetty")
+	}
 
 	repoRoot := filepath.Join("..", "..")
 	for _, rel := range []string{

@@ -196,6 +196,7 @@ Commands:
 Run flags:
   --image <name>           Base image for job execution (default: daemon default image)
   --pool <pool>            Target worker pool (default: default)
+  --arch <arch>            Target architecture: amd64 or arm64 (default: host arch)
   --vcpus <n>              Number of vCPUs required (default: 2)
   --mem <MiB>              Memory size in MiB (default: 2048)
   --files <path>           Local directory or files to package and transfer
@@ -269,7 +270,7 @@ Commands:
 
 Usage:
   compute template list
-  compute template create <name> --vm <name|id> [--desc <text>]
+  compute template create [<name>] --vm <name|id> [--name <name>] [--desc <text>]
   compute template launch <name|id> [--name <vm-name>] [--tier <tier>] [--network-isolation <account|isolated>] [--isolated]
   compute template inspect <name|id>
   compute template delete <name|id>

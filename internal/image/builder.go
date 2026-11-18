@@ -25,6 +25,7 @@ type BuildRequest struct {
 	Command     string   `json:"command,omitempty"`
 	Commands    []string `json:"commands,omitempty"`
 	Dockerfile  string   `json:"dockerfile,omitempty"`
+	Script      string   `json:"script,omitempty"`
 	SizeMB      int      `json:"size_mb,omitempty"` // defaults to 2048 MB
 }
 
@@ -106,6 +107,10 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 			}
 		}
 	}
+	req.Name = cleanName
+	req.BaseImage = baseImage
+	req.Packages = packages
+	req.SizeMB = sizeMB
 
 	uid := uuid.New().String()
 	shortID := strings.ReplaceAll(uid, "-", "")[:8]
@@ -163,10 +168,66 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 	return img, nil
 }
 
-// defaultDockerBuild builds an Ubuntu rootfs with specified packages using Docker and formats it as ext4
+func lookSystemBin(name string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, candidate := range []string{"/usr/sbin/" + name, "/sbin/" + name, "/usr/local/sbin/" + name} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return name
+}
+
+func (b *Builder) findBaseRootfsPath() string {
+	var candidates []string
+	if b != nil && b.storMgr != nil {
+		if p := b.storMgr.GetBaseRootfsPath(); p != "" {
+			candidates = append(candidates, p)
+		}
+		if dir := b.storMgr.GetConfig().BaseImagesDir; dir != "" {
+			candidates = append(candidates,
+				filepath.Join(dir, "ubuntu-24.04.ext4"),
+				filepath.Join(dir, "ubuntu-24.ext4"),
+			)
+		}
+	}
+	candidates = append(candidates, "/var/lib/compute/images/ubuntu-24.04.ext4")
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// defaultDockerBuild builds an Ubuntu rootfs with specified packages using a
+// native base-rootfs clone + chroot fallback when running as root without Docker
+// (or when no custom Dockerfile is provided and a base rootfs exists), or via
+// Docker build/export + mkfs.ext4.
 func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outputPath string, sshPubKey string) error {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return fmt.Errorf("docker is required for default image building but was not found in PATH")
+	_, dockerLookErr := exec.LookPath("docker")
+	baseRootfs := b.findBaseRootfsPath()
+
+	if strings.TrimSpace(req.Dockerfile) == "" && baseRootfs != "" && os.Geteuid() == 0 {
+		chrootErr := b.chrootRootfsBuild(ctx, req, baseRootfs, outputPath, sshPubKey)
+		if chrootErr == nil {
+			return nil
+		}
+		if dockerLookErr != nil {
+			return chrootErr
+		}
+	}
+
+	if dockerLookErr != nil {
+		if strings.TrimSpace(req.Dockerfile) != "" {
+			return fmt.Errorf("docker is required for Dockerfile image building but was not found in PATH")
+		}
+		if os.Geteuid() != 0 {
+			return fmt.Errorf("docker is required for default image building but was not found in PATH (native rootfs clone/chroot fallback requires root privileges)")
+		}
+		return fmt.Errorf("docker is required for default image building but was not found in PATH (and no base rootfs image was found to clone)")
 	}
 
 	buildDir, err := os.MkdirTemp("/tmp", "compute-build-*-pkg")
@@ -180,8 +241,6 @@ func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outp
 		return fmt.Errorf("failed to create temp rootfs dir: %w", err)
 	}
 	defer os.RemoveAll(workDir)
-
-	const baseDockerImage = "ubuntu:24.04"
 
 	// Build package list for apt-get
 	dockerfileContent := buildDockerfile(req)
@@ -241,26 +300,7 @@ func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outp
 		return fmt.Errorf("tar extract failed: %w", err)
 	}
 
-	// Inject SSH authorized keys
-	if sshPubKey != "" {
-		_ = os.MkdirAll(filepath.Join(workDir, "root", ".ssh"), 0700)
-		_ = os.MkdirAll(filepath.Join(workDir, "home", "compute", ".ssh"), 0700)
-		_ = os.WriteFile(filepath.Join(workDir, "root", ".ssh", "authorized_keys"), []byte(sshPubKey+"\n"), 0600)
-		computeKey := filepath.Join(workDir, "home", "compute", ".ssh", "authorized_keys")
-		_ = os.WriteFile(computeKey, []byte(sshPubKey+"\n"), 0600)
-		// The guest runs sshd as root but the target user must own its key file;
-		// otherwise OpenSSH rejects the key ("bad ownership or modes").
-		_ = os.Chown(filepath.Join(workDir, "home", "compute"), 1000, 1000)
-		_ = os.Chown(filepath.Join(workDir, "home", "compute", ".ssh"), 1000, 1000)
-		_ = os.Chown(computeKey, 1000, 1000)
-		_ = os.Chmod(filepath.Join(workDir, "home", "compute", ".ssh"), 0700)
-		_ = os.Chmod(computeKey, 0600)
-	}
-
-	// Write Firecracker /sbin/init
-	initScript := defaultInitScript()
-	initPath := filepath.Join(workDir, "sbin", "init")
-	_ = os.WriteFile(initPath, []byte(initScript), 0755)
+	injectSSHAndInit(workDir, sshPubKey)
 
 	// Format ext4 filesystem directly from directory using mkfs.ext4 -d
 	sizeMB := req.SizeMB
@@ -270,13 +310,191 @@ func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outp
 	sizeArg := fmt.Sprintf("%dM", sizeMB)
 
 	_ = os.Remove(outputPath)
-	mkfsCmd := exec.CommandContext(ctx, "mkfs.ext4", "-F", "-q", "-d", workDir, "-L", "rootfs", outputPath, sizeArg)
+	mkfsCmd := exec.CommandContext(ctx, lookSystemBin("mkfs.ext4"), "-F", "-q", "-d", workDir, "-L", "rootfs", outputPath, sizeArg)
 	var mkfsErrBuf bytes.Buffer
 	mkfsCmd.Stderr = &mkfsErrBuf
 	if err := mkfsCmd.Run(); err != nil {
 		return fmt.Errorf("mkfs.ext4 failed: %w (%s)", err, mkfsErrBuf.String())
 	}
 
+	return nil
+}
+
+func injectSSHAndInit(rootDir, sshPubKey string) {
+	if sshPubKey != "" {
+		_ = os.MkdirAll(filepath.Join(rootDir, "root", ".ssh"), 0700)
+		_ = os.MkdirAll(filepath.Join(rootDir, "home", "compute", ".ssh"), 0700)
+		_ = os.WriteFile(filepath.Join(rootDir, "root", ".ssh", "authorized_keys"), []byte(sshPubKey+"\n"), 0600)
+		computeKey := filepath.Join(rootDir, "home", "compute", ".ssh", "authorized_keys")
+		_ = os.WriteFile(computeKey, []byte(sshPubKey+"\n"), 0600)
+		// The guest runs sshd as root but the target user must own its key file;
+		// otherwise OpenSSH rejects the key ("bad ownership or modes").
+		_ = os.Chown(filepath.Join(rootDir, "home", "compute"), 1000, 1000)
+		_ = os.Chown(filepath.Join(rootDir, "home", "compute", ".ssh"), 1000, 1000)
+		_ = os.Chown(computeKey, 1000, 1000)
+		_ = os.Chmod(filepath.Join(rootDir, "home", "compute", ".ssh"), 0700)
+		_ = os.Chmod(computeKey, 0600)
+	}
+
+	// Write Firecracker /sbin/init
+	initScript := defaultInitScript()
+	initPath := filepath.Join(rootDir, "sbin", "init")
+	_ = os.MkdirAll(filepath.Dir(initPath), 0755)
+	_ = os.WriteFile(initPath, []byte(initScript), 0755)
+}
+
+func (b *Builder) chrootRootfsBuild(ctx context.Context, req BuildRequest, baseRootfs, outputPath, sshPubKey string) error {
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("create output dir: %w", err)
+	}
+	stagingPath := outputPath + ".staging"
+	_ = os.Remove(stagingPath)
+	defer func() {
+		_ = os.Remove(stagingPath)
+	}()
+
+	if err := storage.CloneFileCOW(baseRootfs, stagingPath); err != nil {
+		return fmt.Errorf("clone base rootfs %s: %w", baseRootfs, err)
+	}
+
+	sizeMB := req.SizeMB
+	if sizeMB <= 0 {
+		sizeMB = 2048
+	}
+	if fi, err := os.Stat(stagingPath); err == nil && int64(sizeMB)*1024*1024 > fi.Size() {
+		if err := os.Truncate(stagingPath, int64(sizeMB)*1024*1024); err == nil {
+			_ = exec.CommandContext(ctx, lookSystemBin("e2fsck"), "-pf", stagingPath).Run()
+			_ = exec.CommandContext(ctx, lookSystemBin("resize2fs"), "-f", stagingPath).Run()
+		}
+	}
+
+	mntDir, err := os.MkdirTemp("", "compute-build-mnt-*")
+	if err != nil {
+		return fmt.Errorf("create mount dir: %w", err)
+	}
+
+	mountBin := lookSystemBin("mount")
+	umountBin := lookSystemBin("umount")
+	if out, err := exec.CommandContext(ctx, mountBin, "-o", "loop", stagingPath, mntDir).CombinedOutput(); err != nil {
+		_ = exec.Command(umountBin, mntDir).Run()
+		_ = os.RemoveAll(mntDir)
+		return fmt.Errorf("loop mount %s: %w (%s)", stagingPath, err, strings.TrimSpace(string(out)))
+	}
+
+	var submounts []string
+	unmountAll := func() error {
+		for i := len(submounts) - 1; i >= 0; i-- {
+			if err := exec.Command(umountBin, submounts[i]).Run(); err != nil {
+				_ = exec.Command(umountBin, "-l", submounts[i]).Run()
+			}
+		}
+		submounts = nil
+		if err := exec.Command(umountBin, mntDir).Run(); err != nil {
+			if err2 := exec.Command(umountBin, "-l", mntDir).Run(); err2 != nil {
+				return fmt.Errorf("unmount %s: %w", mntDir, err)
+			}
+		}
+		_ = os.RemoveAll(mntDir)
+		return nil
+	}
+	defer func() {
+		if mntDir != "" {
+			_ = unmountAll()
+		}
+	}()
+
+	var packages []string
+	for _, p := range req.Packages {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			for _, sp := range strings.Split(p, ",") {
+				if sp = strings.TrimSpace(sp); sp != "" {
+					packages = append(packages, sp)
+				}
+			}
+		}
+	}
+
+	if len(packages) > 0 || strings.TrimSpace(req.Script) != "" {
+		procDir := filepath.Join(mntDir, "proc")
+		sysDir := filepath.Join(mntDir, "sys")
+		devDir := filepath.Join(mntDir, "dev")
+		_ = os.MkdirAll(procDir, 0755)
+		_ = os.MkdirAll(sysDir, 0755)
+		_ = os.MkdirAll(devDir, 0755)
+
+		if err := exec.CommandContext(ctx, mountBin, "-t", "proc", "proc", procDir).Run(); err == nil {
+			submounts = append(submounts, procDir)
+		}
+		if err := exec.CommandContext(ctx, mountBin, "-t", "sysfs", "sysfs", sysDir).Run(); err == nil {
+			submounts = append(submounts, sysDir)
+		}
+		if err := exec.CommandContext(ctx, mountBin, "--bind", "/dev", devDir).Run(); err == nil {
+			submounts = append(submounts, devDir)
+		}
+
+		// Ensure DNS works inside the chroot
+		resolvDst := filepath.Join(mntDir, "etc", "resolv.conf")
+		_ = os.MkdirAll(filepath.Dir(resolvDst), 0755)
+		_ = os.Remove(resolvDst)
+		resolvBytes, err := os.ReadFile("/etc/resolv.conf")
+		if err != nil || len(bytes.TrimSpace(resolvBytes)) == 0 {
+			resolvBytes = []byte("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+		}
+		_ = os.WriteFile(resolvDst, resolvBytes, 0644)
+
+		// Prevent apt postinst scripts from starting background daemons inside the chroot
+		policyRC := filepath.Join(mntDir, "usr", "sbin", "policy-rc.d")
+		_ = os.MkdirAll(filepath.Dir(policyRC), 0755)
+		_ = os.WriteFile(policyRC, []byte("#!/bin/sh\nexit 101\n"), 0755)
+		defer func() {
+			_ = os.Remove(policyRC)
+		}()
+
+		chrootBin := lookSystemBin("chroot")
+		chrootEnv := []string{
+			"DEBIAN_FRONTEND=noninteractive",
+			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"HOME=/root",
+			"LC_ALL=C.UTF-8",
+		}
+
+		if len(packages) > 0 {
+			args := append([]string{
+				mntDir,
+				"/bin/sh", "-e", "-c",
+				`apt-get update && apt-get install -y --no-install-recommends "$@" && rm -rf /var/lib/apt/lists/*`,
+				"--",
+			}, packages...)
+			cmd := exec.CommandContext(ctx, chrootBin, args...)
+			cmd.Env = chrootEnv
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("chroot apt-get install failed: %w (%s)", err, strings.TrimSpace(string(out)))
+			}
+		}
+
+		if script := strings.TrimSpace(req.Script); script != "" {
+			cmd := exec.CommandContext(ctx, chrootBin, mntDir, "/bin/bash", "-e", "-c", script)
+			cmd.Env = chrootEnv
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("chroot script failed: %w (%s)", err, strings.TrimSpace(string(out)))
+			}
+		}
+		_ = os.Remove(policyRC)
+	}
+
+	injectSSHAndInit(mntDir, sshPubKey)
+	_ = exec.Command("sync").Run()
+
+	if err := unmountAll(); err != nil {
+		return err
+	}
+	mntDir = ""
+
+	_ = os.Remove(outputPath)
+	if err := os.Rename(stagingPath, outputPath); err != nil {
+		return fmt.Errorf("move built rootfs into place: %w", err)
+	}
 	return nil
 }
 
@@ -397,9 +615,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
-mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /run/sshd /run/lock
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+chmod 1777 /dev/shm /tmp /var/tmp /run/lock 2>/dev/null || true
 chmod 0755 /run/sshd
 mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
 
@@ -450,7 +669,13 @@ fi
 /usr/sbin/sshd
 
 while true; do
-    /sbin/getty -L 115200 ttyS0 vt100 || sleep 1
+    if [ -x /sbin/getty ]; then
+        /sbin/getty -L 115200 ttyS0 vt100 || sleep 1
+    elif [ -x /sbin/agetty ]; then
+        /sbin/agetty -L 115200 ttyS0 vt100 || sleep 1
+    else
+        sleep 3600
+    fi
 done
 `
 }

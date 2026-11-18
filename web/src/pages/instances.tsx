@@ -97,11 +97,11 @@ function isVisibleSandbox(vm: VM): boolean {
   return true;
 }
 
-function deriveTierType(vcpus: number): 'small' | 'default' | 'large' | 'xlarge' {
+function deriveTierType(vcpus: number): 'micro' | 'small' | 'medium' | 'large' {
+  if (vcpus <= 1) return 'micro';
   if (vcpus <= 2) return 'small';
-  if (vcpus <= 4) return 'default';
-  if (vcpus <= 8) return 'large';
-  return 'xlarge';
+  if (vcpus <= 4) return 'medium';
+  return 'large';
 }
 
 function deriveTierLabel(vcpus: number, memoryMb: number): string {
@@ -890,10 +890,10 @@ export function InstancesPage({
             className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">Type</option>
+            <option value="micro">micro (1 vCPU)</option>
             <option value="small">small (2 vCPU)</option>
-            <option value="default">default (4 vCPU)</option>
-            <option value="large">large (8 vCPU)</option>
-            <option value="xlarge">xlarge (16 vCPU)</option>
+            <option value="medium">medium (4 vCPU)</option>
+            <option value="large">large (8+ vCPU)</option>
           </select>
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         </div>
