@@ -11,7 +11,7 @@ var (
 	ProjectName = "Compute"
 
 	// Version is the current semantic version.
-	Version = "1.0.0"
+	Version = "1.1.0"
 
 	// ReleaseName is the release codename / name.
 	ReleaseName = "Compute"
