@@ -35,6 +35,24 @@ Requires Linux (`x86_64` or `arm64`) with `/dev/kvm`, cgroup v2, and rootful Doc
 
    Port `:18080` serves **both** the REST/WebSocket API and the embedded Web Dashboard (`http://127.0.0.1:18080/`, default loopback login `admin` / `admin`). The standalone `compute-gui` service (`:8080`) is strictly optional and disabled by default.
 
+### Default Credentials & Quickstart Settings
+
+After quick installation, the following defaults are active immediately on loopback:
+
+| Component | Default Value | Notes |
+| --- | --- | --- |
+| **Web Dashboard** | `http://127.0.0.1:18080/` | Embedded directly in `computed` (no extra container) |
+| **Admin Username** | `admin` | Default administrator account (`COMPUTE_ADMIN_USERNAME`) |
+| **Admin Password** | `admin` | Initial loopback password (`COMPUTE_ADMIN_PASSWORD`) |
+| **Admin Email** | `admin@compute.local` | Default administrator email (`COMPUTE_ADMIN_EMAIL`) |
+| **CLI Login** | `compute auth login --username admin --password admin` | Authenticates against `http://127.0.0.1:18080` |
+| **Sandbox Guest User** | `compute` | Non-root guest user (UID 1000) with passwordless `sudo` |
+| **Sandbox Root User** | `root` | Root account (UID 0); switch via `sudo su -` |
+| **Sandbox SSH Key** | `./data/images/ssh/id_ed25519` | Key pair generated during install; used by `compute sandbox ssh` |
+| **Sandbox SSH Password** | *Disabled by default* | Opt-in per sandbox via `--ssh-password <secret>` on creation |
+| **Default Image / Kernel** | `ubuntu-24` / `vmlinux` | Ubuntu 24.04 LTS (`./data/images/ubuntu-24.04.ext4`) |
+| **Default VM Resources** | 1 vCPU, 2048 MB RAM, 50 GB disk | Tier `1vcpu` micro (customizable via CLI or Web UI) |
+
 4. **Configure `.env` before exposing beyond loopback**:
 
    ```bash
