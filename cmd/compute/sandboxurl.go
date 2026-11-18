@@ -378,6 +378,34 @@ func handleSandboxURL(ctx context.Context, client *DaemonClient, args []string) 
 	}
 	acc := sandboxAccessForVM(v, user, *port)
 
+	// Fall back to published port URLs (path-based preview / serve links) when
+	// the hostname-derived URL is unavailable.
+	if acc.PortURL == "" || !acc.URLResolvable {
+		if pfs, err := client.ListSandboxPorts(ctx, v.ID); err == nil {
+			if *port > 0 {
+				for _, pf := range pfs {
+					if pf == nil || pf.GuestPort != *port || pf.PublicURL == "" {
+						continue
+					}
+					acc.Port = pf.GuestPort
+					acc.PortURL = pf.PublicURL
+					if acc.URL == "" {
+						acc.URL = pf.PublicURL
+						acc.URLKind = URLKindPort
+						acc.URLResolvable = true
+					}
+					break
+				}
+			} else if acc.URL == "" && len(pfs) > 0 && pfs[0] != nil && pfs[0].PublicURL != "" {
+				acc.Port = pfs[0].GuestPort
+				acc.PortURL = pfs[0].PublicURL
+				acc.URL = pfs[0].PublicURL
+				acc.URLKind = URLKindPort
+				acc.URLResolvable = true
+			}
+		}
+	}
+
 	if *asJSON {
 		_ = json.NewEncoder(os.Stdout).Encode(acc)
 		return

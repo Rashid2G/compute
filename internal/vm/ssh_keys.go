@@ -187,6 +187,12 @@ func (m *Manager) maybeSyncSSHKeys(vm *db.VM) {
 	if vm == nil || m.store == nil || m.storMgr == nil {
 		return
 	}
+	m.mu.RLock()
+	hasCustomLauncher := m.launcher != nil && m.guestSyncer == nil
+	m.mu.RUnlock()
+	if hasCustomLauncher {
+		return
+	}
 	go func(vmID string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()

@@ -101,9 +101,9 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 				status = "attached"
 				attachedVM = v.Name
 			}
-			sizeGB := v.MemoryMB / 1024
-			if sizeGB < 10 {
-				sizeGB = 10
+			sizeGB := v.DiskMB / 1024
+			if sizeGB <= 0 {
+				sizeGB = 50
 			}
 			volOwner := v.OwnerID
 			if volOwner == "" {
@@ -127,10 +127,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 					Snapshots:  0,
 				})
 			} else {
-				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner {
+				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner || existing.SizeGB != sizeGB {
 					existing.Status = status
 					existing.AttachedVM = attachedVM
 					existing.OwnerID = volOwner
+					existing.SizeGB = sizeGB
 					_ = st.SaveVolume(ctx, existing)
 				}
 			}
@@ -165,8 +166,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			Name       string `json:"name"`
 			Pool       string `json:"pool"`
 			SizeGB     int    `json:"size_gb"`
+			SizeMB     int    `json:"size_mb"`
 			Filesystem string `json:"filesystem"`
 			AttachedVM string `json:"attached_vm"`
+			MountPoint string `json:"mount_point"`
+			MountPath  string `json:"mount_path"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -184,6 +188,9 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
 			httpError(w, "name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
+		}
+		if req.SizeGB <= 0 && req.SizeMB > 0 {
+			req.SizeGB = (req.SizeMB + 1023) / 1024
 		}
 		if req.SizeGB <= 0 {
 			req.SizeGB = 10
@@ -219,7 +226,7 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 		devicePath := ""
 		if req.AttachedVM != "" {
 			status = "attached"
-			mountPoint = "/mnt/data"
+			mountPoint = firstNonEmpty(strings.TrimSpace(req.MountPoint), strings.TrimSpace(req.MountPath), "/mnt/data")
 			devicePath = "/dev/vdb"
 		}
 
@@ -389,7 +396,9 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "attach":
 		var req struct {
-			VMID string `json:"vm_id"`
+			VMID       string `json:"vm_id"`
+			MountPoint string `json:"mount_point"`
+			MountPath  string `json:"mount_path"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.VMID == "" {
@@ -411,7 +420,7 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 		}
 		vol.Status = "attached"
 		vol.AttachedVM = vm.Name
-		vol.MountPoint = "/mnt/data"
+		vol.MountPoint = firstNonEmpty(strings.TrimSpace(req.MountPoint), strings.TrimSpace(req.MountPath), "/mnt/data")
 		vol.DevicePath = "/dev/vdb"
 		if err := st.SaveVolume(ctx, vol); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
@@ -1414,6 +1423,9 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			if (req.VMID != "" && existing.VMID == req.VMID) || (vmName != "" && existing.VMName == vmName) {
 				existing.Public = isPublic
 				existing.Status = status
+				if req.HostPort > 0 {
+					existing.HostPort = req.HostPort
+				}
 				if err := s.prepareServe(ctx, st, existing, targetVM, strings.TrimSpace(req.Subdomain)); err != nil {
 					httpError(w, "failed to publish port: "+err.Error(), http.StatusInternalServerError)
 					return
@@ -1432,6 +1444,7 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		pf := &db.PortForward{
 			ID:        "pf_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
 			OwnerID:   pfOwner,
+			HostPort:  req.HostPort,
 			VMID:      req.VMID,
 			VMName:    vmName,
 			GuestPort: req.GuestPort,

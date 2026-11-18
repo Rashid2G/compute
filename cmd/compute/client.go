@@ -286,6 +286,11 @@ func (c *DaemonClient) ListPortForwards(ctx context.Context, vmID string) ([]*db
 	return pfs, err
 }
 
+// ListSandboxPorts lists the published guest ports for one sandbox.
+func (c *DaemonClient) ListSandboxPorts(ctx context.Context, vmID string) ([]*db.PortForward, error) {
+	return c.ListPortForwards(ctx, vmID)
+}
+
 func (c *DaemonClient) UnexposePort(ctx context.Context, vmID string, guestPort int) error {
 	return c.doRequest(ctx, http.MethodPost, "/api/v1/sandboxes/"+url.PathEscape(vmID)+"/unexpose", map[string]int{"guest_port": guestPort}, nil)
 }

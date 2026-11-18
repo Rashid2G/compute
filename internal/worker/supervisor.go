@@ -58,9 +58,11 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 		return 1, fmt.Errorf("vm manager is nil")
 	}
 
-	vmName := fmt.Sprintf("job-%s", a.JobID)
+	cleanJobID := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(a.JobID)), "_", "-")
+	cleanJobID = strings.TrimPrefix(cleanJobID, "job-")
+	vmName := fmt.Sprintf("job-%s", cleanJobID)
 	if len(vmName) > 20 {
-		vmName = vmName[:20]
+		vmName = strings.TrimRight(vmName[:20], "-")
 	}
 
 	streamLog("stdout", fmt.Sprintf("[compute-worker] launching isolated Firecracker microVM for job %s", a.JobID))

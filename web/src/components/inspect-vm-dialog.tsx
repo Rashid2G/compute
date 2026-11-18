@@ -37,6 +37,7 @@ import { api, errorMessage } from '@/lib/api';
 import { formatDateTime, formatMemory } from '@/lib/format';
 import type {
   NetworkInspectResult,
+  PortForwardRecord,
   VM,
   WorkerNodeRecord,
   WorkerPoolRecord,
@@ -71,6 +72,7 @@ export function InspectVMDialog({
   vm,
   workers = [],
   pools = [],
+  portForwards: portForwardsProp,
   isAdmin = false,
   open,
   onOpenChange,
@@ -79,6 +81,7 @@ export function InspectVMDialog({
   vm: VM | null;
   workers?: WorkerNodeRecord[];
   pools?: WorkerPoolRecord[];
+  portForwards?: PortForwardRecord[];
   isAdmin?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -86,6 +89,7 @@ export function InspectVMDialog({
 }) {
   const [inspecting, setInspecting] = useState(false);
   const [network, setNetwork] = useState<NetworkInspectResult | null>(null);
+  const [fetchedPortForwards, setFetchedPortForwards] = useState<PortForwardRecord[]>([]);
   const [migrateOpen, setMigrateOpen] = useState(false);
   const [targetWorkerId, setTargetWorkerId] = useState('');
   const [targetPoolId, setTargetPoolId] = useState('');
@@ -116,10 +120,21 @@ export function InspectVMDialog({
         if (!cancelled) setInspecting(false);
       });
 
+    if (portForwardsProp === undefined && typeof api.listPortForwards === 'function') {
+      void api
+        .listPortForwards()
+        .then((list) => {
+          if (!cancelled) setFetchedPortForwards(list || []);
+        })
+        .catch(() => {
+          if (!cancelled) setFetchedPortForwards([]);
+        });
+    }
+
     return () => {
       cancelled = true;
     };
-  }, [open, vmId]);
+  }, [open, vmId, portForwardsProp]);
 
   if (!vm) return null;
 
@@ -128,6 +143,9 @@ export function InspectVMDialog({
   const workerLabel = workerNode
     ? `${workerNode.name} (${workerNode.id})`
     : vm.worker_id || 'nod_host_local';
+  const vmPortForwards = (portForwardsProp ?? fetchedPortForwards).filter(
+    (pf) => pf.vm_id === vm.id || pf.vm_name === vm.name,
+  );
 
   function handleMigrateSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -228,7 +246,7 @@ export function InspectVMDialog({
                 <Fact label="Zone" value={sandboxZoneLabel(vm)} mono />
               </div>
 
-              <SandboxAccessCard vm={vm} className="mt-4" />
+              <SandboxAccessCard vm={vm} portForwards={vmPortForwards} className="mt-4" />
 
               {isAdmin && (
                 <div className="mt-4 rounded-md border p-3.5 bg-secondary/15 space-y-3">
@@ -389,6 +407,62 @@ export function InspectVMDialog({
                 <Fact label="Gateway" value={network?.gateway || '—'} />
                 <Fact label="Status" value={network?.status || vm.status} />
               </div>
+
+              {vmPortForwards.length > 0 && (
+                <div className="mt-4 rounded-md border p-3.5 bg-secondary/15 space-y-2">
+                  <div className="text-xs font-medium flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-primary" />
+                    Exposed Ports ({vmPortForwards.length})
+                  </div>
+                  <div className="divide-y divide-border border border-border bg-background">
+                    {vmPortForwards.map((pf) => {
+                      const url =
+                        pf.public_url ||
+                        (pf.host_port > 0
+                          ? `${window.location.protocol}//${window.location.hostname}:${pf.host_port}`
+                          : '');
+                      return (
+                        <div
+                          key={pf.id}
+                          className="flex items-center justify-between gap-2 px-3 py-2 font-mono text-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-foreground font-medium shrink-0">
+                              :{pf.guest_port}
+                            </span>
+                            <span
+                              className={
+                                pf.public
+                                  ? 'shrink-0 border border-success/40 bg-success/10 px-1.5 py-0.5 text-[10px] uppercase text-success'
+                                  : 'shrink-0 border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground'
+                              }
+                            >
+                              {pf.public ? 'public' : 'private'}
+                            </span>
+                            {url && (
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="truncate text-[color:var(--link)] hover:underline"
+                              >
+                                {url}
+                              </a>
+                            )}
+                          </div>
+                          {url && (
+                            <CopyButton
+                              value={url}
+                              label={`Copy URL for port ${pf.guest_port}`}
+                              className="h-6 w-6 shrink-0"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="mt-4 flex items-center justify-between rounded-md border p-3.5 bg-secondary/15">
                 <div>

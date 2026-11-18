@@ -1,7 +1,11 @@
 .git
 .agents
 .github
+.env
+.env.*
+!.env.example
 data
+data/
 preview-data
 images
 vms
