@@ -865,6 +865,29 @@ export interface BulkVMsResponse {
   succeeded: string[];
   failed: BulkVMItemError[];
   warnings?: BulkVMItemError[];
+  /** Durable operation records created for this request, in item order. */
+  operation_ids?: string[];
+}
+
+/** Durable record of a long-running unit of work. */
+export interface OperationRecord {
+  id: string;
+  owner_id: string;
+  kind: string;
+  target_id?: string;
+  target_name?: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | string;
+  progress: number;
+  request_json?: string;
+  result_json?: string;
+  error_msg?: string;
+  task_id?: string;
+  actor?: string;
+  trace_id?: string;
+  created_at: string;
+  started_at?: string;
+  updated_at: string;
+  finished_at?: string;
 }
 
 /** Terminal or in-flight state of an asynchronous bulk task. */
