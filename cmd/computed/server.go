@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -43,18 +44,20 @@ import (
 )
 
 type Server struct {
-	vmMgr        *vm.Manager
-	cfg          config.GlobalConfig
-	mux          *http.ServeMux
-	workers      *scheduler.WorkerRegistry
-	scheduler    *scheduler.Scheduler
-	jobRunner    *jobs.Runner
-	authMgr      *auth.Manager
-	metaStore    *store.Store
-	fcVersion    string
-	ingressProxy *network.IngressProxy
-	dns          *dnsRuntime
-	guiHandler   http.Handler
+	vmMgr         *vm.Manager
+	cfg           config.GlobalConfig
+	mux           *http.ServeMux
+	workers       *scheduler.WorkerRegistry
+	scheduler     *scheduler.Scheduler
+	jobRunner     *jobs.Runner
+	authMgr       *auth.Manager
+	metaStore     *store.Store
+	fcVersion     string
+	ingressProxy  *network.IngressProxy
+	dns           *dnsRuntime
+	guiHandler    http.Handler
+	servePorts    *servePortRegistry
+	serveTokenKey []byte
 
 	// DNS/ingress caches (daemon-owned, response only).
 	userIndexMu     sync.RWMutex
@@ -70,11 +73,26 @@ type Server struct {
 	tailnetDomain       string
 	tailnetDomainExpiry time.Time
 
-	eventMu          sync.RWMutex
-	eventSubs        map[chan *db.AuditEvent]struct{}
-	portForwardMu    sync.Mutex
-	resourceSampleMu sync.Mutex
-	resourceSamples  resourceSampleState
+	eventMu             sync.RWMutex
+	eventSubs           map[chan *db.AuditEvent]struct{}
+	wsMu                sync.RWMutex
+	wsClients           map[*wsClient]struct{}
+	portForwardMu       sync.Mutex
+	resourceSampleMu    sync.Mutex
+	resourceSamples     resourceSampleState
+	adminResourcesMu    sync.Mutex
+	adminResourcesCache *adminResourcesResponse
+	adminResourcesAt    time.Time
+
+	opQueueOnce       sync.Once
+	opQueue           *serverOpQueue
+	createPlaceMu     sync.Mutex
+	inFlightNodeVCPUs map[string]int
+	inFlightNodeMemMB map[string]int
+	inFlightNodeDisk  map[string]int
+	taskMu            sync.Mutex
+	tasks             map[string]*taskRecord
+	taskOrder         []string
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -140,7 +158,9 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 			hostname = "localhost"
 		}
 		status := "ready"
+		var existingLocal *db.WorkerNode
 		if existing, err := st.GetWorkerNode(initCtx, "nod_host_local"); err == nil && existing != nil {
+			existingLocal = existing
 			if existing.Status == "cordoned" || existing.Status == "draining" {
 				status = existing.Status
 			}
@@ -149,7 +169,20 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		if cfg.Network.BridgeIP != "" {
 			underlayIP = strings.Split(cfg.Network.BridgeIP, "/")[0]
 		}
+		physVCPUs, physMemMB, physDiskMB := getHostResources(0, 0, 0)
 		hostVCPUs, hostMemMB, hostDiskMB := getHostResources(cfg.Resources.MaxTotalVCPUs, cfg.Resources.MaxTotalMemoryMB, int(cfg.Resources.MaxTotalDiskMB))
+		allocVCPUs, allocMemMB, allocDiskMB := int(cfg.Resources.MaxTotalVCPUs), int(cfg.Resources.MaxTotalMemoryMB), int(cfg.Resources.MaxTotalDiskMB)
+		if existingLocal != nil {
+			if allocVCPUs == 0 && existingLocal.AllocatedVCPUs > 0 {
+				allocVCPUs = existingLocal.AllocatedVCPUs
+			}
+			if allocMemMB == 0 && existingLocal.AllocatedMemMB > 0 {
+				allocMemMB = existingLocal.AllocatedMemMB
+			}
+			if allocDiskMB == 0 && existingLocal.AllocatedDiskMB > 0 {
+				allocDiskMB = existingLocal.AllocatedDiskMB
+			}
+		}
 		localNode := &db.WorkerNode{
 			ID:               "nod_host_local",
 			Name:             hostname,
@@ -161,6 +194,12 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 			TotalVCPUs:       hostVCPUs,
 			TotalMemMB:       hostMemMB,
 			TotalDiskMB:      hostDiskMB,
+			AllocatedVCPUs:   allocVCPUs,
+			AllocatedMemMB:   allocMemMB,
+			AllocatedDiskMB:  allocDiskMB,
+			PhysicalVCPUs:    physVCPUs,
+			PhysicalMemMB:    physMemMB,
+			PhysicalDiskMB:   physDiskMB,
 			LabelsJSON:       `{"kvm":"true","nvme":"true","role":"primary"}`,
 			CapabilitiesJSON: `{"firecracker":true,"snapshots":true,"ebpf":true}`,
 			AgentVersion:     version.Version,
@@ -182,6 +221,19 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 				Payload:    fmt.Sprintf(`{"version":"%s","arch":"%s"}`, version.Version, runtime.GOARCH),
 			})
 		}
+
+		// 3b. Prune finished operation/task history past its retention window.
+		retentionCutoff := time.Now().UTC().Add(-operationRetention)
+		_, _ = st.PruneOperations(initCtx, retentionCutoff)
+		_, _ = st.PruneTaskRecords(initCtx, retentionCutoff)
+
+		// 3c. The in-memory execution queue does not survive a restart. Mark
+		// anything that was queued/running as interrupted so its visible status
+		// stays truthful instead of appearing pending forever.
+		if n, err := st.FailInterruptedOperations(initCtx, "interrupted by daemon restart"); err == nil && n > 0 {
+			log.Printf("[computed] marked %d interrupted operation(s) as failed", n)
+		}
+		_, _ = st.FailInterruptedTaskRecords(initCtx)
 
 		// 4. Auto-seed "base" default environment profile if environments table is empty
 		if envs, err := st.ListEnvironments(initCtx); err == nil && len(envs) == 0 {
@@ -305,8 +357,14 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		metaStore:   metaStore,
 		fcVersion:   fcVersion,
 		eventSubs:   make(map[chan *db.AuditEvent]struct{}),
+		wsClients:   make(map[*wsClient]struct{}),
 		vmListCache: make(map[string]vmListEntry),
+		tasks:       make(map[string]*taskRecord),
 	}
+
+	// Create the backend operation queue up front so /queue and cluster
+	// snapshot polling never race the first bulk request's lazy init.
+	s.ensureOpQueue()
 
 	var domains []string
 	if cfg.Network.BaseDomain != "" {
@@ -328,9 +386,18 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	}
 	domains = append(domains, "preview.localhost", "compute.internal", "compute.dev", "localhost")
 
+	s.serveTokenKey = network.ServeTokenKey(cfg.Server.ServeTokenKey, cfg.Server.AdminSecret)
+	serveDomains := []string{}
+	if d := cfg.ServeDomainResolved(); d != "" {
+		serveDomains = append(serveDomains, d)
+	}
 	s.ingressProxy = network.NewIngressProxy(network.ProxyOptions{
-		BaseDomains: domains,
-		Resolver:    s,
+		BaseDomains:      domains,
+		ServeDomains:     serveDomains,
+		ServeResolver:    s,
+		ServeTokenKey:    s.serveTokenKey,
+		AuthorizeBaseURL: s.authorizeBaseURL(),
+		Resolver:         s,
 		Auth: func(r *http.Request, ownerID string) bool {
 			if !s.authEnabled() {
 				return true
@@ -341,11 +408,60 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 			}
 			return s.canAccessOwner(req, ownerID)
 		},
+		DialTarget: func(ctx context.Context, target *network.TargetInfo, networkName, addr string) (net.Conn, error) {
+			if target != nil && target.WorkerID != "" && target.WorkerID != "nod_host_local" && s.workers != nil {
+				return s.workers.OpenTunnel(ctx, target.WorkerID, addr)
+			}
+			dialer := &net.Dialer{Timeout: 10 * time.Second}
+			return dialer.DialContext(ctx, networkName, addr)
+		},
 	})
 
 	s.configureAuthIntegrations()
 	s.routes()
+	s.servePorts = newServePortRegistry(s)
+	if cfg.ServeMode() == "port" {
+		s.servePorts.restore(context.Background())
+	}
 	return s
+}
+
+// persistAuditEvent writes an audit event to the durable audit trail. Unlike
+// recordEvent it surfaces the write error so callers that require audit-before-
+// execution can refuse to dispatch unaudited work.
+func (s *Server) persistAuditEvent(auditEvt *db.AuditEvent) error {
+	if auditEvt == nil {
+		return errors.New("audit event is required")
+	}
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
+		return errors.New("audit store unavailable")
+	}
+	return s.vmMgr.GetStore().SaveAuditEvent(context.Background(), auditEvt)
+}
+
+// publishAuditEvent fans a persisted audit event out to live subscribers and
+// webhook consumers. Persistence is deliberately separate so a failed write can
+// abort the operation before execution.
+func (s *Server) publishAuditEvent(auditEvt *db.AuditEvent) {
+	if auditEvt == nil {
+		return
+	}
+	s.eventMu.RLock()
+	for ch := range s.eventSubs {
+		select {
+		case ch <- auditEvt:
+		default:
+		}
+	}
+	s.eventMu.RUnlock()
+
+	// Fan the event out to subscribed webhook endpoints without blocking the
+	// API caller.
+	s.deliverWebhooks(auditEvt)
+
+	if auditEvt.Event != "ssh.tunnel_attempt" {
+		s.broadcastClusterUpdate()
+	}
 }
 
 func (s *Server) recordEvent(event, actor, target, status string, durationMs int, payload interface{}) *db.AuditEvent {
@@ -380,23 +496,8 @@ func (s *Server) recordEvent(event, actor, target, status string, durationMs int
 		Payload:    payloadStr,
 	}
 
-	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		_ = s.vmMgr.GetStore().SaveAuditEvent(context.Background(), auditEvt)
-	}
-
-	s.eventMu.RLock()
-	for ch := range s.eventSubs {
-		select {
-		case ch <- auditEvt:
-		default:
-		}
-	}
-	s.eventMu.RUnlock()
-
-	// Fan the event out to subscribed webhook endpoints without blocking the
-	// API caller.
-	s.deliverWebhooks(auditEvt)
-
+	_ = s.persistAuditEvent(auditEvt)
+	s.publishAuditEvent(auditEvt)
 	return auditEvt
 }
 
@@ -503,25 +604,33 @@ func (s *Server) mountAttachedVolumes(ctx context.Context, v *db.VM) {
 	}
 }
 
-// applyPortForwardsForVM installs every host forwarding rule that belongs to v.
-// It is safe to call repeatedly; AddPortForward is idempotent.
+// applyPortForwardsForVM reopens the serve origins that belong to v after it
+// starts (or after a daemon restart). HostPort holds the dedicated port-mode
+// listener port; it is not a host DNAT port.
 func (s *Server) applyPortForwardsForVM(ctx context.Context, v *db.VM) {
-	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || s.vmMgr.NetManager() == nil || v == nil || v.IPAddress == "" {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
 		return
 	}
 	st := s.vmMgr.GetStore()
 	pfs, err := st.ListPortForwards(ctx)
 	if err != nil {
-		log.Printf("[computed] port-forward reconcile: list failed: %v", err)
+		log.Printf("[computed] serve reconcile: list failed: %v", err)
 		return
 	}
 	for _, pf := range pfs {
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if err := s.vmMgr.NetManager().AddPortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort); err != nil {
-			log.Printf("[computed] port-forward %s (%d->%d): %v", pf.ID, pf.HostPort, pf.GuestPort, err)
-			continue
+		if s.cfg.ServeMode() == "port" && s.servePorts != nil && pf.HostPort > 0 {
+			port, err := s.servePorts.ensure(pf)
+			if err != nil {
+				log.Printf("[computed] serve %s: %v", pf.ID, err)
+				continue
+			}
+			if port != pf.HostPort || pf.PublicURL == "" {
+				pf.HostPort = port
+				pf.PublicURL = s.serveURLFor("", port)
+			}
 		}
 		if pf.Status != "active" {
 			pf.Status = "active"
@@ -546,10 +655,10 @@ func (s *Server) removePortForwardsForVM(ctx context.Context, v *db.VM, deleteRe
 		if !portForwardTargetsVM(pf, v) {
 			continue
 		}
-		if v.IPAddress != "" && s.vmMgr.NetManager() != nil {
-			_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
-		}
 		if deleteRecords {
+			// Deleting the sandbox frees its serve origins; stopping it keeps
+			// them so the URLs stay stable (requests return 503 while stopped).
+			s.releaseServe(pf)
 			_ = st.DeletePortForward(ctx, pf.ID)
 			continue
 		}
@@ -634,6 +743,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/ready", s.handleReady)
 	s.mux.HandleFunc("/api/v1/version", s.handleVersion)
+	s.mux.HandleFunc("/api/v1/serve/authorize", s.wrapAuth(s.handleServeAuthorize))
 	s.mux.HandleFunc("/api/v1/stats", s.handleStats)
 	s.mux.HandleFunc("/api/v1/tiers", s.handleTiers)
 
@@ -653,12 +763,27 @@ func (s *Server) routes() {
 
 	// Sandboxes / VMs
 	s.mux.HandleFunc("/api/v1/vms", s.wrapAuth(s.handleVMs))
+	s.mux.HandleFunc("/api/v1/vms/bulk-create", s.wrapAuth(s.handleBulkCreateVMs))
+	s.mux.HandleFunc("/api/v1/vms/bulk-clone", s.wrapAuth(s.handleBulkCloneVMs))
+	s.mux.HandleFunc("/api/v1/vms/bulk-delete", s.wrapAuth(s.handleBulkDeleteVMs))
+	s.mux.HandleFunc("/api/v1/vms/bulk-action", s.wrapAuth(s.handleBulkActionVMs))
 	s.mux.HandleFunc("/api/v1/vms/", s.wrapAuth(s.handleVMActions))
 	s.mux.HandleFunc("/api/v1/sandboxes", s.wrapAuth(s.handleVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/bulk-create", s.wrapAuth(s.handleBulkCreateVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/bulk-clone", s.wrapAuth(s.handleBulkCloneVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/bulk-delete", s.wrapAuth(s.handleBulkDeleteVMs))
+	s.mux.HandleFunc("/api/v1/sandboxes/bulk-action", s.wrapAuth(s.handleBulkActionVMs))
 	s.mux.HandleFunc("/api/v1/sandboxes/", s.wrapAuth(s.handleVMActions))
+
+	// Asynchronous bulk task status
+	s.mux.HandleFunc("/api/v1/tasks", s.wrapAuth(s.handleListTasks))
+	s.mux.HandleFunc("/api/v1/tasks/", s.wrapAuth(s.handleGetTask))
+	s.mux.HandleFunc("/api/v1/operations", s.wrapAuth(s.handleOperations))
+	s.mux.HandleFunc("/api/v1/operations/", s.wrapAuth(s.handleOperations))
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
 	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
+	s.mux.HandleFunc("/api/v1/scheduler/policy", s.wrapAuth(s.handleSchedulerPolicy))
 	s.mux.HandleFunc("/api/v1/network", s.wrapAuth(s.handleNetworkInfo))
 	s.mux.HandleFunc("/api/v1/network/allocations", s.wrapAuth(s.handleNetworkAllocations))
 	s.mux.HandleFunc("/api/v1/network/inspect/", s.wrapAuth(s.handleNetworkInspect))
@@ -684,7 +809,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/ci/repos/", s.wrapAuth(s.handleCIRepoActions))
 	s.mux.HandleFunc("/api/v1/ci/webhooks/github", s.handleGitHubWebhook)
 	s.mux.HandleFunc("/api/v1/ssh/", s.wrapAuth(s.handleSSHDirect))
-	s.mux.HandleFunc("/preview/", s.handlePreviewProxy)
 	s.mux.HandleFunc("/", s.handleRoot)
 
 	// Volumes
@@ -727,10 +851,6 @@ func (s *Server) SetGUIHandler(h http.Handler) {
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if (r.URL.Path == "/" || r.URL.Path == "/deployments") && deploymentsIndexEnabled() {
-		s.handleDeploymentsIndex(w, r)
-		return
-	}
 	if s.guiHandler != nil {
 		s.guiHandler.ServeHTTP(w, r)
 		return
@@ -758,6 +878,7 @@ func (s *Server) ResolveTarget(ctx context.Context, idOrName string) (*network.T
 		OwnerID:   v.OwnerID,
 		Status:    string(v.Status),
 		IPAddress: v.IPAddress,
+		WorkerID:  v.WorkerID,
 	}, nil
 }
 
@@ -797,6 +918,7 @@ func (s *Server) ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel
 				OwnerID:   v.OwnerID,
 				Status:    string(v.Status),
 				IPAddress: v.IPAddress,
+				WorkerID:  v.WorkerID,
 			}, nil
 		}
 	}
@@ -807,6 +929,17 @@ func (s *Server) ResolveTargetForOwner(ctx context.Context, idOrName, ownerLabel
 func (s *Server) IsPortPublic(ctx context.Context, idOrName string, port int) bool {
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
 		if s.vmMgr.GetStore().IsPortForwardPublic(ctx, idOrName, port) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPortPublicForOwner checks whether a given guest port on a VM owned by ownerID
+// is configured for public exposure.
+func (s *Server) IsPortPublicForOwner(ctx context.Context, ownerID, idOrName string, port int) bool {
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		if s.vmMgr.GetStore().IsPortForwardPublicForOwner(ctx, ownerID, idOrName, port) {
 			return true
 		}
 	}
@@ -854,7 +987,15 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	info := version.Get("computed", "Compute Daemon")
+	// Advertise the externally reachable base URL so CLI clients can print
+	// absolute preview links even when they reach the daemon over loopback.
+	info := struct {
+		version.Info
+		PublicURL string `json:"public_url,omitempty"`
+	}{
+		Info:      version.Get("computed", "Compute Daemon"),
+		PublicURL: s.cfg.Server.NormalizedPublicURL(),
+	}
 	_ = json.NewEncoder(w).Encode(info)
 }
 
@@ -914,12 +1055,13 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	stats := s.nonJobStats(r.Context(), r)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"queued_vms":      queue,
-		"count":           len(queue),
-		"running_vms":     stats.RunningVMs,
-		"running_vcpus":   stats.RunningVCPUs,
-		"running_mem_mb":  stats.RunningMemoryMB,
-		"resource_limits": s.vmMgr.GetResourceLimits(),
+		"queued_vms":          queue,
+		"count":               len(queue),
+		"backend_ops_pending": s.backendOpPending(),
+		"running_vms":         stats.RunningVMs,
+		"running_vcpus":       stats.RunningVCPUs,
+		"running_mem_mb":      stats.RunningMemoryMB,
+		"resource_limits":     s.vmMgr.GetResourceLimits(),
 	})
 }
 
@@ -1058,6 +1200,111 @@ func (s *Server) waitGuestSSH(ctx context.Context, v *db.VM, timeout time.Durati
 	}
 }
 
+func (s *Server) needsPostBootSSHSetup(ctx context.Context, v *db.VM) bool {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
+		return false
+	}
+	st := s.vmMgr.GetStore()
+	if envs, err := st.ListEnvironments(ctx); err == nil && len(envs) > 0 {
+		for _, env := range envs {
+			if (env.SecretsEnabled && strings.TrimSpace(env.Secrets) != "") ||
+				(env.GitHubReposEnabled && len(env.GitHubRepos) > 0) {
+				return true
+			}
+		}
+	}
+	if vols, err := st.ListVolumes(ctx); err == nil {
+		for _, vol := range vols {
+			if vol.Path != "" && volumeAttachedToVM(vol, v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// schedulePostBootSetup applies host-side port forwards immediately and runs
+// guest SSH volume mounting / environment injection in the background only
+// when there are attached volumes or environment profiles to apply.
+func (s *Server) schedulePostBootSetup(ctx context.Context, v *db.VM) {
+	if v == nil {
+		return
+	}
+	s.applyPortForwardsForVM(ctx, v)
+	if !s.needsPostBootSSHSetup(ctx, v) {
+		return
+	}
+	vmCopy := *v
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		s.waitGuestSSH(bgCtx, &vmCopy, 30*time.Second)
+		s.mountAttachedVolumes(bgCtx, &vmCopy)
+		s.applyEnvironment(bgCtx, &vmCopy)
+	}()
+}
+
+// schedulePostBootBuildCommand executes an initial build command/script inside
+// a sandbox after it boots and logs the execution output to audit events.
+func (s *Server) schedulePostBootBuildCommand(ctx context.Context, v *db.VM, cmd string, user string) {
+	if v == nil || strings.TrimSpace(cmd) == "" {
+		return
+	}
+	vmCopy := *v
+	if user == "" {
+		user = "compute"
+	}
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
+		start := time.Now()
+		var res *vm.ExecResponse
+		var err error
+		if vm.IsRemoteVM(&vmCopy) {
+			var remoteRes vm.ExecResponse
+			err = s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
+				VMID:           s.remoteVMTargetID(&vmCopy),
+				Command:        cmd,
+				User:           user,
+				TimeoutSeconds: 90,
+			}, &remoteRes)
+			res = &remoteRes
+		} else {
+			res, err = s.vmMgr.ExecVM(bgCtx, vmCopy.ID, vm.ExecRequest{
+				Command: cmd,
+				User:    user,
+				Timeout: 90,
+			})
+		}
+		durationMs := int(time.Since(start).Milliseconds())
+		status := "succeeded"
+		exitCode := 0
+		var stdout, stderr string
+		if res != nil {
+			exitCode = res.ExitCode
+			stdout = res.Stdout
+			stderr = res.Stderr
+			if exitCode != 0 {
+				status = "failed"
+			}
+		}
+		if err != nil {
+			status = "failed"
+			stderr = err.Error()
+			exitCode = 1
+		}
+		s.recordEvent("sandbox.build_command_executed", "system", vmCopy.ID, status, durationMs, map[string]interface{}{
+			"command":   cmd,
+			"user":      user,
+			"exit_code": exitCode,
+			"stdout":    stdout,
+			"stderr":    stderr,
+		})
+		s.broadcastClusterUpdate()
+	}()
+}
+
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1074,6 +1321,7 @@ func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 	if pruned == nil {
 		pruned = []string{}
 	}
+	s.broadcastClusterUpdate()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":      "ok",
 		"pruned_taps": pruned,
@@ -1110,108 +1358,64 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
-			httpError(w, "name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
+		ownerID, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		if !ok {
 			return
 		}
-		if ownerID, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		if err := s.validateCreateItem(ctx, r, ownerID, isAdmin, req.AuthorizedOwnerIDs, &req); err != nil {
+			writeDetachedError(w, r, err)
 			return
-		} else if req.SSHPublicKey == "" && req.SSHKeyID == "" && !req.SSHNoDefaultKey && req.OwnerID == ownerID {
-			// Include the caller's default account key unless the request
-			// chose a key explicitly or opted out. Admins creating sandboxes
-			// for another owner do not get their own default key injected.
-			if def, err := s.vmMgr.GetStore().GetDefaultSSHKey(ctx, ownerID); err != nil {
-				log.Printf("[ssh-keys] default key lookup for %s: %v", ownerID, err)
-			} else if def != nil {
-				req.SSHKeyID = def.ID
-			}
 		}
-
-		if req.CloneFrom != "" {
-			src, err := s.resolveAccessibleVM(ctx, r, req.CloneFrom)
-			if err != nil || src == nil || !s.canAccessOwner(r, src.OwnerID) {
-				httpError(w, "clone source not found", http.StatusNotFound)
-				return
-			}
-			// Pin to the unique ID so a same-named VM owned by another tenant
-			// can never be cloned by the manager's global lookup.
-			req.CloneFrom = vmIdentifier(src)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    ownerID,
+			Kind:       "sandbox.create",
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    summarizeCreateRequest(req),
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
 		}
-		if req.Template != "" {
-			tpl, err := s.resolveAccessibleTemplate(ctx, r, req.Template)
-			if err != nil || tpl == nil || !s.canAccessOwner(r, tpl.OwnerID) {
-				httpError(w, "template not found", http.StatusNotFound)
-				return
+		created, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			vmOut, execErr := s.executeCreateVM(bgCtx, isAdmin, req)
+			s.finishOperation(bgCtx, op, vmOut, execErr)
+			if vmOut != nil {
+				s.recordEvent("sandbox.created", actor, vmOut.Name, "delivered", 85, map[string]interface{}{
+					"vm_id":     vmOut.ID,
+					"vcpus":     vmOut.VCPUs,
+					"memory_mb": vmOut.MemoryMB,
+					"worker_id": vmOut.WorkerID,
+					"pool_id":   vmOut.PoolID,
+				})
 			}
-			req.Template = templateIdentifier(tpl)
+			return vmOut, execErr
+		})
+		if disconnected {
+			return
 		}
-		if req.Image != "" {
-			// The image field may name either a custom image or a template; both
-			// are owner-scoped. Mirror the manager's resolution order so a
-			// non-admin cannot reach another tenant's template through it.
-			img, err := s.resolveAccessibleImage(ctx, r, req.Image)
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if created == nil {
 			if err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
+				writeDetachedError(w, r, err)
 				return
 			}
-			if img != nil {
-				// Pin to the unique ID so the manager cannot resolve a
-				// same-named image belonging to another tenant.
-				req.Image = imageIdentifier(img)
-			} else {
-				tpl, tplErr := s.resolveAccessibleTemplate(ctx, r, req.Image)
-				if tplErr != nil {
-					httpError(w, tplErr.Error(), http.StatusInternalServerError)
-					return
-				}
-				if tpl != nil {
-					req.Image = templateIdentifier(tpl)
-				} else if !s.vmMgr.IsPlatformBaseImage(req.Image) {
-					// An image/template with this name may exist for another
-					// tenant. Preserve the non-enumerating 404 contract, but
-					// never let a foreign custom image shadow a platform base
-					// image name such as "ubuntu-24.04".
-					if globalImg, _ := s.vmMgr.GetImage(ctx, req.Image); globalImg != nil {
-						httpError(w, "image not found", http.StatusNotFound)
-						return
-					}
-					if globalTpl, _ := s.vmMgr.GetTemplate(ctx, req.Image); globalTpl != nil {
-						httpError(w, "image not found", http.StatusNotFound)
-						return
-					}
-				}
-			}
-		}
-
-		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+			httpError(w, "sandbox creation failed", http.StatusInternalServerError)
 			return
 		}
-
-		created, err := s.vmMgr.CreateVM(ctx, req)
 		if err != nil {
-			if strings.Contains(err.Error(), "ssh key not found") {
-				httpError(w, err.Error(), http.StatusNotFound)
+			// The record exists but auto-start did not complete; surface the
+			// reason instead of reporting a plain success.
+			var warn *vmStartWarning
+			if !errors.As(err, &warn) {
+				writeDetachedError(w, r, err)
 				return
 			}
-			if strings.Contains(err.Error(), "base rootfs image not found") || strings.Contains(err.Error(), "image not found") || strings.Contains(err.Error(), "custom image rootfs not found") || (strings.Contains(err.Error(), "template '") && strings.Contains(err.Error(), "' not found")) {
-				httpError(w, err.Error(), http.StatusNotFound)
-				return
-			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
-				httpError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
+			w.Header().Set("X-Compute-Boot-Warning", headerSafe(warn.reason))
 		}
 		w.WriteHeader(http.StatusCreated)
-		s.recordEvent("sandbox.created", getActor(r), created.Name, "delivered", 85, map[string]interface{}{
-			"vm_id":     created.ID,
-			"vcpus":     created.VCPUs,
-			"memory_mb": created.MemoryMB,
-		})
 		s.encodeVM(w, created)
 
 	default:
@@ -1261,12 +1465,48 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, fmt.Sprintf("item %s is protected against deletion", displayName), http.StatusBadRequest)
 				return
 			}
-			s.removePortForwardsForVM(ctx, v, true)
-			var delErr error
-			if _, isAdmin := s.currentOwnerID(r); isAdmin {
-				delErr = s.vmMgr.DeleteVM(ctx, vmID)
-			} else {
-				delErr = s.vmMgr.DeleteVMForOwner(ctx, v.OwnerID, vmID)
+			_, isAdmin := s.currentOwnerID(r)
+			actor := getActor(r)
+			op, opErr := s.createOperation(ctx, operationSpec{
+				OwnerID:    v.OwnerID,
+				Kind:       "sandbox.delete",
+				TargetID:   vmIdentifier(v),
+				TargetName: displayName,
+				Actor:      actor,
+				Request:    map[string]interface{}{"id": requestedID},
+			})
+			if opErr != nil {
+				httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			delErr, disconnected := runDetachedErr(r, func(bgCtx context.Context) error {
+				s.startOperation(bgCtx, op)
+				s.removePortForwardsForVM(bgCtx, v, true)
+				var err error
+				if vm.IsRemoteVM(v) {
+					if s.workers != nil {
+						err = s.workers.CallRPC(bgCtx, v.WorkerID, "vm.delete", api.WorkerVMIDRequest{VMID: s.remoteVMTargetID(v)}, nil)
+						if err != nil && strings.Contains(strings.ToLower(err.Error()), "not found") {
+							err = nil
+						}
+					}
+					if err == nil {
+						err = s.vmMgr.DeleteVMRecord(bgCtx, vmID)
+					}
+				} else if isAdmin {
+					err = s.vmMgr.DeleteVM(bgCtx, vmID)
+				} else {
+					err = s.vmMgr.DeleteVMForOwner(bgCtx, v.OwnerID, vmID)
+				}
+				if err == nil {
+					s.recordEvent("sandbox.deleted", actor, requestedID, "delivered", 40, map[string]string{"id": requestedID})
+					s.broadcastClusterUpdate()
+				}
+				s.finishOperation(bgCtx, op, nil, err)
+				return err
+			})
+			if disconnected {
+				return
 			}
 			if delErr != nil {
 				if strings.Contains(delErr.Error(), "protected against deletion") {
@@ -1276,7 +1516,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, delErr.Error(), http.StatusInternalServerError)
 				return
 			}
-			s.recordEvent("sandbox.deleted", getActor(r), requestedID, "delivered", 40, map[string]string{"id": requestedID})
 			json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": requestedID})
 
 		case http.MethodPatch, http.MethodPut:
@@ -1285,7 +1524,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+			actor := getActor(r)
+			updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+				u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+				if uErr == nil {
+					s.recordEvent("sandbox.config_updated", actor, vmID, "delivered", 20, req)
+					s.broadcastClusterUpdate()
+				}
+				return u, uErr
+			})
+			if disconnected {
+				return
+			}
 			if err != nil {
 				if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
 					httpError(w, err.Error(), http.StatusBadRequest)
@@ -1294,7 +1544,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
 			s.encodeVM(w, updated)
 
 		default:
@@ -1320,12 +1569,23 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		s.handleVMProcesses(w, r, vmID, parts[2:])
 		return
 	}
+	if action == "ports" || action == "expose" || action == "unexpose" {
+		s.handleVMPorts(w, r, v, action, parts[2:])
+		return
+	}
+	if action == "serve-token" {
+		s.handleServeToken(w, r, v)
+		return
+	}
 	if r.Method != http.MethodPost {
 		httpError(w, "action requires POST", http.StatusMethodNotAllowed)
 		return
 	}
 
 	switch action {
+	case "migrate":
+		s.handleVMMigrate(w, r, v)
+
 	case "clone":
 		var req vm.CreateRequest
 		if r.Body != nil {
@@ -1338,111 +1598,295 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
-		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		callerOwner, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		if !ok {
 			return
 		}
-		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    callerOwner,
+			Kind:       "sandbox.clone",
+			TargetID:   vmID,
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    summarizeCreateRequest(req),
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		cloned, err := s.vmMgr.CloneVM(ctx, vmID, req)
+		cloned, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			c, cErr := s.executeCloneVM(bgCtx, isAdmin, vmID, req)
+			s.finishOperation(bgCtx, op, c, cErr)
+			if c != nil {
+				s.recordEvent("sandbox.cloned", actor, c.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": c.ID})
+			}
+			return c, cErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if cloned == nil {
+			if err != nil {
+				writeDetachedError(w, r, err)
+				return
+			}
+			httpError(w, "sandbox clone failed", http.StatusInternalServerError)
+			return
+		}
 		if err != nil {
-			if strings.Contains(err.Error(), "ssh key not found") {
-				httpError(w, err.Error(), http.StatusNotFound)
+			var warn *vmStartWarning
+			if !errors.As(err, &warn) {
+				writeDetachedError(w, r, err)
 				return
 			}
-			if strings.Contains(err.Error(), "disk space issue") || strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "unsupported") || strings.Contains(err.Error(), "conflicting") {
-				httpError(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
+			w.Header().Set("X-Compute-Boot-Warning", headerSafe(warn.reason))
 		}
-		if req.AutoStart {
-			if err := s.enforceRunQuota(ctx, r, cloned); err != nil {
-				httpError(w, err.Error(), http.StatusTooManyRequests)
-				return
-			}
-			if runErr := s.vmMgr.RunVM(ctx, cloned.ID); runErr != nil {
-				log.Printf("[computed] clone %s auto_start skipped/failed: %v", cloned.ID, runErr)
-			} else if started, getErr := s.vmMgr.GetVM(ctx, cloned.ID); getErr == nil && started != nil {
-				cloned = started
-				if cloned.Status == db.StatusRunning {
-					s.mountAttachedVolumes(ctx, cloned)
-					s.applyEnvironment(ctx, cloned)
-					s.applyPortForwardsForVM(ctx, cloned)
-				}
-			}
-		}
-		s.recordEvent("sandbox.cloned", getActor(r), cloned.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": cloned.ID})
 		w.WriteHeader(http.StatusCreated)
 		s.encodeVM(w, cloned)
 
 	case "run", "start":
-		if err := s.enforceRunQuota(ctx, r, v); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.start",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.vmMgr.RunVM(ctx, vmID); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		startedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				s.finishOperation(bgCtx, op, nil, qErr)
+				return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
+			}
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.start")
+				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
+					return nil, uErr
+				}
+				out = updated
+			} else {
+				if rErr := s.vmMgr.RunVM(bgCtx, vmID); rErr != nil {
+					s.finishOperation(bgCtx, op, nil, rErr)
+					return nil, rErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+				if out != nil && out.Status == db.StatusRunning {
+					s.schedulePostBootSetup(bgCtx, out)
+				}
+			}
+			s.recordEvent("sandbox.started", actor, vmID, "delivered", 35, nil)
+			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
+			return out, nil
+		})
+		if disconnected {
 			return
 		}
-		v, _ := s.vmMgr.GetVM(ctx, vmID)
-		if v != nil && v.Status == db.StatusRunning {
-			// Give operators and automation a sandbox that is actually reachable.
-			s.waitGuestSSH(ctx, v, 30*time.Second)
-			s.mountAttachedVolumes(ctx, v)
-			s.applyEnvironment(ctx, v)
-			s.applyPortForwardsForVM(ctx, v)
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
 		}
-		s.recordEvent("sandbox.started", getActor(r), vmID, "delivered", 35, nil)
-		s.encodeVM(w, v)
+		s.encodeVM(w, startedVM)
+
+	case "restart":
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.restart",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		restartedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			out, rErr := s.restartSingleVM(bgCtx, isAdmin, v, true)
+			s.finishOperation(bgCtx, op, out, rErr)
+			if rErr == nil {
+				s.recordEvent("sandbox.restarted", actor, vmID, "delivered", 40, nil)
+			}
+			return out, rErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
+		}
+		s.encodeVM(w, restartedVM)
 
 	case "save-state", "snapshot":
-		if err := s.vmMgr.SaveState(ctx, vmID); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.snapshot",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		v, _ := s.vmMgr.GetVM(ctx, vmID)
-		s.recordEvent("snapshot.created", getActor(r), vmID, "delivered", 50, nil)
-		s.encodeVM(w, v)
+		savedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.save_state")
+				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
+					return nil, uErr
+				}
+				out = updated
+			} else {
+				if sErr := s.vmMgr.SaveState(bgCtx, vmID); sErr != nil {
+					s.finishOperation(bgCtx, op, nil, sErr)
+					return nil, sErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+			}
+			s.recordEvent("snapshot.created", actor, vmID, "delivered", 50, nil)
+			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
+			return out, nil
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
+		}
+		s.encodeVM(w, savedVM)
 
 	case "resume":
-		if err := s.enforceRunQuota(ctx, r, v); err != nil {
-			httpError(w, err.Error(), http.StatusTooManyRequests)
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.resume",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.vmMgr.ResumeVM(ctx, vmID); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		resumedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				s.finishOperation(bgCtx, op, nil, qErr)
+				return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
+			}
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.resume")
+				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
+					return nil, uErr
+				}
+				out = updated
+			} else {
+				if rErr := s.vmMgr.ResumeVM(bgCtx, vmID); rErr != nil {
+					s.finishOperation(bgCtx, op, nil, rErr)
+					return nil, rErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+				if out != nil && out.Status == db.StatusRunning {
+					s.schedulePostBootSetup(bgCtx, out)
+				}
+			}
+			s.recordEvent("sandbox.resumed", actor, vmID, "delivered", 25, nil)
+			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
+			return out, nil
+		})
+		if disconnected {
 			return
 		}
-		v, _ := s.vmMgr.GetVM(ctx, vmID)
-		if v != nil && v.Status == db.StatusRunning {
-			s.waitGuestSSH(ctx, v, 30*time.Second)
-			s.mountAttachedVolumes(ctx, v)
-			s.applyEnvironment(ctx, v)
-			s.applyPortForwardsForVM(ctx, v)
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
 		}
-		s.recordEvent("sandbox.resumed", getActor(r), vmID, "delivered", 25, nil)
-		s.encodeVM(w, v)
+		s.encodeVM(w, resumedVM)
 
 	case "stop":
-		if _, isAdmin := s.currentOwnerID(r); isAdmin {
-			if err := s.vmMgr.StopVM(ctx, vmID); err != nil {
-				httpError(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		} else if err := s.vmMgr.StopVMForOwner(ctx, v.OwnerID, vmID); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		_, isAdmin := s.currentOwnerID(r)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.stop",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		v, _ := s.vmMgr.GetVM(ctx, vmID)
-		if v != nil {
-			s.removePortForwardsForVM(ctx, v, false)
+		stoppedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			out := v
+			if vm.IsRemoteVM(out) {
+				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.stop")
+				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
+					return nil, uErr
+				}
+				out = updated
+				if out != nil {
+					s.removePortForwardsForVM(bgCtx, out, false)
+				}
+			} else {
+				if isAdmin {
+					if sErr := s.vmMgr.StopVM(bgCtx, vmID); sErr != nil {
+						s.finishOperation(bgCtx, op, nil, sErr)
+						return nil, sErr
+					}
+				} else if sErr := s.vmMgr.StopVMForOwner(bgCtx, out.OwnerID, vmID); sErr != nil {
+					s.finishOperation(bgCtx, op, nil, sErr)
+					return nil, sErr
+				}
+				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
+				if out != nil {
+					s.removePortForwardsForVM(bgCtx, out, false)
+				}
+			}
+			s.recordEvent("sandbox.stopped", actor, vmID, "delivered", 30, nil)
+			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
+			return out, nil
+		})
+		if disconnected {
+			return
 		}
-		s.recordEvent("sandbox.stopped", getActor(r), vmID, "delivered", 30, nil)
-		s.encodeVM(w, v)
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		if err != nil {
+			writeDetachedError(w, r, err)
+			return
+		}
+		s.encodeVM(w, stoppedVM)
 
 	case "exec":
 		var req vm.ExecRequest
@@ -1450,7 +1894,19 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		res, err := s.vmMgr.ExecVM(ctx, vmID, req)
+		var res *vm.ExecResponse
+		if vm.IsRemoteVM(v) {
+			var remoteRes vm.ExecResponse
+			err = s.workers.CallRPC(ctx, v.WorkerID, "vm.exec", api.WorkerVMExecRequest{
+				VMID:           s.remoteVMTargetID(v),
+				Command:        req.Command,
+				User:           req.User,
+				TimeoutSeconds: req.Timeout,
+			}, &remoteRes)
+			res = &remoteRes
+		} else {
+			res, err = s.vmMgr.ExecVM(ctx, vmID, req)
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1491,9 +1947,15 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 			return nil
 		}
-		if err := s.vmMgr.ExecVMStream(r.Context(), vmID, req, send); err != nil {
+		var streamErr error
+		if vm.IsRemoteVM(v) {
+			streamErr = s.execRemoteVMStream(r.Context(), v, req, send)
+		} else {
+			streamErr = s.vmMgr.ExecVMStream(r.Context(), vmID, req, send)
+		}
+		if streamErr != nil {
 			code := 1
-			_ = send(vm.ExecStreamEvent{Error: err.Error(), ExitCode: &code})
+			_ = send(vm.ExecStreamEvent{Error: streamErr.Error(), ExitCode: &code})
 		}
 
 	case "public-ip":
@@ -1511,7 +1973,16 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			req.PublicIP = &b
 			req.PublicIPEnabled = &b
 		}
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+			if uErr == nil {
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1550,7 +2021,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "missing network_isolation or isolated parameter", http.StatusBadRequest)
 			return
 		}
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+			if uErr == nil {
+				s.recordEvent("sandbox.network_isolation_updated", actor, vmID, "delivered", 20, map[string]string{"network_isolation": u.NetworkIsolation})
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
@@ -1559,7 +2041,6 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.network_isolation_updated", getActor(r), vmID, "delivered", 20, map[string]string{"network_isolation": updated.NetworkIsolation})
 		s.encodeVM(w, updated)
 
 	case "config":
@@ -1570,7 +2051,18 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, req)
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, req)
+			if uErr == nil {
+				s.recordEvent("sandbox.config_updated", actor, vmID, "delivered", 20, req)
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "conflicting") {
 				httpError(w, err.Error(), http.StatusBadRequest)
@@ -1579,32 +2071,60 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.config_updated", getActor(r), vmID, "delivered", 20, req)
 		s.encodeVM(w, updated)
 
 	case "protect":
-		t := true
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, vm.UpdateVMConfigRequest{Protected: &t})
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			t := true
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, vm.UpdateVMConfigRequest{Protected: &t})
+			if uErr == nil {
+				s.recordEvent("sandbox.protected", actor, vmID, "delivered", 20, map[string]bool{"protected": true})
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.protected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": true})
 		json.NewEncoder(w).Encode(updated)
 
 	case "unprotect":
-		f := false
-		updated, err := s.vmMgr.UpdateVMConfig(ctx, vmID, vm.UpdateVMConfigRequest{Protected: &f})
+		actor := getActor(r)
+		updated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			f := false
+			u, uErr := s.vmMgr.UpdateVMConfig(bgCtx, vmID, vm.UpdateVMConfigRequest{Protected: &f})
+			if uErr == nil {
+				s.recordEvent("sandbox.unprotected", actor, vmID, "delivered", 20, map[string]bool{"protected": false})
+				s.broadcastClusterUpdate()
+			}
+			return u, uErr
+		})
+		if disconnected {
+			return
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.recordEvent("sandbox.unprotected", getActor(r), vmID, "delivered", 20, map[string]bool{"protected": false})
 		json.NewEncoder(w).Encode(updated)
 
 	case "reconcile-ssh", "reconcile":
-		if err := s.vmMgr.SyncSSHKeysForVM(ctx, v.ID); err != nil {
-			httpError(w, "failed to reconcile SSH access: "+err.Error(), http.StatusInternalServerError)
+		syncErr, disconnected := runDetachedErr(r, func(bgCtx context.Context) error {
+			if vm.IsRemoteVM(v) {
+				return s.syncRemoteVMSSHKeys(bgCtx, v)
+			}
+			return s.vmMgr.SyncSSHKeysForVM(bgCtx, v.ID)
+		})
+		if disconnected {
+			return
+		}
+		if syncErr != nil {
+			httpError(w, "failed to reconcile SSH access: "+syncErr.Error(), http.StatusInternalServerError)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1623,66 +2143,86 @@ func httpError(w http.ResponseWriter, message string, code int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
+func writeResourceLimitError(w http.ResponseWriter, _ *http.Request, err error) bool {
+	var rle *api.ResourceLimitError
+	if !errors.As(err, &rle) || rle == nil {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_ = json.NewEncoder(w).Encode(rle)
+	return true
+}
+
+type ImageListItem struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	BaseImage   string   `json:"base_image,omitempty"`
+	Packages    []string `json:"packages,omitempty"`
+	SizeMB      int      `json:"size_mb"`
+	Status      string   `json:"status"`
+	Kind        string   `json:"kind"`
+	CreatedAt   string   `json:"created_at,omitempty"`
+}
+
+func (s *Server) listImageItems(ctx context.Context, isAdmin bool, canAccess func(ownerID string) bool) ([]ImageListItem, error) {
+	if s.vmMgr == nil {
+		return []ImageListItem{}, nil
+	}
+	customImgs, err := s.vmMgr.ListImages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]ImageListItem, 0, 1+len(customImgs))
+	result = append(result, ImageListItem{
+		ID:          "img-base-ubuntu-24",
+		Name:        "ubuntu-24",
+		Description: "Ubuntu 24.04 LTS (Noble Numbat) official MicroVM base image",
+		BaseImage:   "ubuntu-24.04",
+		Packages:    []string{"openssh-server", "sudo", "curl", "wget", "git", "iputils-ping", "iproute2", "bind9-dnsutils", "netcat-openbsd", "python3", "nodejs", "npm", "jq", "tar", "unzip"},
+		SizeMB:      4096,
+		Status:      "ready",
+		Kind:        "base",
+	})
+	for _, c := range customImgs {
+		if c == nil {
+			continue
+		}
+		if !isAdmin && (canAccess == nil || !canAccess(c.OwnerID)) {
+			continue
+		}
+		createdStr := ""
+		if !c.CreatedAt.IsZero() {
+			createdStr = c.CreatedAt.Format(time.RFC3339)
+		}
+		result = append(result, ImageListItem{
+			ID:          c.ID,
+			Name:        c.Name,
+			Description: c.Description,
+			BaseImage:   c.BaseImage,
+			Packages:    c.Packages,
+			SizeMB:      c.SizeMB,
+			Status:      string(c.Status),
+			Kind:        "custom",
+			CreatedAt:   createdStr,
+		})
+	}
+	return result, nil
+}
+
 func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	_, isAdmin := s.currentOwnerID(r)
 	switch r.Method {
 	case http.MethodGet:
-		customImgs, err := s.vmMgr.ListImages(ctx)
+		result, err := s.listImageItems(ctx, isAdmin, func(ownerID string) bool {
+			return s.canAccessOwner(r, ownerID)
+		})
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if customImgs == nil {
-			customImgs = []*db.CustomImage{}
-		}
-
-		type ImageListItem struct {
-			ID          string   `json:"id"`
-			Name        string   `json:"name"`
-			Description string   `json:"description,omitempty"`
-			BaseImage   string   `json:"base_image,omitempty"`
-			Packages    []string `json:"packages,omitempty"`
-			SizeMB      int      `json:"size_mb"`
-			Status      string   `json:"status"`
-			Kind        string   `json:"kind"`
-			CreatedAt   string   `json:"created_at,omitempty"`
-		}
-
-		var result []ImageListItem
-
-		result = append(result, ImageListItem{
-			ID:          "img-base-ubuntu-24",
-			Name:        "ubuntu-24",
-			Description: "Ubuntu 24.04 LTS (Noble Numbat) official MicroVM base image",
-			BaseImage:   "ubuntu-24.04",
-			Packages:    []string{"openssh-server", "sudo", "curl", "wget", "git", "iputils-ping", "iproute2", "bind9-dnsutils", "netcat-openbsd", "python3", "nodejs", "npm", "jq", "tar", "unzip"},
-			SizeMB:      4096,
-			Status:      "ready",
-			Kind:        "base",
-		})
-
-		for _, c := range customImgs {
-			if !isAdmin && !s.canAccessOwner(r, c.OwnerID) {
-				continue
-			}
-			createdStr := ""
-			if !c.CreatedAt.IsZero() {
-				createdStr = c.CreatedAt.Format(time.RFC3339)
-			}
-			result = append(result, ImageListItem{
-				ID:          c.ID,
-				Name:        c.Name,
-				Description: c.Description,
-				BaseImage:   c.BaseImage,
-				Packages:    c.Packages,
-				SizeMB:      c.SizeMB,
-				Status:      string(c.Status),
-				Kind:        "custom",
-				CreatedAt:   createdStr,
-			})
-		}
-
 		json.NewEncoder(w).Encode(result)
 
 	case http.MethodPost:
@@ -1703,11 +2243,41 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		} else {
 			req.OwnerID = ownerID
 		}
-		img, err := s.vmMgr.BuildImage(ctx, req)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    ownerID,
+			Kind:       "image.build",
+			TargetName: req.Name,
+			Actor:      actor,
+			Request: map[string]interface{}{
+				"name":       req.Name,
+				"base_image": req.BaseImage,
+				"packages":   req.Packages,
+				"size_mb":    req.SizeMB,
+			},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		img, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.CustomImage, error) {
+			s.startOperation(bgCtx, op)
+			out, bErr := s.vmMgr.BuildImage(bgCtx, req)
+			s.finishOperation(bgCtx, op, out, bErr)
+			return out, bErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
+			if writeResourceLimitError(w, r, err) {
+				return
+			}
 			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.broadcastClusterUpdate()
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(img)
 
@@ -1762,7 +2332,12 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "image not found", http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(img)
+		// Custom images are always reported with kind "custom" so CLI and SDK
+		// clients can label the image type.
+		json.NewEncoder(w).Encode(struct {
+			*db.CustomImage
+			Kind string `json:"kind"`
+		}{CustomImage: img, Kind: "custom"})
 
 	case http.MethodDelete:
 		img, err := s.resolveAccessibleImage(ctx, r, nameOrID)
@@ -1780,6 +2355,7 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.broadcastClusterUpdate()
 		json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": nameOrID})
 
 	default:
@@ -1839,11 +2415,37 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 			// tenant can never be snapshotted.
 			req.VMID = vmIdentifier(src)
 		}
-		tpl, err := s.vmMgr.CreateTemplate(ctx, req)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    ownerID,
+			Kind:       "template.create",
+			TargetID:   req.VMID,
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    map[string]interface{}{"name": req.Name, "description": req.Description, "vm_id": req.VMID},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		tpl, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.Template, error) {
+			s.startOperation(bgCtx, op)
+			created, cErr := s.vmMgr.CreateTemplate(bgCtx, req)
+			s.finishOperation(bgCtx, op, created, cErr)
+			return created, cErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
+			if writeResourceLimitError(w, r, err) {
+				return
+			}
 			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		s.broadcastClusterUpdate()
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(tpl)
 
@@ -1893,6 +2495,7 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			s.broadcastClusterUpdate()
 			json.NewEncoder(w).Encode(map[string]string{"status": "deleted", "id": nameOrID})
 
 		default:
@@ -1923,7 +2526,8 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
-		if _, _, ok := s.authorizeCreateRequest(w, r, &req); !ok {
+		callerOwner, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		if !ok {
 			return
 		}
 		// Apply any template defaults before quota estimation so limits reflect
@@ -1938,19 +2542,83 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			req.DiskMB = tpl.DiskMB
 		}
 		vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
-		if err := s.enforceCreateQuota(ctx, r, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
+		if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
 		// Templates launch (and run) immediately, so the running quota applies.
-		if err := s.enforceRunQuota(ctx, r, &db.VM{OwnerID: req.OwnerID, VCPUs: vcpus, MemoryMB: memoryMB, DiskMB: diskMB}); err != nil {
+		if err := s.enforceRunQuotaWithAdmin(ctx, isAdmin, &db.VM{OwnerID: req.OwnerID, VCPUs: vcpus, MemoryMB: memoryMB, DiskMB: diskMB}); err != nil {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
 		// Pin to the unique internal ID so duplicate template names cannot
 		// resolve to another tenant's template inside the manager.
-		launchedVM, err := s.vmMgr.LaunchTemplate(ctx, templateIdentifier(tpl), req)
+		tplID := templateIdentifier(tpl)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    callerOwner,
+			Kind:       "sandbox.create",
+			TargetID:   tplID,
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    summarizeCreateRequest(req),
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		launchedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
+			placeErr := func() error {
+				s.createPlaceMu.Lock()
+				defer s.createPlaceMu.Unlock()
+				workers, localNode, policy, pErr := s.buildPlacementNodes(bgCtx)
+				if pErr != nil {
+					return nil
+				}
+				normVCPUs, normMemMB, normDiskMB, normErr := config.ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB)
+				if normErr != nil {
+					return normErr
+				}
+				placeReq := scheduler.SandboxPlacementRequest{
+					WorkerID: req.WorkerID,
+					PoolID:   req.PoolID,
+					VCPUs:    normVCPUs,
+					MemoryMB: normMemMB,
+					DiskMB:   normDiskMB,
+				}
+				if localNode != nil {
+					// Template launch runs locally on nod_host_local; validate local node fits.
+					if _, selErr := scheduler.SelectNodeForSandbox(bgCtx, nil, localNode, placeReq, policy); selErr != nil {
+						return selErr
+					}
+				} else if len(workers) > 0 {
+					if _, selErr := scheduler.SelectNodeForSandbox(bgCtx, workers, localNode, placeReq, policy); selErr != nil {
+						return selErr
+					}
+				}
+				return nil
+			}()
+			if placeErr != nil {
+				s.finishOperation(bgCtx, op, nil, placeErr)
+				return nil, placeErr
+			}
+
+			vOut, lErr := s.vmMgr.LaunchTemplate(bgCtx, tplID, req)
+			s.finishOperation(bgCtx, op, vOut, lErr)
+			if lErr == nil {
+				s.broadcastClusterUpdate()
+			}
+			return vOut, lErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
+			if writeResourceLimitError(w, r, err) {
+				return
+			}
 			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -1963,80 +2631,114 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 }
 
 type ClusterSnapshot struct {
-	Type          string                  `json:"type"`
-	Stats         *vm.StatsResult         `json:"stats,omitempty"`
-	VMs           []*db.VM                `json:"vms"`
-	Allocations   []*db.NetworkAllocation `json:"allocations"`
-	NetworkConfig network.Config          `json:"network_config"`
-	Config        config.GlobalConfig     `json:"config"`
-	Queue         map[string]interface{}  `json:"queue"`
-	Workers       []*db.WorkerNode        `json:"workers"`
-	Jobs          []*db.Job               `json:"jobs"`
-	Volumes       []*db.Volume            `json:"volumes"`
-	Events        []*db.AuditEvent        `json:"events"`
-	Timestamp     time.Time               `json:"timestamp"`
+	Type             string                      `json:"type"`
+	Stats            *vm.StatsResult             `json:"stats,omitempty"`
+	VMs              []*db.VM                    `json:"vms"`
+	Allocations      []*db.NetworkAllocation     `json:"allocations"`
+	NetworkConfig    network.Config              `json:"network_config"`
+	Config           config.GlobalConfig         `json:"config"`
+	Queue            map[string]interface{}      `json:"queue"`
+	Workers          []*db.WorkerNode            `json:"workers"`
+	Pools            *[]*db.WorkerPool           `json:"pools,omitempty"`
+	WorkerTokens     *[]api.WorkerTokenResponse  `json:"worker_tokens,omitempty"`
+	SchedulingPolicy *db.ClusterSchedulingPolicy `json:"scheduling_policy,omitempty"`
+	Resources        *adminResourcesResponse     `json:"resources,omitempty"`
+	Templates        []*db.Template              `json:"templates"`
+	Images           []ImageListItem             `json:"images"`
+	PortForwards     []*db.PortForward           `json:"port_forwards"`
+	Jobs             []*db.Job                   `json:"jobs"`
+	Volumes          []*db.Volume                `json:"volumes"`
+	Events           []*db.AuditEvent            `json:"events"`
+	Timestamp        time.Time                   `json:"timestamp"`
+}
+
+func workerTokenMaskID(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return "tok_" + hex.EncodeToString(sum[:8])
 }
 
 func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthContext) *ClusterSnapshot {
-	scoped := s.authEnabled() && authCtx != nil && authCtx.User != nil && !isAdminAuthContext(authCtx)
+	isAdmin := !s.authEnabled() || isAdminAuthContext(authCtx)
+	scoped := s.authEnabled() && !isAdmin
 
-	store := s.vmMgr.GetStore()
-	var stats *vm.StatsResult
-	var vms []*db.VM
-	if scoped {
-		vms = filterNonJobVMs(s.listVMsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...)))
-		stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
-	} else {
-		rawVMs, _ := s.vmMgr.ListVMs(ctx)
-		vms = filterNonJobVMs(rawVMs)
-		stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
-	}
-	if vms == nil {
-		vms = []*db.VM{}
+	var st *db.Store
+	if s.vmMgr != nil {
+		st = s.vmMgr.GetStore()
 	}
 
+	var ownerIDList []string
 	owners := make(map[string]bool)
-	if scoped {
-		for _, oid := range append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...) {
+	if scoped && authCtx != nil && authCtx.User != nil {
+		ownerIDList = append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...)
+		for _, oid := range ownerIDList {
 			if oid != "" {
 				owners[oid] = true
 			}
 		}
 	}
 
-	rawAllocs, _ := store.GetNetworkAllocations(ctx)
-	allocs := make([]*db.NetworkAllocation, 0, len(rawAllocs))
-	for _, a := range rawAllocs {
-		if isJobNetworkAllocation(a) {
-			continue
+	var stats *vm.StatsResult
+	var vms []*db.VM
+	if s.vmMgr != nil {
+		if scoped {
+			if len(ownerIDList) > 0 {
+				vms = filterNonJobVMs(s.listVMsForOwners(ctx, ownerIDList))
+			}
+			stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
+		} else {
+			rawVMs, _ := s.vmMgr.ListVMs(ctx)
+			vms = filterNonJobVMs(rawVMs)
+			stats = snapshotStats(vms, s.vmMgr.GetResourceLimits())
 		}
-		if scoped && !owners[a.OwnerID] {
-			continue
-		}
-		allocs = append(allocs, a)
 	}
-	netCfg := s.vmMgr.GetNetworkManager().GetConfig()
+	if vms == nil {
+		vms = []*db.VM{}
+	}
+
+	allocs := make([]*db.NetworkAllocation, 0)
+	if st != nil {
+		rawAllocs, _ := st.GetNetworkAllocations(ctx)
+		for _, a := range rawAllocs {
+			if isJobNetworkAllocation(a) {
+				continue
+			}
+			if scoped && !owners[a.OwnerID] {
+				continue
+			}
+			allocs = append(allocs, a)
+		}
+	}
+
+	var netCfg network.Config
+	if s.vmMgr != nil && s.vmMgr.GetNetworkManager() != nil {
+		netCfg = s.vmMgr.GetNetworkManager().GetConfig()
+	}
 
 	cfg := s.safeConfig(!scoped)
 
-	rawQueue, _ := s.vmMgr.GetQueue(ctx)
-	queue := make([]*vm.QueueItem, 0, len(rawQueue))
-	for _, q := range rawQueue {
-		if isJobQueueItem(q) {
-			continue
+	var limits config.ResourceLimits
+	queue := make([]*vm.QueueItem, 0)
+	if s.vmMgr != nil {
+		limits = s.vmMgr.GetResourceLimits()
+		rawQueue, _ := s.vmMgr.GetQueue(ctx)
+		for _, q := range rawQueue {
+			if isJobQueueItem(q) {
+				continue
+			}
+			if scoped && !owners[q.OwnerID] {
+				continue
+			}
+			queue = append(queue, q)
 		}
-		if scoped && !owners[q.OwnerID] {
-			continue
-		}
-		queue = append(queue, q)
 	}
 	queueData := map[string]interface{}{
-		"queued_vms":      queue,
-		"count":           len(queue),
-		"running_vms":     0,
-		"running_vcpus":   0,
-		"running_mem_mb":  0,
-		"resource_limits": s.vmMgr.GetResourceLimits(),
+		"queued_vms":          queue,
+		"count":               len(queue),
+		"backend_ops_pending": s.backendOpPending(),
+		"running_vms":         0,
+		"running_vcpus":       0,
+		"running_mem_mb":      0,
+		"resource_limits":     limits,
 	}
 	if stats != nil {
 		queueData["running_vms"] = stats.RunningVMs
@@ -2045,36 +2747,127 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 	}
 
 	var workers []*db.WorkerNode
+	var poolsPtr *[]*db.WorkerPool
+	var tokensPtr *[]api.WorkerTokenResponse
+	var policyPtr *db.ClusterSchedulingPolicy
+	var resourcesPtr *adminResourcesResponse
+	var templatesList []*db.Template
+	var imagesList []ImageListItem
+	var portForwardsList []*db.PortForward
 	var jobsList []*db.Job
 	var vols []*db.Volume
 	var eventsList []*db.AuditEvent
-	if s.vmMgr != nil && store != nil {
+
+	if s.vmMgr != nil {
+		rawTemplates, _ := s.vmMgr.ListTemplates(ctx)
+		templatesList = make([]*db.Template, 0, len(rawTemplates))
+		for _, tpl := range rawTemplates {
+			if tpl == nil {
+				continue
+			}
+			if scoped && !owners[tpl.OwnerID] {
+				continue
+			}
+			templatesList = append(templatesList, tpl)
+		}
+		if imgs, err := s.listImageItems(ctx, !scoped, func(ownerID string) bool {
+			return owners[ownerID]
+		}); err == nil {
+			imagesList = imgs
+		}
+	}
+
+	if st != nil {
 		if !scoped {
-			// Worker topology is infrastructure metadata and is admin-only.
-			workers, _ = store.ListWorkerNodes(ctx)
+			// Worker topology, pools, tokens, scheduling policy, and host resources are admin-only.
+			workers, _ = st.ListWorkerNodes(ctx)
 			s.enrichWorkerNodes(workers)
+
+			pools, _ := st.ListWorkerPools(ctx)
+			if pools == nil {
+				pools = []*db.WorkerPool{}
+			}
+			poolsPtr = &pools
+
+			rawTokens, _ := st.ListWorkerTokens(ctx)
+			maskedTokens := make([]api.WorkerTokenResponse, 0, len(rawTokens))
+			for _, t := range rawTokens {
+				if t == nil {
+					continue
+				}
+				prefix := t.Token
+				if len(prefix) > 8 {
+					prefix = prefix[:8]
+				}
+				expUnix := t.ExpiresAt.Unix()
+				maskedTokens = append(maskedTokens, api.WorkerTokenResponse{
+					ID:        workerTokenMaskID(t.Token),
+					Name:      t.Name,
+					Token:     prefix + "…",
+					Prefix:    prefix,
+					PoolID:    t.PoolID,
+					ExpiresAt: &expUnix,
+					CreatedAt: t.CreatedAt.Unix(),
+				})
+			}
+			tokensPtr = &maskedTokens
+
+			if pol, err := st.GetSchedulingPolicy(ctx); err == nil {
+				policyPtr = &pol
+			} else {
+				defPol := db.DefaultSchedulingPolicy()
+				policyPtr = &defPol
+			}
+
+			resourcesPtr = s.getCachedAdminResources(ctx)
 		}
 		if scoped {
-			jobsList = s.listJobsForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...))
-			vols = filterNonJobVolumes(s.listVolumesForOwners(ctx, append([]string{authCtx.User.ID}, orgIDIfDifferent(authCtx)...)))
-			allEvents, _ := store.ListAuditEvents(ctx, 100)
-			for _, evt := range allEvents {
-				if evt != nil && evt.Actor == authCtx.User.Username {
-					eventsList = append(eventsList, evt)
-					if len(eventsList) >= 50 {
-						break
+			if len(ownerIDList) > 0 {
+				jobsList = s.listJobsForOwners(ctx, ownerIDList)
+				vols = filterNonJobVolumes(s.listVolumesForOwners(ctx, ownerIDList))
+				seenPF := make(map[string]bool)
+				for _, oid := range ownerIDList {
+					if owned, err := st.ListPortForwardsByOwner(ctx, oid); err == nil {
+						for _, pf := range owned {
+							if pf == nil || seenPF[pf.ID] {
+								continue
+							}
+							seenPF[pf.ID] = true
+							portForwardsList = append(portForwardsList, pf)
+						}
+					}
+				}
+			}
+			if authCtx != nil && authCtx.User != nil {
+				allEvents, _ := st.ListAuditEvents(ctx, 100)
+				for _, evt := range allEvents {
+					if evt != nil && evt.Actor == authCtx.User.Username {
+						eventsList = append(eventsList, evt)
+						if len(eventsList) >= 50 {
+							break
+						}
 					}
 				}
 			}
 		} else {
-			jobsList, _ = store.ListJobs(ctx, "")
-			rawVols, _ := store.ListVolumes(ctx)
+			jobsList, _ = st.ListJobs(ctx, "")
+			rawVols, _ := st.ListVolumes(ctx)
 			vols = filterNonJobVolumes(rawVols)
-			eventsList, _ = store.ListAuditEvents(ctx, 50)
+			portForwardsList, _ = st.ListPortForwards(ctx)
+			eventsList, _ = st.ListAuditEvents(ctx, 50)
 		}
 	}
 	if workers == nil {
 		workers = []*db.WorkerNode{}
+	}
+	if templatesList == nil {
+		templatesList = []*db.Template{}
+	}
+	if imagesList == nil {
+		imagesList = []ImageListItem{}
+	}
+	if portForwardsList == nil {
+		portForwardsList = []*db.PortForward{}
 	}
 	if jobsList == nil {
 		jobsList = []*db.Job{}
@@ -2087,18 +2880,25 @@ func (s *Server) getClusterSnapshot(ctx context.Context, authCtx *auth.AuthConte
 	}
 
 	return &ClusterSnapshot{
-		Type:          "snapshot",
-		Stats:         stats,
-		VMs:           vms,
-		Allocations:   allocs,
-		NetworkConfig: netCfg,
-		Config:        cfg,
-		Queue:         queueData,
-		Workers:       workers,
-		Jobs:          jobsList,
-		Volumes:       vols,
-		Events:        eventsList,
-		Timestamp:     time.Now().UTC(),
+		Type:             "snapshot",
+		Stats:            stats,
+		VMs:              vms,
+		Allocations:      allocs,
+		NetworkConfig:    netCfg,
+		Config:           cfg,
+		Queue:            queueData,
+		Workers:          workers,
+		Pools:            poolsPtr,
+		WorkerTokens:     tokensPtr,
+		SchedulingPolicy: policyPtr,
+		Resources:        resourcesPtr,
+		Templates:        templatesList,
+		Images:           imagesList,
+		PortForwards:     portForwardsList,
+		Jobs:             jobsList,
+		Volumes:          vols,
+		Events:           eventsList,
+		Timestamp:        time.Now().UTC(),
 	}
 }
 
@@ -2136,6 +2936,39 @@ func snapshotStats(vms []*db.VM, limits config.ResourceLimits) *vm.StatsResult {
 	return stats
 }
 
+type wsClient struct {
+	authCtx  *auth.AuthContext
+	notifyCh chan struct{}
+}
+
+func (s *Server) registerWSClient(c *wsClient) {
+	s.wsMu.Lock()
+	if s.wsClients == nil {
+		s.wsClients = make(map[*wsClient]struct{})
+	}
+	s.wsClients[c] = struct{}{}
+	s.wsMu.Unlock()
+}
+
+func (s *Server) unregisterWSClient(c *wsClient) {
+	s.wsMu.Lock()
+	delete(s.wsClients, c)
+	s.wsMu.Unlock()
+}
+
+// broadcastClusterUpdate wakes all connected WebSocket clients so they emit a
+// fresh RBAC-scoped snapshot immediately after cluster state changes.
+func (s *Server) broadcastClusterUpdate() {
+	s.wsMu.RLock()
+	for c := range s.wsClients {
+		select {
+		case c.notifyCh <- struct{}{}:
+		default:
+		}
+	}
+	s.wsMu.RUnlock()
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	opts := &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -2144,19 +2977,36 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(1 << 20)
 	defer conn.Close(websocket.StatusInternalError, "server closed")
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Initial snapshot
 	authCtx := auth.GetAuth(r.Context())
-	snapshot := s.getClusterSnapshot(ctx, authCtx)
-	if data, err := json.Marshal(snapshot); err == nil {
-		_ = conn.Write(ctx, websocket.MessageText, data)
+	client := &wsClient{
+		authCtx:  authCtx,
+		notifyCh: make(chan struct{}, 1),
+	}
+	s.registerWSClient(client)
+	defer s.unregisterWSClient(client)
+
+	writeSnapshot := func() error {
+		snap := s.getClusterSnapshot(ctx, authCtx)
+		data, err := json.Marshal(snap)
+		if err != nil {
+			return err
+		}
+		return conn.Write(ctx, websocket.MessageText, data)
 	}
 
-	// Incoming message loop
+	// Initial snapshot written synchronously before starting reader goroutine.
+	if err := writeSnapshot(); err != nil {
+		return
+	}
+
+	// Incoming message loop: never writes directly to conn; signals notifyCh so
+	// all WebSocket writes stay serialized on this single writer goroutine.
 	go func() {
 		defer cancel()
 		for {
@@ -2167,15 +3017,15 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			if msgType == websocket.MessageText {
 				var req map[string]interface{}
 				_ = json.Unmarshal(data, &req)
-				snap := s.getClusterSnapshot(ctx, authCtx)
-				if respBytes, err := json.Marshal(snap); err == nil {
-					_ = conn.Write(ctx, websocket.MessageText, respBytes)
+				select {
+				case client.notifyCh <- struct{}{}:
+				default:
 				}
 			}
 		}
 	}()
 
-	ticker := time.NewTicker(1500 * time.Millisecond)
+	ticker := time.NewTicker(2000 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -2183,13 +3033,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return
-		case <-ticker.C:
-			snap := s.getClusterSnapshot(ctx, authCtx)
-			data, err := json.Marshal(snap)
-			if err != nil {
-				continue
+		case <-client.notifyCh:
+			if err := writeSnapshot(); err != nil {
+				return
 			}
-			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		case <-ticker.C:
+			if err := writeSnapshot(); err != nil {
 				return
 			}
 		}
@@ -2223,9 +3072,16 @@ func (s *Server) syncAccountSSHKeys(ctx context.Context, key *db.SSHKey) *vm.SSH
 	result, err := s.vmMgr.SyncSSHKeysForOwner(ctx, key.OwnerID)
 	if err != nil {
 		log.Printf("[ssh-keys] reconcile owner %s: %v", key.OwnerID, err)
-		return &vm.SSHKeySyncResult{Failed: []vm.SSHKeySyncFailure{{Error: err.Error()}}}
+		result = &vm.SSHKeySyncResult{Failed: []vm.SSHKeySyncFailure{{Error: err.Error()}}}
 	}
-	if len(result.Failed) > 0 {
+	if remoteRes := s.syncRemoteSSHKeysForOwner(ctx, key.OwnerID); remoteRes != nil {
+		if result == nil {
+			result = &vm.SSHKeySyncResult{}
+		}
+		result.Applied = append(result.Applied, remoteRes.Applied...)
+		result.Failed = append(result.Failed, remoteRes.Failed...)
+	}
+	if result != nil && len(result.Failed) > 0 {
 		log.Printf("[ssh-keys] reconcile owner %s: %d applied, %d failed", key.OwnerID, len(result.Applied), len(result.Failed))
 	}
 	return result
@@ -2371,6 +3227,13 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":"reconciliation failed: %v"}`, err), http.StatusInternalServerError)
 			return
 		}
+		if remoteRes := s.syncRemoteSSHKeysForOwner(r.Context(), ownerID); remoteRes != nil {
+			if res == nil {
+				res = &vm.SSHKeySyncResult{}
+			}
+			res.Applied = append(res.Applied, remoteRes.Applied...)
+			res.Failed = append(res.Failed, remoteRes.Failed...)
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"status": "reconciled", "sync": res})
 		return
 	}
@@ -2470,7 +3333,11 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[ssh-keys] update sandbox references for %s: %v", key.ID, err)
 			} else {
 				for _, vmID := range affected {
-					if err := s.vmMgr.SyncSSHKeysForVM(r.Context(), vmID); err != nil {
+					if v, _ := s.vmMgr.GetStore().GetVM(r.Context(), vmID); vm.IsRemoteVM(v) {
+						if err := s.syncRemoteVMSSHKeys(r.Context(), v); err != nil {
+							log.Printf("[ssh-keys] remote sync %s after key update: %v", vmID, err)
+						}
+					} else if err := s.vmMgr.SyncSSHKeysForVM(r.Context(), vmID); err != nil {
 						log.Printf("[ssh-keys] sync %s after key update: %v", vmID, err)
 					}
 				}
@@ -2504,6 +3371,20 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 
 // EnsureHostSSHKey auto-generates or loads the master host Ed25519 SSH key.
 func (s *Server) EnsureHostSSHKey() (ssh.Signer, string, error) {
+	explicitPath := strings.TrimSpace(s.cfg.Images.SSHKeyPath)
+	if explicitPath != "" && explicitPath != "/var/lib/compute/images/ssh/id_ed25519" {
+		if data, err := os.ReadFile(explicitPath); err == nil {
+			if signer, err := ssh.ParsePrivateKey(data); err == nil {
+				pubData, _ := os.ReadFile(explicitPath + ".pub")
+				return signer, string(pubData), nil
+			}
+		} else if os.IsNotExist(err) {
+			if signer, pubBytes, genErr := generateHostEd25519(explicitPath); genErr == nil {
+				return signer, string(pubBytes), nil
+			}
+		}
+	}
+
 	var candidates []string
 	if s.cfg.Images.SSHKeyPath != "" {
 		candidates = append(candidates, s.cfg.Images.SSHKeyPath)
@@ -2630,9 +3511,16 @@ func (s *Server) resolveSSHKey(keyPath, pubKey, keyName string) []ssh.AuthMethod
 	}
 
 	// Auto-provision master host Ed25519 private key if none exists on host
-	if len(signers) == 0 {
+	// or if an explicit SSHKeyPath is configured and does not exist yet.
+	needHostKey := len(signers) == 0
+	if !needHostKey && s.cfg.Images.SSHKeyPath != "" {
+		if _, err := os.Stat(s.cfg.Images.SSHKeyPath); os.IsNotExist(err) {
+			needHostKey = true
+		}
+	}
+	if needHostKey {
 		if signer, _, err := s.EnsureHostSSHKey(); err == nil && signer != nil {
-			signers = append(signers, signer)
+			signers = append([]ssh.Signer{signer}, signers...)
 		}
 	}
 
@@ -2746,6 +3634,9 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 	}
 
 	isRawStream := r.URL.Query().Get("stream") == "raw" || r.URL.Query().Get("mode") == "stdio"
+	if s.vmMgr != nil {
+		s.vmMgr.TouchVMActivity(r.Context(), v.ID)
+	}
 
 	// 2. Raw Stream / ProxyCommand Mode: Full-duplex WebSocket <-> TCP bridging
 	if isRawStream {
@@ -2769,7 +3660,9 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 			"timestamp":   time.Now().UTC().Format(time.RFC3339),
 		})
 
-		tcpConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+		dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+		tcpConn, err := s.dialVMAddress(dialCtx, v, "tcp", targetAddr)
+		dialCancel()
 		if err != nil {
 			errMsg := fmt.Sprintf("\r\n\x1b[31;1m[Compute SSH Error]\x1b[0m Connection to %s failed: %v\r\n", targetAddr, err)
 			_ = wsConn.Write(ctx, websocket.MessageBinary, []byte(errMsg))
@@ -2903,7 +3796,19 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 	}
 
 	dest := targetAddr
-	sshClient, err := ssh.Dial("tcp", dest, sshConfig)
+	dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+	rawConn, err := s.dialVMAddress(dialCtx, v, "tcp", dest)
+	dialCancel()
+	var sshClient *ssh.Client
+	if err == nil {
+		ncc, chans, reqs, ccErr := ssh.NewClientConn(rawConn, dest, sshConfig)
+		if ccErr != nil {
+			_ = rawConn.Close()
+			err = ccErr
+		} else {
+			sshClient = ssh.NewClient(ncc, chans, reqs)
+		}
+	}
 	if err != nil {
 		errMsg := fmt.Sprintf("\r\n\x1b[31;1m[Compute SSH Connection Failed]\x1b[0m %v\r\n\r\n\x1b[33mEnsure the VM guest SSH service has finished initializing.\x1b[0m\r\n", err)
 		_ = safeWrite(websocket.MessageText, []byte(errMsg))
@@ -3086,6 +3991,9 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	if s.vmMgr != nil {
+		s.vmMgr.TouchVMActivity(ctx, v.ID)
+	}
 
 	var writeMu sync.Mutex
 	safeWrite := func(typ websocket.MessageType, data []byte) error {
@@ -3120,7 +4028,19 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 	dest := net.JoinHostPort(v.IPAddress, "22")
 	_ = safeWrite(websocket.MessageText, []byte(fmt.Sprintf("\x1b[36m[Compute]\x1b[0m Establishing SSH terminal session to %s@%s...\r\n", user, dest)))
 
-	sshClient, err := ssh.Dial("tcp", dest, sshConfig)
+	dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+	rawConn, err := s.dialVMAddress(dialCtx, v, "tcp", dest)
+	dialCancel()
+	var sshClient *ssh.Client
+	if err == nil {
+		ncc, chans, reqs, ccErr := ssh.NewClientConn(rawConn, dest, sshConfig)
+		if ccErr != nil {
+			_ = rawConn.Close()
+			err = ccErr
+		} else {
+			sshClient = ssh.NewClient(ncc, chans, reqs)
+		}
+	}
 	if err != nil {
 		errMsg := fmt.Sprintf("\r\n\x1b[31;1m[Compute SSH Connection Failed]\x1b[0m %v\r\n\r\n\x1b[33mEnsure the VM guest SSH service has finished initializing.\x1b[0m\r\n", err)
 		_ = safeWrite(websocket.MessageText, []byte(errMsg))
@@ -3275,6 +4195,7 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	conn.SetReadLimit(16 << 20)
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -3293,16 +4214,146 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	if tokenToConsume == "" {
 		tokenToConsume = workerToken
 	}
-	if !s.authEnabled() && tokenToConsume != "" && s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		_, _ = s.vmMgr.GetStore().ConsumeWorkerToken(ctx, tokenToConsume)
+
+	var st *db.Store
+	if s.vmMgr != nil {
+		st = s.vmMgr.GetStore()
 	}
 
-	workerID := hello.ID
+	var tokenRecord *db.WorkerToken
+	if tokenToConsume != "" && st != nil {
+		tokenRecord, _ = st.GetWorkerToken(ctx, tokenToConsume)
+		if !s.authEnabled() {
+			_, _ = st.ConsumeWorkerToken(ctx, tokenToConsume)
+		}
+	}
+
+	// Resolve pool: token.PoolID -> hello.PoolID -> "default"
+	poolID := "default"
+	if tokenRecord != nil && strings.TrimSpace(tokenRecord.PoolID) != "" {
+		poolID = strings.TrimSpace(tokenRecord.PoolID)
+	} else if strings.TrimSpace(hello.PoolID) != "" {
+		poolID = strings.TrimSpace(hello.PoolID)
+	}
+	if st != nil {
+		if existingPool, err := st.GetWorkerPool(ctx, poolID); err == nil && existingPool == nil {
+			_ = st.SaveWorkerPool(ctx, &db.WorkerPool{
+				ID:         poolID,
+				Name:       poolID,
+				LabelsJSON: "{}",
+				PolicyJSON: "{}",
+			})
+		}
+	}
+
+	workerName := strings.TrimSpace(hello.Name)
+	workerID := strings.TrimSpace(hello.WorkerID)
 	if workerID == "" {
-		workerID = hello.Name
+		workerID = strings.TrimSpace(hello.ID)
+	}
+	if workerID == "" {
+		workerID = workerName
 	}
 	if workerID == "" {
 		workerID = fmt.Sprintf("nod_%s", uuid.NewString()[:8])
+	}
+	if workerName == "" {
+		workerName = workerID
+	}
+
+	if st != nil {
+		now := time.Now().UTC()
+		capJSON, _ := json.Marshal(hello.Capabilities)
+		existing, _ := st.GetWorkerNode(ctx, workerID)
+		policy, _ := st.GetSchedulingPolicy(ctx)
+
+		status := "ready"
+		createdAt := now
+		if existing != nil {
+			if existing.Status == "cordoned" || existing.Status == "draining" {
+				status = existing.Status
+			}
+			if !existing.CreatedAt.IsZero() {
+				createdAt = existing.CreatedAt
+			}
+		}
+
+		physVCPUs := capabilityInt(hello.Capabilities, "vcpus", "cpus")
+		physMemMB := capabilityInt(hello.Capabilities, "memory_mb")
+		physDiskMB := capabilityInt(hello.Capabilities, "disk_mb")
+
+		allocVCPUs := physVCPUs
+		if physVCPUs > policy.HostReservedVCPUs {
+			allocVCPUs = physVCPUs - policy.HostReservedVCPUs
+		} else if physVCPUs > 0 {
+			allocVCPUs = 1
+		}
+		allocMemMB := physMemMB
+		if physMemMB > policy.HostReservedMemoryMB+256 {
+			allocMemMB = physMemMB - policy.HostReservedMemoryMB
+		}
+		allocDiskMB := physDiskMB
+		if physDiskMB > policy.HostReservedDiskMB {
+			allocDiskMB = physDiskMB - policy.HostReservedDiskMB
+		}
+		if existing != nil {
+			if existing.AllocatedVCPUs > 0 {
+				allocVCPUs = existing.AllocatedVCPUs
+			}
+			if existing.AllocatedMemMB > 0 {
+				allocMemMB = existing.AllocatedMemMB
+			}
+			if existing.AllocatedDiskMB > 0 {
+				allocDiskMB = existing.AllocatedDiskMB
+			}
+		}
+		if maxV := capabilityInt(hello.Capabilities, "max_vcpus"); maxV > 0 && (allocVCPUs == 0 || maxV < allocVCPUs) {
+			allocVCPUs = maxV
+		}
+		if maxM := capabilityInt(hello.Capabilities, "max_memory_mb"); maxM > 0 && (allocMemMB == 0 || maxM < allocMemMB) {
+			allocMemMB = maxM
+		}
+		if maxD := capabilityInt(hello.Capabilities, "max_disk_mb"); maxD > 0 && (allocDiskMB == 0 || maxD < allocDiskMB) {
+			allocDiskMB = maxD
+		}
+		// Never advertise more schedulable capacity than the worker physically
+		// reported, even if max_* config is larger.
+		if physVCPUs > 0 && allocVCPUs > physVCPUs {
+			allocVCPUs = physVCPUs
+		}
+		if physMemMB > 0 && allocMemMB > physMemMB {
+			allocMemMB = physMemMB
+		}
+		if physDiskMB > 0 && allocDiskMB > physDiskMB {
+			allocDiskMB = physDiskMB
+		}
+
+		node := &db.WorkerNode{
+			ID:               workerID,
+			Name:             workerName,
+			PoolID:           poolID,
+			Role:             "worker",
+			Status:           status,
+			Arch:             hello.Architecture,
+			TotalVCPUs:       physVCPUs,
+			TotalMemMB:       physMemMB,
+			TotalDiskMB:      physDiskMB,
+			AllocatedVCPUs:   allocVCPUs,
+			AllocatedMemMB:   allocMemMB,
+			AllocatedDiskMB:  allocDiskMB,
+			PhysicalVCPUs:    physVCPUs,
+			PhysicalMemMB:    physMemMB,
+			PhysicalDiskMB:   physDiskMB,
+			AgentVersion:     hello.AgentVersion,
+			FCVersion:        s.fcVersion,
+			UnderlayIP:       workerUnderlayIP(hello.Capabilities),
+			CapabilitiesJSON: string(capJSON),
+			LastHeartbeat:    &now,
+			CreatedAt:        createdAt,
+			UpdatedAt:        now,
+		}
+		s.enrichWorkerNodes([]*db.WorkerNode{node})
+		_ = st.SaveWorkerNode(ctx, node)
 	}
 
 	ack := api.WorkerHelloAck{
@@ -3314,6 +4365,7 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		},
 		Accepted:            true,
 		WorkerID:            workerID,
+		PoolID:              poolID,
 		HeartbeatIntervalMS: 10000,
 	}
 	ackBytes, _ := json.Marshal(ack)
@@ -3321,31 +4373,20 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workerObj := scheduler.NewWorker(workerID, "default", hello.Capabilities, conn)
+	workerObj := scheduler.NewWorker(workerID, poolID, hello.Capabilities, conn)
 	if err := s.workers.Register(workerObj); err != nil {
 		return
 	}
-	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		now := time.Now().UTC()
-		capJSON, _ := json.Marshal(hello.Capabilities)
-		node := &db.WorkerNode{
-			ID:               workerID,
-			Name:             workerID,
-			PoolID:           "default",
-			Role:             "worker",
-			Status:           "ready",
-			Arch:             hello.Architecture,
-			AgentVersion:     hello.AgentVersion,
-			FCVersion:        s.fcVersion,
-			UnderlayIP:       workerUnderlayIP(hello.Capabilities),
-			CapabilitiesJSON: string(capJSON),
-			LastHeartbeat:    &now,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		}
-		s.enrichWorkerNodes([]*db.WorkerNode{node})
-		_ = s.vmMgr.GetStore().SaveWorkerNode(ctx, node)
-	}
+	s.broadcastClusterUpdate()
+	defer s.broadcastClusterUpdate()
+	log.Printf("[computed] worker enrolled id=%s pool=%s arch=%s vcpus=%d mem=%dMB disk=%dMB",
+		workerID,
+		poolID,
+		hello.Architecture,
+		capabilityInt(hello.Capabilities, "vcpus", "cpus"),
+		capabilityInt(hello.Capabilities, "memory_mb"),
+		capabilityInt(hello.Capabilities, "disk_mb"),
+	)
 	if s.scheduler != nil {
 		go func() {
 			_, _ = s.scheduler.ScheduleNext(context.Background())
@@ -3378,7 +4419,18 @@ func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
 	path = strings.TrimPrefix(path, "/")
 
 	if r.Method == http.MethodDelete && path != "" {
-		if err := st.DeleteWorkerToken(ctx, path); err != nil {
+		deleteTarget := path
+		if strings.HasPrefix(path, "tok_") {
+			if tokens, err := st.ListWorkerTokens(ctx); err == nil {
+				for _, t := range tokens {
+					if t != nil && workerTokenMaskID(t.Token) == path {
+						deleteTarget = t.Token
+						break
+					}
+				}
+			}
+		}
+		if err := st.DeleteWorkerToken(ctx, deleteTarget); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -3419,10 +4471,7 @@ func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req api.WorkerTokenCreateRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		poolID := req.PoolID
-		if poolID == "" {
-			poolID = "default"
-		}
+		poolID := strings.TrimSpace(req.PoolID)
 		name := req.Name
 		// An empty name means "unbound": the daemon binds the token to the
 		// first worker that enrolls with it, and that worker may reconnect
@@ -3466,46 +4515,135 @@ func (s *Server) handleWorkerTokens(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func capabilityInt(m map[string]interface{}, keys ...string) int {
+	if m == nil {
+		return 0
+	}
+	for _, k := range keys {
+		val, ok := m[k]
+		if !ok || val == nil {
+			continue
+		}
+		switch v := val.(type) {
+		case int:
+			if v > 0 {
+				return v
+			}
+		case int64:
+			if v > 0 {
+				return int(v)
+			}
+		case uint64:
+			if v > 0 {
+				return int(v)
+			}
+		case float64:
+			if v > 0 {
+				return int(v)
+			}
+		case json.Number:
+			if n, err := v.Int64(); err == nil && n > 0 {
+				return int(n)
+			}
+		}
+	}
+	return 0
+}
+
 func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 	var fallbackVCPUs, fallbackMemMB, fallbackDiskMB int
 	if s.vmMgr != nil {
 		limits := s.vmMgr.GetResourceLimits()
 		fallbackVCPUs, fallbackMemMB, fallbackDiskMB = getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
 	}
+
+	var allVMs []*db.VM
+	var allVols []*db.Volume
+	var allTpls []*db.Template
+	var allImgs []*db.CustomImage
+	hasLocal := false
 	for _, n := range nodes {
-		if n.TotalVCPUs == 0 && n.CapabilitiesJSON != "" {
-			var cap struct {
-				VCPUs        int    `json:"vcpus"`
-				CPUs         int    `json:"cpus"`
-				MemoryMB     int    `json:"memory_mb"`
-				DiskMB       int    `json:"disk_mb"`
-				Architecture string `json:"architecture"`
+		if n != nil && n.ID == "nod_host_local" {
+			hasLocal = true
+			break
+		}
+	}
+	ctx := context.Background()
+	var st *db.Store
+	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
+		st = s.vmMgr.GetStore()
+		allVMs, _ = st.ListVMs(ctx)
+		if hasLocal {
+			allVols, _ = st.ListVolumes(ctx)
+			if tpls, err := st.ListTemplates(ctx); err == nil {
+				allTpls = tpls
 			}
-			if err := json.Unmarshal([]byte(n.CapabilitiesJSON), &cap); err == nil {
-				if cap.VCPUs > 0 {
-					n.TotalVCPUs = cap.VCPUs
-				} else if cap.CPUs > 0 {
-					n.TotalVCPUs = cap.CPUs
-				}
-				if cap.MemoryMB > 0 {
-					n.TotalMemMB = cap.MemoryMB
-				}
-				if cap.DiskMB > 0 {
-					n.TotalDiskMB = cap.DiskMB
-				}
-				if n.Arch == "" && cap.Architecture != "" {
-					n.Arch = cap.Architecture
-				}
+			if imgs, err := st.ListImages(ctx); err == nil {
+				allImgs = imgs
 			}
 		}
-		if n.TotalVCPUs == 0 && fallbackVCPUs > 0 {
-			n.TotalVCPUs = fallbackVCPUs
+	}
+
+	for _, n := range nodes {
+		if n.CapabilitiesJSON != "" {
+			var caps map[string]interface{}
+			if err := json.Unmarshal([]byte(n.CapabilitiesJSON), &caps); err == nil {
+				if v := capabilityInt(caps, "vcpus", "cpus"); v > 0 {
+					if n.PhysicalVCPUs == 0 {
+						n.PhysicalVCPUs = v
+					}
+					if n.TotalVCPUs == 0 {
+						n.TotalVCPUs = v
+					}
+				}
+				if v := capabilityInt(caps, "memory_mb"); v > 0 {
+					if n.PhysicalMemMB == 0 {
+						n.PhysicalMemMB = v
+					}
+					if n.TotalMemMB == 0 {
+						n.TotalMemMB = v
+					}
+				}
+				if v := capabilityInt(caps, "disk_mb"); v > 0 {
+					if n.PhysicalDiskMB == 0 {
+						n.PhysicalDiskMB = v
+					}
+					if n.TotalDiskMB == 0 {
+						n.TotalDiskMB = v
+					}
+				}
+				if v := capabilityInt(caps, "memory_available_mb"); v > 0 && n.AvailableMemMB == 0 {
+					n.AvailableMemMB = v
+				}
+				if v := capabilityInt(caps, "disk_available_mb"); v > 0 && n.AvailableDiskMB == 0 {
+					n.AvailableDiskMB = v
+				}
+				if n.Arch == "" {
+					if arch, ok := caps["architecture"].(string); ok && arch != "" {
+						n.Arch = arch
+					}
+				}
+			}
 		}
-		if n.TotalMemMB == 0 && fallbackMemMB > 0 {
-			n.TotalMemMB = fallbackMemMB
+		if n.ID == "nod_host_local" {
+			if n.TotalVCPUs == 0 && fallbackVCPUs > 0 {
+				n.TotalVCPUs = fallbackVCPUs
+			}
+			if n.TotalMemMB == 0 && fallbackMemMB > 0 {
+				n.TotalMemMB = fallbackMemMB
+			}
+			if n.TotalDiskMB == 0 && fallbackDiskMB > 0 {
+				n.TotalDiskMB = fallbackDiskMB
+			}
 		}
-		if n.TotalDiskMB == 0 && fallbackDiskMB > 0 {
-			n.TotalDiskMB = fallbackDiskMB
+		if n.PhysicalVCPUs == 0 {
+			n.PhysicalVCPUs = n.TotalVCPUs
+		}
+		if n.PhysicalMemMB == 0 {
+			n.PhysicalMemMB = n.TotalMemMB
+		}
+		if n.PhysicalDiskMB == 0 {
+			n.PhysicalDiskMB = n.TotalDiskMB
 		}
 		if n.Arch == "" {
 			n.Arch = runtime.GOARCH
@@ -3519,6 +4657,72 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 		if n.UnderlayIP == "" {
 			n.UnderlayIP = "127.0.0.1"
 		}
+
+		// Compute live usage from VMs (and volumes/templates/images for nod_host_local)
+		usedVCPUs, usedMemMB, usedDiskMB, runningVMs := 0, 0, 0, 0
+		for _, v := range allVMs {
+			belongs := v.WorkerID == n.ID || (n.ID == "nod_host_local" && v.WorkerID == "")
+			if !belongs {
+				continue
+			}
+			usedDiskMB += v.DiskMB
+			if v.Status != db.StatusPaused {
+				usedMemMB += v.MemoryMB
+			}
+			if v.Status == db.StatusRunning || v.Status == db.StatusQueued {
+				usedVCPUs += v.VCPUs
+			}
+			if v.Status == db.StatusRunning {
+				runningVMs++
+			}
+		}
+		if n.ID == "nod_host_local" {
+			for _, vol := range allVols {
+				if strings.HasPrefix(vol.ID, "vol_root_") || vol.Path == "" {
+					continue
+				}
+				usedDiskMB += vol.SizeGB * 1024 * (1 + vol.Snapshots)
+			}
+			for _, tpl := range allTpls {
+				if tpl == nil {
+					continue
+				}
+				if tpl.DiskMB > 0 {
+					usedDiskMB += tpl.DiskMB
+				} else if tpl.DiskPath != "" {
+					usedDiskMB += int(vm.FileAllocatedMB(tpl.DiskPath))
+				}
+			}
+			for _, img := range allImgs {
+				if img == nil || img.Status == db.ImageStatusFailed {
+					continue
+				}
+				if img.SizeMB > 0 {
+					usedDiskMB += img.SizeMB
+				} else if img.RootfsPath != "" {
+					usedDiskMB += int(vm.FileAllocatedMB(img.RootfsPath))
+				}
+			}
+			if n.AvailableMemMB == 0 && s.vmMgr != nil {
+				n.AvailableMemMB = int(s.vmMgr.HostMemoryAvailableMB())
+			}
+			if n.AvailableDiskMB == 0 && s.vmMgr != nil {
+				n.AvailableDiskMB = int(s.vmMgr.HostDiskAvailableMB())
+			}
+		} else if s.workers != nil {
+			if rw, ok := s.workers.Get(n.ID); ok && rw != nil {
+				if v := capabilityInt(rw.Metrics, "memory_available_mb"); v > 0 {
+					n.AvailableMemMB = v
+				}
+				if v := capabilityInt(rw.Metrics, "disk_available_mb"); v > 0 {
+					n.AvailableDiskMB = v
+				}
+			}
+		}
+		n.RunningVMs = runningVMs
+		n.UsedVCPUs = usedVCPUs
+		n.UsedMemMB = usedMemMB
+		n.UsedDiskMB = usedDiskMB
 	}
 }
 
@@ -3552,10 +4756,23 @@ func (s *Server) handleWorkers(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		localNode.LastHeartbeat = &now
 		limits := s.vmMgr.GetResourceLimits()
+		physVCPUs, physMemMB, physDiskMB := getHostResources(0, 0, 0)
 		vcpus, memMB, diskMB := getHostResources(limits.MaxTotalVCPUs, limits.MaxTotalMemoryMB, int(limits.MaxTotalDiskMB))
 		localNode.TotalVCPUs = vcpus
 		localNode.TotalMemMB = memMB
 		localNode.TotalDiskMB = diskMB
+		localNode.PhysicalVCPUs = physVCPUs
+		localNode.PhysicalMemMB = physMemMB
+		localNode.PhysicalDiskMB = physDiskMB
+		if limits.MaxTotalVCPUs > 0 {
+			localNode.AllocatedVCPUs = limits.MaxTotalVCPUs
+		}
+		if limits.MaxTotalMemoryMB > 0 {
+			localNode.AllocatedMemMB = limits.MaxTotalMemoryMB
+		}
+		if limits.MaxTotalDiskMB > 0 {
+			localNode.AllocatedDiskMB = int(limits.MaxTotalDiskMB)
+		}
 		_ = st.SaveWorkerNode(ctx, localNode)
 	}
 
@@ -3579,6 +4796,14 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		httpError(w, "worker id required", http.StatusBadRequest)
+		return
+	}
+
+	// Alias /api/v1/workers/tokens[/<id>] to /api/v1/worker-tokens[/<id>].
+	if path == "tokens" || strings.HasPrefix(path, "tokens/") {
+		clone := r.Clone(r.Context())
+		clone.URL.Path = "/api/v1/worker-" + path
+		s.handleWorkerTokens(w, clone)
 		return
 	}
 
@@ -3631,7 +4856,10 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 				httpError(w, "worker not found", http.StatusNotFound)
 				return
 			}
+			s.enrichWorkerNodes([]*db.WorkerNode{node})
 			json.NewEncoder(w).Encode(node)
+		case http.MethodPatch, http.MethodPut:
+			s.handleWorkerUpdate(w, r, id)
 		case http.MethodDelete:
 			if err := st.DeleteWorkerNode(ctx, id); err != nil {
 				httpError(w, err.Error(), http.StatusInternalServerError)
@@ -3729,6 +4957,7 @@ func (s *Server) handlePools(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.broadcastClusterUpdate()
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pool)
 	default:
@@ -3740,13 +4969,27 @@ func (s *Server) handlePoolActions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdminAccess(w, r) {
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/pools/")
-	if id == "" {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/pools/"), "/")
+	if rest == "" {
 		httpError(w, "pool id required", http.StatusBadRequest)
 		return
 	}
+	parts := strings.Split(rest, "/")
+	id := parts[0]
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
+		return
+	}
+	if len(parts) > 1 {
+		if len(parts) == 2 && parts[1] == "migrate" {
+			if r.Method != http.MethodPost {
+				httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			s.handlePoolMigrate(w, r, id)
+			return
+		}
+		httpError(w, "unknown pool action", http.StatusNotFound)
 		return
 	}
 	switch r.Method {
@@ -3766,6 +5009,7 @@ func (s *Server) handlePoolActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.broadcastClusterUpdate()
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)

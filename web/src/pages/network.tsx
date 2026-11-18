@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Network,
   Plus,
-  RefreshCw,
+  RotateCw,
   Trash2,
   X,
 } from 'lucide-react';
@@ -16,19 +16,33 @@ import type {
   NetworkConfig,
   NetworkInspectResult,
   PortForwardRecord,
+  VM,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface NetworkPageProps {
   allocations: NetworkAllocation[];
   networkConfig: NetworkConfig | null;
+  portForwards?: PortForwardRecord[];
+  vms?: VM[];
   onRefresh: () => void;
   embedded?: boolean;
+}
+
+function usableSubnetIPs(cidr?: string | null): number {
+  const raw = (cidr || '').trim();
+  const slashIdx = raw.indexOf('/');
+  if (slashIdx === -1) return 253;
+  const prefix = Number(raw.slice(slashIdx + 1));
+  if (!Number.isInteger(prefix) || prefix < 8 || prefix > 30) return 253;
+  return Math.max(1, Math.pow(2, 32 - prefix) - 3);
 }
 
 export function NetworkPage({
   allocations,
   networkConfig,
+  portForwards: portForwardsProp,
+  vms: vmsProp,
   onRefresh,
   embedded = false,
 }: NetworkPageProps) {
@@ -39,14 +53,66 @@ export function NetworkPage({
     useState<NetworkInspectResult | null>(null);
   const [inspectingId, setInspectingId] = useState<string | null>(null);
 
-  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>(
+    () => portForwardsProp ?? [],
+  );
+  const [fetchedVMs, setFetchedVMs] = useState<VM[]>([]);
   const [addPfOpen, setAddPfOpen] = useState(false);
-  const [pfHostPort, setPfHostPort] = useState(18081);
   const [pfGuestPort, setPfGuestPort] = useState(8080);
   const [pfVmId, setPfVmId] = useState('');
   const [pfProto, setPfProto] = useState('tcp');
+  const [pfPublic, setPfPublic] = useState(true);
 
-  const loadPortForwards = useCallback(async () => {
+  const hasPortForwardsPropRef = useRef(portForwardsProp !== undefined);
+  hasPortForwardsPropRef.current = portForwardsProp !== undefined;
+
+  useEffect(() => {
+    if (portForwardsProp !== undefined) {
+      setPortForwards(portForwardsProp);
+    }
+  }, [portForwardsProp]);
+
+  useEffect(() => {
+    if (vmsProp !== undefined || typeof api.listVMs !== 'function') return;
+    void api
+      .listVMs()
+      .then((list) => setFetchedVMs(list || []))
+      .catch(() => setFetchedVMs([]));
+  }, [vmsProp, addPfOpen]);
+
+  const targetSandboxes = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; ip_address: string }>();
+    const allVMs = vmsProp ?? fetchedVMs;
+    for (const v of allVMs) {
+      if (v.owner_id === 'jobs' || v.name?.startsWith('job-')) continue;
+      map.set(v.id, {
+        id: v.id,
+        name: v.name || v.id,
+        ip_address: v.ip_address || '',
+      });
+    }
+    for (const a of allocations) {
+      if (!map.has(a.vm_id)) {
+        map.set(a.vm_id, {
+          id: a.vm_id,
+          name: a.vm_name || a.vm_id,
+          ip_address: a.ip_address || '',
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [vmsProp, fetchedVMs, allocations]);
+
+  const usableIPs = useMemo(
+    () =>
+      usableSubnetIPs(
+        networkConfig?.subnet_cidr || networkConfig?.subnet || '172.16.0.0/24',
+      ),
+    [networkConfig],
+  );
+
+  const loadPortForwards = useCallback(async (force = false) => {
+    if (!force && hasPortForwardsPropRef.current) return;
     try {
       const list = await api.listPortForwards();
       setPortForwards(list || []);
@@ -94,27 +160,24 @@ export function NetworkPage({
   function handleCreatePortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!pfVmId) return;
-    const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
+    const vmTarget = targetSandboxes.find((s) => s.id === pfVmId);
     const payload = {
-      host_port: pfHostPort,
       guest_port: pfGuestPort,
       vm_id: pfVmId,
-      vm_name: vmAlloc?.vm_name || pfVmId,
+      vm_name: vmTarget?.name || pfVmId,
       protocol: pfProto,
+      public: pfPublic,
     };
     setAddPfOpen(false);
 
-    const toastID = toast.loading(
-      `Adding DNAT port forward :${payload.host_port} -> :${payload.guest_port}…`,
-    );
+    const label = `:${pfGuestPort}`;
+    const toastID = toast.loading(`Adding exposure ${label}…`);
     void api
       .createPortForward(payload)
       .then(async () => {
-        toast.success(
-          `Added DNAT port forward :${payload.host_port} -> :${payload.guest_port}`,
-          { id: toastID },
-        );
-        await loadPortForwards();
+        toast.success(`Added exposure ${label}`, { id: toastID });
+        await loadPortForwards(true);
+        onRefresh?.();
       })
       .catch((err) => {
         toast.error(errorMessage(err), { id: toastID });
@@ -159,11 +222,11 @@ export function NetworkPage({
             type="button"
             onClick={() => {
               onRefresh();
-              void loadPortForwards();
+              void loadPortForwards(true);
             }}
             className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
-            <RefreshCw className="h-3.5 w-3.5" />
+            <RotateCw className="h-3.5 w-3.5" />
             <span>Reconcile Bridge</span>
           </button>
         </div>
@@ -201,7 +264,7 @@ export function NetworkPage({
             IP Leases
           </div>
           <div className="text-[13px] font-medium text-foreground tabular">
-            {allocations.length} / 253 IPs
+            {allocations.length} / {usableIPs} IPs
           </div>
           <div className="text-success text-[11px]">
             Live SQLite IPAM Allocations
@@ -414,7 +477,7 @@ export function NetworkPage({
               className="border border-border bg-muted/15 p-4 space-y-3"
             >
               <div className="text-[13px] font-medium text-foreground">
-                Add DNAT Port Forward Rule
+                Add Port Exposure
               </div>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
                 <div>
@@ -429,24 +492,12 @@ export function NetworkPage({
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
                   >
                     <option value="">Select sandbox…</option>
-                    {allocations.map((a) => (
-                      <option key={a.vm_id} value={a.vm_id}>
-                        {a.vm_name} ({a.ip_address})
+                    {targetSandboxes.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}{s.ip_address ? ` (${s.ip_address})` : ''}
                       </option>
                     ))}
                   </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] text-muted-foreground mb-1">
-                    Host Port
-                  </label>
-                  <input
-                    type="number"
-                    aria-label="Host port"
-                    value={pfHostPort}
-                    onChange={(e) => setPfHostPort(Number(e.target.value))}
-                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
-                  />
                 </div>
                 <div>
                   <label className="block text-[11px] text-muted-foreground mb-1">
@@ -471,10 +522,18 @@ export function NetworkPage({
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
                   >
                     <option value="tcp">TCP</option>
-                    <option value="udp">UDP</option>
                   </select>
                 </div>
               </div>
+              <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={pfPublic}
+                  onChange={(e) => setPfPublic(e.target.checked)}
+                  className="h-3.5 w-3.5 border border-border"
+                />
+                Public URL (anyone with the link can reach it)
+              </label>
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
@@ -487,7 +546,7 @@ export function NetworkPage({
                   type="submit"
                   className="h-8 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
                 >
-                  Save Rule
+                  Save Exposure
                 </button>
               </div>
             </form>
@@ -498,9 +557,10 @@ export function NetworkPage({
               <thead>
                 <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
                   <th className="py-2.5 px-3 font-normal">Protocol</th>
-                  <th className="py-2.5 px-3 font-normal">Host Port</th>
+                  <th className="py-2.5 px-3 font-normal">Serve Port</th>
                   <th className="py-2.5 px-3 font-normal">Sandbox</th>
                   <th className="py-2.5 px-3 font-normal">Guest Port</th>
+                  <th className="py-2.5 px-3 font-normal">Access</th>
                   <th className="py-2.5 px-3 font-normal">Public URL</th>
                   <th className="py-2.5 px-3 font-normal">Created</th>
                   <th className="py-2.5 px-3 text-right font-normal">
@@ -512,10 +572,10 @@ export function NetworkPage({
                 <tbody>
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={8}
                       className="py-12 text-center text-muted-foreground"
                     >
-                      No custom DNAT port-forwarding rules configured.
+                      No port exposures configured.
                     </td>
                   </tr>
                 </tbody>
@@ -525,13 +585,16 @@ export function NetworkPage({
                     <tr key={pf.id} className="hover:bg-muted/30">
                       <td className="py-2.5 px-3">{pf.protocol}</td>
                       <td className="py-2.5 px-3 text-foreground font-medium">
-                        :{pf.host_port}
+                        {pf.host_port > 0 ? `:${pf.host_port}` : 'subdomain'}
                       </td>
                       <td className="py-2.5 px-3 text-foreground">
                         {pf.vm_name || pf.vm_id}
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         :{pf.guest_port}
+                      </td>
+                      <td className="py-2.5 px-3 text-muted-foreground">
+                        {pf.public ? 'public' : 'private'}
                       </td>
                       <td className="py-2.5 px-3 text-muted-foreground">
                         {pf.public_url ? (
@@ -558,9 +621,10 @@ export function NetworkPage({
                           onClick={() => {
                             void api
                               .deletePortForward(pf.id)
-                              .then(() => {
+                              .then(async () => {
                                 toast.success('Deleted port forward rule');
-                                void loadPortForwards();
+                                await loadPortForwards(true);
+                                onRefresh?.();
                               })
                               .catch((err) => toast.error(errorMessage(err)));
                           }}

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,8 +67,24 @@ func main() {
 		handleSandboxSSH(context.Background(), client, os.Args[2:])
 		return
 
+	case "exec":
+		handleExecCommand(ctx, client, os.Args[2:])
+		return
+
 	case "url":
 		handleSandboxURL(ctx, client, os.Args[2:])
+		return
+
+	case "expose":
+		handleExposeCommand(ctx, client, os.Args[2:])
+		return
+
+	case "ports":
+		handlePortsCommand(ctx, client, os.Args[2:])
+		return
+
+	case "unexpose":
+		handleUnexposeCommand(ctx, client, os.Args[2:])
 		return
 
 	case "auth":
@@ -210,8 +227,12 @@ func printUsageTo(w io.Writer) {
 	fmt.Fprintln(w, "  cp                 Copy files between local host and sandboxes")
 	fmt.Fprintln(w, "  scp                Copy files/directories to and from sandboxes (scp-style, -r for directories)")
 	fmt.Fprintln(w, "  process, ps        List, start, and kill processes inside sandboxes")
+	fmt.Fprintln(w, "  exec               Execute commands on a sandbox with live streaming feedback (--user, --timeout, --no-stream, --json)")
 	fmt.Fprintln(w, "  ssh                Connect to sandbox via SSH over WebSocket")
 	fmt.Fprintln(w, "  url                Print the best sandbox URL or SSH target (--json, --port)")
+	fmt.Fprintln(w, "  expose             Publish a sandbox port on the daemon ingress URL (--private, --subdomain)")
+	fmt.Fprintln(w, "  ports              List guest ports exposed on a sandbox")
+	fmt.Fprintln(w, "  unexpose           Remove a sandbox port exposure")
 	fmt.Fprintln(w, "  doctor, check      Print daemon readiness checks with remediation for failures")
 	fmt.Fprintln(w, "  version, -v        Display version, build, and release information (--client, --short, --json)")
 	fmt.Fprintln(w, "  gui, web, ui       Launch the Web UI dashboard (--port, --addr, --daemon)")
@@ -289,6 +310,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		networkIsolation := createCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' (communicate with account sandboxes) or 'isolated' (own sandbox only)")
 		isolated := createCmd.Bool("isolated", false, "Isolate this sandbox on its own network (shorthand for --network-isolation isolated)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
+		buildCommand := createCmd.String("command", "", "Command to execute inside the sandbox on build/start")
+		createCmd.StringVar(buildCommand, "build-command", "", "Alias for --command")
+		execUser := createCmd.String("user", "compute", "User to run the build command as (default: compute)")
 		startNow := createCmd.Bool("start", false, "Immediately boot/start the sandbox after creation")
 		bootNow := createCmd.Bool("boot", false, "Alias for --start")
 		createCmd.Parse(subArgs)
@@ -348,6 +372,8 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			SSHNoDefaultKey:  *noSSHKey,
 			SSHPassword:      password,
 			Protected:        protected,
+			Command:          *buildCommand,
+			ExecUser:         *execUser,
 			NetworkIsolation: *networkIsolation,
 			Isolated:         isolatedPtr,
 		})
@@ -384,6 +410,54 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			if v.Status == db.StatusQueued {
 				printQueuedHint(ctx, client, v)
 			}
+		}
+
+		if *buildCommand != "" {
+			if !(*startNow || *bootNow) {
+				fmt.Printf("Booting sandbox %s for build command execution...\n", v.Name)
+				runningVM, err := client.RunVM(ctx, v.ID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error booting sandbox %s: %v\n", v.Name, err)
+					os.Exit(1)
+				}
+				v = runningVM
+				fmt.Printf("Sandbox Started: ID=%s Name=%s IP=%s Status=%s\n",
+					v.ID, v.Name, v.IPAddress, v.Status)
+			}
+			fmt.Printf("Executing build command on %s (%s):\n", v.Name, *buildCommand)
+			exitCode := 0
+			streamErr := ""
+			err := client.ExecVMStream(ctx, v.ID, vm.ExecRequest{
+				Command: *buildCommand,
+				User:    *execUser,
+			}, func(ev vm.ExecStreamEvent) error {
+				if ev.Data != "" {
+					if ev.Stream == "stderr" {
+						fmt.Fprint(os.Stderr, ev.Data)
+					} else {
+						fmt.Fprint(os.Stdout, ev.Data)
+					}
+				}
+				if ev.Error != "" {
+					streamErr = ev.Error
+				}
+				if ev.ExitCode != nil {
+					exitCode = *ev.ExitCode
+				}
+				return nil
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Build command error: %v\n", err)
+				os.Exit(1)
+			}
+			if streamErr != "" {
+				fmt.Fprintf(os.Stderr, "Build command error: %s\n", streamErr)
+			}
+			if exitCode != 0 {
+				fmt.Fprintf(os.Stderr, "Build command exited with code %d\n", exitCode)
+				os.Exit(exitCode)
+			}
+			fmt.Printf("Build command completed successfully (exit 0).\n")
 		}
 
 	case "start", "run":
@@ -590,6 +664,15 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 
 	case "url":
 		handleSandboxURL(ctx, client, subArgs)
+
+	case "expose":
+		handleExposeCommand(ctx, client, subArgs)
+
+	case "ports":
+		handlePortsCommand(ctx, client, subArgs)
+
+	case "unexpose":
+		handleUnexposeCommand(ctx, client, subArgs)
 
 	case "protect":
 		if len(subArgs) < 1 {
@@ -990,6 +1073,9 @@ func handleExecCommand(ctx context.Context, client *DaemonClient, args []string)
 		user = parts[0]
 		vmID = parts[1]
 	}
+	if resolved, err := resolveSandboxReference(ctx, client, vmID); err == nil && resolved != nil {
+		vmID = resolved.ID
+	}
 
 	cmdArgs := rest[1:]
 	if len(cmdArgs) > 0 && cmdArgs[0] == "--" {
@@ -1136,6 +1222,7 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 		runCmd := flag.NewFlagSet("job run", flag.ExitOnError)
 		image := runCmd.String("image", "", "Base image for job execution (default: daemon default image)")
 		pool := runCmd.String("pool", "default", "Target worker pool")
+		arch := runCmd.String("arch", runtime.GOARCH, "Target architecture (amd64 or arm64)")
 		vcpus := runCmd.Int("vcpus", 2, "vCPUs required")
 		mem := runCmd.Int("mem", 2048, "Memory in MB required")
 		files := runCmd.String("files", "", "Path to directory or files to package and sync to the job sandbox")
@@ -1169,9 +1256,19 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 			}
 		}
 
+		targetArch := strings.ToLower(strings.TrimSpace(*arch))
+		switch targetArch {
+		case "":
+			targetArch = runtime.GOARCH
+		case "x86_64", "x64":
+			targetArch = "amd64"
+		case "aarch64":
+			targetArch = "arm64"
+		}
+
 		spec := api.JobSpec{
 			ImageID:        *image,
-			Architecture:   "amd64",
+			Architecture:   targetArch,
 			VCPUs:          *vcpus,
 			MemoryMB:       *mem,
 			Command:        cmdArgs,
@@ -1525,10 +1622,12 @@ func handleImageCommand(ctx context.Context, client *DaemonClient, args []string
 		base := buildCmd.String("base", "ubuntu-24", "Base image to derive from")
 		size := buildCmd.Int("size", 2048, "Image disk size in MiB")
 		desc := buildCmd.String("desc", "", "Optional description")
+		cmdFlag := buildCmd.String("command", "", "Optional build command or script to execute during image build")
+		buildCmd.StringVar(cmdFlag, "run", "", "Alias for --command")
 		buildCmd.Parse(args[1:])
 
 		if *name == "" {
-			printCommandError("--name is required to build an image.", "Usage: compute image build --name <name> [--base <image>] [--packages <a,b>] [--size <MiB>] [--desc <text>]", "image")
+			printCommandError("--name is required to build an image.", "Usage: compute image build --name <name> [--base <image>] [--packages <a,b>] [--command <cmd>] [--size <MiB>] [--desc <text>]", "image")
 		}
 		var pkgList []string
 		if *pkgs != "" {
@@ -1544,6 +1643,7 @@ func handleImageCommand(ctx context.Context, client *DaemonClient, args []string
 			Name:        *name,
 			BaseImage:   *base,
 			Packages:    pkgList,
+			Command:     *cmdFlag,
 			SizeMB:      *size,
 			Description: *desc,
 		})
@@ -1565,7 +1665,11 @@ func handleImageCommand(ctx context.Context, client *DaemonClient, args []string
 		}
 		fmt.Printf("Image Details: %s\n", img.Name)
 		fmt.Printf("  ID:       %s\n", img.ID)
-		fmt.Printf("  Kind:     %s\n", img.Kind)
+		kind := img.Kind
+		if kind == "" {
+			kind = "custom"
+		}
+		fmt.Printf("  Kind:     %s\n", kind)
 		fmt.Printf("  Status:   %s\n", img.Status)
 		fmt.Printf("  Size:     %d MB\n", img.SizeMB)
 		fmt.Printf("  Packages: %s\n", strings.Join(img.Packages, ", "))
@@ -1617,15 +1721,42 @@ func handleTemplateCommand(ctx context.Context, client *DaemonClient, args []str
 		w.Flush()
 
 	case "create":
-		if len(args) < 2 {
-			printCommandError("missing required template name.", "Usage: compute template create <template_name> --vm <vm_id> [--desc <description>]", "template")
-		}
-		tplName := args[1]
 		createCmd := flag.NewFlagSet("template create", flag.ExitOnError)
+		nameFlag := createCmd.String("name", "", "Template name")
 		sourceVM := createCmd.String("vm", "", "Source VM ID or Name")
 		desc := createCmd.String("desc", "", "Optional description")
-		createCmd.Parse(args[2:])
 
+		var flagArgs, positional []string
+		valueFlags := map[string]bool{
+			"--vm": true, "-vm": true,
+			"--name": true, "-name": true,
+			"--desc": true, "-desc": true,
+		}
+		for i := 1; i < len(args); i++ {
+			arg := args[i]
+			if arg == "--" {
+				positional = append(positional, args[i+1:]...)
+				break
+			}
+			if !strings.HasPrefix(arg, "-") || arg == "-" {
+				positional = append(positional, arg)
+				continue
+			}
+			flagArgs = append(flagArgs, arg)
+			if valueFlags[arg] && i+1 < len(args) {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+		}
+		createCmd.Parse(flagArgs)
+
+		tplName := strings.TrimSpace(*nameFlag)
+		if tplName == "" && len(positional) > 0 {
+			tplName = strings.TrimSpace(positional[0])
+		}
+		if tplName == "" {
+			printCommandError("missing required template name.", "Usage: compute template create <template_name> --vm <vm_id> [--desc <description>]", "template")
+		}
 		if *sourceVM == "" {
 			printCommandError("--vm is required to specify source VM.", "Usage: compute template create <template_name> --vm <vm_id> [--desc <description>]", "template")
 		}
@@ -1892,7 +2023,7 @@ func handleVersionCommand(ctx context.Context, client *DaemonClient, args []stri
 		return
 	}
 
-	var daemonInfo *version.Info
+	var daemonInfo *DaemonVersion
 	var daemonErr error
 	if !*clientOnly && client != nil {
 		queryCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)

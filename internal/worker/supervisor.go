@@ -45,14 +45,24 @@ func NewMicroVMSupervisor(vmMgr *vm.Manager, bootTimeout time.Duration) *MicroVM
 	}
 }
 
+// VMManager returns the underlying worker-local VM manager.
+func (s *MicroVMSupervisor) VMManager() *vm.Manager {
+	if s == nil {
+		return nil
+	}
+	return s.vmMgr
+}
+
 func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment, streamLog LogStreamFunc) (int, error) {
 	if s.vmMgr == nil {
 		return 1, fmt.Errorf("vm manager is nil")
 	}
 
-	vmName := fmt.Sprintf("job-%s", a.JobID)
+	cleanJobID := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(a.JobID)), "_", "-")
+	cleanJobID = strings.TrimPrefix(cleanJobID, "job-")
+	vmName := fmt.Sprintf("job-%s", cleanJobID)
 	if len(vmName) > 20 {
-		vmName = vmName[:20]
+		vmName = strings.TrimRight(vmName[:20], "-")
 	}
 
 	streamLog("stdout", fmt.Sprintf("[compute-worker] launching isolated Firecracker microVM for job %s", a.JobID))

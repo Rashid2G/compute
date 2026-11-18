@@ -125,6 +125,8 @@ type InstanceCreate struct {
 	Restart            string            `json:"restart,omitempty"`
 	Start              *bool             `json:"start,omitempty"`
 	RegistryCredential string            `json:"registry_credential,omitempty"`
+	PoolID             string            `json:"pool_id,omitempty"`
+	WorkerID           string            `json:"worker_id,omitempty"`
 }
 
 type APIKeyCreateReq struct {
@@ -244,4 +246,115 @@ type AuthStatusResponse struct {
 	AuthEnabled   bool   `json:"auth_enabled"`
 	SignupEnabled bool   `json:"signup_enabled"`
 	AdminUsername string `json:"admin_username,omitempty"`
+}
+
+// ClusterSchedulingPolicy governs cluster-wide CPU, RAM, and disk scheduling limits.
+type ClusterSchedulingPolicy struct {
+	Strategy               string  `json:"strategy"` // "least_loaded", "round_robin", "bin_pack", "spread"
+	CPUWeight              float64 `json:"cpu_weight"`
+	MemoryWeight           float64 `json:"memory_weight"`
+	DiskWeight             float64 `json:"disk_weight"`
+	CPUSoftOvercommitRatio float64 `json:"cpu_soft_overcommit_ratio"`
+	CPUHardOvercommitRatio float64 `json:"cpu_hard_overcommit_ratio"`
+	CPUShareWeightBase     int     `json:"cpu_share_weight_base"`
+	MemoryHardGuarantee    bool    `json:"memory_hard_guarantee"`
+	IdleRAMSnapshotEnabled bool    `json:"idle_ram_snapshot_enabled"`
+	IdleThresholdSeconds   int     `json:"idle_threshold_seconds"`
+	AutoReclaimOnPressure  bool    `json:"auto_reclaim_on_pressure"`
+	HostReservedVCPUs      int     `json:"host_reserved_vcpus"`
+	HostReservedMemoryMB   int     `json:"host_reserved_memory_mb"`
+	HostReservedDiskMB     int     `json:"host_reserved_disk_mb"`
+	DiskHardEnforcement    bool    `json:"disk_hard_enforcement"`
+}
+
+// DefaultSchedulingPolicy returns the safe default cluster scheduling policy.
+func DefaultSchedulingPolicy() ClusterSchedulingPolicy {
+	return ClusterSchedulingPolicy{
+		Strategy:               "least_loaded",
+		CPUWeight:              0.35,
+		MemoryWeight:           0.40,
+		DiskWeight:             0.25,
+		CPUSoftOvercommitRatio: 1.5,
+		CPUHardOvercommitRatio: 2.0,
+		CPUShareWeightBase:     100,
+		MemoryHardGuarantee:    true,
+		IdleRAMSnapshotEnabled: true,
+		IdleThresholdSeconds:   900,
+		AutoReclaimOnPressure:  true,
+		HostReservedVCPUs:      1,
+		HostReservedMemoryMB:   512,
+		HostReservedDiskMB:     2048,
+		DiskHardEnforcement:    true,
+	}
+}
+
+// UpdateWorkerRequest updates mutable worker node pool, allocation limits, status, and labels.
+type UpdateWorkerRequest struct {
+	PoolID          *string            `json:"pool_id,omitempty"`
+	AllocatedVCPUs  *int               `json:"allocated_vcpus,omitempty"`
+	AllocatedMemMB  *int               `json:"allocated_mem_mb,omitempty"`
+	AllocatedDiskMB *int               `json:"allocated_disk_mb,omitempty"`
+	Labels          *map[string]string `json:"labels,omitempty"`
+	Status          *string            `json:"status,omitempty"`
+}
+
+// MigrateVMRequest migrates a sandbox to a target worker or pool.
+type MigrateVMRequest struct {
+	TargetWorkerID string `json:"target_worker_id,omitempty"`
+	TargetPoolID   string `json:"target_pool_id,omitempty"`
+	Force          bool   `json:"force,omitempty"`
+}
+
+// MigratePoolRequest moves workers and/or sandboxes out of a pool.
+type MigratePoolRequest struct {
+	TargetPoolID     string `json:"target_pool_id,omitempty"`
+	TargetWorkerID   string `json:"target_worker_id,omitempty"`
+	MigrateWorkers   bool   `json:"migrate_workers,omitempty"`
+	MigrateSandboxes bool   `json:"migrate_sandboxes,omitempty"`
+	Force            bool   `json:"force,omitempty"`
+}
+
+// PoolMigrationResponse summarizes a pool migration operation.
+type PoolMigrationResponse struct {
+	SourcePoolID      string   `json:"source_pool_id"`
+	TargetPoolID      string   `json:"target_pool_id"`
+	WorkersMoved      int      `json:"workers_moved"`
+	WorkersFailed     int      `json:"workers_failed"`
+	SandboxesMigrated int      `json:"sandboxes_migrated"`
+	SandboxesFailed   int      `json:"sandboxes_failed"`
+	MovedWorkerIDs    []string `json:"moved_worker_ids"`
+	MigratedVMIDs     []string `json:"migrated_vm_ids"`
+	Errors            []string `json:"errors,omitempty"`
+}
+
+// BulkVMsRequest executes an action or deletion across multiple sandboxes.
+type BulkVMsRequest struct {
+	IDs    []string `json:"ids"`
+	VMIDs  []string `json:"vm_ids,omitempty"`
+	Action string   `json:"action,omitempty"` // "start", "stop", "save-state", "snapshot", "resume", "restart", "protect", "unprotect", "delete"
+	Async  bool     `json:"async,omitempty"`
+}
+
+// BulkVMItemError reports a single failure in a bulk operation.
+type BulkVMItemError struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+// BulkVMsResponse summarizes the outcome of a bulk VM operation.
+type BulkVMsResponse struct {
+	Action    string            `json:"action,omitempty"`
+	Status    string            `json:"status,omitempty"`
+	TaskID    string            `json:"task_id,omitempty"`
+	Requested int               `json:"requested"`
+	Queued    int               `json:"queued,omitempty"`
+	Succeeded []string          `json:"succeeded"`
+	Failed    []BulkVMItemError `json:"failed"`
+	// Warnings reports items that were created but could not fully start, so a
+	// queued bulk create does not silently look like a clean success.
+	Warnings []BulkVMItemError `json:"warnings,omitempty"`
+	// OperationIDs lists the durable operation records created for this
+	// request, in item order. Each ID can be resolved through
+	// GET /api/v1/operations/{id} while the work is still in flight.
+	OperationIDs []string `json:"operation_ids,omitempty"`
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Camera,
   ChevronDown,
@@ -12,7 +12,6 @@ import {
   Pencil,
   Play,
   Plus,
-  RefreshCw,
   ShieldCheck,
   Star,
   Trash2,
@@ -26,6 +25,7 @@ import { formatMemory, formatRelativeTime } from '@/lib/format';
 import type { PageId } from '@/lib/navigation';
 import type {
   EnvironmentProfileRecord,
+  ImageListItem,
   Template,
   VM,
 } from '@/lib/types';
@@ -33,6 +33,8 @@ import { cn } from '@/lib/utils';
 
 interface ImagesTemplatesPageProps {
   vms: VM[];
+  templates?: Template[];
+  images?: ImageListItem[];
   mode?: 'environment' | 'snapshots';
   onLaunchVM: () => void;
   onNavigate?: (page: PageId) => void;
@@ -42,6 +44,8 @@ interface ImagesTemplatesPageProps {
 
 export function ImagesTemplatesPage({
   vms,
+  templates: propTemplates,
+  images: _propImages,
   mode = 'environment',
   onLaunchVM: _onLaunchVM,
   onNavigate,
@@ -66,8 +70,8 @@ export function ImagesTemplatesPage({
   const [revealSecrets, setRevealSecrets] = useState(false);
   const [savingEnv, setSavingEnv] = useState(false);
 
-  // Snapshots & Templates state backed by /api/v1/templates
-  const [templates, setTemplates] = useState<Template[]>([]);
+  // Snapshots & Templates state backed by /api/v1/templates (WS synced)
+  const [templates, setTemplates] = useState<Template[]>(propTemplates || []);
   const [loadingAssets, setLoadingAssets] = useState(false);
 
   // Create Snapshot modal state
@@ -77,6 +81,11 @@ export function ImagesTemplatesPage({
   const [launchModalTpl, setLaunchModalTpl] = useState<Template | null>(null);
   const [launchName, setLaunchName] = useState('');
   const [launchAutoStart, setLaunchAutoStart] = useState(true);
+
+  const selectedProfileNameRef = useRef(selectedProfileName);
+  selectedProfileNameRef.current = selectedProfileName;
+  const hasPropTemplatesRef = useRef(propTemplates !== undefined);
+  hasPropTemplatesRef.current = propTemplates !== undefined;
 
   const applyProfile = useCallback((p: EnvironmentProfileRecord) => {
     setSelectedProfileName(p.name);
@@ -92,19 +101,20 @@ export function ImagesTemplatesPage({
     setVersion(p.version || 1);
   }, []);
 
-  const loadEnvironments = useCallback(async () => {
+  const loadEnvironments = useCallback(async (overrideName?: string) => {
     try {
       const list = await api.listEnvironments();
       setProfiles(list || []);
+      const targetName = overrideName ?? selectedProfileNameRef.current;
       const current =
-        list.find((item) => item.name === selectedProfileName) || list[0];
+        list.find((item) => item.name === targetName) || list[0];
       if (current) {
         applyProfile(current);
       }
     } catch {
       // Fallback initial state before first save
     }
-  }, [applyProfile, selectedProfileName]);
+  }, [applyProfile]);
 
   const loadSnapshots = useCallback(async () => {
     setLoadingAssets(true);
@@ -119,8 +129,16 @@ export function ImagesTemplatesPage({
   }, []);
 
   useEffect(() => {
+    if (propTemplates) {
+      setTemplates(propTemplates);
+    }
+  }, [propTemplates]);
+
+  useEffect(() => {
     void loadEnvironments();
-    void loadSnapshots();
+    if (!hasPropTemplatesRef.current) {
+      void loadSnapshots();
+    }
   }, [loadEnvironments, loadSnapshots]);
 
   async function handleSaveEnvironment() {
@@ -138,7 +156,7 @@ export function ImagesTemplatesPage({
         credential_profile: credentialProfile,
       });
       applyProfile(saved);
-      await loadEnvironments();
+      await loadEnvironments(saved.name);
       toast.success(`Environment "${saved.name}" saved (v${saved.version})`);
     } catch (err) {
       toast.error(`Failed to save environment: ${errorMessage(err)}`);
@@ -598,14 +616,6 @@ export function ImagesTemplatesPage({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => void loadSnapshots()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-2.5 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
-          <button
-            type="button"
             onClick={() => setCreateSnapOpen(true)}
             className="flex h-8 items-center gap-1.5 bg-primary hover:bg-primary-hover px-3 text-[12px] font-medium text-primary-foreground"
           >
@@ -699,6 +709,7 @@ export function ImagesTemplatesPage({
                             .then(() => {
                               toast.success(`Deleted template ${tpl.name}`);
                               void loadSnapshots();
+                              onRefreshCluster?.();
                             })
                             .catch((err) => toast.error(errorMessage(err)));
                         }}
@@ -720,7 +731,10 @@ export function ImagesTemplatesPage({
         vms={vms}
         open={createSnapOpen}
         onOpenChange={setCreateSnapOpen}
-        onCreated={() => void loadSnapshots()}
+        onCreated={() => {
+          void loadSnapshots();
+          onRefreshCluster?.();
+        }}
       />
 
       {launchModalTpl && (

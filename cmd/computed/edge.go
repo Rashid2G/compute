@@ -38,7 +38,15 @@ func startEdge(s *Server, cfg config.GlobalConfig) {
 		log.Printf("[computed] edge listener disabled: cannot parse listen address %q", cfg.Server.ListenAddr)
 		return
 	}
-	backend := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", port)}
+	backendScheme := "http"
+	if strings.TrimSpace(cfg.Server.TLSCertFile) != "" {
+		backendScheme = "https"
+	}
+	backendHost := "127.0.0.1"
+	if lh := strings.TrimSpace(cfg.Server.ListenHost()); lh != "" && lh != "0.0.0.0" && lh != "::" {
+		backendHost = lh
+	}
+	backend := &url.URL{Scheme: backendScheme, Host: net.JoinHostPort(backendHost, port)}
 
 	edgeZones := cfg.DNSBaseDomains()
 	if s.dns != nil && len(s.dns.zones) > 0 {

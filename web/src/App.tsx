@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Menu } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 
+import { resolveQueuedTask } from '@/lib/queued-task';
+
 import { CommandPalette } from '@/components/command-palette';
 import { CreateVMDialog } from '@/components/create-vm-dialog';
 import { DeleteVMDialog } from '@/components/delete-vm-dialog';
+import { ExecuteCommandDialog } from '@/components/execute-command-dialog';
 import { InspectVMDialog } from '@/components/inspect-vm-dialog';
 import { LoginDialog } from '@/components/login-dialog';
 import { Sidebar } from '@/components/layout/sidebar';
@@ -95,7 +98,16 @@ export default function App() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [inspectTarget, setInspectTarget] = useState<VM | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VM | null>(null);
+  const [execTarget, setExecTarget] = useState<VM | null>(null);
+  const [execInitialCmd, setExecInitialCmd] = useState('');
+  const [execAutoRun, setExecAutoRun] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+
+  const openExec = useCallback((vm: VM, initialCmd = '', autoRun = false) => {
+    setExecTarget(vm);
+    setExecInitialCmd(initialCmd);
+    setExecAutoRun(autoRun);
+  }, []);
 
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);
@@ -111,6 +123,13 @@ export default function App() {
         (v) => v.owner_id !== 'jobs' && !v.name?.startsWith('job-'),
       ),
     [cluster.vms],
+  );
+  const liveInspectTarget = useMemo(
+    () =>
+      inspectTarget
+        ? cluster.vms.find((v) => v.id === inspectTarget.id) ?? inspectTarget
+        : null,
+    [cluster.vms, inspectTarget],
   );
   const currentPage = PAGES.find((item) => item.id === page) ?? PAGES[0];
 
@@ -332,38 +351,108 @@ export default function App() {
 
   async function createVM(payload: CreateVMRequest, autoStart: boolean) {
     const targetName = payload.name?.trim() || 'sandbox';
-    const toastID = toast.loading(`Provisioning ${targetName}…`);
+    const toastID = toast.loading(
+      autoStart ? `Provisioning & booting ${targetName}…` : `Provisioning ${targetName}…`,
+    );
     try {
-      const created = await api.createVM(payload);
+      const created = await api.createVM({ ...payload, auto_start: autoStart });
       const createdName = created?.name || targetName;
-      toast.success(`${createdName} provisioned`, {
-        id: toastID,
-        description: created.ip_address
-          ? `Address ${created.ip_address}`
-          : 'Address assigned automatically.',
-      });
-      void cluster.refresh(true);
-
-      if (autoStart) {
-        const bootID = toast.loading(`Booting ${createdName}…`);
-        try {
-          await api.runVM(created.id);
-          toast.success(`${createdName} is running`, { id: bootID });
-          void cluster.refresh(true);
-        } catch (error) {
-          toast.error(`Could not boot ${createdName}`, {
-            id: bootID,
-            description: errorMessage(error),
-          });
-        }
+      if (autoStart && created.status !== 'running' && created.status !== 'queued') {
+        // The record exists but the requested boot did not complete; say so
+        // instead of reporting a plain success.
+        toast.warning(`${createdName} provisioned but did not start`, {
+          id: toastID,
+          description:
+            'The sandbox was created but its boot did not finish. Check the activity log for the reason.',
+        });
+      } else {
+        const statusNote =
+          created.status === 'running'
+            ? `${createdName} is running`
+            : created.status === 'queued'
+              ? `${createdName} queued`
+              : `${createdName} provisioned`;
+        toast.success(statusNote, {
+          id: toastID,
+          description: created.ip_address
+            ? `Address ${created.ip_address}`
+            : 'Address assigned automatically.',
+        });
       }
-
+      if (payload.command && created) {
+        openExec(created, payload.command, created.status === 'running');
+      }
       await cluster.refresh(true);
     } catch (error) {
       toast.error(`Could not provision ${targetName}`, {
         id: toastID,
         description: errorMessage(error),
       });
+      throw error;
+    }
+  }
+
+  async function bulkCreateVMs(payloads: CreateVMRequest[], autoStart: boolean) {
+    const toastID = toast.loading(
+      `Queueing creation of ${payloads.length} sandboxes…`,
+    );
+    try {
+      const res = await api.bulkCreateVMs({
+        items: payloads.map((p) => ({ ...p, auto_start: autoStart })),
+        async: true,
+      });
+      if (res.status === 'queued') {
+        const queuedCount = res.queued ?? payloads.length;
+        if (res.failed && res.failed.length > 0) {
+          toast.warning(
+            `Queued ${queuedCount} of ${res.requested} sandboxes`,
+            {
+              id: toastID,
+              description: res.failed
+                .map((f) => `${f.id}: ${f.error}`)
+                .join('; '),
+            },
+          );
+        } else {
+          toast.success(`Queued creation of ${queuedCount} sandboxes`, {
+            id: toastID,
+            description:
+              'Provisioning continues on the backend even if you refresh or navigate away.',
+          });
+        }
+        void resolveQueuedTask(res.task_id, toastID, {
+          doneVerb: 'Created',
+          noun: 'sandboxes',
+        });
+      } else if (res.failed.length === 0) {
+        toast.success(`Provisioned ${res.succeeded.length} sandboxes`, {
+          id: toastID,
+        });
+      } else if (res.succeeded.length > 0) {
+        toast.warning(
+          `Provisioned ${res.succeeded.length} of ${res.requested} sandboxes`,
+          {
+            id: toastID,
+            description: res.failed
+              .map((f) => `${f.id}: ${f.error}`)
+              .join('; '),
+          },
+        );
+      } else {
+        toast.error('Failed to provision sandboxes', {
+          id: toastID,
+          description: res.failed
+            .map((f) => `${f.id}: ${f.error}`)
+            .join('; '),
+        });
+      }
+      await cluster.refresh(true);
+    } catch (error) {
+      toast.error('Failed to queue sandbox creation', {
+        id: toastID,
+        description: errorMessage(error),
+      });
+      await cluster.refresh(true);
       throw error;
     }
   }
@@ -389,18 +478,55 @@ export default function App() {
   }
 
   async function bulkDeleteVMs(ids: string[]) {
-    const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
+    const toastID = toast.loading(`Queueing deletion of ${ids.length} sandbox(es)…`);
     try {
-      await Promise.all(
-        ids.map(async (id) => {
-          await api.deleteVM(id);
-          if (inspectTarget?.id === id) setInspectTarget(null);
-        }),
-      );
-      toast.success(`Deleted ${ids.length} sandbox(es)`, {
-        id: toastID,
-        description: 'Processes, network leases, and overlay disks removed.',
-      });
+      const res = await api.bulkDeleteVMs(ids, { async: true });
+      if (inspectTarget && (res.status === 'queued' ? ids.includes(inspectTarget.id) : res.succeeded.includes(inspectTarget.id))) {
+        setInspectTarget(null);
+      }
+      if (res.status === 'queued') {
+        const queuedCount = res.queued ?? ids.length;
+        if (res.failed && res.failed.length > 0) {
+          toast.warning(
+            `Queued deletion of ${queuedCount} of ${res.requested} sandbox(es)`,
+            {
+              id: toastID,
+              description: res.failed
+                .map((f) => `${f.id}: ${f.error}`)
+                .join('; '),
+            },
+          );
+        } else {
+          toast.success(`Queued deletion of ${queuedCount} sandbox(es)`, {
+            id: toastID,
+            description: 'The backend is removing processes, leases, and disks.',
+          });
+        }
+        void resolveQueuedTask(res.task_id, toastID, {
+          doneVerb: 'Deleted',
+          noun: 'sandbox(es)',
+        });
+      } else if (res.failed.length === 0) {
+        toast.success(`Deleted ${res.succeeded.length} sandbox(es)`, {
+          id: toastID,
+          description: 'Processes, network leases, and overlay disks removed.',
+        });
+      } else if (res.succeeded.length > 0) {
+        toast.warning(
+          `Deleted ${res.succeeded.length} of ${res.requested} sandbox(es)`,
+          {
+            id: toastID,
+            description: res.failed
+              .map((f) => `${f.id}: ${f.error}`)
+              .join('; '),
+          },
+        );
+      } else {
+        toast.error('Failed to delete sandboxes', {
+          id: toastID,
+          description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; '),
+        });
+      }
       await cluster.refresh(true);
     } catch (error) {
       toast.error('Failed to delete sandboxes', {
@@ -420,8 +546,13 @@ export default function App() {
         return (
           <InstancesPage
             vms={visibleVMs}
+            workers={cluster.workers}
+            pools={cluster.pools}
+            volumes={cluster.volumes}
+            portForwards={cluster.portForwards}
             events={cluster.events}
             isLoading={cluster.isLoading}
+            isAdmin={isAdmin}
             onNew={openNew}
             onRun={startVM}
             onStop={stopVM}
@@ -431,6 +562,7 @@ export default function App() {
             onBulkDelete={bulkDeleteVMs}
             onInspect={setInspectTarget}
             onConsole={openConsole}
+            onExec={openExec}
             onRefresh={() => void cluster.refresh(true)}
           />
         );
@@ -438,6 +570,8 @@ export default function App() {
         return (
           <ImagesTemplatesPage
             vms={visibleVMs}
+            templates={cluster.templates}
+            images={cluster.images}
             mode="snapshots"
             onLaunchVM={openNew}
             onNavigate={navigate}
@@ -449,6 +583,7 @@ export default function App() {
           <StoragePage
             volumes={cluster.volumes}
             vms={visibleVMs}
+            pools={cluster.pools}
             config={cluster.config}
             onRefresh={() => void cluster.refresh(true)}
           />
@@ -465,10 +600,15 @@ export default function App() {
         return (
           <WorkersPage
             workers={cluster.workers}
+            pools={cluster.pools}
+            workerTokens={cluster.workerTokens}
+            schedulingPolicy={cluster.schedulingPolicy}
             stats={cluster.stats}
             vms={visibleVMs}
             volumes={cluster.volumes}
             config={cluster.config}
+            isAdmin={isAdmin}
+            wsConnected={cluster.wsConnected}
             onRefresh={() => void cluster.refresh(true)}
           />
         );
@@ -480,6 +620,8 @@ export default function App() {
             workers={cluster.workers}
             volumes={cluster.volumes}
             config={cluster.config}
+            resources={cluster.resources}
+            wsConnected={cluster.wsConnected}
             currentUser={authUser}
             authEnabled={authEnabled}
           />
@@ -500,6 +642,10 @@ export default function App() {
             volumes={cluster.volumes}
             allocations={cluster.allocations}
             networkConfig={cluster.networkConfig}
+            portForwards={cluster.portForwards}
+            workerTokens={cluster.workerTokens}
+            templates={cluster.templates}
+            images={cluster.images}
             events={cluster.events}
             currentUser={authUser}
             onRefresh={() => void cluster.refresh(true)}
@@ -666,7 +812,12 @@ export default function App() {
           open={createOpen}
           onOpenChange={setCreateOpen}
           config={cluster.config}
+          workers={cluster.workers}
+          pools={cluster.pools}
+          templates={cluster.templates}
+          stats={cluster.stats}
           onCreate={createVM}
+          onBulkCreate={bulkCreateVMs}
         />
 
         <CommandPalette
@@ -675,18 +826,35 @@ export default function App() {
           onNavigate={navigate}
           onNewSandbox={openNew}
           onOpenKeys={() => setKeysOpen(true)}
-          onRefresh={() => void cluster.refresh()}
           vms={visibleVMs}
+          onExecVM={openExec}
           isAdmin={isAdmin}
         />
 
         <SSHKeysDialog open={keysOpen} onOpenChange={setKeysOpen} />
 
         <InspectVMDialog
-          vm={inspectTarget}
-          open={inspectTarget !== null}
+          vm={liveInspectTarget}
+          workers={cluster.workers}
+          pools={cluster.pools}
+          isAdmin={isAdmin}
+          open={liveInspectTarget !== null}
           onOpenChange={(open) => !open && setInspectTarget(null)}
           onUpdated={() => void cluster.refresh(true)}
+        />
+
+        <ExecuteCommandDialog
+          vm={execTarget}
+          open={execTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setExecTarget(null);
+              setExecInitialCmd('');
+              setExecAutoRun(false);
+            }
+          }}
+          initialCommand={execInitialCmd}
+          autoRun={execAutoRun}
         />
 
         <DeleteVMDialog

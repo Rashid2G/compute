@@ -19,6 +19,9 @@ Usage:
   compute sandbox network-isolation <name|id> <account|isolated>
   compute sandbox info <name|id|hostname>
   compute sandbox url [flags] <name|id|hostname>
+  compute sandbox expose [flags] <name|id> <guest-port>
+  compute sandbox ports <name|id>
+  compute sandbox unexpose <name|id> <guest-port>
   compute sandbox file <read|write|list|mkdir|remove> <sandbox> [args...]
   compute sandbox cp <src> <dst>
   compute sandbox process <list|start|kill> <sandbox> [args...]
@@ -27,7 +30,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --command <cmd>, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.
@@ -43,6 +46,9 @@ Commands:
   process, ps              Inspect and manage background processes (list, start, kill).
   info, inspect, show      Display sandbox details, hostname, SSH command and URLs.
   url                      Print the best HTTP URL, or the SSH name when no URL resolves.
+  expose                   Publish a sandbox port on the daemon ingress URL.
+  ports                    List guest ports exposed on a sandbox.
+  unexpose                 Remove a sandbox port exposure.
   exec                     Execute a command inside a sandbox, streaming output live.
   ssh                      Open an SSH session to a sandbox.
 
@@ -138,6 +144,39 @@ The HTTP URL is only printed when the sandbox DNS zone is expected to resolve.
 Names under Tailscale's *.ts.net zone are answered by MagicDNS, so the command
 prints the tailnet DNS name or sandbox IP instead and explains why.`,
 
+	"expose": `Publish a sandbox port at its own origin.
+
+Usage:
+  compute expose [flags] <name|id> <guest-port>
+
+Flags:
+  --public            Publish without authentication (default)
+  --private           Require tenant authentication
+  --subdomain <name>  Preferred serve label (DNS-safe, made unique)
+  --json              Print the port-forward record as JSON
+
+Each exposure gets a dedicated origin so the app sees "/" as its root:
+  subdomain mode  https://<sandbox>-<port>.<serve-domain>/
+  port mode       https://<daemon-host>:<serve-port>/
+  localhost       http://<sandbox>-<port>.localhost:<api-port>/
+
+Redirects, SPA routing, cookies and WebSockets therefore work without URL
+rewriting. Public URLs are reachable by anyone who knows them; --private
+requires a tenant session or a short-lived serve token.`,
+
+	"ports": `List guest ports exposed on a sandbox.
+
+Usage:
+  compute ports <name|id>
+
+Flags:
+  --json              Print the port-forward records as JSON`,
+
+	"unexpose": `Remove a sandbox port exposure.
+
+Usage:
+  compute unexpose <name|id> <guest-port>`,
+
 	"job": `Run and monitor distributed jobs.
 
 Usage:
@@ -157,6 +196,7 @@ Commands:
 Run flags:
   --image <name>           Base image for job execution (default: daemon default image)
   --pool <pool>            Target worker pool (default: default)
+  --arch <arch>            Target architecture: amd64 or arm64 (default: host arch)
   --vcpus <n>              Number of vCPUs required (default: 2)
   --mem <MiB>              Memory size in MiB (default: 2048)
   --files <path>           Local directory or files to package and transfer
@@ -200,17 +240,29 @@ Commands:
   create                   Create a new worker pool.
   delete, rm               Delete an existing worker pool.`,
 
+	"exec": `Execute commands inside a sandbox with live streaming output.
+
+Usage:
+  compute exec [flags] [user@]<name|id> [--] <command...>
+
+Flags:
+  --no-stream              Buffer output and print it only when the command finishes.
+  --json                   Print the buffered result as JSON (implies --no-stream).
+  --timeout <seconds>      Command timeout in seconds (0 = no timeout while streaming).
+  --user <username>        SSH user (default: compute, or user@target prefix).
+`,
+
 	"image": `Manage base and custom rootfs images.
 
 Usage:
   compute image list
-  compute image build --name <name> [--base <image>] [--packages <a,b>] [--size <MiB>] [--desc <text>]
+  compute image build --name <name> [--base <image>] [--packages <a,b>] [--command <cmd>] [--size <MiB>] [--desc <text>]
   compute image inspect <name|id>
   compute image delete <name|id>
 
 Commands:
   list, ls                 List all available base and custom images.
-  build, create            Build a custom rootfs image with preinstalled packages.
+  build, create            Build a custom rootfs image with preinstalled packages and optional build command.
   inspect, show            Display image details and installed packages.
   delete, rm               Delete an image.`,
 
@@ -218,7 +270,7 @@ Commands:
 
 Usage:
   compute template list
-  compute template create <name> --vm <name|id> [--desc <text>]
+  compute template create [<name>] --vm <name|id> [--name <name>] [--desc <text>]
   compute template launch <name|id> [--name <vm-name>] [--tier <tier>] [--network-isolation <account|isolated>] [--isolated]
   compute template inspect <name|id>
   compute template delete <name|id>

@@ -1,5 +1,7 @@
 package api
 
+import "encoding/json"
+
 // WorkerMessage is the common envelope for worker stream frames.
 type WorkerMessage struct {
 	Version        int    `json:"protocol_version"`
@@ -16,6 +18,7 @@ type WorkerHello struct {
 	WorkerMessage
 	Token        string                 `json:"token,omitempty"`
 	Name         string                 `json:"name"`
+	PoolID       string                 `json:"pool_id,omitempty"`
 	Architecture string                 `json:"architecture"`
 	AgentVersion string                 `json:"agent_version,omitempty"`
 	Capabilities map[string]interface{} `json:"capabilities,omitempty"`
@@ -24,6 +27,7 @@ type WorkerHelloAck struct {
 	WorkerMessage
 	Accepted            bool   `json:"accepted"`
 	WorkerID            string `json:"worker_id"`
+	PoolID              string `json:"pool_id,omitempty"`
 	HeartbeatIntervalMS int    `json:"heartbeat_interval_ms"`
 }
 type WorkerHeartbeat struct {
@@ -151,4 +155,146 @@ type WorkerError struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable,omitempty"`
+}
+
+// WorkerRPCRequest invokes a synchronous RPC method on a connected worker.
+type WorkerRPCRequest struct {
+	WorkerMessage
+	RequestID string          `json:"request_id"`
+	Method    string          `json:"method"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+}
+
+// WorkerRPCResponse returns the result or error for a WorkerRPCRequest.
+type WorkerRPCResponse struct {
+	WorkerMessage
+	RequestID string          `json:"request_id"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Code      string          `json:"code,omitempty"`
+}
+
+// WorkerTunnelOpen asks a worker to dial targetAddr on its host/bridge network.
+type WorkerTunnelOpen struct {
+	WorkerMessage
+	TunnelID   string `json:"tunnel_id"`
+	TargetAddr string `json:"target_addr"`
+}
+
+// WorkerTunnelData carries base64-encoded TCP stream bytes over the worker WebSocket.
+type WorkerTunnelData struct {
+	WorkerMessage
+	TunnelID string `json:"tunnel_id"`
+	Data     string `json:"data,omitempty"`
+	EOF      bool   `json:"eof,omitempty"`
+}
+
+// WorkerTunnelClose closes a tunneled TCP stream.
+type WorkerTunnelClose struct {
+	WorkerMessage
+	TunnelID string `json:"tunnel_id"`
+	Error    string `json:"error,omitempty"`
+}
+
+// WorkerVMCreateRequest carries sandbox creation fields plus resolved control-plane SSH keys.
+type WorkerVMCreateRequest struct {
+	Name              string   `json:"name"`
+	OwnerID           string   `json:"owner_id,omitempty"`
+	Tier              string   `json:"tier,omitempty"`
+	VCPUs             int      `json:"vcpus"`
+	MemoryMB          int      `json:"memory_mb,omitempty"`
+	DiskMB            int      `json:"disk_mb,omitempty"`
+	DiskGB            int      `json:"disk_gb,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	AutoStart         bool     `json:"auto_start,omitempty"`
+	Image             string   `json:"image,omitempty"`
+	Template          string   `json:"template,omitempty"`
+	IPAddress         string   `json:"ip_address,omitempty"`
+	MACAddress        string   `json:"mac_address,omitempty"`
+	PublicIP          *bool    `json:"public_ip,omitempty"`
+	PublicIPEnabled   *bool    `json:"public_ip_enabled,omitempty"`
+	DedicatedIP       *bool    `json:"dedicated_ip,omitempty"`
+	NetworkIsolation  string   `json:"network_isolation,omitempty"`
+	Isolated          *bool    `json:"isolated,omitempty"`
+	NetworkIsolated   *bool    `json:"network_isolated,omitempty"`
+	DHCP              *bool    `json:"dhcp,omitempty"`
+	SSHPublicKey      string   `json:"ssh_public_key,omitempty"`
+	AuthorizedSSHKeys []string `json:"authorized_ssh_keys,omitempty"`
+	SSHPassword       string   `json:"ssh_password,omitempty"`
+	Protected         *bool    `json:"protected,omitempty"`
+	Command           string   `json:"command,omitempty"`
+	BuildCommand      string   `json:"build_command,omitempty"`
+	ExecUser          string   `json:"exec_user,omitempty"`
+	PoolID            string   `json:"pool_id,omitempty"`
+	WorkerID          string   `json:"worker_id,omitempty"`
+}
+
+// WorkerVMIDRequest identifies a sandbox for lifecycle RPCs.
+type WorkerVMIDRequest struct {
+	VMID string `json:"vm_id"`
+}
+
+// WorkerVMExecRequest executes a command inside a sandbox on a worker.
+type WorkerVMExecRequest struct {
+	VMID           string `json:"vm_id"`
+	Command        string `json:"command"`
+	User           string `json:"user,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	StdinBase64    string `json:"stdin_base64,omitempty"`
+}
+
+// WorkerVMFilesRequest runs a filesystem operation inside a sandbox on a worker.
+type WorkerVMFilesRequest struct {
+	VMID    string `json:"vm_id"`
+	Action  string `json:"action"` // "read", "write", "list", "mkdir", "remove"
+	Path    string `json:"path"`
+	Content string `json:"content,omitempty"`
+	Format  string `json:"format,omitempty"`
+}
+
+// WorkerVMProcessesRequest inspects or controls guest processes on a worker.
+type WorkerVMProcessesRequest struct {
+	VMID    string            `json:"vm_id"`
+	Action  string            `json:"action"` // "list", "start", "kill"
+	Command string            `json:"command,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	PID     int               `json:"pid,omitempty"`
+	Signal  string            `json:"signal,omitempty"`
+}
+
+// WorkerVMSSHSyncRequest reconciles authorized_keys for a sandbox on a worker.
+type WorkerVMSSHSyncRequest struct {
+	VMID       string   `json:"vm_id"`
+	PublicKeys []string `json:"public_keys"`
+}
+
+// WorkerVMExportDiskRequest requests a gzipped chunk of a VM disk or snapshot file.
+type WorkerVMExportDiskRequest struct {
+	VMID   string `json:"vm_id"`
+	Kind   string `json:"kind,omitempty"` // "disk" (default), "snapshot", "mem"
+	Offset int64  `json:"offset"`
+	Length int    `json:"length"`
+}
+
+// WorkerVMExportDiskResponse returns a base64-encoded gzipped chunk of a VM disk/snapshot.
+type WorkerVMExportDiskResponse struct {
+	Offset    int64  `json:"offset"`
+	RawLength int    `json:"raw_length"`
+	TotalSize int64  `json:"total_size"`
+	Data      string `json:"data"`
+	EOF       bool   `json:"eof"`
+	Gzipped   bool   `json:"gzipped"`
+}
+
+// WorkerVMImportDiskRequest streams a disk/snapshot chunk to a target worker and optionally registers the VM.
+type WorkerVMImportDiskRequest struct {
+	VMID      string          `json:"vm_id"`
+	Kind      string          `json:"kind,omitempty"` // "disk" (default), "snapshot", "mem"
+	Offset    int64           `json:"offset"`
+	TotalSize int64           `json:"total_size"`
+	Data      string          `json:"data"`
+	Gzipped   bool            `json:"gzipped"`
+	Finalize  bool            `json:"finalize,omitempty"`
+	VM        json.RawMessage `json:"vm,omitempty"`
 }

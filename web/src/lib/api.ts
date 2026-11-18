@@ -2,32 +2,48 @@ import type {
   AccessAPIKeyRecord,
   AdminResourcesResponse,
   AuditEventRecord,
+  BulkCloneVMsRequest,
+  BulkCreateVMsRequest,
+  BulkTaskRecord,
+  BulkVMsRequest,
+  BulkVMsResponse,
   CloneVMOptions,
+  ClusterSchedulingPolicy,
   CreateCIRepoRequest,
   CreateTemplateRequest,
   CreateVMRequest,
   DaemonConfig,
   EnvironmentProfileRecord,
+  ExecStreamEvent,
+  ExecVMRequest,
+  ExecVMResponse,
   FileEntry,
   FileReadResponse,
   GitHubConnectionRecord,
   HealthResult,
+  ImageListItem,
   JobLogRecord,
   JobRecord,
   LaunchTemplateRequest,
+  MigratePoolRequest,
+  MigrateVMRequest,
   NetworkAllocation,
   NetworkConfig,
   NetworkInspectResult,
   NetworkIsolationMode,
   OTelConfigRecord,
+  OperationRecord,
+  PoolMigrationResponse,
   PortForwardRecord,
   ProcessInfo,
   QueueResult,
+  ResourceLimitErrorDetails,
   SSHKey,
   StatsResult,
   Template,
   TriggerCIRepoRequest,
   UpdateCIRepoRequest,
+  UpdateWorkerRequest,
   VM,
   VMTier,
   VolumeRecord,
@@ -49,11 +65,20 @@ const AUTH_USER_KEY = 'compute_auth_user';
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
+  details?: ResourceLimitErrorDetails;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: ResourceLimitErrorDetails,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -130,8 +155,16 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     authHeaders['Authorization'] = `Bearer ${token}`;
   }
 
+  const method = (options.method || 'GET').toUpperCase();
+  const canKeepalive =
+    method !== 'GET' &&
+    method !== 'HEAD' &&
+    typeof options.body === 'string' &&
+    options.body.length < 60000;
+
   const response = await fetch(`${BASE_PATH}${path}`, {
     credentials: 'include',
+    keepalive: options.keepalive ?? canKeepalive,
     ...options,
     headers: {
       'Content-Type': 'application/json',
@@ -142,12 +175,46 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
+    let errorCode: string | undefined;
+    let details: ResourceLimitErrorDetails | undefined;
     try {
-      const body = (await response.json()) as { error?: string; message?: string };
+      const body = (await response.json()) as {
+        error?: string;
+        message?: string;
+        code?: string;
+        resource?: string;
+        limit_type?: string;
+        node_id?: string;
+        requested?: number;
+        available?: number;
+        limit?: number;
+        suggestion?: string;
+      };
+      if (body.code) {
+        errorCode = body.code;
+      }
       if (body.message) {
         message = body.message;
       } else if (body.error) {
         message = body.error;
+      }
+      if (
+        body.code === 'RESOURCE_LIMIT_EXCEEDED' ||
+        body.resource ||
+        body.suggestion ||
+        body.limit_type
+      ) {
+        details = {
+          code: body.code,
+          resource: body.resource,
+          limit_type: body.limit_type,
+          node_id: body.node_id,
+          requested: body.requested,
+          available: body.available,
+          limit: body.limit,
+          error: body.error || body.message,
+          suggestion: body.suggestion,
+        };
       }
     } catch {
       // Keep the status-based message when the body is not JSON.
@@ -163,7 +230,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       notifyUnauthorized();
     }
 
-    throw new ApiError(message, response.status);
+    throw new ApiError(message, response.status, errorCode, details);
   }
 
   if (response.status === 204) {
@@ -217,10 +284,24 @@ export const api = {
     });
   },
 
+  bulkCreateVMs(payload: BulkCreateVMsRequest): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-create', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   cloneVM(id: string, nameOrOptions: string | CloneVMOptions | CreateVMRequest): Promise<VM> {
     const payload =
       typeof nameOrOptions === 'string' ? { name: nameOrOptions } : nameOrOptions;
     return request<VM>(`/vms/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  bulkCloneVMs(payload: BulkCloneVMsRequest): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-clone', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -232,6 +313,10 @@ export const api = {
 
   stopVM(id: string): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+  },
+
+  restartVM(id: string): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/restart`, { method: 'POST' });
   },
 
   snapshotVM(id: string): Promise<VM> {
@@ -256,19 +341,152 @@ export const api = {
     });
   },
 
+  bulkDeleteVMs(
+    ids: string[],
+    opts?: { async?: boolean },
+  ): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify({ ids, async: opts?.async ?? false }),
+    });
+  },
+
+  bulkActionVMs(payload: BulkVMsRequest): Promise<BulkVMsResponse> {
+    return request<BulkVMsResponse>('/vms/bulk-action', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  /** Execute a command inside a sandbox and return buffered output. */
+  execVM(id: string, req: ExecVMRequest): Promise<ExecVMResponse> {
+    return request<ExecVMResponse>(`/vms/${encodeURIComponent(id)}/exec`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
+  },
+
+  /** Execute a command inside a sandbox and stream real-time output chunks. */
+  async execVMStream(
+    id: string,
+    req: ExecVMRequest,
+    onEvent: (ev: ExecStreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const token = getStoredToken();
+    const authHeaders: Record<string, string> = {};
+    if (token) {
+      authHeaders['Authorization'] = `Bearer ${token}`;
+    }
+    const response = await fetch(`${BASE_PATH}/vms/${encodeURIComponent(id)}/exec-stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!response.ok) {
+      let message = `Command execution failed (${response.status})`;
+      try {
+        const body = (await response.json()) as { message?: string; error?: string };
+        if (body.message) message = body.message;
+        else if (body.error) message = body.error;
+      } catch {}
+      throw new ApiError(message, response.status);
+    }
+    if (!response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() ?? '';
+      for (const block of blocks) {
+        for (const line of block.split('\n')) {
+          if (line.startsWith('data: ')) {
+            try {
+              const ev = JSON.parse(line.slice(6)) as ExecStreamEvent;
+              onEvent(ev);
+            } catch {}
+          }
+        }
+      }
+    }
+    if (buffer.trim()) {
+      for (const line of buffer.split('\n')) {
+        if (line.startsWith('data: ')) {
+          try {
+            const ev = JSON.parse(line.slice(6)) as ExecStreamEvent;
+            onEvent(ev);
+          } catch {}
+        }
+      }
+    }
+  },
+
+  /** Resolve a queued bulk task's final outcome. */
+  getBulkTask(taskID: string): Promise<BulkTaskRecord> {
+    return request<BulkTaskRecord>(`/tasks/${encodeURIComponent(taskID)}`);
+  },
+
+  /** List durable long-running operations, newest first. */
+  listOperations(params?: {
+    status?: string;
+    taskId?: string;
+    kind?: string;
+    limit?: number;
+  }): Promise<OperationRecord[]> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set('status', params.status);
+    if (params?.taskId) search.set('task_id', params.taskId);
+    if (params?.kind) search.set('kind', params.kind);
+    if (params?.limit) search.set('limit', String(params.limit));
+    const query = search.toString();
+    return request<OperationRecord[]>(`/operations${query ? `?${query}` : ''}`);
+  },
+
+  /** Fetch a single durable operation by ID. */
+  getOperation(id: string): Promise<OperationRecord> {
+    return request<OperationRecord>(`/operations/${encodeURIComponent(id)}`);
+  },
+
+  migrateVM(id: string, payload: MigrateVMRequest): Promise<VM> {
+    return request<VM>(`/vms/${encodeURIComponent(id)}/migrate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
   updateVMConfig(
     id: string,
     payload: {
       public_ip?: boolean;
+      public_ip_enabled?: boolean;
+      dedicated_ip?: boolean;
       protected?: boolean;
       network_isolation?: NetworkIsolationMode;
       isolated?: boolean;
+      description?: string;
+      ssh_password_enabled?: boolean;
+      pool_id?: string;
     },
   ): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
+  },
+
+  reconcileVMSSH(id: string): Promise<{ status: string; message?: string }> {
+    return request<{ status: string; message?: string }>(
+      `/vms/${encodeURIComponent(id)}/reconcile-ssh`,
+      { method: 'POST' },
+    );
   },
 
   protectVM(id: string): Promise<VM> {
@@ -356,17 +574,31 @@ export const api = {
   },
 
   createPortForward(payload: {
-    host_port: number;
+    host_port?: number;
     vm_id: string;
     vm_name?: string;
     guest_port: number;
     protocol?: string;
     subdomain?: string;
+    public?: boolean;
   }): Promise<PortForwardRecord> {
     return request<PortForwardRecord>('/network/port-forwards', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  setPortForwardPublic(
+    id: string,
+    isPublic: boolean,
+  ): Promise<PortForwardRecord> {
+    return request<PortForwardRecord>(
+      `/network/port-forwards/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ public: isPublic }),
+      },
+    );
   },
 
   deletePortForward(id: string): Promise<{ status: string }> {
@@ -510,6 +742,13 @@ export const api = {
     });
   },
 
+  updateWorker(id: string, payload: UpdateWorkerRequest): Promise<WorkerNodeRecord> {
+    return request<WorkerNodeRecord>(`/workers/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
   listPools(): Promise<WorkerPoolRecord[]> {
     return request<WorkerPoolRecord[]>('/pools');
   },
@@ -519,6 +758,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  migratePool(id: string, payload: MigratePoolRequest): Promise<PoolMigrationResponse> {
+    return request<PoolMigrationResponse>(`/pools/${encodeURIComponent(id)}/migrate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getSchedulingPolicy(): Promise<ClusterSchedulingPolicy> {
+    return request<ClusterSchedulingPolicy>('/scheduler/policy');
+  },
+
+  updateSchedulingPolicy(
+    payload: Partial<ClusterSchedulingPolicy>,
+  ): Promise<ClusterSchedulingPolicy> {
+    return request<ClusterSchedulingPolicy>('/scheduler/policy', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  listImages(): Promise<ImageListItem[]> {
+    return request<ImageListItem[]>('/images');
   },
 
   listWorkerTokens(): Promise<WorkerTokenRecord[]> {
@@ -841,6 +1104,33 @@ export const api = {
 
 
 export function errorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const base = error.message || `Request failed (${error.status})`;
+    const d = error.details;
+    if (d) {
+      const parts: string[] = [base];
+      if (d.node_id && !base.includes(d.node_id)) {
+        parts.push(`[node: ${d.node_id}]`);
+      }
+      if (
+        d.resource &&
+        d.requested !== undefined &&
+        d.available !== undefined &&
+        !base.includes(String(d.requested))
+      ) {
+        parts.push(
+          `(${d.resource}: requested ${d.requested}, available ${d.available}${
+            d.limit !== undefined ? `, limit ${d.limit}` : ''
+          })`,
+        );
+      }
+      if (d.suggestion && !base.includes(d.suggestion)) {
+        parts.push(`— ${d.suggestion}`);
+      }
+      return parts.join(' ');
+    }
+    return base;
+  }
   if (error instanceof Error && error.message) return error.message;
   return String(error);
 }

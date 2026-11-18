@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/master/auth"
+	"github.com/Rashid2G/compute/internal/vm"
 	"github.com/google/uuid"
 )
 
@@ -101,9 +101,9 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 				status = "attached"
 				attachedVM = v.Name
 			}
-			sizeGB := v.MemoryMB / 1024
-			if sizeGB < 10 {
-				sizeGB = 10
+			sizeGB := v.DiskMB / 1024
+			if sizeGB <= 0 {
+				sizeGB = 50
 			}
 			volOwner := v.OwnerID
 			if volOwner == "" {
@@ -127,10 +127,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 					Snapshots:  0,
 				})
 			} else {
-				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner {
+				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner || existing.SizeGB != sizeGB {
 					existing.Status = status
 					existing.AttachedVM = attachedVM
 					existing.OwnerID = volOwner
+					existing.SizeGB = sizeGB
 					_ = st.SaveVolume(ctx, existing)
 				}
 			}
@@ -165,8 +166,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			Name       string `json:"name"`
 			Pool       string `json:"pool"`
 			SizeGB     int    `json:"size_gb"`
+			SizeMB     int    `json:"size_mb"`
 			Filesystem string `json:"filesystem"`
 			AttachedVM string `json:"attached_vm"`
+			MountPoint string `json:"mount_point"`
+			MountPath  string `json:"mount_path"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
@@ -184,6 +188,9 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
 			httpError(w, "name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
+		}
+		if req.SizeGB <= 0 && req.SizeMB > 0 {
+			req.SizeGB = (req.SizeMB + 1023) / 1024
 		}
 		if req.SizeGB <= 0 {
 			req.SizeGB = 10
@@ -219,7 +226,7 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 		devicePath := ""
 		if req.AttachedVM != "" {
 			status = "attached"
-			mountPoint = "/mnt/data"
+			mountPoint = firstNonEmpty(strings.TrimSpace(req.MountPoint), strings.TrimSpace(req.MountPath), "/mnt/data")
 			devicePath = "/dev/vdb"
 		}
 
@@ -227,39 +234,75 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
-
-		volID := "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
-		path, err := s.vmMgr.GetStorageManager().CreateDataVolume(volID, req.SizeGB, req.Filesystem)
-		if err != nil {
-			httpError(w, "failed to allocate volume: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		vol := &db.Volume{
-			ID:         volID,
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
 			OwnerID:    volOwner,
-			Name:       req.Name,
-			Pool:       req.Pool,
-			SizeGB:     req.SizeGB,
-			UsedGB:     0.0,
-			Status:     status,
-			AttachedVM: req.AttachedVM,
-			DevicePath: devicePath,
-			MountPoint: mountPoint,
-			Filesystem: req.Filesystem,
-			Path:       path,
-			IOPS:       3200,
-			Throughput: "250 MB/s",
-			Snapshots:  0,
-			CreatedAt:  time.Now().UTC(),
-			UpdatedAt:  time.Now().UTC(),
+			Kind:       "volume.create",
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    map[string]interface{}{"name": req.Name, "size_gb": req.SizeGB, "filesystem": req.Filesystem, "attached_vm": req.AttachedVM},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
 		}
-		if err := st.SaveVolume(ctx, vol); err != nil {
-			_ = s.vmMgr.GetStorageManager().DeleteDataVolume(path)
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		s.startOperation(ctx, op)
+		var vol *db.Volume
+		var statusCode int
+		var opErrRun error
+		_ = s.vmMgr.WithDiskLock(func() error {
+			if err := s.vmMgr.CheckDiskCapacity(ctx, int64(req.SizeGB)*1024, 16); err != nil {
+				statusCode = http.StatusTooManyRequests
+				opErrRun = err
+				return err
+			}
+
+			volID := "vol_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+			path, err := s.vmMgr.GetStorageManager().CreateDataVolume(volID, req.SizeGB, req.Filesystem)
+			if err != nil {
+				statusCode = http.StatusBadRequest
+				opErrRun = fmt.Errorf("failed to allocate volume: %w", err)
+				return opErrRun
+			}
+
+			candidate := &db.Volume{
+				ID:         volID,
+				OwnerID:    volOwner,
+				Name:       req.Name,
+				Pool:       req.Pool,
+				SizeGB:     req.SizeGB,
+				UsedGB:     0.0,
+				Status:     status,
+				AttachedVM: req.AttachedVM,
+				DevicePath: devicePath,
+				MountPoint: mountPoint,
+				Filesystem: req.Filesystem,
+				Path:       path,
+				IOPS:       3200,
+				Throughput: "250 MB/s",
+				Snapshots:  0,
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			if err := st.SaveVolume(ctx, candidate); err != nil {
+				_ = s.vmMgr.GetStorageManager().DeleteDataVolume(path)
+				statusCode = http.StatusInternalServerError
+				opErrRun = err
+				return err
+			}
+			vol = candidate
+			return nil
+		})
+		s.finishOperation(ctx, op, vol, opErrRun)
+		if opErrRun != nil {
+			if writeResourceLimitError(w, r, opErrRun) {
+				return
+			}
+			httpError(w, opErrRun.Error(), statusCode)
 			return
 		}
 
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		s.recordEvent("volume.created", getActor(r), vol.Name, "delivered", 25, vol)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(vol)
@@ -353,7 +396,9 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "attach":
 		var req struct {
-			VMID string `json:"vm_id"`
+			VMID       string `json:"vm_id"`
+			MountPoint string `json:"mount_point"`
+			MountPath  string `json:"mount_path"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.VMID == "" {
@@ -375,7 +420,7 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 		}
 		vol.Status = "attached"
 		vol.AttachedVM = vm.Name
-		vol.MountPoint = "/mnt/data"
+		vol.MountPoint = firstNonEmpty(strings.TrimSpace(req.MountPoint), strings.TrimSpace(req.MountPath), "/mnt/data")
 		vol.DevicePath = "/dev/vdb"
 		if err := st.SaveVolume(ctx, vol); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
@@ -420,16 +465,51 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
-		if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
-			httpError(w, "failed to expand volume: "+err.Error(), http.StatusBadRequest)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    vol.OwnerID,
+			Kind:       "volume.expand",
+			TargetID:   vol.ID,
+			TargetName: vol.Name,
+			Actor:      actor,
+			Request:    map[string]interface{}{"add_gb": req.AddGB},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		vol.SizeGB += req.AddGB
-		if err := st.SaveVolume(ctx, vol); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		s.startOperation(ctx, op)
+		var statusCode int
+		var opErrRun error
+		_ = s.vmMgr.WithDiskLock(func() error {
+			if err := s.vmMgr.CheckDiskCapacity(ctx, int64(req.AddGB)*1024, 16); err != nil {
+				statusCode = http.StatusTooManyRequests
+				opErrRun = err
+				return err
+			}
+			if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
+				statusCode = http.StatusBadRequest
+				opErrRun = fmt.Errorf("failed to expand volume: %w", err)
+				return opErrRun
+			}
+			vol.SizeGB += req.AddGB
+			if err := st.SaveVolume(ctx, vol); err != nil {
+				statusCode = http.StatusInternalServerError
+				opErrRun = err
+				return err
+			}
+			return nil
+		})
+		s.finishOperation(ctx, op, vol, opErrRun)
+		if opErrRun != nil {
+			if writeResourceLimitError(w, r, opErrRun) {
+				return
+			}
+			httpError(w, opErrRun.Error(), statusCode)
 			return
 		}
-		s.recordEvent("volume.expanded", getActor(r), vol.Name, "delivered", 20, map[string]interface{}{"added_gb": req.AddGB, "new_size": vol.SizeGB})
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		s.recordEvent("volume.expanded", actor, vol.Name, "delivered", 20, map[string]interface{}{"added_gb": req.AddGB, "new_size": vol.SizeGB})
 		json.NewEncoder(w).Encode(vol)
 
 	case "snapshot":
@@ -439,16 +519,58 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if _, err := s.vmMgr.GetStorageManager().SnapshotDataVolume(vol.Path, vol.Snapshots+1); err != nil {
-			httpError(w, "failed to snapshot volume: "+err.Error(), http.StatusBadRequest)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    vol.OwnerID,
+			Kind:       "volume.snapshot",
+			TargetID:   vol.ID,
+			TargetName: vol.Name,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
 			return
 		}
-		vol.Snapshots++
-		if err := st.SaveVolume(ctx, vol); err != nil {
-			httpError(w, err.Error(), http.StatusInternalServerError)
+		s.startOperation(ctx, op)
+		var statusCode int
+		var opErrRun error
+		_ = s.vmMgr.WithDiskLock(func() error {
+			reqLogicalMB := int64(vol.SizeGB) * 1024
+			if reqLogicalMB < 16 {
+				reqLogicalMB = 16
+			}
+			reqPhysMB := vm.FileAllocatedMB(vol.Path)
+			if reqPhysMB < 16 {
+				reqPhysMB = 16
+			}
+			if err := s.vmMgr.CheckDiskCapacity(ctx, reqLogicalMB, reqPhysMB); err != nil {
+				statusCode = http.StatusTooManyRequests
+				opErrRun = err
+				return err
+			}
+			if _, err := s.vmMgr.GetStorageManager().SnapshotDataVolume(vol.Path, vol.Snapshots+1); err != nil {
+				statusCode = http.StatusBadRequest
+				opErrRun = fmt.Errorf("failed to snapshot volume: %w", err)
+				return opErrRun
+			}
+			vol.Snapshots++
+			if err := st.SaveVolume(ctx, vol); err != nil {
+				statusCode = http.StatusInternalServerError
+				opErrRun = err
+				return err
+			}
+			return nil
+		})
+		s.finishOperation(ctx, op, vol, opErrRun)
+		if opErrRun != nil {
+			if writeResourceLimitError(w, r, opErrRun) {
+				return
+			}
+			httpError(w, opErrRun.Error(), statusCode)
 			return
 		}
-		s.recordEvent("volume.snapshot.created", getActor(r), vol.Name, "delivered", 35, map[string]interface{}{"snapshots": vol.Snapshots})
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		s.recordEvent("volume.snapshot.created", actor, vol.Name, "delivered", 35, map[string]interface{}{"snapshots": vol.Snapshots})
 		json.NewEncoder(w).Encode(vol)
 
 	default:
@@ -1164,6 +1286,10 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		vmFilter := strings.TrimSpace(r.URL.Query().Get("vm_id"))
+		if vmFilter == "" {
+			vmFilter = strings.TrimSpace(r.URL.Query().Get("sandbox"))
+		}
 		var pfs []*db.PortForward
 		var err error
 		if _, isAdmin := s.currentOwnerID(r); isAdmin {
@@ -1189,6 +1315,15 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if vmFilter != "" {
+			filtered := make([]*db.PortForward, 0, len(pfs))
+			for _, pf := range pfs {
+				if pf != nil && (strings.EqualFold(pf.VMID, vmFilter) || strings.EqualFold(pf.VMName, vmFilter)) {
+					filtered = append(filtered, pf)
+				}
+			}
+			pfs = filtered
+		}
 		if pfs == nil {
 			pfs = []*db.PortForward{}
 		}
@@ -1213,39 +1348,18 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if req.HostPort <= 0 || req.HostPort > 65535 || req.GuestPort <= 0 || req.GuestPort > 65535 {
-			httpError(w, "host_port and guest_port must be between 1 and 65535", http.StatusBadRequest)
+		if req.GuestPort <= 0 || req.GuestPort > 65535 {
+			httpError(w, "guest_port must be between 1 and 65535", http.StatusBadRequest)
 			return
 		}
 
-		// Anti-collision guard: privileged host ports (< 1024) require administrator privileges
-		if req.HostPort < 1024 && !isAdmin {
-			httpError(w, fmt.Sprintf("privileged host port %d requires administrator privileges", req.HostPort), http.StatusForbidden)
-			return
-		}
-
-		// Wrap collision check, host port availability probe, and insert in s.portForwardMu to prevent check-then-use races
+		// Serialize exposure creation so slug/port allocation cannot race.
 		s.portForwardMu.Lock()
 		defer s.portForwardMu.Unlock()
 
-		// Conflict detection: ensure host port is not already allocated in SQLite
 		allPFs, err := st.ListPortForwards(ctx)
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		for _, existing := range allPFs {
-			if existing.HostPort == req.HostPort {
-				httpError(w, fmt.Sprintf("port conflict: host port %d is already allocated by port forward %s (sandbox: %s)", req.HostPort, existing.ID, existing.VMName), http.StatusConflict)
-				return
-			}
-		}
-
-		// Anti-collision guard: check if host port is currently bound or in use by a host service
-		if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", req.HostPort)); err == nil {
-			_ = ln.Close()
-		} else {
-			httpError(w, fmt.Sprintf("port conflict: host port %d is already in use by a host service: %v", req.HostPort, err), http.StatusConflict)
 			return
 		}
 
@@ -1280,21 +1394,6 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 		if protocol == "" {
 			protocol = "tcp"
 		}
-		publicURL := ""
-		if req.Subdomain != "" {
-			publicURL = fmt.Sprintf("https://%s.compute.dev", req.Subdomain)
-		} else {
-			publicURL = fmt.Sprintf("http://localhost:%d", req.HostPort)
-		}
-
-		status := "pending"
-		if targetVM != nil && targetVM.IPAddress != "" {
-			if err := s.vmMgr.NetManager().AddPortForward(ctx, protocol, req.HostPort, targetVM.IPAddress, req.GuestPort); err != nil {
-				httpError(w, "failed to install host forwarding rule: "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-			status = "active"
-		}
 
 		pfOwner := ownerID
 		if targetVM != nil && targetVM.OwnerID != "" {
@@ -1306,6 +1405,42 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			isPublic = true
 		}
 
+		status := "pending"
+		if targetVM != nil && targetVM.Status == db.StatusRunning {
+			status = "active"
+		}
+		if targetVM == nil {
+			httpError(w, "sandbox is required to publish a port", http.StatusBadRequest)
+			return
+		}
+
+		// Re-exposing the same guest port updates the existing exposure in place,
+		// keeping its origin stable.
+		for _, existing := range allPFs {
+			if existing == nil || existing.OwnerID != pfOwner || existing.GuestPort != req.GuestPort || !strings.EqualFold(existing.Protocol, protocol) {
+				continue
+			}
+			if (req.VMID != "" && existing.VMID == req.VMID) || (vmName != "" && existing.VMName == vmName) {
+				existing.Public = isPublic
+				existing.Status = status
+				if req.HostPort > 0 {
+					existing.HostPort = req.HostPort
+				}
+				if err := s.prepareServe(ctx, st, existing, targetVM, strings.TrimSpace(req.Subdomain)); err != nil {
+					httpError(w, "failed to publish port: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := st.SavePortForward(ctx, existing); err != nil {
+					httpError(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				s.recordEvent("port_forward.updated", getActor(r), fmt.Sprintf("serve->%d", existing.GuestPort), "delivered", 15, existing)
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(existing)
+				return
+			}
+		}
+
 		pf := &db.PortForward{
 			ID:        "pf_" + strings.ReplaceAll(uuid.NewString()[:8], "-", ""),
 			OwnerID:   pfOwner,
@@ -1314,23 +1449,30 @@ func (s *Server) handlePortForwards(w http.ResponseWriter, r *http.Request) {
 			VMName:    vmName,
 			GuestPort: req.GuestPort,
 			Protocol:  protocol,
-			Subdomain: req.Subdomain,
-			PublicURL: publicURL,
+			Subdomain: strings.TrimSpace(req.Subdomain),
 			Status:    status,
 			Public:    isPublic,
 			CreatedAt: time.Now().UTC(),
 		}
+		// Persist first so port-mode listeners can resolve the exposure, then
+		// assign its origin and save again.
 		if err := st.SavePortForward(ctx, pf); err != nil {
-			errStr := strings.ToLower(err.Error())
-			if strings.Contains(errStr, "unique") || strings.Contains(errStr, "constraint") {
-				httpError(w, fmt.Sprintf("port conflict: host port %d is already allocated: %v", req.HostPort, err), http.StatusConflict)
-				return
-			}
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.prepareServe(ctx, st, pf, targetVM, strings.TrimSpace(req.Subdomain)); err != nil {
+			s.releaseServe(pf)
+			_ = st.DeletePortForward(ctx, pf.ID)
+			httpError(w, "failed to publish port: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := st.SavePortForward(ctx, pf); err != nil {
+			s.releaseServe(pf)
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		s.recordEvent("port_forward.created", getActor(r), fmt.Sprintf("%d->%d", pf.HostPort, pf.GuestPort), "delivered", 15, pf)
+		s.recordEvent("port_forward.created", getActor(r), fmt.Sprintf("serve->%d", pf.GuestPort), "delivered", 15, pf)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pf)
 
@@ -1363,17 +1505,51 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 		}
 		json.NewEncoder(w).Encode(pf)
 
+	case http.MethodPatch, http.MethodPut:
+		pf, err := st.GetPortForward(ctx, id)
+		if err != nil || pf == nil || !s.canAccessOwner(r, pf.OwnerID) {
+			httpError(w, "port forward not found", http.StatusNotFound)
+			return
+		}
+		var req struct {
+			Public    *bool   `json:"public,omitempty"`
+			Subdomain *string `json:"subdomain,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var targetVM *db.VM
+		if pf.VMID != "" {
+			targetVM, _ = st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID)
+		}
+		if req.Public != nil {
+			pf.Public = *req.Public
+		}
+		if targetVM != nil && (req.Subdomain != nil || pf.PublicURL == "") {
+			requested := strings.TrimSpace(pf.Subdomain)
+			if req.Subdomain != nil {
+				requested = strings.TrimSpace(*req.Subdomain)
+			}
+			if err := s.prepareServe(ctx, st, pf, targetVM, requested); err != nil {
+				httpError(w, "failed to publish port: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		if err := st.SavePortForward(ctx, pf); err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.recordEvent("port_forward.updated", getActor(r), id, "delivered", 15, pf)
+		json.NewEncoder(w).Encode(pf)
+
 	case http.MethodDelete:
 		pf, err := st.GetPortForward(ctx, id)
 		if err != nil || pf == nil || !s.canAccessOwner(r, pf.OwnerID) {
 			httpError(w, "port forward not found", http.StatusNotFound)
 			return
 		}
-		if pf != nil {
-			if v, _ := st.GetVMByOwner(ctx, pf.OwnerID, pf.VMID); v != nil && v.IPAddress != "" {
-				_ = s.vmMgr.NetManager().RemovePortForward(ctx, pf.Protocol, pf.HostPort, v.IPAddress, pf.GuestPort)
-			}
-		}
+		s.releaseServe(pf)
 		if err := st.DeletePortForward(ctx, id); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1384,4 +1560,148 @@ func (s *Server) handlePortForwardActions(w http.ResponseWriter, r *http.Request
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleVMPorts manages exposed ports for a specific sandbox:
+//   - GET    /api/v1/sandboxes/<id>/ports          -> list exposed ports for sandbox
+//   - POST   /api/v1/sandboxes/<id>/ports          -> expose/update a guest port
+//   - POST   /api/v1/sandboxes/<id>/expose         -> expose/update a guest port
+//   - PATCH  /api/v1/sandboxes/<id>/ports/<port>   -> update visibility (public/private)
+//   - DELETE /api/v1/sandboxes/<id>/ports/<port>   -> unexpose a guest port
+//   - POST   /api/v1/sandboxes/<id>/unexpose       -> unexpose a guest port
+func (s *Server) handleVMPorts(w http.ResponseWriter, r *http.Request, v *db.VM, action string, subParts []string) {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
+		httpError(w, "store not available", http.StatusInternalServerError)
+		return
+	}
+	ctx := r.Context()
+	st := s.vmMgr.GetStore()
+
+	// Unexpose via POST /api/v1/sandboxes/<id>/unexpose or DELETE /api/v1/sandboxes/<id>/ports/<port>
+	if action == "unexpose" || r.Method == http.MethodDelete {
+		targetPort := 0
+		if len(subParts) > 0 && subParts[0] != "" {
+			if p, err := strconv.Atoi(subParts[0]); err == nil {
+				targetPort = p
+			}
+		}
+		if targetPort == 0 && r.URL.Query().Get("port") != "" {
+			if p, err := strconv.Atoi(r.URL.Query().Get("port")); err == nil {
+				targetPort = p
+			}
+		}
+		if targetPort == 0 && r.Body != nil {
+			var req struct {
+				Port      int `json:"port"`
+				GuestPort int `json:"guest_port"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.GuestPort > 0 {
+				targetPort = req.GuestPort
+			} else if req.Port > 0 {
+				targetPort = req.Port
+			}
+		}
+		if targetPort <= 0 || targetPort > 65535 {
+			httpError(w, "valid guest port (1-65535) is required", http.StatusBadRequest)
+			return
+		}
+		pfs, err := st.ListPortForwardsForVM(ctx, v.OwnerID, v.ID, v.Name)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		removed := 0
+		for _, pf := range pfs {
+			if pf != nil && pf.GuestPort == targetPort {
+				s.releaseServe(pf)
+				if err := st.DeletePortForward(ctx, pf.ID); err == nil {
+					removed++
+				}
+			}
+		}
+		if removed == 0 {
+			httpError(w, fmt.Sprintf("port %d is not exposed on sandbox %s", targetPort, v.Name), http.StatusNotFound)
+			return
+		}
+		s.recordEvent("sandbox.port_unexposed", getActor(r), fmt.Sprintf("%s:%d", v.Name, targetPort), "delivered", 15, map[string]interface{}{
+			"vm_id":      v.ID,
+			"vm_name":    v.Name,
+			"guest_port": targetPort,
+		})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":     "ok",
+			"vm_id":      v.ID,
+			"vm_name":    v.Name,
+			"guest_port": targetPort,
+		})
+		return
+	}
+
+	if action == "ports" && r.Method == http.MethodGet {
+		pfs, err := st.ListPortForwardsForVM(ctx, v.OwnerID, v.ID, v.Name)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if pfs == nil {
+			pfs = []*db.PortForward{}
+		}
+		json.NewEncoder(w).Encode(pfs)
+		return
+	}
+
+	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
+		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Port      int    `json:"port"`
+		GuestPort int    `json:"guest_port"`
+		HostPort  int    `json:"host_port"`
+		Protocol  string `json:"protocol"`
+		Subdomain string `json:"subdomain"`
+		Public    *bool  `json:"public,omitempty"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			httpError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	guestPort := req.GuestPort
+	if guestPort == 0 {
+		guestPort = req.Port
+	}
+	if guestPort == 0 && len(subParts) > 0 && subParts[0] != "" {
+		if p, err := strconv.Atoi(subParts[0]); err == nil {
+			guestPort = p
+		}
+	}
+	if guestPort <= 0 || guestPort > 65535 {
+		httpError(w, "guest_port must be between 1 and 65535", http.StatusBadRequest)
+		return
+	}
+
+	// Default to public=true when exposing via /expose unless explicitly set to false
+	isPublic := true
+	if req.Public != nil {
+		isPublic = *req.Public
+	}
+
+	// Delegate to handlePortForwards by synthesizing the canonical request body
+	forwardPayload, _ := json.Marshal(map[string]interface{}{
+		"host_port":  req.HostPort,
+		"vm_id":      v.ID,
+		"vm_name":    v.Name,
+		"guest_port": guestPort,
+		"protocol":   req.Protocol,
+		"subdomain":  req.Subdomain,
+		"public":     isPublic,
+	})
+	cloneReq := r.Clone(ctx)
+	cloneReq.Method = http.MethodPost
+	cloneReq.Body = io.NopCloser(bytes.NewReader(forwardPayload))
+	s.handlePortForwards(w, cloneReq)
 }

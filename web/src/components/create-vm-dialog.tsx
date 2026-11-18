@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ChevronDown, Play, Shield, X } from 'lucide-react';
 
 import { api } from '@/lib/api';
 import type {
   CreateVMRequest,
   DaemonConfig,
+  ImageListItem,
   NetworkIsolationMode,
   SSHKey,
   StatsResult,
   Template,
+  WorkerNodeRecord,
+  WorkerPoolRecord,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -16,8 +19,16 @@ interface CreateVMDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   config?: DaemonConfig | null;
+  images?: ImageListItem[];
+  workers?: WorkerNodeRecord[];
+  pools?: WorkerPoolRecord[];
+  templates?: Template[];
+  stats?: StatsResult | null;
   onCreate: (payload: CreateVMRequest, autoStart: boolean) => Promise<void>;
+  onBulkCreate?: (payloads: CreateVMRequest[], autoStart: boolean) => Promise<void>;
 }
+
+type PlacementMode = 'auto' | 'pool' | 'worker';
 
 interface Preset {
   vcpus: 1 | 2 | 4;
@@ -45,38 +56,114 @@ function formatMemory(mb: number): string {
 export function CreateVMDialog({
   open,
   onOpenChange,
+  config,
+  images: propImages,
+  workers: propWorkers,
+  pools: propPools,
+  templates: propTemplates,
+  stats: propStats,
   onCreate,
+  onBulkCreate,
 }: CreateVMDialogProps) {
+  const defaultImageName = config?.defaults?.image || 'ubuntu-24';
   const [vcpus, setVcpus] = useState<1 | 2 | 4>(1);
-  const [memoryMb, setMemoryMb] = useState(512);
-  const [diskGb, setDiskGb] = useState<number>(DEFAULT_DISK_GB);
-  const [count, setCount] = useState<number>(1);
+  const [memoryMbInput, setMemoryMbInput] = useState('512');
+  const [diskGbInput, setDiskGbInput] = useState(String(DEFAULT_DISK_GB));
+  const [countInput, setCountInput] = useState('1');
   const [sandboxName, setSandboxName] = useState('');
+  const [selectedImage, setSelectedImage] = useState(defaultImageName);
   const [fromSource, setFromSource] = useState('fresh');
+  const [placementMode, setPlacementMode] = useState<PlacementMode>('auto');
+  const [selectedPoolId, setSelectedPoolId] = useState('');
+  const [selectedWorkerId, setSelectedWorkerId] = useState('');
   const [sshKeyId, setSshKeyId] = useState('');
   const [sshPassword, setSshPassword] = useState('');
   const [networkIsolation, setNetworkIsolation] =
     useState<NetworkIsolationMode>('account');
   const [protectedVM, setProtectedVM] = useState(false);
+  const [buildCommand, setBuildCommand] = useState('');
 
-  const [templates, setTemplates] = useState<Template[]>([]);
+  const [fetchedTemplates, setFetchedTemplates] = useState<Template[]>([]);
+  const [fetchedWorkers, setFetchedWorkers] = useState<WorkerNodeRecord[]>([]);
+  const [fetchedPools, setFetchedPools] = useState<WorkerPoolRecord[]>([]);
   const [sshKeys, setSshKeys] = useState<SSHKey[]>([]);
-  const [stats, setStats] = useState<StatsResult | null>(null);
+  const [fetchedStats, setFetchedStats] = useState<StatsResult | null>(null);
+
+  const availableImages = useMemo<Array<{ name: string; description?: string }>>(() => {
+    if (propImages && propImages.length > 0) {
+      return propImages.map((img) => ({
+        name: img.name,
+        description: img.description || (img.name === 'ubuntu-24' ? 'Ubuntu 24.04 LTS' : img.name),
+      }));
+    }
+    const cfgAvailable = config?.images?.available;
+    if (cfgAvailable && cfgAvailable.length > 0) {
+      return cfgAvailable.map((item) => {
+        const imgName = typeof item === 'string' ? item : item.name;
+        const imgDesc = typeof item === 'string' ? undefined : item.description;
+        return {
+          name: imgName,
+          description: imgDesc || (imgName === 'ubuntu-24' ? 'Ubuntu 24.04 LTS' : imgName),
+        };
+      });
+    }
+    return [{ name: defaultImageName, description: 'Ubuntu 24.04 LTS' }];
+  }, [propImages, config, defaultImageName]);
+
+  const memoryTouchedRef = useRef(false);
+  const hasPropTemplatesRef = useRef(Boolean(propTemplates && propTemplates.length > 0));
+  const hasPropWorkersRef = useRef(Boolean(propWorkers && propWorkers.length > 0));
+  const hasPropPoolsRef = useRef(Boolean(propPools && propPools.length > 0));
+  const hasPropStatsRef = useRef(Boolean(propStats));
+  hasPropTemplatesRef.current = Boolean(propTemplates && propTemplates.length > 0);
+  hasPropWorkersRef.current = Boolean(propWorkers && propWorkers.length > 0);
+  hasPropPoolsRef.current = Boolean(propPools && propPools.length > 0);
+  hasPropStatsRef.current = Boolean(propStats);
+
+  const templates = useMemo(
+    () => (propTemplates && propTemplates.length > 0 ? propTemplates : fetchedTemplates),
+    [propTemplates, fetchedTemplates],
+  );
+  const workers = useMemo(
+    () => (propWorkers && propWorkers.length > 0 ? propWorkers : fetchedWorkers),
+    [propWorkers, fetchedWorkers],
+  );
+  const pools = useMemo(
+    () => (propPools && propPools.length > 0 ? propPools : fetchedPools),
+    [propPools, fetchedPools],
+  );
+  const stats = propStats ?? fetchedStats;
 
   useEffect(() => {
     if (!open) return;
-    void api
-      .listTemplates()
-      .then((res) => setTemplates(res || []))
-      .catch(() => setTemplates([]));
+    if (!hasPropTemplatesRef.current) {
+      void api
+        .listTemplates()
+        .then((res) => setFetchedTemplates(res || []))
+        .catch(() => setFetchedTemplates([]));
+    }
+    if (!hasPropWorkersRef.current) {
+      void api
+        .listWorkers()
+        .then((res) => setFetchedWorkers(res || []))
+        .catch(() => setFetchedWorkers([]));
+    }
+    if (!hasPropPoolsRef.current) {
+      void api
+        .listPools()
+        .then((res) => setFetchedPools(res || []))
+        .catch(() => setFetchedPools([]));
+    }
     void api
       .listKeys()
       .then((res) => setSshKeys(res || []))
       .catch(() => setSshKeys([]));
-    void api
-      .stats()
-      .then((res) => setStats(res))
-      .catch(() => setStats(null));
+    if (!hasPropStatsRef.current) {
+      void api
+        .stats()
+        .then((res) => setFetchedStats(res))
+        .catch(() => setFetchedStats(null));
+    }
   }, [open]);
 
   useEffect(() => {
@@ -88,36 +175,80 @@ export function CreateVMDialog({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [open, onOpenChange]);
 
-  // Keep the default memory inside the host's actual headroom so the first
-  // click does not immediately queue the sandbox for lack of RAM.
+  const selectedWorker = useMemo(
+    () => workers.find((w) => w.id === selectedWorkerId) ?? null,
+    [workers, selectedWorkerId],
+  );
+
+  // Keep the default memory inside the target node/cluster's actual headroom on initial open
+  // without overwriting user edits when live stats refresh or clamping remote workers to control-plane RAM.
   const maxUsableMb = useMemo(() => {
+    if (placementMode === 'worker') {
+      if (!selectedWorker) return null;
+      const allocMem = selectedWorker.allocated_mem_mb || selectedWorker.total_mem_mb || 0;
+      const usedMem = selectedWorker.used_mem_mb ?? 0;
+      const freeMem = Math.max(0, allocMem - usedMem);
+      return freeMem > 0 ? Math.max(128, freeMem) : null;
+    }
+    if (placementMode === 'pool' && selectedPoolId) {
+      const poolWorkers = workers.filter(
+        (w) => w.pool_id === selectedPoolId && (!w.status || w.status === 'ready'),
+      );
+      const maxPoolFree = poolWorkers.reduce((max, w) => {
+        const alloc = w.allocated_mem_mb || w.total_mem_mb || 0;
+        const free = Math.max(0, alloc - (w.used_mem_mb ?? 0));
+        return Math.max(max, free);
+      }, 0);
+      return maxPoolFree > 0 ? Math.max(128, maxPoolFree) : null;
+    }
     const available = stats?.host_memory_available_mb ?? 0;
-    if (!available) return null;
-    return Math.max(128, available - HOST_RESERVE_MB);
-  }, [stats]);
+    const localHeadroom = available > 0 ? Math.max(128, available - HOST_RESERVE_MB) : 0;
+    const maxWorkerFree = workers
+      .filter((w) => !w.status || w.status === 'ready')
+      .reduce((max, w) => {
+        const alloc = w.allocated_mem_mb || w.total_mem_mb || 0;
+        const free = Math.max(0, alloc - (w.used_mem_mb ?? 0));
+        return Math.max(max, free);
+      }, 0);
+    const best = Math.max(localHeadroom, maxWorkerFree);
+    return best > 0 ? best : null;
+  }, [placementMode, selectedWorker, selectedPoolId, workers, stats]);
 
   useEffect(() => {
-    if (!open || !maxUsableMb) return;
-    setMemoryMb((current) => Math.min(current, maxUsableMb));
+    if (!open || !maxUsableMb || memoryTouchedRef.current) return;
+    setMemoryMbInput((current) => {
+      const n = Number(current);
+      if (!Number.isFinite(n) || n <= 0) return current;
+      return String(Math.min(n, maxUsableMb));
+    });
   }, [open, maxUsableMb]);
 
   // Never keep a typed password or stale inputs in memory after the dialog closes.
   useEffect(() => {
     if (!open) {
+      memoryTouchedRef.current = false;
       setSandboxName('');
       setVcpus(1);
-      setMemoryMb(512);
-      setCount(1);
+      setMemoryMbInput('512');
+      setCountInput('1');
       setProtectedVM(false);
       setSshPassword('');
       setSshKeyId('');
       setNetworkIsolation('account');
-      setDiskGb(DEFAULT_DISK_GB);
+      setDiskGbInput(String(DEFAULT_DISK_GB));
+      setSelectedImage(defaultImageName);
       setFromSource('fresh');
+      setPlacementMode('auto');
+      setSelectedPoolId('');
+      setSelectedWorkerId('');
     }
-  }, [open]);
+  }, [open, defaultImageName]);
 
   if (!open) return null;
+
+  const memoryMb = Math.max(128, Math.round(Number(memoryMbInput) || 512));
+  const diskGb = Math.max(1, Math.round(Number(diskGbInput) || DEFAULT_DISK_GB));
+  const count = Math.max(1, Math.min(20, Math.round(Number(countInput) || 1)));
 
   const willQueue = maxUsableMb !== null && memoryMb > maxUsableMb;
   const defaultKey = sshKeys.find((k) => k.is_default) ?? null;
@@ -145,27 +276,59 @@ export function CreateVMDialog({
         ssh_key_id: sshKeyId && sshKeyId !== 'none' ? sshKeyId : undefined,
         ssh_no_default_key: sshKeyId === 'none' || undefined,
         ssh_password: sshPassword || undefined,
+        command: buildCommand.trim() || undefined,
+        build_command: buildCommand.trim() || undefined,
       };
+
+      if (placementMode === 'pool' && selectedPoolId) {
+        payload.pool_id = selectedPoolId;
+      } else if (placementMode === 'worker' && selectedWorkerId) {
+        payload.worker_id = selectedWorkerId;
+        if (selectedWorker?.pool_id) {
+          payload.pool_id = selectedWorker.pool_id;
+        }
+      }
 
       if (fromSource.startsWith('tpl:')) {
         payload.template = fromSource.slice(4);
+      } else if (fromSource.startsWith('img:')) {
+        payload.image = fromSource.slice(4);
       } else {
-        payload.image = 'ubuntu-24';
+        payload.image = selectedImage || defaultImageName;
       }
 
       return payload;
     });
 
     onOpenChange(false);
+    memoryTouchedRef.current = false;
     setSandboxName('');
+    setBuildCommand('');
     setSshPassword('');
     setNetworkIsolation('account');
     setProtectedVM(false);
-    setDiskGb(DEFAULT_DISK_GB);
+    setDiskGbInput(String(DEFAULT_DISK_GB));
+    setMemoryMbInput('512');
+    setSelectedImage(defaultImageName);
     setFromSource('fresh');
-    setCount(1);
+    setPlacementMode('auto');
+    setSelectedPoolId('');
+    setSelectedWorkerId('');
+    setCountInput('1');
 
-    void Promise.allSettled(payloads.map((payload) => onCreate(payload, true)));
+    if (payloads.length > 1) {
+      if (onBulkCreate) {
+        void onBulkCreate(payloads, true).catch(() => {});
+      } else {
+        void api.bulkCreateVMs({
+          items: payloads.map((p) => ({ ...p, auto_start: true })),
+          async: true,
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    void onCreate(payloads[0], true).catch(() => {});
   }
 
   return (
@@ -177,7 +340,7 @@ export function CreateVMDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="advanced-create-title"
-        className="w-full max-w-[440px] border border-border bg-background p-6 text-foreground my-auto"
+        className="w-full max-w-[460px] max-h-[92vh] overflow-y-auto border border-border bg-background p-6 text-foreground my-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-5">
@@ -235,7 +398,7 @@ export function CreateVMDialog({
                   <button
                     key={qty}
                     type="button"
-                    onClick={() => setCount(qty)}
+                    onClick={() => setCountInput(String(qty))}
                     className={cn(
                       'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                       count === qty
@@ -253,10 +416,8 @@ export function CreateVMDialog({
               aria-label="Quantity of sandboxes to create"
               min={1}
               max={20}
-              value={count}
-              onChange={(e) =>
-                setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))
-              }
+              value={countInput}
+              onChange={(e) => setCountInput(e.target.value)}
               className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
             />
           </div>
@@ -273,12 +434,9 @@ export function CreateVMDialog({
                     key={preset.vcpus}
                     type="button"
                     onClick={() => {
+                      memoryTouchedRef.current = true;
                       setVcpus(preset.vcpus);
-                      setMemoryMb(
-                        maxUsableMb
-                          ? Math.min(preset.defaultMemoryMb, maxUsableMb)
-                          : preset.defaultMemoryMb,
-                      );
+                      setMemoryMbInput(String(preset.defaultMemoryMb));
                     }}
                     className={cn(
                       'flex flex-col items-center justify-center border py-2.5 px-1.5 text-center transition-colors',
@@ -309,10 +467,11 @@ export function CreateVMDialog({
                 aria-label="Memory in megabytes"
                 min={128}
                 step={128}
-                value={memoryMb}
-                onChange={(e) =>
-                  setMemoryMb(Math.max(128, Number(e.target.value) || 128))
-                }
+                value={memoryMbInput}
+                onChange={(e) => {
+                  memoryTouchedRef.current = true;
+                  setMemoryMbInput(e.target.value);
+                }}
                 className="h-9 w-full border border-border bg-background px-3 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
               />
             </div>
@@ -326,7 +485,7 @@ export function CreateVMDialog({
                     <button
                       key={preset}
                       type="button"
-                      onClick={() => setDiskGb(preset)}
+                      onClick={() => setDiskGbInput(String(preset))}
                       className={cn(
                         'px-1.5 py-0.5 text-[10px] font-mono border transition-colors',
                         diskGb === preset
@@ -345,10 +504,8 @@ export function CreateVMDialog({
                   aria-label="Disk size in GB"
                   min={1}
                   max={2048}
-                  value={diskGb}
-                  onChange={(e) =>
-                    setDiskGb(Math.max(1, Number(e.target.value) || DEFAULT_DISK_GB))
-                  }
+                  value={diskGbInput}
+                  onChange={(e) => setDiskGbInput(e.target.value)}
                   className="h-9 w-full border border-border bg-background px-3 pr-8 font-mono text-[12.5px] text-foreground focus:border-primary focus:outline-none"
                 />
                 <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">
@@ -358,19 +515,36 @@ export function CreateVMDialog({
             </div>
           </div>
 
-          {templates.length > 0 && (
+          {(templates.length > 0 || availableImages.length > 1) && (
             <div className="space-y-1.5">
               <label className="block text-[12px] text-muted-foreground">
-                Snapshot (optional)
+                {templates.length > 0 ? 'Snapshot / Image (optional)' : 'Sandbox image'}
               </label>
               <div className="relative">
                 <select
                   aria-label="Sandbox snapshot"
                   value={fromSource}
-                  onChange={(e) => setFromSource(e.target.value)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setFromSource(val);
+                    if (val.startsWith('img:')) {
+                      setSelectedImage(val.slice(4));
+                    } else if (val === 'fresh') {
+                      setSelectedImage(defaultImageName);
+                    }
+                  }}
                   className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 text-[12.5px] text-foreground focus:border-primary focus:outline-none"
                 >
-                  <option value="fresh">Fresh Ubuntu 24.04 LTS</option>
+                  <option value="fresh">
+                    Fresh Ubuntu 24.04 LTS ({defaultImageName})
+                  </option>
+                  {availableImages
+                    .filter((img) => img.name !== defaultImageName)
+                    .map((img) => (
+                      <option key={`img-${img.name}`} value={`img:${img.name}`}>
+                        Image: {img.description ? `${img.description} (${img.name})` : img.name}
+                      </option>
+                    ))}
                   {templates.map((tpl) => (
                     <option key={`tpl-${tpl.id}`} value={`tpl:${tpl.name}`}>
                       Snapshot: {tpl.name}
@@ -381,6 +555,89 @@ export function CreateVMDialog({
               </div>
             </div>
           )}
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Placement
+            </label>
+            <div className="grid grid-cols-3 gap-1.5">
+              {(
+                [
+                  { id: 'auto', label: 'Auto (Scheduler)' },
+                  { id: 'pool', label: 'Pool' },
+                  { id: 'worker', label: 'Worker Node' },
+                ] as const
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setPlacementMode(opt.id)}
+                  className={cn(
+                    'h-8 border px-2 text-[11px] font-medium transition-colors',
+                    placementMode === opt.id
+                      ? 'border-primary bg-selected text-selected-foreground'
+                      : 'border-border bg-background text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {placementMode === 'pool' && (
+              <div className="relative pt-1">
+                <select
+                  aria-label="Placement pool"
+                  value={selectedPoolId}
+                  onChange={(e) => setSelectedPoolId(e.target.value)}
+                  className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
+                >
+                  <option value="">Select pool (default)</option>
+                  {pools.map((pool) => (
+                    <option key={pool.id} value={pool.name || pool.id}>
+                      {pool.name} ({workers.filter((w) => w.pool_id === (pool.name || pool.id)).length} nodes)
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              </div>
+            )}
+
+            {placementMode === 'worker' && (
+              <div className="space-y-1.5 pt-1">
+                <div className="relative">
+                  <select
+                    aria-label="Placement worker node"
+                    value={selectedWorkerId}
+                    onChange={(e) => setSelectedWorkerId(e.target.value)}
+                    className="h-9 w-full appearance-none border border-border bg-background px-3 pr-8 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
+                  >
+                    <option value="">Select worker node…</option>
+                    {workers.map((node) => {
+                      const allocVcpus = node.allocated_vcpus || node.total_vcpus || 0;
+                      const allocMem = node.allocated_mem_mb || node.total_mem_mb || 0;
+                      const usedVcpus = node.used_vcpus ?? 0;
+                      const usedMem = node.used_mem_mb ?? 0;
+                      return (
+                        <option key={node.id} value={node.id}>
+                          {node.name} [{node.pool_id}] · {node.status} · {usedVcpus}/{allocVcpus} vCPU · {formatMemory(Math.max(0, allocMem - usedMem))} free
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                </div>
+                {selectedWorker && (
+                  <div className="border border-border bg-muted/20 px-2.5 py-1.5 font-mono text-[10.5px] text-muted-foreground">
+                    Node {selectedWorker.name} ({selectedWorker.status}):{' '}
+                    {selectedWorker.used_vcpus ?? 0}/{selectedWorker.allocated_vcpus || selectedWorker.total_vcpus} vCPU ·{' '}
+                    {formatMemory(selectedWorker.used_mem_mb ?? 0)}/{formatMemory(selectedWorker.allocated_mem_mb || selectedWorker.total_mem_mb)} RAM ·{' '}
+                    {Math.round((selectedWorker.used_disk_mb ?? 0) / 1024)}/{Math.round((selectedWorker.allocated_disk_mb || selectedWorker.total_disk_mb) / 1024)} GB Disk
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="space-y-1.5">
             <label className="block text-[12px] text-muted-foreground">
@@ -476,6 +733,23 @@ export function CreateVMDialog({
                 </span>
               </button>
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[12px] text-muted-foreground">
+              Command on build (optional)
+            </label>
+            <input
+              type="text"
+              aria-label="Command on build"
+              value={buildCommand}
+              onChange={(e) => setBuildCommand(e.target.value)}
+              placeholder="e.g. uname -a && echo ready > /ready.txt"
+              className="h-9 w-full border border-border bg-background px-3 font-mono text-[12px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+            />
+            <p className="text-[10.5px] text-muted-foreground">
+              Automatically executes inside the sandbox upon initial creation and boot.
+            </p>
           </div>
 
           <div className="flex items-center gap-2 pt-1 pb-1">

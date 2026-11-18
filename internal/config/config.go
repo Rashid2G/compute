@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -164,6 +165,30 @@ type ServerConfig struct {
 	JailerBinary   string `json:"jailer_binary,omitempty"`
 	JailerBaseDir  string `json:"jailer_base_dir,omitempty"`
 	CgroupEnforce  bool   `json:"cgroup_enforce,omitempty"`
+	// PublicURL is the externally reachable base URL of this daemon, for
+	// example "https://compute-lab.tailb1be99.ts.net". Clients use it to print
+	// absolute serve links instead of the address they connected through
+	// (which may be a loopback or container-internal endpoint). Empty means
+	// "resolve links against the daemon address the client used".
+	PublicURL string `json:"public_url,omitempty"`
+	// ServeDomain selects hostname-based serving: every exposure gets its own
+	// origin at "<slug>.<serve_domain>". Requires a wildcard DNS record and a
+	// wildcard certificate for the domain. When empty, the daemon uses
+	// "localhost" for loopback binds and port-based serving otherwise.
+	ServeDomain string `json:"serve_domain,omitempty"`
+	// ServeBind is the listen address for port-based serving (one listener per
+	// exposure). Defaults to 127.0.0.1; set 0.0.0.0 to accept public traffic.
+	ServeBind string `json:"serve_bind,omitempty"`
+	// ServePortStart/ServePortEnd bound the port-based serve range.
+	ServePortStart int `json:"serve_port_start,omitempty"`
+	ServePortEnd   int `json:"serve_port_end,omitempty"`
+	// ServeTLSCertFile/ServeTLSKeyFile enable HTTPS on port-based serve
+	// listeners. Empty falls back to the API listener's TLS files.
+	ServeTLSCertFile string `json:"serve_tls_cert_file,omitempty"`
+	ServeTLSKeyFile  string `json:"serve_tls_key_file,omitempty"`
+	// ServeTokenKey signs short-lived tokens for private serve access. When
+	// empty it is derived from AdminSecret, else generated per process.
+	ServeTokenKey string `json:"serve_token_key,omitempty"`
 	// EdgeListen optionally starts an HTTP edge listener (default ":80" when
 	// DNS is enabled) that dispatches by Host header: the reserved "api" and
 	// apex/gui/www subdomains of the base domain are served by the daemon
@@ -174,6 +199,131 @@ type ServerConfig struct {
 	// listener. Leave empty to terminate TLS in a reverse proxy or Tailscale.
 	TLSCertFile string `json:"tls_cert_file,omitempty"`
 	TLSKeyFile  string `json:"tls_key_file,omitempty"`
+}
+
+// NormalizedPublicURL returns the configured externally reachable base URL
+// without a trailing slash. Values without a scheme are assumed to be HTTPS
+// (the common case for a reverse proxy or tailnet name).
+func (c ServerConfig) NormalizedPublicURL() string {
+	u := strings.TrimSpace(c.PublicURL)
+	if u == "" {
+		return ""
+	}
+	if !strings.Contains(u, "://") {
+		u = "https://" + u
+	}
+	return strings.TrimRight(u, "/")
+}
+
+// PublicURLHost returns the host (no scheme or path) of the configured public
+// URL, or "" when it is unset.
+func (c ServerConfig) PublicURLHost() string {
+	u := c.NormalizedPublicURL()
+	if u == "" {
+		return ""
+	}
+	rest := u
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if h, _, err := net.SplitHostPort(rest); err == nil {
+		return h
+	}
+	return rest
+}
+
+// ListenHost returns the host part of the API listen address.
+func (c ServerConfig) ListenHost() string {
+	addr := strings.TrimPrefix(strings.TrimSpace(c.ListenAddr), "tcp://")
+	if strings.HasPrefix(addr, "unix://") || addr == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		return h
+	}
+	return addr
+}
+
+// ServeMode reports how sandbox exposures are addressed: "subdomain" when a
+// serve domain (explicit or localhost) is available, otherwise "port".
+func (c GlobalConfig) ServeMode() string {
+	if strings.TrimSpace(c.Server.ServeDomain) != "" {
+		return "subdomain"
+	}
+	if host := c.Server.PublicURLHost(); host != "" && !isLoopbackHost(host) {
+		return "port"
+	}
+	if isLoopbackHost(c.Server.ListenHost()) {
+		return "subdomain"
+	}
+	return "port"
+}
+
+// ServeDomainResolved returns the subdomain suffix used in subdomain mode.
+// Explicit configuration wins; loopback binds default to "localhost".
+func (c GlobalConfig) ServeDomainResolved() string {
+	if d := strings.Trim(strings.TrimSpace(c.Server.ServeDomain), "."); d != "" {
+		return strings.ToLower(d)
+	}
+	if c.ServeMode() == "subdomain" {
+		return "localhost"
+	}
+	return ""
+}
+
+// ServePortRange returns the inclusive port range for port-based serving.
+func (c GlobalConfig) ServePortRange() (int, int) {
+	start := c.Server.ServePortStart
+	if start <= 0 {
+		start = 18400
+	}
+	end := c.Server.ServePortEnd
+	if end <= 0 {
+		end = start + 100
+	}
+	if end < start {
+		end = start
+	}
+	if start > 65535 {
+		start = 65535
+	}
+	if end > 65535 {
+		end = 65535
+	}
+	return start, end
+}
+
+// ServeScheme returns the scheme used for generated serve URLs. Port-mode
+// listeners speak plain HTTP unless serve TLS is configured; subdomain mode
+// assumes TLS in front (wildcard certificate or reverse proxy).
+func (c GlobalConfig) ServeScheme() string {
+	if strings.TrimSpace(c.Server.ServeTLSCertFile) != "" || strings.TrimSpace(c.Server.ServeTLSKeyFile) != "" {
+		return "https"
+	}
+	if c.ServeMode() == "subdomain" {
+		if strings.HasPrefix(c.Server.NormalizedPublicURL(), "https://") {
+			return "https"
+		}
+		if domain := c.ServeDomainResolved(); domain != "" && !isLoopbackHost(domain) {
+			return "https"
+		}
+	}
+	return "http"
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // DefaultsConfig holds default microVM specifications
@@ -466,6 +616,7 @@ func ResolveConfig(explicitPath string) (GlobalConfig, string, error) {
 		"config/compute.json",
 		"config/network.json",
 		"/etc/compute/config.json",
+		"/etc/compute/daemon.json",
 	}
 
 	for _, p := range candidatePaths {

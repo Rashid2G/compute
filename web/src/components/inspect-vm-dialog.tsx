@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import {
+  ArrowRightLeft,
   CheckCircle2,
   ExternalLink,
   Globe,
@@ -34,7 +35,13 @@ import {
 import { toast } from 'sonner';
 import { api, errorMessage } from '@/lib/api';
 import { formatDateTime, formatMemory } from '@/lib/format';
-import type { NetworkInspectResult, VM } from '@/lib/types';
+import type {
+  NetworkInspectResult,
+  PortForwardRecord,
+  VM,
+  WorkerNodeRecord,
+  WorkerPoolRecord,
+} from '@/lib/types';
 
 function Fact({
   label,
@@ -63,27 +70,46 @@ function sandboxZoneLabel(vm: VM): string {
 
 export function InspectVMDialog({
   vm,
+  workers = [],
+  pools = [],
+  portForwards: portForwardsProp,
+  isAdmin = false,
   open,
   onOpenChange,
   onUpdated,
 }: {
   vm: VM | null;
+  workers?: WorkerNodeRecord[];
+  pools?: WorkerPoolRecord[];
+  portForwards?: PortForwardRecord[];
+  isAdmin?: boolean;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onUpdated?: () => void;
 }) {
   const [inspecting, setInspecting] = useState(false);
   const [network, setNetwork] = useState<NetworkInspectResult | null>(null);
+  const [fetchedPortForwards, setFetchedPortForwards] = useState<PortForwardRecord[]>([]);
+  const [migrateOpen, setMigrateOpen] = useState(false);
+  const [targetWorkerId, setTargetWorkerId] = useState('');
+  const [targetPoolId, setTargetPoolId] = useState('');
+  const [migrateForce, setMigrateForce] = useState(false);
+
+  const vmId = vm?.id ?? null;
 
   useEffect(() => {
-    if (!open || !vm) return;
+    if (!open || !vmId) return;
 
     let cancelled = false;
     setInspecting(true);
     setNetwork(null);
+    setMigrateOpen(false);
+    setTargetWorkerId('');
+    setTargetPoolId('');
+    setMigrateForce(false);
 
     api
-      .inspectNetwork(vm.id)
+      .inspectNetwork(vmId)
       .then((result) => {
         if (!cancelled) setNetwork(result);
       })
@@ -94,14 +120,58 @@ export function InspectVMDialog({
         if (!cancelled) setInspecting(false);
       });
 
+    if (portForwardsProp === undefined && typeof api.listPortForwards === 'function') {
+      void api
+        .listPortForwards()
+        .then((list) => {
+          if (!cancelled) setFetchedPortForwards(list || []);
+        })
+        .catch(() => {
+          if (!cancelled) setFetchedPortForwards([]);
+        });
+    }
+
     return () => {
       cancelled = true;
     };
-  }, [open, vm]);
+  }, [open, vmId, portForwardsProp]);
 
   if (!vm) return null;
 
   const json = JSON.stringify(vm, null, 2);
+  const workerNode = workers.find((w) => w.id === vm.worker_id);
+  const workerLabel = workerNode
+    ? `${workerNode.name} (${workerNode.id})`
+    : vm.worker_id || 'nod_host_local';
+  const vmPortForwards = (portForwardsProp ?? fetchedPortForwards).filter(
+    (pf) => pf.vm_id === vm.id || pf.vm_name === vm.name,
+  );
+
+  function handleMigrateSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!vm) return;
+    const targetVM = vm;
+    const vmName = targetVM.name || targetVM.id;
+    const payload = {
+      target_worker_id: targetWorkerId || undefined,
+      target_pool_id: targetPoolId || undefined,
+      force: migrateForce,
+    };
+    onOpenChange(false);
+    const toastID = toast.loading(`Migrating sandbox ${vmName}…`);
+    void api
+      .migrateVM(targetVM.id, payload)
+      .then(() => {
+        toast.success(`Migrated sandbox ${vmName}`, { id: toastID });
+        onUpdated?.();
+      })
+      .catch((err) => {
+        toast.error(`Migration failed for ${vmName}`, {
+          id: toastID,
+          description: errorMessage(err),
+        });
+      });
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -120,7 +190,17 @@ export function InspectVMDialog({
                 </DialogDescription>
               </div>
             </div>
-            <StatusBadge status={vm.status} />
+            <div className="flex items-center gap-2">
+              {vm.auto_hibernated && (
+                <span
+                  title={vm.hibernate_reason || 'Auto-hibernated to SSD'}
+                  className="border border-warning/40 bg-warning/10 px-2 py-0.5 font-mono text-[10.5px] uppercase text-warning"
+                >
+                  SSD Hibernated
+                </span>
+              )}
+              <StatusBadge status={vm.status} />
+            </div>
           </div>
         </DialogHeader>
 
@@ -138,6 +218,17 @@ export function InspectVMDialog({
                 <Fact label="vCPUs" value={String(vm.vcpus)} />
                 <Fact label="Memory" value={formatMemory(vm.memory_mb)} />
                 <Fact label="PID" value={vm.pid ? String(vm.pid) : '—'} />
+                <Fact label="Worker Node" value={workerLabel} />
+                <Fact label="Pool" value={vm.pool_id || 'default'} />
+                <Fact
+                  label="Hibernation"
+                  value={
+                    vm.auto_hibernated
+                      ? `SSD Hibernated${vm.hibernate_reason ? ` (${vm.hibernate_reason})` : ''}`
+                      : 'Active'
+                  }
+                  mono={false}
+                />
                 <Fact label="Dedicated IP" value={vm.ip_address} />
                 <Fact label="Public IP" value={vm.public_ip_enabled ? (vm.public_ip || vm.ip_address) : 'Disabled (off)'} />
                 <Fact label="Sandbox Network" value={vm.network_isolation === 'isolated' ? 'Isolated (own sandbox only)' : 'Account (all account sandboxes)'} mono={false} />
@@ -155,7 +246,99 @@ export function InspectVMDialog({
                 <Fact label="Zone" value={sandboxZoneLabel(vm)} mono />
               </div>
 
-              <SandboxAccessCard vm={vm} className="mt-4" />
+              <SandboxAccessCard vm={vm} portForwards={vmPortForwards} className="mt-4" />
+
+              {isAdmin && (
+                <div className="mt-4 rounded-md border p-3.5 bg-secondary/15 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-medium flex items-center gap-1.5">
+                        <ArrowRightLeft className="h-3.5 w-3.5 text-primary" />
+                        Migrate Sandbox Placement
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-muted-foreground">
+                        Move this sandbox to another worker node or placement pool.
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs"
+                      onClick={() => setMigrateOpen((v) => !v)}
+                    >
+                      {migrateOpen ? 'Hide Migration' : 'Migrate Sandbox'}
+                    </Button>
+                  </div>
+
+                  {migrateOpen && (
+                    <form
+                      onSubmit={handleMigrateSubmit}
+                      className="space-y-3 border-t border-border pt-3 text-xs"
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] text-muted-foreground mb-1">
+                            Target Worker Node
+                          </label>
+                          <select
+                            aria-label="Target Worker Node"
+                            value={targetWorkerId}
+                            onChange={(e) => setTargetWorkerId(e.target.value)}
+                            className="h-8 w-full border border-border bg-background px-2 font-mono text-xs text-foreground focus:border-primary focus:outline-none"
+                          >
+                            <option value="">Auto-select in target pool</option>
+                            {workers
+                              .filter((w) => w.id !== vm.worker_id)
+                              .map((w) => (
+                                <option key={w.id} value={w.id}>
+                                  {w.name} ({w.pool_id} · {w.status})
+                                </option>
+                              ))}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] text-muted-foreground mb-1">
+                            Target Pool
+                          </label>
+                          <select
+                            aria-label="Target Pool"
+                            value={targetPoolId}
+                            onChange={(e) => setTargetPoolId(e.target.value)}
+                            className="h-8 w-full border border-border bg-background px-2 font-mono text-xs text-foreground focus:border-primary focus:outline-none"
+                          >
+                            <option value="">Keep current / match worker</option>
+                            <option value="default">default</option>
+                            {pools
+                              .filter((p) => p.name !== 'default')
+                              .map((p) => (
+                                <option key={p.id || p.name} value={p.name}>
+                                  {p.name}
+                                </option>
+                              ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="inline-flex items-center gap-2 text-foreground">
+                          <input
+                            type="checkbox"
+                            checked={migrateForce}
+                            onChange={(e) => setMigrateForce(e.target.checked)}
+                            className="accent-primary"
+                          />
+                          <span>Force stop &amp; migrate if currently running</span>
+                        </label>
+                        <Button type="submit" size="sm" className="h-8 text-xs">
+                          Confirm Migration
+                        </Button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              )}
 
               <div className="mt-4 flex items-center justify-between rounded-md border p-3.5 bg-secondary/15">
                 <div>
@@ -224,6 +407,62 @@ export function InspectVMDialog({
                 <Fact label="Gateway" value={network?.gateway || '—'} />
                 <Fact label="Status" value={network?.status || vm.status} />
               </div>
+
+              {vmPortForwards.length > 0 && (
+                <div className="mt-4 rounded-md border p-3.5 bg-secondary/15 space-y-2">
+                  <div className="text-xs font-medium flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-primary" />
+                    Exposed Ports ({vmPortForwards.length})
+                  </div>
+                  <div className="divide-y divide-border border border-border bg-background">
+                    {vmPortForwards.map((pf) => {
+                      const url =
+                        pf.public_url ||
+                        (pf.host_port > 0
+                          ? `${window.location.protocol}//${window.location.hostname}:${pf.host_port}`
+                          : '');
+                      return (
+                        <div
+                          key={pf.id}
+                          className="flex items-center justify-between gap-2 px-3 py-2 font-mono text-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-foreground font-medium shrink-0">
+                              :{pf.guest_port}
+                            </span>
+                            <span
+                              className={
+                                pf.public
+                                  ? 'shrink-0 border border-success/40 bg-success/10 px-1.5 py-0.5 text-[10px] uppercase text-success'
+                                  : 'shrink-0 border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground'
+                              }
+                            >
+                              {pf.public ? 'public' : 'private'}
+                            </span>
+                            {url && (
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="truncate text-[color:var(--link)] hover:underline"
+                              >
+                                {url}
+                              </a>
+                            )}
+                          </div>
+                          {url && (
+                            <CopyButton
+                              value={url}
+                              label={`Copy URL for port ${pf.guest_port}`}
+                              className="h-6 w-6 shrink-0"
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="mt-4 flex items-center justify-between rounded-md border p-3.5 bg-secondary/15">
                 <div>

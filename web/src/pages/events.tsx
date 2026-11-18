@@ -8,7 +8,6 @@ import {
   Play,
   Plus,
   Radio,
-  RefreshCw,
   Search,
   Send,
   Trash2,
@@ -20,6 +19,7 @@ import { api, errorMessage } from '@/lib/api';
 import { formatTimestamp } from '@/lib/format';
 import type {
   AuditEventRecord,
+  OperationRecord,
   OTelConfigRecord,
   WebhookEndpointRecord,
 } from '@/lib/types';
@@ -41,6 +41,20 @@ const AVAILABLE_EVENT_TYPES = [
   'worker.heartbeat',
   'volume.attached',
 ];
+
+function operationStatusClass(status: string): string {
+  switch (status) {
+    case 'succeeded':
+      return 'border-success/40 bg-success/10 text-success';
+    case 'failed':
+    case 'canceled':
+      return 'border-destructive/40 bg-destructive/10 text-destructive';
+    case 'running':
+      return 'border-info/40 bg-info/10 text-info';
+    default:
+      return 'border-warning/40 bg-warning/10 text-warning';
+  }
+}
 
 export function EventsPage({
   events: propEvents,
@@ -65,9 +79,13 @@ export function EventsPage({
   const [auditEvents, setAuditEvents] = useState<AuditEventRecord[]>(
     propEvents || [],
   );
-  const [activeTab, setActiveTab] = useState<'webhooks' | 'otel' | 'audit'>(
-    'webhooks',
-  );
+  const [operations, setOperations] = useState<OperationRecord[]>([]);
+  const [operationFilter, setOperationFilter] = useState<
+    'active' | 'all' | 'failed'
+  >('active');
+  const [activeTab, setActiveTab] = useState<
+    'webhooks' | 'otel' | 'audit' | 'operations'
+  >('webhooks');
 
   // Add Webhook form
   const [addWhOpen, setAddWhOpen] = useState(false);
@@ -90,14 +108,16 @@ export function EventsPage({
   );
 
   const loadAll = useCallback(async () => {
-    const [whRes, otelRes, evtRes] = await Promise.allSettled([
+    const [whRes, otelRes, evtRes, opRes] = await Promise.allSettled([
       api.listWebhooks(),
       api.getOTelConfig(),
       api.listEvents(),
+      api.listOperations({ limit: 200 }),
     ]);
     if (whRes.status === 'fulfilled') setWebhooks(whRes.value || []);
     if (otelRes.status === 'fulfilled' && otelRes.value) setOtel(otelRes.value);
     if (evtRes.status === 'fulfilled') setAuditEvents(evtRes.value || []);
+    if (opRes.status === 'fulfilled') setOperations(opRes.value || []);
   }, []);
 
   useEffect(() => {
@@ -144,6 +164,50 @@ export function EventsPage({
         e.id.toLowerCase().includes(q),
     );
   }, [auditEvents, auditSearch]);
+
+  // Operations are the durable view of accepted-but-unfinished work. Refresh
+  // them continuously so the tab count stays accurate, and faster while the
+  // operations tab is open.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const ops = await api.listOperations({ limit: 200 });
+        if (!cancelled) setOperations(ops || []);
+      } catch {
+        // Keep the last snapshot; the audit stream still works.
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(
+      refresh,
+      activeTab === 'operations' ? 3000 : 10000,
+    );
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTab]);
+
+  const filteredOperations = useMemo(() => {
+    if (operationFilter === 'all') return operations;
+    if (operationFilter === 'failed') {
+      return operations.filter(
+        (op) => op.status === 'failed' || op.status === 'canceled',
+      );
+    }
+    return operations.filter(
+      (op) => op.status === 'queued' || op.status === 'running',
+    );
+  }, [operations, operationFilter]);
+
+  const activeOperationCount = useMemo(
+    () =>
+      operations.filter(
+        (op) => op.status === 'queued' || op.status === 'running',
+      ).length,
+    [operations],
+  );
 
   function handleCreateWebhook(e: React.FormEvent) {
     e.preventDefault();
@@ -239,14 +303,6 @@ export function EventsPage({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => void loadAll()}
-            className="flex h-8 items-center gap-1.5 border border-border bg-background px-3 text-[12px] text-muted-foreground hover:text-foreground"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            <span>Refresh</span>
-          </button>
-          <button
-            type="button"
             onClick={() => {
               setActiveTab('webhooks');
               setAddWhOpen(true);
@@ -296,6 +352,18 @@ export function EventsPage({
           )}
         >
           Live Audit Stream ({auditEvents.length})
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab('operations')}
+          className={cn(
+            'border-b-2 px-4 py-2 text-[12.5px] transition-colors',
+            activeTab === 'operations'
+              ? 'border-primary text-foreground font-medium'
+              : 'border-transparent text-muted-foreground hover:text-foreground',
+          )}
+        >
+          Operations ({activeOperationCount} active)
         </button>
       </div>
 
@@ -809,6 +877,107 @@ export function EventsPage({
               </pre>
             </div>
           )}
+        </div>
+      )}
+
+      {/* TAB 4: Durable operations */}
+      {activeTab === 'operations' && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-1 border border-border">
+              {(
+                [
+                  ['active', 'Active'],
+                  ['failed', 'Failed'],
+                  ['all', 'All'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setOperationFilter(value)}
+                  className={cn(
+                    'px-3 py-1.5 text-[11.5px] transition-colors',
+                    operationFilter === value
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground',
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] text-muted-foreground">
+              Persisted before execution · refreshes every 3s
+            </span>
+          </div>
+
+          <div className="border border-border bg-background overflow-x-auto">
+            <table className="w-full border-collapse text-left text-[12px]">
+              <thead>
+                <tr className="border-b border-border bg-muted/30 text-[11.5px] text-muted-foreground">
+                  <th className="py-2 px-3 font-normal">Operation</th>
+                  <th className="py-2 px-3 font-normal">Target</th>
+                  <th className="py-2 px-3 font-normal">Status</th>
+                  <th className="py-2 px-3 font-normal">Progress</th>
+                  <th className="py-2 px-3 font-normal">Actor</th>
+                  <th className="py-2 px-3 font-normal">Updated</th>
+                  <th className="py-2 px-3 font-normal">Detail</th>
+                </tr>
+              </thead>
+              {filteredOperations.length === 0 ? (
+                <tbody>
+                  <tr>
+                    <td
+                      colSpan={7}
+                      className="py-12 text-center text-muted-foreground"
+                    >
+                      No operations in this view. Long-running actions appear
+                      here as soon as they are accepted.
+                    </td>
+                  </tr>
+                </tbody>
+              ) : (
+                <tbody className="divide-y divide-border font-mono text-[11.5px]">
+                  {filteredOperations.map((op) => (
+                    <tr key={op.id} className="hover:bg-muted/30">
+                      <td className="py-2 px-3 text-foreground font-medium">
+                        {op.kind}
+                        <span className="ml-2 text-[10px] text-muted-foreground">
+                          {op.id}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-foreground">
+                        {op.target_name || op.target_id || '—'}
+                      </td>
+                      <td className="py-2 px-3">
+                        <span
+                          className={cn(
+                            'border px-1.5 py-0.5 text-[10px] uppercase',
+                            operationStatusClass(op.status),
+                          )}
+                        >
+                          {op.status}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-muted-foreground">
+                        {op.progress}%
+                      </td>
+                      <td className="py-2 px-3 text-muted-foreground">
+                        {op.actor || 'system'}
+                      </td>
+                      <td className="py-2 px-3 text-muted-foreground">
+                        {formatTimestamp(op.updated_at)}
+                      </td>
+                      <td className="max-w-[26rem] truncate py-2 px-3 text-muted-foreground">
+                        {op.error_msg || op.request_json || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              )}
+            </table>
+          </div>
         </div>
       )}
     </div>

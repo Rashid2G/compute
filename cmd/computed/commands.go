@@ -110,8 +110,8 @@ func runInit(args []string) {
 	fmt.Printf("  computed admin user create --username admin --email admin@example.com --password <secret> --data-dir %s\n", *dataDir)
 }
 
-// runInitImages performs the first-run image/SSH-key bootstrap. It is used by
-// the compute-init compose service and is safe to run on every start.
+// runInitImages performs the first-run image/SSH-key bootstrap via the CLI
+// (`computed init --images`) and is safe to run idempotently.
 func runInitImages(mode, manifestURL, imagesDir, sshKeyPath string) {
 	cfg, _, err := config.ResolveConfig("")
 	if err != nil {

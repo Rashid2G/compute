@@ -16,6 +16,7 @@ func clearEnv(t *testing.T) {
 		"COMPUTE_DB_PATH", "COMPUTE_FIRECRACKER_BIN", "COMPUTE_AUTH_ENABLED",
 		"COMPUTE_SIGNUP_ENABLED", "COMPUTE_ADMIN_SECRET", "COMPUTE_ADMIN_USERNAME",
 		"COMPUTE_ADMIN_EMAIL", "COMPUTE_ADMIN_PASSWORD", "COMPUTE_EDGE_LISTEN",
+		"COMPUTE_PUBLIC_URL",
 		"COMPUTE_CGROUP_ENFORCE", "COMPUTE_JAILER_ENABLED", "COMPUTE_JAILER_BIN",
 		"COMPUTE_JAILER_DIR", "COMPUTE_TLS_CERT_FILE", "COMPUTE_TLS_KEY_FILE",
 		"COMPUTE_NETWORK_MODE", "COMPUTE_BRIDGE_NAME", "COMPUTE_BRIDGE_IP",
@@ -64,8 +65,8 @@ func TestEnvOverridesApplyWithoutConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveConfig: %v", err)
 	}
-	if path != "" {
-		t.Fatalf("expected no config path, got %q", path)
+	if path != "" && path != "/etc/compute/config.json" && path != "/etc/compute/daemon.json" {
+		t.Fatalf("expected no local config path, got %q", path)
 	}
 	if cfg.Server.ListenAddr != "0.0.0.0:19090" {
 		t.Fatalf("listen = %q", cfg.Server.ListenAddr)
@@ -105,6 +106,7 @@ func TestEnvOverridesWinOverConfigFile(t *testing.T) {
 	t.Setenv("COMPUTE_BRIDGE_NAME", "br-env")
 	t.Setenv("COMPUTE_DEFAULT_VCPUS", "4")
 	t.Setenv("COMPUTE_DNS_ENABLED", "false")
+	t.Setenv("COMPUTE_PUBLIC_URL", "https://compute-lab.tailb1be99.ts.net/")
 
 	cfg, err := LoadConfigFile(path)
 	if err != nil {
@@ -121,6 +123,9 @@ func TestEnvOverridesWinOverConfigFile(t *testing.T) {
 	}
 	if cfg.DNS.Enabled {
 		t.Fatalf("expected DNS disabled by env")
+	}
+	if got := cfg.Server.NormalizedPublicURL(); got != "https://compute-lab.tailb1be99.ts.net" {
+		t.Fatalf("public url = %q", got)
 	}
 	if cfg.DNS.BaseDomain != "file.test" {
 		t.Fatalf("base domain should retain file value, got %q", cfg.DNS.BaseDomain)

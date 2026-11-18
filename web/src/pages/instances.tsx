@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRightLeft,
   Camera,
   Check,
   ChevronDown,
@@ -9,15 +10,16 @@ import {
   Globe,
   HardDrive,
   HelpCircle,
+  Loader2,
   MoreHorizontal,
   Pause,
   Play,
   Plus,
-  RefreshCw,
   RotateCcw,
   Scaling,
   Server,
   Shield,
+  SlidersHorizontal,
   Square,
   Terminal,
   Trash2,
@@ -25,6 +27,8 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
+
+import { resolveQueuedTask } from '@/lib/queued-task';
 
 import {
   AlertDialog,
@@ -47,6 +51,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { SandboxOptionsDialog } from '@/components/sandbox-options-dialog';
 import { SSHTerminal, type SSHTerminalHandle } from '@/components/ssh-terminal';
 import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
@@ -55,16 +60,24 @@ import { primarySandboxAddress, sandboxAccess } from '@/lib/sandbox-access';
 import { openSSHTerminalWindow } from '@/lib/terminal';
 import type {
   AuditEventRecord,
+  OperationRecord,
   PortForwardRecord,
   VM,
   VolumeRecord,
+  WorkerNodeRecord,
+  WorkerPoolRecord,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface InstancesPageProps {
   vms: VM[];
+  workers?: WorkerNodeRecord[];
+  pools?: WorkerPoolRecord[];
+  volumes?: VolumeRecord[];
+  portForwards?: PortForwardRecord[];
   events?: AuditEventRecord[];
   isLoading: boolean;
+  isAdmin?: boolean;
   onNew: () => void;
   onRun: (vm: VM) => void;
   onStop: (vm: VM) => void;
@@ -74,6 +87,7 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole?: (vm: VM) => void;
+  onExec?: (vm: VM, initialCommand?: string) => void;
   onRefresh?: () => void | Promise<void>;
 }
 
@@ -85,11 +99,11 @@ function isVisibleSandbox(vm: VM): boolean {
   return true;
 }
 
-function deriveTierType(vcpus: number): 'small' | 'default' | 'large' | 'xlarge' {
+function deriveTierType(vcpus: number): 'micro' | 'small' | 'medium' | 'large' {
+  if (vcpus <= 1) return 'micro';
   if (vcpus <= 2) return 'small';
-  if (vcpus <= 4) return 'default';
-  if (vcpus <= 8) return 'large';
-  return 'xlarge';
+  if (vcpus <= 4) return 'medium';
+  return 'large';
 }
 
 function deriveTierLabel(vcpus: number, memoryMb: number): string {
@@ -103,7 +117,12 @@ function deriveTierLabel(vcpus: number, memoryMb: number): string {
 
 export function InstancesPage({
   vms: rawVMs,
+  workers = [],
+  pools = [],
+  volumes: propVolumes,
+  portForwards: propPortForwards,
   isLoading,
+  isAdmin = false,
   onNew,
   onRun,
   onStop,
@@ -112,9 +131,48 @@ export function InstancesPage({
   onDelete,
   onBulkDelete,
   onInspect,
+  onExec,
   onRefresh,
 }: InstancesPageProps) {
   const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
+
+  // Surface accepted-but-unfinished work (queued creations, clones, deletes)
+  // directly above the table so a queued request is never invisible.
+  const [activeOperations, setActiveOperations] = useState<OperationRecord[]>(
+    [],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const ops = await api.listOperations({
+          status: 'queued,running',
+          limit: 50,
+        });
+        if (!cancelled) {
+          setActiveOperations(
+            (ops || []).filter((op) => op.kind.startsWith('sandbox.')),
+          );
+        }
+      } catch {
+        // Visibility is best-effort; the table still renders from cluster state.
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const workerNameById = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const w of workers) {
+      map[w.id] = w.name;
+    }
+    return map;
+  }, [workers]);
 
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<string>('all');
@@ -127,6 +185,7 @@ export function InstancesPage({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [cloneTarget, setCloneTarget] = useState<VM | null>(null);
   const [snapshotTarget, setSnapshotTarget] = useState<VM | null>(null);
+  const [optionsTarget, setOptionsTarget] = useState<VM | null>(null);
   const [stopConfirmTargets, setStopConfirmTargets] = useState<VM[] | null>(null);
 
   // Selected sandbox detail view state
@@ -143,18 +202,34 @@ export function InstancesPage({
   const [resizeDiskGb, setResizeDiskGb] = useState(20);
   const [resizeAutoStart, setResizeAutoStart] = useState(true);
 
+  // Migrate modal state
+  const [migrateTarget, setMigrateTarget] = useState<VM | null>(null);
+  const [migrateWorkerId, setMigrateWorkerId] = useState('');
+  const [migratePoolId, setMigratePoolId] = useState('');
+  const [migrateForce, setMigrateForce] = useState(false);
+
   // Detail cards state: Volumes & Port Forwards
-  const [volumes, setVolumes] = useState<VolumeRecord[]>([]);
+  const [volumes, setVolumes] = useState<VolumeRecord[]>(propVolumes || []);
   const [volumesLoading, setVolumesLoading] = useState(false);
   const [attachVolumeId, setAttachVolumeId] = useState('');
 
-  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>([]);
+  const [portForwards, setPortForwards] = useState<PortForwardRecord[]>(
+    propPortForwards || [],
+  );
   const [forwardsLoading, setForwardsLoading] = useState(false);
   const [addForwardOpen, setAddForwardOpen] = useState(false);
-  const [fwHostPort, setFwHostPort] = useState('8080');
   const [fwGuestPort, setFwGuestPort] = useState('8080');
   const [fwProtocol, setFwProtocol] = useState<'TCP' | 'HTTP/HTTPS'>('TCP');
   const [fwSubdomain, setFwSubdomain] = useState('');
+  const [fwPublic, setFwPublic] = useState(true);
+
+  useEffect(() => {
+    if (propVolumes) setVolumes(propVolumes);
+  }, [propVolumes]);
+
+  useEffect(() => {
+    if (propPortForwards) setPortForwards(propPortForwards);
+  }, [propPortForwards]);
 
   const selectedVMs = useMemo(
     () => vms.filter((v) => selectedIds.includes(v.id)),
@@ -166,18 +241,30 @@ export function InstancesPage({
     [vms, selectedVMId],
   );
 
+  const liveOptionsTarget = useMemo(
+    () =>
+      optionsTarget
+        ? vms.find((v) => v.id === optionsTarget.id) ?? optionsTarget
+        : null,
+    [vms, optionsTarget],
+  );
+
   const selectedAccess = useMemo(() => sandboxAccess(selectedVM), [selectedVM]);
 
   const filteredVMs = useMemo(() => {
     return vms.filter((vm) => {
       const q = search.trim().toLowerCase();
       const access = sandboxAccess(vm);
+      const workerName = vm.worker_id ? workerNameById[vm.worker_id] : '';
       const matchable = [
         vm.name,
         vm.id,
         vm.internal_id,
         vm.ip_address,
         vm.hostname,
+        vm.worker_id,
+        workerName,
+        vm.pool_id,
         access.url,
         access.sshHost,
       ]
@@ -200,7 +287,7 @@ export function InstancesPage({
 
       return matchesSearch && matchesState && matchesSnapshot && matchesType;
     });
-  }, [vms, search, stateFilter, snapshotFilter, typeFilter]);
+  }, [vms, search, stateFilter, snapshotFilter, typeFilter, workerNameById]);
 
   const allSelected =
     filteredVMs.length > 0 && selectedIds.length === filteredVMs.length;
@@ -226,17 +313,26 @@ export function InstancesPage({
     setTimeout(() => setCopiedId(null), 1500);
   };
 
-  const loadSandboxConnectivity = useCallback(async () => {
-    setVolumesLoading(true);
-    setForwardsLoading(true);
+  const hasPropVolumesRef = useRef(propVolumes !== undefined);
+  const hasPropPortForwardsRef = useRef(propPortForwards !== undefined);
+  hasPropVolumesRef.current = propVolumes !== undefined;
+  hasPropPortForwardsRef.current = propPortForwards !== undefined;
+
+  const loadSandboxConnectivity = useCallback(async (force = false) => {
+    const needVolumes = force || !hasPropVolumesRef.current;
+    const needForwards = force || !hasPropPortForwardsRef.current;
+    if (!needVolumes && !needForwards) return;
+
+    if (needVolumes) setVolumesLoading(true);
+    if (needForwards) setForwardsLoading(true);
     const [volsRes, pfsRes] = await Promise.allSettled([
-      api.listVolumes(),
-      api.listPortForwards(),
+      needVolumes ? api.listVolumes() : Promise.resolve(null),
+      needForwards ? api.listPortForwards() : Promise.resolve(null),
     ]);
-    if (volsRes.status === 'fulfilled') {
+    if (needVolumes && volsRes.status === 'fulfilled' && volsRes.value) {
       setVolumes(volsRes.value || []);
     }
-    if (pfsRes.status === 'fulfilled') {
+    if (needForwards && pfsRes.status === 'fulfilled' && pfsRes.value) {
       setPortForwards(pfsRes.value || []);
     }
     setVolumesLoading(false);
@@ -249,8 +345,42 @@ export function InstancesPage({
     if (!selectedVMKey) return;
     setAddForwardOpen(false);
     setAttachVolumeId('');
-    void loadSandboxConnectivity();
+    void loadSandboxConnectivity(false);
   }, [selectedVMKey, loadSandboxConnectivity]);
+
+  function openMigrateModal(vm: VM) {
+    setMigrateTarget(vm);
+    setMigrateWorkerId('');
+    setMigratePoolId(vm.pool_id || '');
+    setMigrateForce(false);
+  }
+
+  function handleMigrateSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!migrateTarget) return;
+    const src = migrateTarget;
+    const vmName = src.name || src.id;
+    const payload = {
+      target_worker_id: migrateWorkerId || undefined,
+      target_pool_id: migratePoolId || undefined,
+      force: migrateForce,
+    };
+    setMigrateTarget(null);
+
+    const toastID = toast.loading(`Migrating sandbox ${vmName}…`);
+    void api
+      .migrateVM(src.id, payload)
+      .then(async () => {
+        toast.success(`Migrated sandbox ${vmName}`, { id: toastID });
+        await onRefresh?.();
+      })
+      .catch((err) => {
+        toast.error(`Migration failed for ${vmName}`, {
+          id: toastID,
+          description: errorMessage(err),
+        });
+      });
+  }
 
   function openResizeModal(vm: VM) {
     setResizeTarget(vm);
@@ -295,8 +425,7 @@ export function InstancesPage({
     setRestartingId(vm.id);
     const toastID = toast.loading(`Restarting ${vmName}…`);
     try {
-      await api.stopVM(vm.id);
-      await api.runVM(vm.id);
+      await api.restartVM(vm.id);
       toast.success(`${vmName} restarted`, { id: toastID });
       await onRefresh?.();
     } catch (err) {
@@ -320,7 +449,7 @@ export function InstancesPage({
         id: toastID,
       });
       setAttachVolumeId('');
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
       toast.error(`Attach failed: ${errorMessage(err)}`, { id: toastID });
     }
@@ -331,7 +460,7 @@ export function InstancesPage({
     try {
       await api.detachVolume(vol.id);
       toast.success(`Detached ${vol.name}`, { id: toastID });
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
       toast.error(`Detach failed: ${errorMessage(err)}`, { id: toastID });
     }
@@ -340,52 +469,78 @@ export function InstancesPage({
   async function handleAddPortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!selectedVM) return;
-    const hostPort = Number(fwHostPort);
     const guestPort = Number(fwGuestPort);
-    if (!hostPort || !guestPort) {
-      toast.error('Host and guest ports are required');
+    if (!guestPort) {
+      toast.error('A guest port is required');
       return;
     }
-    const toastID = toast.loading(`Adding port forward :${hostPort} → :${guestPort}…`);
+    const label = `:${guestPort}`;
+    const toastID = toast.loading(`Adding port exposure ${label}…`);
     try {
       await api.createPortForward({
-        host_port: hostPort,
         guest_port: guestPort,
         vm_id: selectedVM.id,
         vm_name: selectedVM.name,
         protocol: fwProtocol,
         subdomain: fwSubdomain.trim() || undefined,
+        public: fwPublic,
       });
-      toast.success(`Forwarding :${hostPort} → ${selectedVM.name}:${guestPort}`, {
-        id: toastID,
-      });
+      toast.success(`Exposed ${label}`, { id: toastID });
       setAddForwardOpen(false);
       setFwSubdomain('');
-      await loadSandboxConnectivity();
+      await loadSandboxConnectivity(true);
     } catch (err) {
-      toast.error(`Failed to add forward: ${errorMessage(err)}`, { id: toastID });
+      toast.error(`Failed to add exposure: ${errorMessage(err)}`, { id: toastID });
     }
   }
 
   async function handleDeletePortForward(pf: PortForwardRecord) {
-    const toastID = toast.loading(`Removing port forward :${pf.host_port}…`);
+    const label = `:${pf.guest_port}`;
+    const toastID = toast.loading(`Removing port exposure ${label}…`);
     try {
       await api.deletePortForward(pf.id);
-      toast.success(`Removed port forward :${pf.host_port}`, { id: toastID });
-      await loadSandboxConnectivity();
+      toast.success(`Removed port exposure ${label}`, { id: toastID });
+      await loadSandboxConnectivity(true);
     } catch (err) {
-      toast.error(`Failed to remove forward: ${errorMessage(err)}`, { id: toastID });
+      toast.error(`Failed to remove exposure: ${errorMessage(err)}`, { id: toastID });
     }
   }
 
-  function confirmStop() {
+  async function confirmStop() {
     const targets = stopConfirmTargets ?? [];
     if (targets.length === 0) return;
     setStopConfirmTargets(null);
     setSelectedIds((prev) =>
       prev.filter((id) => !targets.some((vm) => vm.id === id)),
     );
-    void Promise.allSettled(targets.map((vm) => Promise.resolve(onStop(vm))));
+    if (targets.length === 1) {
+      await Promise.resolve(onStop(targets[0])).catch(() => {});
+      return;
+    }
+    const toastID = toast.loading(`Queueing stop for ${targets.length} sandboxes…`);
+    try {
+      const res = await api.bulkActionVMs({
+        ids: targets.map((vm) => vm.id),
+        action: 'stop',
+        async: true,
+      });
+      if (res.status === 'queued') {
+        toast.success(`Queued stop for ${res.queued ?? targets.length} sandboxes`, {
+          id: toastID,
+        });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Stopped', noun: 'sandboxes' });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Stopped ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Stopped ${res.succeeded.length} sandboxes`, { id: toastID });
+      }
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Stop failed: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   async function handleBatchStart() {
@@ -396,8 +551,35 @@ export function InstancesPage({
       toast.info('None of the selected sandboxes can be started.');
       return;
     }
-    await Promise.all(toStart.map((vm) => onRun(vm)));
     setSelectedIds([]);
+    if (toStart.length === 1) {
+      await onRun(toStart[0]);
+      return;
+    }
+    const toastID = toast.loading(`Queueing start for ${toStart.length} sandboxes…`);
+    try {
+      const res = await api.bulkActionVMs({
+        ids: toStart.map((vm) => vm.id),
+        action: 'start',
+        async: true,
+      });
+      if (res.status === 'queued') {
+        toast.success(`Queued start for ${res.queued ?? toStart.length} sandboxes`, {
+          id: toastID,
+        });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Started', noun: 'sandboxes' });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Started ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Started ${res.succeeded.length} sandboxes`, { id: toastID });
+      }
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Start failed: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   function requestBatchStop() {
@@ -419,31 +601,93 @@ export function InstancesPage({
       toast.info('Only running sandboxes can be snapshotted.');
       return;
     }
-    await Promise.all(toSnap.map((vm) => onSnapshot(vm)));
     setSelectedIds([]);
+    if (toSnap.length === 1) {
+      await onSnapshot(toSnap[0]);
+      return;
+    }
+    const toastID = toast.loading(`Queueing pause/snapshot for ${toSnap.length} sandboxes…`);
+    try {
+      const res = await api.bulkActionVMs({
+        ids: toSnap.map((vm) => vm.id),
+        action: 'snapshot',
+        async: true,
+      });
+      if (res.status === 'queued') {
+        toast.success(`Queued pause for ${res.queued ?? toSnap.length} sandboxes`, {
+          id: toastID,
+        });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Paused', noun: 'sandboxes' });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Paused ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Paused ${res.succeeded.length} sandboxes`, { id: toastID });
+      }
+      await onRefresh?.();
+    } catch (err) {
+      toast.error(`Snapshot failed: ${errorMessage(err)}`, { id: toastID });
+    }
   }
 
   async function handleBatchClone() {
     if (selectedIds.length === 0) return;
-    const toastID = toast.loading(`Cloning ${selectedIds.length} sandbox(es)…`);
+    const idsToClone = [...selectedIds];
+    setSelectedIds([]);
+    if (idsToClone.length === 1) {
+      const id = idsToClone[0];
+      const source = vms.find((v) => v.id === id);
+      const cloneName = source
+        ? `${source.name}-clone`
+        : `sbx-clone-${id.slice(0, 6)}`;
+      const toastID = toast.loading(`Cloning ${source?.name || id}…`);
+      try {
+        await api.cloneVM(id, {
+          name: cloneName,
+          vcpus: source?.vcpus || 2,
+          memory_mb: source?.memory_mb,
+        });
+        toast.success(`Cloned ${cloneName}`, { id: toastID });
+        await onRefresh?.();
+      } catch (err) {
+        toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
+        await onRefresh?.();
+      }
+      return;
+    }
+
+    const toastID = toast.loading(`Queueing clone of ${idsToClone.length} sandboxes…`);
     try {
-      await Promise.all(
-        selectedIds.map(async (id) => {
-          const source = vms.find((v) => v.id === id);
-          const cloneName = source
-            ? `${source.name}-clone`
-            : `sbx-clone-${id.slice(0, 6)}`;
-          await api.cloneVM(id, {
-            name: cloneName,
-            vcpus: source?.vcpus || 2,
-            memory_mb: source?.memory_mb,
-          });
-        }),
-      );
-      toast.success(`Successfully cloned ${selectedIds.length} sandbox(es)`, {
-        id: toastID,
+      const items = idsToClone.map((id) => {
+        const source = vms.find((v) => v.id === id);
+        const cloneName = source
+          ? `${source.name}-clone`
+          : `sbx-clone-${id.slice(0, 6)}`;
+        return {
+          source_id: id,
+          name: cloneName,
+          vcpus: source?.vcpus || 2,
+          memory_mb: source?.memory_mb,
+        };
       });
-      setSelectedIds([]);
+      const res = await api.bulkCloneVMs({ items, async: true });
+      if (res.status === 'queued') {
+        toast.success(`Queued clone of ${res.queued ?? idsToClone.length} sandboxes`, {
+          id: toastID,
+        });
+        void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Cloned', noun: 'sandboxes' });
+      } else if (res.failed.length > 0) {
+        toast.warning(
+          `Cloned ${res.succeeded.length} of ${res.requested} sandboxes`,
+          { id: toastID, description: res.failed.map((f) => `${f.id}: ${f.error}`).join('; ') },
+        );
+      } else {
+        toast.success(`Successfully cloned ${res.succeeded.length} sandboxes`, {
+          id: toastID,
+        });
+      }
       await onRefresh?.();
     } catch (err) {
       toast.error(`Clone failed: ${errorMessage(err)}`, { id: toastID });
@@ -474,16 +718,30 @@ export function InstancesPage({
     const toastID = toast.loading(
       targets.length === 1
         ? 'Disabling protection…'
-        : `Disabling protection for ${targets.length} sandboxes…`,
+        : `Queueing protection removal for ${targets.length} sandboxes…`,
     );
     try {
-      await Promise.all(ids.map((id) => api.unprotectVM(id)));
-      if (targets.length === 1) {
-        toast.success(`Sandbox ${targets[0].name} protection disabled`, { id: toastID });
-      } else {
-        toast.success(`Protection disabled for ${targets.length} sandboxes`, {
+      if (ids.length === 1) {
+        await api.unprotectVM(ids[0]);
+        toast.success(`Sandbox ${targets[0]?.name || ids[0]} protection disabled`, {
           id: toastID,
         });
+      } else {
+        const res = await api.bulkActionVMs({
+          ids,
+          action: 'unprotect',
+          async: true,
+        });
+        if (res.status === 'queued') {
+          toast.success(
+            `Queued protection removal for ${res.queued ?? ids.length} sandboxes`,
+            { id: toastID },
+          );
+        } else {
+          toast.success(`Protection disabled for ${res.succeeded.length} sandboxes`, {
+            id: toastID,
+          });
+        }
       }
       onRefresh?.();
     } catch (err) {
@@ -530,10 +788,18 @@ export function InstancesPage({
     if (onBulkDelete) {
       await onBulkDelete(ids);
     } else {
-      const toastID = toast.loading(`Deleting ${ids.length} sandbox(es)…`);
+      const toastID = toast.loading(`Queueing deletion of ${ids.length} sandbox(es)…`);
       try {
-        await Promise.all(ids.map((id) => api.deleteVM(id)));
-        toast.success(`Deleted ${ids.length} sandbox(es)`, { id: toastID });
+        const res = await api.bulkDeleteVMs(ids, { async: true });
+        if (res.status === 'queued') {
+          toast.success(`Queued deletion of ${res.queued ?? ids.length} sandbox(es)`, {
+            id: toastID,
+          });
+          void resolveQueuedTask(res.task_id, toastID, { doneVerb: 'Deleted', noun: 'sandbox(es)' });
+        } else {
+          toast.success(`Deleted ${res.succeeded.length} sandbox(es)`, { id: toastID });
+        }
+        await onRefresh?.();
       } catch (err) {
         toast.error(`Delete failed: ${errorMessage(err)}`, { id: toastID });
         throw err;
@@ -635,10 +901,10 @@ export function InstancesPage({
             className="h-8 appearance-none border border-border bg-background pl-2.5 pr-7 text-[12px] text-muted-foreground hover:text-foreground focus:border-primary focus:outline-none cursor-pointer"
           >
             <option value="all">Type</option>
+            <option value="micro">micro (1 vCPU)</option>
             <option value="small">small (2 vCPU)</option>
-            <option value="default">default (4 vCPU)</option>
-            <option value="large">large (8 vCPU)</option>
-            <option value="xlarge">xlarge (16 vCPU)</option>
+            <option value="medium">medium (4 vCPU)</option>
+            <option value="large">large (8+ vCPU)</option>
           </select>
           <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         </div>
@@ -722,6 +988,43 @@ export function InstancesPage({
         )}
       </div>
 
+      {activeOperations.length > 0 && (
+        <div className="border border-warning/40 bg-warning/5 px-3 py-2.5">
+          <div className="flex items-center gap-2 text-[12px] font-medium text-warning">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>
+              {activeOperations.length} operation
+              {activeOperations.length === 1 ? '' : 's'} in progress
+            </span>
+            <span className="font-normal text-muted-foreground">
+              persisted before execution
+            </span>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {activeOperations.slice(0, 8).map((op) => (
+              <li
+                key={op.id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]"
+              >
+                <span className="w-40 shrink-0 truncate text-foreground">
+                  {op.target_name || op.target_id || op.id}
+                </span>
+                <span className="text-muted-foreground">{op.kind}</span>
+                <span className="border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] uppercase text-warning">
+                  {op.status}
+                </span>
+                <span className="text-muted-foreground">{op.progress}%</span>
+              </li>
+            ))}
+          </ul>
+          {activeOperations.length > 8 && (
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              +{activeOperations.length - 8} more — see Events → Operations
+            </p>
+          )}
+        </div>
+      )}
+
       {/* Sandboxes Table */}
       <div className="border border-border bg-background">
         <div className="overflow-x-auto">
@@ -740,6 +1043,7 @@ export function InstancesPage({
                 <th className="py-2 px-1 font-normal">Name / URL</th>
                 <th className="py-2 px-1 font-normal">Sandbox ID</th>
                 <th className="py-2 px-1 font-normal">State</th>
+                <th className="py-2 px-1 font-normal">Node / Pool</th>
                 <th className="py-2 px-1 font-normal">Created</th>
                 <th className="py-2 px-1 font-normal">Type</th>
                 <th className="py-2 px-1 font-normal">
@@ -776,7 +1080,7 @@ export function InstancesPage({
             {filteredVMs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={12} className="py-20 text-center">
+                  <td colSpan={13} className="py-20 text-center">
                     <div className="mx-auto flex max-w-xs flex-col items-center justify-center space-y-3.5">
                       <svg
                         viewBox="0 0 120 110"
@@ -846,6 +1150,11 @@ export function InstancesPage({
                   );
                   const resourcesStr = `${vm.vcpus} vCPU · ${formatMemory(vm.memory_mb)} · ${diskGb} GB`;
                   const shortId = (vm.internal_id || vm.id).slice(0, 12);
+                  const nodeName =
+                    (vm.worker_id && workerNameById[vm.worker_id]) ||
+                    vm.worker_id ||
+                    'local';
+                  const poolLabel = vm.pool_id || 'default';
 
                   return (
                     <tr
@@ -925,31 +1234,50 @@ export function InstancesPage({
                       </td>
 
                       <td className="py-2 px-1.5">
-                        <span
-                          className={cn(
-                            'inline-flex items-center gap-1 border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider',
-                            vm.status === 'running' &&
-                              'border-success/40 bg-success/10 text-success',
-                            vm.status === 'paused' &&
-                              'border-warning/40 bg-warning/10 text-warning',
-                            (vm.status === 'stopped' || vm.status === 'created') &&
-                              'border-border bg-muted/40 text-muted-foreground',
-                            vm.status === 'failed' &&
-                              'border-destructive/40 bg-destructive/10 text-destructive',
-                          )}
-                        >
+                        <div className="flex items-center gap-1">
                           <span
                             className={cn(
-                              'h-1.5 w-1.5',
-                              vm.status === 'running' && 'bg-success',
-                              vm.status === 'paused' && 'bg-warning',
+                              'inline-flex items-center gap-1 border px-1.5 py-0.5 font-mono text-[9.5px] uppercase tracking-wider',
+                              vm.status === 'running' &&
+                                'border-success/40 bg-success/10 text-success',
+                              vm.status === 'paused' &&
+                                'border-warning/40 bg-warning/10 text-warning',
                               (vm.status === 'stopped' || vm.status === 'created') &&
-                                'bg-muted-foreground',
-                              vm.status === 'failed' && 'bg-destructive',
+                                'border-border bg-muted/40 text-muted-foreground',
+                              vm.status === 'failed' &&
+                                'border-destructive/40 bg-destructive/10 text-destructive',
                             )}
-                          />
-                          {vm.status === 'paused' ? 'PAUSED (STATE SAVED)' : vm.status}
-                        </span>
+                          >
+                            <span
+                              className={cn(
+                                'h-1.5 w-1.5',
+                                vm.status === 'running' && 'bg-success',
+                                vm.status === 'paused' && 'bg-warning',
+                                (vm.status === 'stopped' || vm.status === 'created') &&
+                                  'bg-muted-foreground',
+                                vm.status === 'failed' && 'bg-destructive',
+                              )}
+                            />
+                            {vm.status === 'paused' ? 'PAUSED (STATE SAVED)' : vm.status}
+                          </span>
+                          {vm.auto_hibernated && (
+                            <span
+                              title={vm.hibernate_reason || 'Auto-hibernated to SSD'}
+                              className="inline-flex items-center border border-warning/40 bg-warning/10 px-1 py-0.5 font-mono text-[9px] uppercase text-warning"
+                            >
+                              SSD Hibernated
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="py-2 px-1.5 font-mono text-[10.5px]">
+                        <div className="text-foreground truncate max-w-[140px]" title={vm.worker_id || ''}>
+                          {nodeName}
+                        </div>
+                        <div className="text-[9.5px] text-muted-foreground">
+                          pool:{poolLabel}
+                        </div>
                       </td>
 
                       <td className="py-2 px-1.5 font-mono text-[10.5px] text-muted-foreground tabular">
@@ -1094,7 +1422,16 @@ export function InstancesPage({
                                 <MoreHorizontal className="h-3 w-3" />
                               </button>
                             </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-48">
+                            <DropdownMenuContent align="end" className="w-52">
+                              <DropdownMenuItem onSelect={() => setOptionsTarget(vm)}>
+                                <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+                                Options &amp; Settings
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => onExec?.(vm)}>
+                                <Play className="h-3.5 w-3.5" />
+                                Execute Command
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onSelect={() =>
                                   openSSHTerminalWindow(vm.id, vm.name, 'compute')
@@ -1129,6 +1466,12 @@ export function InstancesPage({
                                 <Scaling className="h-3.5 w-3.5" />
                                 Resize
                               </DropdownMenuItem>
+                              {isAdmin && (
+                                <DropdownMenuItem onSelect={() => openMigrateModal(vm)}>
+                                  <ArrowRightLeft className="h-3.5 w-3.5" />
+                                  Migrate Sandbox
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuItem onSelect={() => onInspect(vm)}>
                                 <Server className="h-3.5 w-3.5" />
                                 JSON Spec
@@ -1161,16 +1504,19 @@ export function InstancesPage({
         </div>
       </div>
 
-      {/* Redesigned Calm Sandbox Detail View (Item #6 & #7) */}
+      {/* Streamlined Sandbox Detail View - Pure Terminal View */}
       {selectedVM && (
         <div
           data-testid="sandbox-detail-panel"
-          className="border border-border bg-background"
+          className="border border-border bg-background shadow-xs"
         >
-          {/* Clean Header */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-              <span className="font-display text-[15px] font-medium text-foreground">
+          {/* Streamlined Terminal Top Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border bg-muted/20 px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center border border-border bg-background text-primary">
+                <Terminal className="h-3.5 w-3.5" />
+              </span>
+              <span className="font-display text-[14px] font-semibold text-foreground truncate">
                 {selectedVM.name}
               </span>
               <span
@@ -1191,6 +1537,14 @@ export function InstancesPage({
                   ? 'PAUSED (STATE SAVED)'
                   : selectedVM.status}
               </span>
+              {selectedVM.auto_hibernated && (
+                <span
+                  title={selectedVM.hibernate_reason || 'Auto-hibernated to SSD'}
+                  className="inline-flex items-center border border-warning/40 bg-warning/10 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-warning"
+                >
+                  SSD Hibernated
+                </span>
+              )}
               {selectedVM.protected && (
                 <span className="inline-flex items-center gap-1 border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-primary dark:text-[var(--accent-bright)]">
                   <Shield className="h-2.5 w-2.5" />
@@ -1198,113 +1552,129 @@ export function InstancesPage({
                 </span>
               )}
 
-              {selectedVM.ip_address && (
-                <button
-                  type="button"
-                  onClick={() => copyText(selectedVM.ip_address)}
-                  title="Copy IP address"
-                  className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
-                >
-                  <span>{selectedVM.ip_address}</span>
-                  {copiedId === selectedVM.ip_address ? (
-                    <Check className="h-3 w-3 text-success" />
-                  ) : (
-                    <Copy className="h-3 w-3 text-muted-foreground" />
-                  )}
-                </button>
-              )}
-
-              {selectedVM.ip_address && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    copyText(selectedAccess.ssh || `ssh compute@${selectedVM.ip_address}`)
-                  }
-                  title="Copy SSH command"
-                  className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-muted-foreground hover:text-foreground hover:border-primary transition-colors"
-                >
-                  <span>
-                    {selectedAccess.ssh || `ssh compute@${selectedVM.ip_address}`}
+              {/* Terminal User Toggle (only when running) */}
+              {selectedVM.status === 'running' && (
+                <div className="ml-2 flex items-center gap-1.5 border-l border-border pl-2.5">
+                  <span className="font-mono text-[10.5px] text-muted-foreground">
+                    User:
                   </span>
-                  <Copy className="h-3 w-3" />
-                </button>
+                  <div className="inline-flex border border-border bg-background">
+                    {(['compute', 'root'] as const).map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setTerminalUser(u)}
+                        className={cn(
+                          'px-2 py-0.5 font-mono text-[10.5px] transition-colors',
+                          terminalUser === u
+                            ? 'bg-primary text-primary-foreground font-medium'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        {u}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
 
+            {/* Actions Toolbar */}
             <div className="flex flex-wrap items-center gap-1.5">
-              {selectedVM.status === 'running' ? (
+              {selectedVM.status === 'running' && (
                 <>
                   <button
                     type="button"
-                    onClick={() => setStopConfirmTargets([selectedVM])}
-                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-warning hover:text-warning transition-colors"
-                  >
-                    <Square className="h-3 w-3" />
-                    <span>Stop</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={restartingId === selectedVM.id}
-                    onClick={() => void handleRestartVM(selectedVM)}
-                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-primary transition-colors disabled:opacity-50"
+                    onClick={() => terminalRef.current?.reconnect()}
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
+                    title="Reconnect SSH terminal session"
                   >
                     <RotateCcw className="h-3 w-3" />
-                    <span>
-                      {restartingId === selectedVM.id ? 'Restarting…' : 'Restart'}
-                    </span>
+                    <span>Reconnect</span>
                   </button>
                   <button
                     type="button"
                     onClick={() =>
-                      openSSHTerminalWindow(selectedVM.id, selectedVM.name, terminalUser)
+                      openSSHTerminalWindow(
+                        selectedVM.id,
+                        selectedVM.name,
+                        terminalUser,
+                      )
                     }
-                    className="inline-flex h-7 items-center gap-1.5 bg-primary px-2.5 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
+                    title="Open terminal in a separate window"
                   >
                     <ExternalLink className="h-3 w-3" />
-                    <span>Pop Out Terminal</span>
+                    <span>Pop Out</span>
                   </button>
                 </>
-              ) : selectedVM.status === 'paused' ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onResume(selectedVM)}
-                    className="inline-flex h-7 items-center gap-1.5 border border-success/40 bg-success/10 px-2.5 text-[11.5px] font-medium text-success hover:bg-success/20 transition-colors"
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    <span>Resume</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setStopConfirmTargets([selectedVM])}
-                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-warning hover:text-warning transition-colors"
-                  >
-                    <Square className="h-3 w-3" />
-                    <span>Stop</span>
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onRun(selectedVM)}
-                  className="inline-flex h-7 items-center gap-1.5 bg-primary px-3 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
-                >
-                  <Play className="h-3 w-3" />
-                  <span>Start</span>
-                </button>
               )}
 
+              {/* Dedicated All-in-One Options & Settings Popup Trigger */}
+              <button
+                type="button"
+                onClick={() => setOptionsTarget(selectedVM)}
+                className="inline-flex h-7 items-center gap-1.5 border border-primary/50 bg-primary/10 px-2.5 font-mono text-[11px] font-medium text-primary hover:bg-primary hover:text-primary-foreground transition-colors"
+                title="View all sandbox options, compute specs, volumes, network & settings in one place"
+              >
+                <SlidersHorizontal className="h-3 w-3" />
+                <span>Options &amp; Settings</span>
+              </button>
+
+              {/* More Dropdown Menu */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
-                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-primary transition-colors"
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2 text-[11px] text-foreground hover:border-primary transition-colors"
                   >
                     <span>More</span>
                     <ChevronDown className="h-3 w-3 text-muted-foreground" />
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuItem onSelect={() => setOptionsTarget(selectedVM)}>
+                    <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+                    All Options &amp; Settings
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => onExec?.(selectedVM)}>
+                    <Play className="h-3.5 w-3.5" />
+                    Execute Command
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {selectedVM.status === 'running' ? (
+                    <>
+                      <DropdownMenuItem onSelect={() => void handleRestartVM(selectedVM)}>
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Restart Sandbox
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => setStopConfirmTargets([selectedVM])}>
+                        <Square className="h-3.5 w-3.5 text-warning" />
+                        Stop Sandbox
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
+                        <Pause className="h-3.5 w-3.5" />
+                        Pause &amp; Save State
+                      </DropdownMenuItem>
+                    </>
+                  ) : selectedVM.status === 'paused' ? (
+                    <>
+                      <DropdownMenuItem onSelect={() => onResume(selectedVM)}>
+                        <RotateCcw className="h-3.5 w-3.5 text-success" />
+                        Resume Sandbox
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => setStopConfirmTargets([selectedVM])}>
+                        <Square className="h-3.5 w-3.5 text-warning" />
+                        Stop Sandbox
+                      </DropdownMenuItem>
+                    </>
+                  ) : (
+                    <DropdownMenuItem onSelect={() => onRun(selectedVM)}>
+                      <Play className="h-3.5 w-3.5 text-success" />
+                      Start Sandbox
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onSelect={() => setSnapshotTarget(selectedVM)}>
                     <Camera className="h-3.5 w-3.5" />
                     Snapshot
@@ -1317,15 +1687,13 @@ export function InstancesPage({
                     <Scaling className="h-3.5 w-3.5" />
                     Resize
                   </DropdownMenuItem>
-                  {selectedVM.status === 'running' && (
-                    <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
-                      <Pause className="h-3.5 w-3.5" />
-                      Pause &amp; Save State
+                  {isAdmin && (
+                    <DropdownMenuItem onSelect={() => openMigrateModal(selectedVM)}>
+                      <ArrowRightLeft className="h-3.5 w-3.5" />
+                      Migrate Sandbox
                     </DropdownMenuItem>
                   )}
-                  <DropdownMenuItem
-                    onSelect={() => void toggleProtection(selectedVM)}
-                  >
+                  <DropdownMenuItem onSelect={() => void toggleProtection(selectedVM)}>
                     <Shield className="h-3.5 w-3.5" />
                     {selectedVM.protected ? 'Unprotect' : 'Protect'}
                   </DropdownMenuItem>
@@ -1345,11 +1713,12 @@ export function InstancesPage({
                 </DropdownMenuContent>
               </DropdownMenu>
 
+              {/* Close Detail Panel */}
               <button
                 type="button"
                 onClick={() => setSelectedVMId(null)}
-                className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-foreground"
-                title="Close detail panel"
+                className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors"
+                title="Close terminal panel"
                 aria-label="Close detail panel"
               >
                 <X className="h-3.5 w-3.5" />
@@ -1357,75 +1726,24 @@ export function InstancesPage({
             </div>
           </div>
 
-          {/* Embedded Pure Interactive SSH Terminal */}
-          <div className="border-b border-border">
+          {/* Pure Interactive SSH Terminal - No Bloat Below */}
+          <div>
             {selectedVM.status === 'running' ? (
-              <div>
-                <div className="flex items-center justify-between border-b border-border bg-muted/15 px-4 py-1.5">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-[11px] text-muted-foreground">
-                      Terminal User
-                    </span>
-                    <div className="inline-flex border border-border bg-background">
-                      {(['compute', 'root'] as const).map((u) => (
-                        <button
-                          key={u}
-                          type="button"
-                          onClick={() => setTerminalUser(u)}
-                          className={cn(
-                            'px-2 py-0.5 font-mono text-[11px] transition-colors',
-                            terminalUser === u
-                              ? 'bg-primary text-primary-foreground font-medium'
-                              : 'text-muted-foreground hover:text-foreground',
-                          )}
-                        >
-                          {u}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => terminalRef.current?.reconnect()}
-                      className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                      <span>Reconnect</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openSSHTerminalWindow(
-                          selectedVM.id,
-                          selectedVM.name,
-                          terminalUser,
-                        )
-                      }
-                      className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                      <span>Pop Out</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="h-[360px] w-full bg-[#0a0a0a]">
-                  <SSHTerminal
-                    ref={terminalRef}
-                    vmId={selectedVM.id}
-                    user={terminalUser}
-                    raw
-                    autoFocus={false}
-                    className="h-full w-full"
-                  />
-                </div>
+              <div className="h-[420px] w-full bg-[#0a0a0a]">
+                <SSHTerminal
+                  ref={terminalRef}
+                  vmId={selectedVM.id}
+                  user={terminalUser}
+                  raw
+                  autoFocus={false}
+                  className="h-full w-full"
+                />
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center gap-3 bg-muted/10 px-4 py-12 text-center">
-                <Terminal className="h-6 w-6 text-muted-foreground" />
+              <div className="flex flex-col items-center justify-center gap-3 bg-muted/10 px-4 py-14 text-center">
+                <Terminal className="h-7 w-7 text-muted-foreground" />
                 <div className="space-y-1">
-                  <p className="text-[13px] font-medium text-foreground">
+                  <p className="text-[13.5px] font-medium text-foreground">
                     Sandbox is {selectedVM.status}
                   </p>
                   <p className="text-[11.5px] text-muted-foreground">
@@ -1438,7 +1756,7 @@ export function InstancesPage({
                   <button
                     type="button"
                     onClick={() => onResume(selectedVM)}
-                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     <span>Resume Sandbox</span>
@@ -1447,7 +1765,7 @@ export function InstancesPage({
                   <button
                     type="button"
                     onClick={() => onRun(selectedVM)}
-                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                   >
                     <Play className="h-3.5 w-3.5" />
                     <span>Start Sandbox</span>
@@ -1455,271 +1773,6 @@ export function InstancesPage({
                 )}
               </div>
             )}
-          </div>
-
-          {/* Focused Resource & Connectivity Cards */}
-          <div className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-3">
-            {/* Card 1: Compute Specs */}
-            <div className="border border-border bg-background p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[12px] font-medium text-foreground">
-                  Compute Specs
-                </span>
-                <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
-              </div>
-              <div className="grid grid-cols-2 gap-y-2 font-mono text-[11.5px]">
-                <span className="text-muted-foreground">vCPUs</span>
-                <span className="text-right text-foreground">
-                  {selectedVM.vcpus} vCPU
-                </span>
-                <span className="text-muted-foreground">Memory</span>
-                <span className="text-right text-foreground">
-                  {formatMemory(selectedVM.memory_mb)}
-                </span>
-                <span className="text-muted-foreground">Disk</span>
-                <span className="text-right text-foreground">
-                  {Math.max(
-                    1,
-                    Math.round((selectedVM.disk_mb || DEFAULT_DISK_MB) / 1024),
-                  )}{' '}
-                  GB
-                </span>
-                <span className="text-muted-foreground">OS Image</span>
-                <span className="text-right text-foreground">Ubuntu 24.04 LTS</span>
-                <span className="text-muted-foreground">Created</span>
-                <span className="text-right text-muted-foreground">
-                  {formatRelativeTime(selectedVM.created_at)}
-                </span>
-              </div>
-            </div>
-
-            {/* Card 2: Attached Volumes */}
-            <div className="border border-border bg-background p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[12px] font-medium text-foreground">
-                  Attached Volumes ({attachedVolumes.length})
-                </span>
-                <HardDrive className="h-3.5 w-3.5 text-muted-foreground" />
-              </div>
-
-              {volumesLoading && attachedVolumes.length === 0 ? (
-                <div className="font-mono text-[11px] text-muted-foreground">
-                  Loading volumes…
-                </div>
-              ) : attachedVolumes.length === 0 ? (
-                <div className="text-[11.5px] text-muted-foreground">
-                  No block volumes attached.
-                </div>
-              ) : (
-                <div className="divide-y divide-border border border-border">
-                  {attachedVolumes.map((vol) => (
-                    <div
-                      key={vol.id}
-                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 font-mono text-[11px]"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate font-medium text-foreground">
-                          {vol.name}
-                        </div>
-                        <div className="text-[10px] text-muted-foreground">
-                          {vol.size_gb} GB · {vol.filesystem} · {vol.mount_point || '/mnt'}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void handleDetachVolume(vol)}
-                        className="inline-flex h-6 shrink-0 items-center gap-1 border border-border px-2 text-[10.5px] text-muted-foreground hover:border-warning hover:text-warning"
-                      >
-                        <Unplug className="h-3 w-3" />
-                        <span>Detach</span>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {availableVolumes.length > 0 && (
-                <form
-                  onSubmit={(e) => void handleAttachVolume(e)}
-                  className="flex items-center gap-1.5 pt-1"
-                >
-                  <select
-                    aria-label="Attach volume"
-                    value={attachVolumeId}
-                    onChange={(e) => setAttachVolumeId(e.target.value)}
-                    className="h-7 flex-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground focus:border-primary focus:outline-none"
-                  >
-                    <option value="">Select available volume…</option>
-                    {availableVolumes.map((vol) => (
-                      <option key={vol.id} value={vol.id}>
-                        {vol.name} ({vol.size_gb} GB)
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="submit"
-                    disabled={!attachVolumeId}
-                    className="h-7 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50"
-                  >
-                    Attach
-                  </button>
-                </form>
-              )}
-            </div>
-
-            {/* Card 3: Port Forwards & Public Ingress */}
-            <div className="border border-border bg-background p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-[12px] font-medium text-foreground">
-                    Port Forwards &amp; Ingress
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setAddForwardOpen((v) => !v)}
-                  className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 text-[10.5px] text-foreground hover:border-primary"
-                >
-                  <Plus className="h-3 w-3" />
-                  <span>Add</span>
-                </button>
-              </div>
-
-              {selectedAccess.url && (
-                <div className="flex items-center justify-between gap-2 border border-border bg-muted/20 px-2.5 py-1.5 font-mono text-[11px]">
-                  <a
-                    href={selectedAccess.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="truncate text-[color:var(--link)] hover:underline"
-                  >
-                    {selectedAccess.url}
-                  </a>
-                  <CopyButton
-                    value={selectedAccess.url}
-                    label="Copy ingress URL"
-                    className="h-4 w-4 shrink-0"
-                  />
-                </div>
-              )}
-
-              {forwardsLoading && vmPortForwards.length === 0 ? (
-                <div className="font-mono text-[11px] text-muted-foreground">
-                  Loading port forwards…
-                </div>
-              ) : vmPortForwards.length === 0 ? (
-                <div className="text-[11.5px] text-muted-foreground">
-                  No custom port forwards configured.
-                </div>
-              ) : (
-                <div className="divide-y divide-border border border-border">
-                  {vmPortForwards.map((pf) => (
-                    <div
-                      key={pf.id}
-                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 font-mono text-[11px]"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-foreground">
-                          :{pf.host_port} → :{pf.guest_port}{' '}
-                          <span className="text-[10px] text-muted-foreground">
-                            ({pf.protocol})
-                          </span>
-                        </div>
-                        {pf.public_url && (
-                          <div className="truncate text-[10px] text-[color:var(--link)]">
-                            {pf.public_url}
-                          </div>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeletePortForward(pf)}
-                        aria-label={`Remove forward ${pf.host_port}`}
-                        className="flex h-6 w-6 shrink-0 items-center justify-center border border-border text-muted-foreground hover:border-destructive hover:text-destructive"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {addForwardOpen && (
-                <form
-                  onSubmit={(e) => void handleAddPortForward(e)}
-                  className="space-y-2 border border-border bg-muted/15 p-2.5"
-                >
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Host Port
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={65535}
-                        value={fwHostPort}
-                        onChange={(e) => setFwHostPort(e.target.value)}
-                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Guest Port
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={65535}
-                        value={fwGuestPort}
-                        onChange={(e) => setFwGuestPort(e.target.value)}
-                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Protocol
-                      </label>
-                      <select
-                        value={fwProtocol}
-                        onChange={(e) =>
-                          setFwProtocol(e.target.value as 'TCP' | 'HTTP/HTTPS')
-                        }
-                        className="h-7 w-full border border-border bg-background px-1.5 font-mono text-[11px]"
-                      >
-                        <option value="TCP">TCP</option>
-                        <option value="HTTP/HTTPS">HTTP</option>
-                      </select>
-                    </div>
-                  </div>
-                  {fwProtocol === 'HTTP/HTTPS' && (
-                    <input
-                      type="text"
-                      value={fwSubdomain}
-                      onChange={(e) => setFwSubdomain(e.target.value)}
-                      placeholder="Optional subdomain (e.g. app)"
-                      className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                    />
-                  )}
-                  <div className="flex justify-end gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setAddForwardOpen(false)}
-                      className="h-6.5 border border-border px-2 text-[11px] text-muted-foreground"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="h-6.5 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
-                    >
-                      Add Forward
-                    </button>
-                  </div>
-                </form>
-              )}
-            </div>
           </div>
         </div>
       )}
@@ -1904,6 +1957,110 @@ export function InstancesPage({
         </div>
       )}
 
+      {/* Migrate Sandbox Modal */}
+      {migrateTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setMigrateTarget(null)}
+        >
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-label="Migrate Sandbox"
+            onClick={(e) => e.stopPropagation()}
+            onSubmit={handleMigrateSubmit}
+            className="w-full max-w-md border border-border bg-background p-5 space-y-4 text-foreground"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ArrowRightLeft className="h-4 w-4 text-primary" />
+                <h2 className="text-[15px] font-medium">
+                  Migrate {migrateTarget.name}
+                </h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close migrate dialog"
+                onClick={() => setMigrateTarget(null)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="text-[11.5px] text-muted-foreground">
+              Move sandbox <span className="font-mono text-foreground">{migrateTarget.name}</span> to a target worker node or placement pool.
+            </p>
+            <div className="space-y-3 text-[12px]">
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  Target Worker Node
+                </label>
+                <select
+                  aria-label="Target Worker Node"
+                  value={migrateWorkerId}
+                  onChange={(e) => setMigrateWorkerId(e.target.value)}
+                  className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
+                >
+                  <option value="">Auto-select in target pool</option>
+                  {workers
+                    .filter((w) => w.id !== migrateTarget.worker_id)
+                    .map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name} ({w.pool_id} · {w.status})
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-[11px] text-muted-foreground mb-1">
+                  Target Pool
+                </label>
+                <select
+                  aria-label="Target Pool"
+                  value={migratePoolId}
+                  onChange={(e) => setMigratePoolId(e.target.value)}
+                  className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] text-foreground focus:border-primary focus:outline-none"
+                >
+                  <option value="">Keep current / match worker</option>
+                  <option value="default">default</option>
+                  {pools
+                    .filter((p) => p.name !== 'default')
+                    .map((p) => (
+                      <option key={p.id || p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <label className="flex items-center gap-2 text-[12px] text-muted-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={migrateForce}
+                  onChange={(e) => setMigrateForce(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                <span>Force stop &amp; migrate if currently running</span>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <button
+                type="button"
+                onClick={() => setMigrateTarget(null)}
+                className="h-8 border border-border px-3 text-[12px] text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="h-8 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+              >
+                Migrate Sandbox
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <BulkDeleteVMDialog
         vms={selectedVMs}
         open={bulkDeleteOpen}
@@ -1930,6 +2087,28 @@ export function InstancesPage({
         open={snapshotTarget !== null}
         onOpenChange={(open) => !open && setSnapshotTarget(null)}
         onCreated={() => onRefresh?.()}
+      />
+      <SandboxOptionsDialog
+        vm={liveOptionsTarget}
+        open={liveOptionsTarget !== null}
+        onOpenChange={(open) => !open && setOptionsTarget(null)}
+        workers={workers}
+        pools={pools}
+        volumes={volumes}
+        portForwards={portForwards}
+        isAdmin={isAdmin}
+        onRun={onRun}
+        onStop={(vm) => setStopConfirmTargets([vm])}
+        onResume={onResume}
+        onRestart={handleRestartVM}
+        onDelete={onDelete}
+        onSnapshot={setSnapshotTarget}
+        onClone={setCloneTarget}
+        onResize={openResizeModal}
+        onMigrate={openMigrateModal}
+        onToggleProtection={toggleProtection}
+        onInspectJson={onInspect}
+        onRefresh={onRefresh}
       />
     </div>
   );

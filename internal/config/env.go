@@ -54,10 +54,20 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	} else if bind != "" || port != 0 {
 		host := bind
 		if host == "" {
+			host = cfg.Server.ListenHost()
+		}
+		if host == "" {
 			host = "127.0.0.1"
 		}
 		if port == 0 {
-			port = 18080
+			if _, pStr, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimSpace(cfg.Server.ListenAddr), "tcp://")); err == nil {
+				if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+					port = p
+				}
+			}
+			if port == 0 {
+				port = 18080
+			}
 		}
 		cfg.Server.ListenAddr = net.JoinHostPort(host, strconv.Itoa(port))
 	}
@@ -69,6 +79,7 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_ADMIN_USERNAME", &cfg.Server.AdminUsername)
 	env.strInto("COMPUTE_ADMIN_EMAIL", &cfg.Server.AdminEmail)
 	env.strInto("COMPUTE_ADMIN_PASSWORD", &cfg.Server.AdminPassword)
+	env.strInto("COMPUTE_PUBLIC_URL", &cfg.Server.PublicURL)
 	env.strInto("COMPUTE_EDGE_LISTEN", &cfg.Server.EdgeListen)
 	env.boolInto("COMPUTE_CGROUP_ENFORCE", &cfg.Server.CgroupEnforce)
 	env.boolInto("COMPUTE_JAILER_ENABLED", &cfg.Server.JailerEnabled)
@@ -76,6 +87,13 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_JAILER_DIR", &cfg.Server.JailerBaseDir)
 	env.strInto("COMPUTE_TLS_CERT_FILE", &cfg.Server.TLSCertFile)
 	env.strInto("COMPUTE_TLS_KEY_FILE", &cfg.Server.TLSKeyFile)
+	env.strInto("COMPUTE_SERVE_DOMAIN", &cfg.Server.ServeDomain)
+	env.strInto("COMPUTE_SERVE_BIND", &cfg.Server.ServeBind)
+	env.intInto("COMPUTE_SERVE_PORT_START", &cfg.Server.ServePortStart)
+	env.intInto("COMPUTE_SERVE_PORT_END", &cfg.Server.ServePortEnd)
+	env.strInto("COMPUTE_SERVE_TLS_CERT_FILE", &cfg.Server.ServeTLSCertFile)
+	env.strInto("COMPUTE_SERVE_TLS_KEY_FILE", &cfg.Server.ServeTLSKeyFile)
+	env.strInto("COMPUTE_SERVE_TOKEN_KEY", &cfg.Server.ServeTokenKey)
 
 	// Network.
 	if v := env.str("COMPUTE_NETWORK_MODE"); v != "" {
@@ -180,7 +198,20 @@ func (e *envReader) boolValue(name string) *bool {
 }
 
 func (e *envReader) intInto(name string, dst *int) {
-	if v := e.intValue(name); v != 0 {
+	raw, ok := os.LookupEnv(name)
+	if !ok {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		e.fail(name, "an integer", raw)
+		return
+	}
+	if v >= 0 {
 		*dst = v
 	}
 }

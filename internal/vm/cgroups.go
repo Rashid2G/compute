@@ -14,6 +14,7 @@ import (
 // CgroupLimits defines the Cgroups v2 resource constraints for a microVM.
 type CgroupLimits struct {
 	VCPUs                int
+	CPUWeight            int // Relative CPU share weight (1..10000, default 100)
 	MemoryMB             int
 	MemorySafetyBufferMB int    // Overhead buffer in MB (default 64MB)
 	MemoryHighBufferMB   int    // Throttle watermark buffer in MB (e.g. 32MB)
@@ -103,6 +104,20 @@ func FormatCPUMax(vcpus int) string {
 	}
 	quota := vcpus * 100000
 	return fmt.Sprintf("%d 100000", quota)
+}
+
+// FormatCPUWeight normalizes a cgroups v2 cpu.weight value (1..10000, default 100).
+func FormatCPUWeight(weight int) string {
+	if weight <= 0 {
+		weight = 100
+	}
+	if weight < 1 {
+		weight = 1
+	}
+	if weight > 10000 {
+		weight = 10000
+	}
+	return fmt.Sprintf("%d", weight)
 }
 
 // FormatMemoryMax computes memory.max in bytes: (memoryMB + safetyBufferMB) * 1024 * 1024.
@@ -248,6 +263,15 @@ func (cm *CgroupManager) Setup(vmID string, limits CgroupLimits) (string, error)
 	if err := writeLimit("cpu.max", FormatCPUMax(limits.VCPUs)); err != nil {
 		if isV2 || !os.IsNotExist(err) {
 			return "", fmt.Errorf("failed to write cpu.max: %w", err)
+		}
+	}
+
+	// 1b. cpu.weight (soft overcommit CPU share weight)
+	if limits.CPUWeight > 0 {
+		if err := writeLimit("cpu.weight", FormatCPUWeight(limits.CPUWeight)); err != nil {
+			if isV2 || !os.IsNotExist(err) {
+				return "", fmt.Errorf("failed to write cpu.weight: %w", err)
+			}
 		}
 	}
 

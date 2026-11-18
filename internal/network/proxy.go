@@ -1,7 +1,6 @@
 package network
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -9,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +21,10 @@ type TargetInfo struct {
 	OwnerID   string `json:"owner_id"`
 	Status    string `json:"status"`
 	IPAddress string `json:"ip_address"`
+	WorkerID  string `json:"worker_id,omitempty"`
 }
+
+type targetInfoCtxKey struct{}
 
 // TargetResolver resolves a VM ID or name to its target information and port exposure.
 type TargetResolver interface {
@@ -35,26 +36,69 @@ type TargetResolver interface {
 	IsPortPublic(ctx context.Context, idOrName string, port int) bool
 }
 
+// OwnerPortChecker is an optional extension of TargetResolver that scopes public
+// port exposure checks to the resolved VM's OwnerID, preventing cross-tenant
+// collisions when two tenants use the same sandbox name.
+type OwnerPortChecker interface {
+	IsPortPublicForOwner(ctx context.Context, ownerID, idOrName string, port int) bool
+}
+
 // AuthValidator validates whether an incoming HTTP request is authorized to access the given owner.
 type AuthValidator func(r *http.Request, ownerID string) bool
 
+// DialTargetFunc dials a backend sandbox address, optionally tunneling through a remote worker.
+type DialTargetFunc func(ctx context.Context, target *TargetInfo, network, addr string) (net.Conn, error)
+
 // ProxyOptions configures the IngressProxy.
 type ProxyOptions struct {
-	BaseDomains []string // e.g. "preview.localhost", "compute.internal", "localhost"
-	Resolver    TargetResolver
-	Auth        AuthValidator
-	Transport   http.RoundTripper
-	Timeout     time.Duration
+	BaseDomains  []string // legacy DNS zones for "<sandbox>.<user>.<zone>" routing
+	ServeDomains []string // serve domains for "<slug>.<serve-domain>" routing
+	Resolver     TargetResolver
+	Auth         AuthValidator
+	DialTarget   DialTargetFunc
+	Transport    http.RoundTripper
+	Timeout      time.Duration
+
+	// ServeResolver resolves published exposures by slug (subdomain mode) or
+	// by exposure ID (port mode).
+	ServeResolver ServeResolver
+	// ServeTokenKey signs/verifies short-lived private-serve tokens. Empty
+	// disables token auth (private serves then require a bearer token).
+	ServeTokenKey []byte
+	// AuthorizeBaseURL is the daemon base URL browsers are sent to when a
+	// private serve needs authentication (e.g. "https://compute.example.com").
+	AuthorizeBaseURL string
 }
 
-// IngressProxy is a high-performance unified reverse proxy supporting path-based routing,
-// wildcard subdomains, public vs. private authorization, HTTP/1.1, HTTP/2, WebSockets, and SSE.
+// Exposure describes one published guest port and its access rules.
+type Exposure struct {
+	ID        string
+	OwnerID   string
+	Slug      string
+	GuestPort int
+	Public    bool
+}
+
+// ServeResolver resolves exposures for subdomain and port based serving.
+type ServeResolver interface {
+	ResolveServeSlug(ctx context.Context, slug string) (*TargetInfo, *Exposure, error)
+	ResolveServeExposure(ctx context.Context, id string) (*TargetInfo, *Exposure, error)
+}
+
+// IngressProxy is a high-performance unified reverse proxy supporting
+// hostname-based serving, public vs. private authorization, HTTP/1.1, HTTP/2,
+// WebSockets, and SSE.
 type IngressProxy struct {
-	baseDomains []string
-	resolver    TargetResolver
-	auth        AuthValidator
-	transport   http.RoundTripper
-	mu          sync.RWMutex
+	baseDomains      []string
+	serveDomains     []string
+	resolver         TargetResolver
+	serveResolver    ServeResolver
+	auth             AuthValidator
+	dialTarget       DialTargetFunc
+	transport        http.RoundTripper
+	serveTokenKey    []byte
+	authorizeBaseURL string
+	mu               sync.RWMutex
 }
 
 // NewIngressProxy creates a new unified ingress reverse proxy instance.
@@ -63,14 +107,22 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 	if len(domains) == 0 {
 		domains = []string{"preview.localhost", "compute.internal", "compute.dev", "localhost"}
 	}
+	baseDialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	tr := opts.Transport
 	if tr == nil {
 		tr = &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   10 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if opts.DialTarget != nil {
+					if target, ok := ctx.Value(targetInfoCtxKey{}).(*TargetInfo); ok && target != nil && target.WorkerID != "" && target.WorkerID != "nod_host_local" {
+						return opts.DialTarget(ctx, target, network, addr)
+					}
+				}
+				return baseDialer.DialContext(ctx, network, addr)
+			},
 			ForceAttemptHTTP2:     true,
 			MaxIdleConns:          100,
 			IdleConnTimeout:       90 * time.Second,
@@ -80,25 +132,26 @@ func NewIngressProxy(opts ProxyOptions) *IngressProxy {
 		}
 	}
 	return &IngressProxy{
-		baseDomains: domains,
-		resolver:    opts.Resolver,
-		auth:        opts.Auth,
-		transport:   tr,
+		baseDomains:      domains,
+		serveDomains:     opts.ServeDomains,
+		resolver:         opts.Resolver,
+		serveResolver:    opts.ServeResolver,
+		auth:             opts.Auth,
+		dialTarget:       opts.DialTarget,
+		transport:        tr,
+		serveTokenKey:    opts.ServeTokenKey,
+		authorizeBaseURL: strings.TrimRight(strings.TrimSpace(opts.AuthorizeBaseURL), "/"),
 	}
 }
 
 // RouteMatch represents parsed routing details for an incoming request.
 type RouteMatch struct {
-	Target  string // VM ID or VM Name
-	Port    int    // Upstream guest port
-	Owner   string // Username DNS label for "<sandbox>.<username>.<zone>" routes
-	SubPath string // Rewritten path to forward upstream
-	// Prefix is the URL path prefix the request was matched under, for
-	// path-based preview routes (e.g. "/preview/pr-42/8080"). Empty for
-	// subdomain routes and the /api/v1/*/preview forms, which are already
-	// API-scoped and need no HTML rewriting.
-	Prefix  string
-	IsMatch bool
+	Target   string    // VM ID or VM Name
+	Port     int       // Upstream guest port
+	Owner    string    // Username DNS label for "<sandbox>.<username>.<zone>" routes
+	SubPath  string    // Path forwarded upstream
+	Exposure *Exposure // Non-nil for published serve routes
+	IsMatch  bool
 }
 
 // ParseRoute extracts target microVM ID/name, port, and subpath from either subdomain or URL path.
@@ -125,6 +178,39 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
 
+	// 1. Published serve subdomains: <slug>.<serve-domain>. Every exposure has
+	// its own origin, so the app sees "/" as its root and no URL rewriting is
+	// needed.
+	for _, domain := range p.serveDomains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		suffix := "." + domain
+		if !strings.HasSuffix(host, suffix) {
+			continue
+		}
+		slug := strings.TrimSuffix(host, suffix)
+		if slug == "" || strings.Contains(slug, ".") || networkReservedLabels[strings.ToLower(slug)] {
+			continue
+		}
+		if p.serveResolver == nil {
+			continue
+		}
+		target, exp, err := p.serveResolver.ResolveServeSlug(r.Context(), slug)
+		if err != nil || target == nil || exp == nil {
+			continue
+		}
+		return RouteMatch{
+			Target:   target.Name,
+			Port:     exp.GuestPort,
+			SubPath:  r.URL.Path,
+			Exposure: exp,
+			IsMatch:  true,
+		}
+	}
+
+	// 2. Legacy DNS zones: "<port>-<vm>.<zone>", "<vm>.<username>.<zone>", ...
 	for _, domain := range p.baseDomains {
 		domain = strings.ToLower(strings.TrimSpace(domain))
 		if domain == "" {
@@ -139,17 +225,81 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 		}
 	}
 
-	// 2. Check Path-Based Routing
-	// Patterns supported:
-	//   /preview/<target>/<port>/*
-	//   /api/v1/sandboxes/<target>/preview/<port>/*
-	//   /api/v1/vms/<target>/preview/<port>/*
-	path := r.URL.Path
-	if m, ok := parsePathRoute(path); ok {
-		return m
+	// 3. Path-based preview routes:
+	//   /preview/<target>/<port>[/...]
+	//   /api/v1/sandboxes/<target>/preview/<port>[/...]
+	//   /api/v1/vms/<target>/preview/<port>[/...]
+	if r.URL != nil {
+		if m, ok := parsePreviewPath(r.URL.Path); ok {
+			return m
+		}
 	}
 
 	return RouteMatch{IsMatch: false}
+}
+
+func parsePreviewPath(rawPath string) (RouteMatch, bool) {
+	if strings.HasPrefix(rawPath, "/preview/") {
+		rest := strings.TrimPrefix(rawPath, "/preview/")
+		return splitTargetPortSubpath(rest)
+	}
+	for _, apiPrefix := range []string{"/api/v1/sandboxes/", "/api/v1/vms/"} {
+		if strings.HasPrefix(rawPath, apiPrefix) {
+			rest := strings.TrimPrefix(rawPath, apiPrefix)
+			slashIdx := strings.IndexByte(rest, '/')
+			if slashIdx <= 0 {
+				continue
+			}
+			target := rest[:slashIdx]
+			afterTarget := rest[slashIdx:]
+			if !strings.HasPrefix(afterTarget, "/preview/") {
+				continue
+			}
+			portAndRest := strings.TrimPrefix(afterTarget, "/preview/")
+			return splitPortSubpath(target, portAndRest)
+		}
+	}
+	return RouteMatch{}, false
+}
+
+func splitTargetPortSubpath(rest string) (RouteMatch, bool) {
+	slashIdx := strings.IndexByte(rest, '/')
+	if slashIdx <= 0 {
+		return RouteMatch{}, false
+	}
+	target := rest[:slashIdx]
+	portAndRest := rest[slashIdx+1:]
+	if strings.HasPrefix(target, "@") && len(target) > 1 {
+		owner := strings.ToLower(target[1:])
+		if m, ok := splitTargetPortSubpath(portAndRest); ok {
+			m.Owner = owner
+			return m, true
+		}
+		return RouteMatch{}, false
+	}
+	return splitPortSubpath(target, portAndRest)
+}
+
+func splitPortSubpath(target, portAndRest string) (RouteMatch, bool) {
+	if target == "" || portAndRest == "" {
+		return RouteMatch{}, false
+	}
+	portStr := portAndRest
+	subPath := "/"
+	if slashIdx := strings.IndexByte(portAndRest, '/'); slashIdx >= 0 {
+		portStr = portAndRest[:slashIdx]
+		subPath = portAndRest[slashIdx:]
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return RouteMatch{}, false
+	}
+	return RouteMatch{
+		Target:  target,
+		Port:    port,
+		SubPath: subPath,
+		IsMatch: true,
+	}, true
 }
 
 // parseSubdomain parses the labels preceding a base domain. A single label is
@@ -280,102 +430,32 @@ func parseSubdomainPrefix(subdomain, rawPath string) (RouteMatch, bool) {
 	return RouteMatch{}, false
 }
 
-func parsePathRoute(path string) (RouteMatch, bool) {
-	var trimmed string
-	switch {
-	case strings.HasPrefix(path, "/preview/"):
-		trimmed = strings.TrimPrefix(path, "/preview/")
-	case strings.HasPrefix(path, "/api/v1/sandboxes/"):
-		after := strings.TrimPrefix(path, "/api/v1/sandboxes/")
-		idx := strings.Index(after, "/preview/")
-		if idx > 0 {
-			target := after[:idx]
-			rest := after[idx+len("/preview/"):]
-			parts := strings.SplitN(rest, "/", 2)
-			if len(parts) >= 1 {
-				port, err := strconv.Atoi(parts[0])
-				if err == nil && port > 0 && port <= 65535 {
-					subPath := "/"
-					if len(parts) == 2 && parts[1] != "" {
-						subPath = "/" + parts[1]
-					}
-					return RouteMatch{
-						Target:  target,
-						Port:    port,
-						SubPath: subPath,
-						IsMatch: true,
-					}, true
-				}
-			}
-		}
-		return RouteMatch{}, false
-	case strings.HasPrefix(path, "/api/v1/vms/"):
-		after := strings.TrimPrefix(path, "/api/v1/vms/")
-		idx := strings.Index(after, "/preview/")
-		if idx > 0 {
-			target := after[:idx]
-			rest := after[idx+len("/preview/"):]
-			parts := strings.SplitN(rest, "/", 2)
-			if len(parts) >= 1 {
-				port, err := strconv.Atoi(parts[0])
-				if err == nil && port > 0 && port <= 65535 {
-					subPath := "/"
-					if len(parts) == 2 && parts[1] != "" {
-						subPath = "/" + parts[1]
-					}
-					return RouteMatch{
-						Target:  target,
-						Port:    port,
-						SubPath: subPath,
-						IsMatch: true,
-					}, true
-				}
-			}
-		}
-		return RouteMatch{}, false
-	default:
-		return RouteMatch{}, false
-	}
-
-	parts := strings.SplitN(trimmed, "/", 3)
-	if len(parts) < 2 {
-		return RouteMatch{}, false
-	}
-	target := parts[0]
-	port, err := strconv.Atoi(parts[1])
-	if err != nil || port <= 0 || port > 65535 {
-		return RouteMatch{}, false
-	}
-	subPath := "/"
-	if len(parts) == 3 && parts[2] != "" {
-		subPath = "/" + parts[2]
-	}
-	match := RouteMatch{
-		Target:  target,
-		Port:    port,
-		SubPath: subPath,
-		IsMatch: true,
-	}
-	// Public /preview/<target>/<port> URLs serve full web apps under a path
-	// prefix; the proxy rewrites their HTML so absolute asset/API paths keep
-	// working (see rewriteHTMLForPrefix).
-	if strings.HasPrefix(path, "/preview/") {
-		match.Prefix = "/preview/" + target + "/" + strconv.Itoa(port)
-	}
-	return match, true
-}
-
-// ShouldHandle returns whether the request matches any ingress subdomain or preview path.
+// ShouldHandle reports whether the request targets a sandbox exposure host.
 func (p *IngressProxy) ShouldHandle(r *http.Request) bool {
 	match := p.ParseRoute(r)
 	return match.IsMatch
 }
 
-// ServeHTTP handles routing, authentication, and reverse-proxying of the incoming request.
+// ServeHTTP handles hostname routing, authentication, and reverse-proxying.
 func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	match := p.ParseRoute(r)
 	if !match.IsMatch {
-		http.Error(w, "invalid preview url format or unmatched route", http.StatusBadRequest)
+		http.Error(w, "unknown host: no sandbox exposure matches this URL", http.StatusNotFound)
+		return
+	}
+
+	ctx := r.Context()
+	if match.Exposure != nil {
+		if p.serveResolver == nil {
+			http.Error(w, "serve resolver not configured", http.StatusInternalServerError)
+			return
+		}
+		target, exp, err := p.serveResolver.ResolveServeSlug(ctx, match.Exposure.Slug)
+		if err != nil || target == nil || exp == nil {
+			http.Error(w, "sandbox exposure not found", http.StatusNotFound)
+			return
+		}
+		p.serveResolved(w, r, target, exp)
 		return
 	}
 
@@ -383,8 +463,6 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "ingress proxy resolver not configured", http.StatusInternalServerError)
 		return
 	}
-
-	ctx := r.Context()
 	var targetInfo *TargetInfo
 	var err error
 	if match.Owner != "" {
@@ -397,175 +475,231 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if targetInfo.Status != "running" {
-		http.Error(w, fmt.Sprintf("sandbox %s is not running (status: %s)", match.Target, targetInfo.Status), http.StatusServiceUnavailable)
+	// Legacy DNS routing has no exposure record; derive access from the
+	// port-forward table.
+	isPublic := false
+	if ownerChecker, ok := p.resolver.(OwnerPortChecker); ok {
+		isPublic = ownerChecker.IsPortPublicForOwner(ctx, targetInfo.OwnerID, targetInfo.ID, match.Port) ||
+			ownerChecker.IsPortPublicForOwner(ctx, targetInfo.OwnerID, targetInfo.Name, match.Port)
+	} else {
+		isPublic = p.resolver.IsPortPublic(ctx, targetInfo.ID, match.Port) ||
+			p.resolver.IsPortPublic(ctx, targetInfo.Name, match.Port)
+	}
+	exp := &Exposure{
+		ID:        fmt.Sprintf("preview:%s:%d", targetInfo.ID, match.Port),
+		OwnerID:   targetInfo.OwnerID,
+		GuestPort: match.Port,
+		Public:    isPublic,
+	}
+	// Authorize against the public request path first: rewriting r.URL.Path to
+	// the subpath below would drop "/preview/<target>/<port>/" from the
+	// authorize redirect's "next" URL.
+	if !exp.Public && !p.authorizePrivateServe(w, r, targetInfo, exp) {
 		return
 	}
-
-	if targetInfo.IPAddress == "" || targetInfo.IPAddress == "dhcp" {
-		http.Error(w, fmt.Sprintf("sandbox %s has no allocated IP address", match.Target), http.StatusServiceUnavailable)
-		return
+	if match.SubPath != "" && r.URL != nil && r.URL.Path != match.SubPath {
+		r = r.Clone(ctx)
+		r.URL.Path = match.SubPath
+		r.URL.RawPath = ""
 	}
-
-	// Determine Public vs. Private exposure
-	isPublic := p.resolver.IsPortPublic(ctx, targetInfo.ID, match.Port) ||
-		p.resolver.IsPortPublic(ctx, targetInfo.Name, match.Port)
-
-	if !isPublic {
-		// Private (default): enforce tenant authentication and verify caller owns the VM
-		if p.auth != nil && !p.auth(r, targetInfo.OwnerID) {
-			http.Error(w, "unauthorized: private sandbox preview requires authentication", http.StatusUnauthorized)
-			return
-		}
-	}
-
-	// Handle WebSocket Upgrade
-	if isWebSocketUpgrade(r) {
-		p.serveWebSocket(w, r, targetInfo.IPAddress, match.Port, match.SubPath)
-		return
-	}
-
-	// Handle standard HTTP/1.1, HTTP/2, and Server-Sent Events (SSE)
-	if match.Prefix != "" && previewPrefixIsValid(match.Prefix) {
-		w = newHTMLPrefixWriter(w, match.Prefix+"/")
-	}
-	p.serveHTTP(w, r, targetInfo.IPAddress, match.Port, match.SubPath)
-	if hw, ok := w.(*htmlPrefixWriter); ok {
-		hw.finalize()
-	}
+	p.serveResolved(w, r, targetInfo, exp)
 }
 
-// previewPrefixIsValid guards against untrusted URL segments being embedded in
-// rewritten HTML. Real sandbox names are DNS labels; anything else is left
-// un-rewritten rather than injected into a document.
-func previewPrefixIsValid(prefix string) bool {
-	for _, part := range strings.Split(strings.Trim(prefix, "/"), "/") {
-		if part == "" {
-			return false
-		}
-		for i := 0; i < len(part); i++ {
-			c := part[i]
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+// ServeExposure proxies a port-mode request bound to one exposure ID.
+func (p *IngressProxy) ServeExposure(w http.ResponseWriter, r *http.Request, exposureID string) {
+	if p.serveResolver == nil {
+		http.Error(w, "serve resolver not configured", http.StatusInternalServerError)
+		return
+	}
+	target, exp, err := p.serveResolver.ResolveServeExposure(r.Context(), exposureID)
+	if err != nil || target == nil || exp == nil {
+		http.Error(w, "sandbox exposure not found", http.StatusNotFound)
+		return
+	}
+	p.serveResolved(w, r, target, exp)
+}
+
+// serveResolved applies access control and proxies the request to the sandbox.
+// The upstream sees the public Host and the request path unchanged, so apps
+// that build absolute URLs behave as if they were served from their own root.
+func (p *IngressProxy) serveResolved(w http.ResponseWriter, r *http.Request, target *TargetInfo, exp *Exposure) {
+	if target == nil || exp == nil {
+		http.Error(w, "sandbox exposure not found", http.StatusNotFound)
+		return
+	}
+	if target.Status != "running" {
+		http.Error(w, fmt.Sprintf("sandbox %s is not running (status: %s)", target.Name, target.Status), http.StatusServiceUnavailable)
+		return
+	}
+	if target.IPAddress == "" || target.IPAddress == "dhcp" {
+		http.Error(w, fmt.Sprintf("sandbox %s has no allocated IP address", target.Name), http.StatusServiceUnavailable)
+		return
+	}
+	if !exp.Public && !p.authorizePrivateServe(w, r, target, exp) {
+		return
+	}
+
+	r = r.WithContext(context.WithValue(r.Context(), targetInfoCtxKey{}, target))
+	if isWebSocketUpgrade(r) {
+		p.serveWebSocket(w, r, target, exp.GuestPort, r.URL.Path)
+		return
+	}
+	p.serveHTTP(w, r, target, exp.GuestPort, r.URL.Path)
+}
+
+// authorizePrivateServe admits bearer/session credentials, a signed serve
+// token (query or cookie), or bounces browser navigations through the daemon so
+// it can mint a token from the user's existing session.
+func (p *IngressProxy) authorizePrivateServe(w http.ResponseWriter, r *http.Request, target *TargetInfo, exp *Exposure) bool {
+	if p.auth != nil && p.auth(r, target.OwnerID) {
+		return true
+	}
+	if token := serveTokenFromRequest(r); token != "" && len(p.serveTokenKey) > 0 {
+		if id, owner, err := VerifyServeToken(p.serveTokenKey, token); err == nil && id == exp.ID && (owner == "" || owner == target.OwnerID) {
+			if r.URL.Query().Get(ServeTokenQueryParam) != "" {
+				p.setServeCookie(w, r, token)
+				redirectServeClean(w, r)
 				return false
 			}
+			return true
 		}
 	}
-	return true
+	if base := p.authorizeBaseURLForRequest(r); base != "" && acceptsHTML(r.Header.Get("Accept")) {
+		next := serveRequestURL(r)
+		http.Redirect(w, r, base+"/api/v1/serve/authorize?next="+url.QueryEscape(next), http.StatusFound)
+		return false
+	}
+	http.Error(w, "unauthorized: private sandbox exposure requires authentication", http.StatusUnauthorized)
+	return false
 }
 
-// rewriteHTMLForPrefix makes an upstream document work under a path prefix:
-//   - absolute src=/href= attributes are rewritten to the prefix,
-//   - a <base href> is injected after <head> so relative URLs resolve,
-//   - a small runtime patch redirects fetch/XHR/EventSource/WebSocket calls
-//     that use absolute paths (e.g. "/api/v1/...") to the prefix.
-//
-// The rewrite runs on already-decoded response bodies (the transport handles
-// gzip), so no Content-Encoding negotiation is involved.
-func rewriteHTMLForPrefix(body []byte, prefix string) []byte {
-	html := string(body)
-	base := strings.TrimSuffix(prefix, "/")
-	attrRe := regexp.MustCompile(`(?i)\b(src|href)\s*=\s*"(/[^/"][^"]*)"`)
-	html = attrRe.ReplaceAllString(html, `$1="`+base+`$2"`)
-	attrSingleRe := regexp.MustCompile(`(?i)\b(src|href)\s*=\s*'(/[^/'][^']*)'`)
-	html = attrSingleRe.ReplaceAllString(html, `$1='`+base+`$2'`)
+// authorizeBaseURLForRequest returns the daemon base URL browsers should use to
+// authenticate. When the configured base URL points at loopback but the request
+// arrived through a public host (e.g. Tailscale Serve forwarding
+// "compute-lab.tailb1be99.ts.net" to 127.0.0.1:18080), the request's own scheme
+// and host are used so remote browsers are not redirected to loopback.
+func (p *IngressProxy) authorizeBaseURLForRequest(r *http.Request) string {
+	base := p.authorizeBaseURL
+	if base == "" || r == nil {
+		return base
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || !isLoopbackHost(u.Hostname()) {
+		return base
+	}
+	host := requestForwardedHost(r)
+	if host == "" || isLoopbackHost(stripHostPort(host)) {
+		return base
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	u.Scheme = scheme
+	u.Host = normalizeRequestHost(scheme, host)
+	return strings.TrimRight(u.String(), "/")
+}
 
-	inject := `<base href="` + prefix + `">` + previewRuntimePatch(prefix)
-	lower := strings.ToLower(html)
-	if idx := strings.Index(lower, "<head"); idx >= 0 {
-		if gt := strings.Index(html[idx:], ">"); gt >= 0 {
-			at := idx + gt + 1
-			return []byte(html[:at] + inject + html[at:])
+// requestForwardedHost returns the externally visible host, preferring
+// X-Forwarded-Host over the request's Host header.
+func requestForwardedHost(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+		if idx := strings.IndexByte(fwd, ','); idx >= 0 {
+			fwd = strings.TrimSpace(fwd[:idx])
 		}
+		return fwd
 	}
-	return []byte(inject + html)
+	return strings.TrimSpace(r.Host)
 }
 
-// previewRuntimePatch returns the inline script that patches browser APIs to
-// honor the preview prefix for runtime-issued requests (SPA code typically
-// fetches "/api/v1/..." with absolute paths that bypass <base>).
-func previewRuntimePatch(prefix string) string {
-	return `<script>(function(){
-var P="` + prefix + `";
-function A(u){return typeof u==="string"&&u.charAt(0)==="/"&&u.charAt(1)!=="/";}
-var F=window.fetch;
-if(F)window.fetch=function(){if(A(arguments[0]))arguments[0]=P+arguments[0].slice(1);return F.apply(this,arguments);};
-var O=XMLHttpRequest&&XMLHttpRequest.prototype.open;
-if(O)XMLHttpRequest.prototype.open=function(){if(A(arguments[1]))arguments[1]=P+arguments[1].slice(1);return O.apply(this,arguments);};
-var E=window.EventSource;
-if(E){window.EventSource=function(u){if(A(u))u=P+u.slice(1);return new E(u);};window.EventSource.prototype=E.prototype;}
-var W=window.WebSocket;
-if(W){window.WebSocket=function(u,p){if(A(u))u=(location.protocol==="https:"?"wss://":"ws://")+location.host+P+u.slice(1);return p!==undefined?new W(u,p):new W(u);};window.WebSocket.prototype=W.prototype;window.WebSocket.CONNECTING=W.CONNECTING;window.WebSocket.OPEN=W.OPEN;window.WebSocket.CLOSING=W.CLOSING;window.WebSocket.CLOSED=W.CLOSED;}
-})();</script>`
-}
-
-// htmlPrefixWriter buffers HTML responses so they can be rewritten for the
-// preview path prefix. Non-HTML responses (including SSE streams) pass
-// through untouched.
-type htmlPrefixWriter struct {
-	w           http.ResponseWriter
-	prefix      string // ends with "/"
-	wroteHeader bool
-	buffering   bool
-	status      int
-	buf         bytes.Buffer
-	finalized   bool
-}
-
-func newHTMLPrefixWriter(w http.ResponseWriter, prefix string) *htmlPrefixWriter {
-	return &htmlPrefixWriter{w: w, prefix: prefix}
-}
-
-func (h *htmlPrefixWriter) Header() http.Header { return h.w.Header() }
-
-func (h *htmlPrefixWriter) WriteHeader(code int) {
-	if h.wroteHeader {
-		return
+func stripHostPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
 	}
-	h.wroteHeader = true
-	h.status = code
-	if strings.Contains(h.w.Header().Get("Content-Type"), "text/html") {
-		h.buffering = true
-		return
-	}
-	h.w.WriteHeader(code)
+	return strings.Trim(host, "[]")
 }
 
-func (h *htmlPrefixWriter) Write(p []byte) (int, error) {
-	if !h.wroteHeader {
-		h.WriteHeader(http.StatusOK)
+// normalizeRequestHost drops a port that is redundant for the given scheme.
+func normalizeRequestHost(scheme, host string) string {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
 	}
-	if h.buffering {
-		if h.finalized {
-			return h.w.Write(p)
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		if strings.Contains(h, ":") {
+			return "[" + h + "]"
 		}
-		return h.buf.Write(p)
+		return h
 	}
-	return h.w.Write(p)
+	return host
 }
 
-// Flush is a no-op while an HTML response is being buffered; the full body is
-// written by finalize once the upstream handler returns. Reverse proxying
-// (FlushInterval -1) flushes immediately after WriteHeader, which would
-// otherwise cut the buffered rewrite short. Non-HTML responses flush through.
-func (h *htmlPrefixWriter) Flush() {
-	if !h.buffering || h.finalized {
-		if f, ok := h.w.(http.Flusher); ok {
-			f.Flush()
-		}
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(stripHostPort(host)))
+	if host == "" {
+		return false
 	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
-func (h *htmlPrefixWriter) finalize() {
-	if !h.buffering || h.finalized {
-		return
+func (p *IngressProxy) setServeCookie(w http.ResponseWriter, r *http.Request, token string) {
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	http.SetCookie(w, &http.Cookie{
+		Name:     ServeCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		MaxAge:   int(ServeTokenTTL.Seconds()),
+	})
+}
+
+// serveRequestURL reconstructs the externally visible request URL.
+func serveRequestURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
 	}
-	h.finalized = true
-	rewritten := rewriteHTMLForPrefix(h.buf.Bytes(), h.prefix)
-	header := h.w.Header()
-	header.Del("Content-Encoding") // upstream body is decoded; no encoding to declare
-	header.Set("Content-Length", strconv.Itoa(len(rewritten)))
-	h.w.WriteHeader(h.status)
-	_, _ = h.w.Write(rewritten)
+	host := r.Host
+	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+		host = fwd
+	}
+	return scheme + "://" + host + r.URL.RequestURI()
+}
+
+// redirectServeClean removes the one-time token from the address bar after it
+// has been exchanged for a cookie.
+func redirectServeClean(w http.ResponseWriter, r *http.Request) {
+	u := *r.URL
+	q := u.Query()
+	q.Del(ServeTokenQueryParam)
+	u.RawQuery = q.Encode()
+	target := u.Path
+	if target == "" {
+		target = "/"
+	}
+	if u.RawQuery != "" {
+		target += "?" + u.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+func acceptsHTML(accept string) bool {
+	accept = strings.ToLower(accept)
+	if strings.TrimSpace(accept) == "" {
+		return false
+	}
+	return strings.Contains(accept, "text/html") || strings.Contains(accept, "*/*")
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {
@@ -574,16 +708,22 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // serveWebSocket performs bidirectional raw TCP tunneling / hijacking for WebSocket traffic.
-func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, targetIP string, port int, subPath string) {
+func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, target *TargetInfo, port int, subPath string) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "websocket hijacking not supported by server", http.StatusInternalServerError)
 		return
 	}
 
-	targetAddr := net.JoinHostPort(targetIP, strconv.Itoa(port))
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	backendConn, err := dialer.DialContext(r.Context(), "tcp", targetAddr)
+	targetAddr := net.JoinHostPort(target.IPAddress, strconv.Itoa(port))
+	var backendConn net.Conn
+	var err error
+	if p.dialTarget != nil && target.WorkerID != "" && target.WorkerID != "nod_host_local" {
+		backendConn, err = p.dialTarget(r.Context(), target, "tcp", targetAddr)
+	} else {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		backendConn, err = dialer.DialContext(r.Context(), "tcp", targetAddr)
+	}
 	if err != nil {
 		http.Error(w, "failed to connect to upstream websocket service: "+err.Error(), http.StatusBadGateway)
 		return
@@ -597,10 +737,11 @@ func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, ta
 	}
 	defer clientConn.Close()
 
-	// Rewrite request URL path and target Host for upstream
+	// Forward the public Host (as with HTTP requests) and the upstream path.
 	outReq := r.Clone(r.Context())
 	outReq.URL.Path = subPath
-	outReq.Host = targetAddr
+	outReq.Host = r.Host
+	outReq.Header.Set("X-Forwarded-Host", r.Host)
 
 	// Forward client handshake to backend
 	if err := outReq.Write(backendConn); err != nil {
@@ -622,8 +763,8 @@ func (p *IngressProxy) serveWebSocket(w http.ResponseWriter, r *http.Request, ta
 }
 
 // serveHTTP proxies HTTP/1.1 and HTTP/2 requests with immediate unbuffered flush for streaming/SSE.
-func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, targetIP string, port int, subPath string) {
-	targetURL, err := url.Parse(fmt.Sprintf("http://%s:%d", targetIP, port))
+func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, target *TargetInfo, port int, subPath string) {
+	targetURL, err := url.Parse(fmt.Sprintf("http://%s:%d", target.IPAddress, port))
 	if err != nil {
 		http.Error(w, "failed to parse upstream url: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -637,8 +778,15 @@ func (p *IngressProxy) serveHTTP(w http.ResponseWriter, r *http.Request, targetI
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-		req.URL.Path = subPath
-		req.Host = fmt.Sprintf("%s:%d", targetIP, port)
+		if subPath != "" {
+			req.URL.Path = subPath
+		}
+		// Preserve the public Host: apps that build absolute URLs or redirects
+		// from it then emit the serve origin, which is exactly where the client
+		// is. X-Forwarded-* carries the original values for apps that need them.
+		if target.WorkerID != "" && target.WorkerID != "nod_host_local" {
+			req.Close = true
+		}
 		req.Header.Set("X-Forwarded-Host", r.Host)
 		if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			req.Header.Set("X-Forwarded-For", clientIP)

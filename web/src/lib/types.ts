@@ -44,6 +44,11 @@ export interface VM {
   pid?: number;
   socket_path?: string;
   protected?: boolean;
+  pool_id?: string;
+  worker_id?: string;
+  last_activity_at?: string | null;
+  auto_hibernated?: boolean;
+  hibernate_reason?: string;
   created_at: string;
   updated_at: string;
 }
@@ -93,6 +98,8 @@ export interface CreateVMRequest {
   clone_from?: string;
   image?: string;
   template?: string;
+  pool_id?: string;
+  worker_id?: string;
   ip_address?: string;
   mac_address?: string;
   public_ip?: boolean;
@@ -108,6 +115,9 @@ export interface CreateVMRequest {
   ssh_password?: string;
   /** Opts out of embedding the account's default key when no ssh_key_id is set. */
   ssh_no_default_key?: boolean;
+  command?: string;
+  build_command?: string;
+  exec_user?: string;
 }
 
 export interface CloneVMOptions {
@@ -315,6 +325,18 @@ export interface WorkerNodeRecord {
   total_vcpus: number;
   total_mem_mb: number;
   total_disk_mb: number;
+  allocated_vcpus?: number;
+  allocated_mem_mb?: number;
+  allocated_disk_mb?: number;
+  physical_vcpus?: number;
+  physical_mem_mb?: number;
+  physical_disk_mb?: number;
+  used_vcpus?: number;
+  used_mem_mb?: number;
+  used_disk_mb?: number;
+  running_vms?: number;
+  available_mem_mb?: number;
+  available_disk_mb?: number;
   labels_json: string;
   capabilities_json: string;
   agent_version: string;
@@ -697,6 +719,7 @@ export interface PortForwardRecord {
   protocol: 'TCP' | 'HTTP/HTTPS' | string;
   subdomain: string;
   public_url: string;
+  public: boolean;
   status: 'active' | 'inactive' | string;
   created_at: string;
 }
@@ -746,4 +769,202 @@ export interface AuthMeResponse {
   role?: string;
   auth_type?: string;
   scopes?: string[];
+}
+
+export interface ImageListItem {
+  id: string;
+  name: string;
+  description?: string;
+  base_image?: string;
+  packages?: string[];
+  size_mb: number;
+  status: string;
+  kind: 'base' | 'custom' | string;
+  created_at?: string;
+}
+
+export type SchedulingStrategy = 'least_loaded' | 'round_robin' | 'bin_pack' | 'spread';
+
+export interface ClusterSchedulingPolicy {
+  strategy: SchedulingStrategy | string;
+  cpu_weight: number;
+  memory_weight: number;
+  disk_weight: number;
+  cpu_soft_overcommit_ratio: number;
+  cpu_hard_overcommit_ratio: number;
+  cpu_share_weight_base: number;
+  memory_hard_guarantee: boolean;
+  idle_ram_snapshot_enabled: boolean;
+  idle_threshold_seconds: number;
+  auto_reclaim_on_pressure: boolean;
+  host_reserved_vcpus: number;
+  host_reserved_memory_mb: number;
+  host_reserved_disk_mb: number;
+  disk_hard_enforcement: boolean;
+}
+
+export interface UpdateWorkerRequest {
+  pool_id?: string;
+  allocated_vcpus?: number;
+  allocated_mem_mb?: number;
+  allocated_disk_mb?: number;
+  labels?: Record<string, string>;
+  status?: 'ready' | 'cordoned' | 'draining' | 'offline' | string;
+}
+
+export interface MigrateVMRequest {
+  target_worker_id?: string;
+  target_pool_id?: string;
+  force?: boolean;
+}
+
+export interface MigratePoolRequest {
+  target_pool_id?: string;
+  target_worker_id?: string;
+  migrate_workers?: boolean;
+  migrate_sandboxes?: boolean;
+  force?: boolean;
+}
+
+export interface PoolMigrationResponse {
+  source_pool_id: string;
+  target_pool_id: string;
+  workers_moved: number;
+  workers_failed: number;
+  sandboxes_migrated: number;
+  sandboxes_failed: number;
+  moved_worker_ids: string[];
+  migrated_vm_ids: string[];
+  errors?: string[];
+}
+
+export interface BulkVMsRequest {
+  ids: string[];
+  action?:
+    | 'start'
+    | 'stop'
+    | 'restart'
+    | 'save-state'
+    | 'snapshot'
+    | 'resume'
+    | 'protect'
+    | 'unprotect'
+    | 'delete'
+    | string;
+  async?: boolean;
+}
+
+export interface BulkVMItemError {
+  id: string;
+  error: string;
+}
+
+export interface BulkVMsResponse {
+  action?: string;
+  status?: 'queued' | 'completed' | string;
+  task_id?: string;
+  queued?: number;
+  requested: number;
+  succeeded: string[];
+  failed: BulkVMItemError[];
+  warnings?: BulkVMItemError[];
+  /** Durable operation records created for this request, in item order. */
+  operation_ids?: string[];
+}
+
+/** Durable record of a long-running unit of work. */
+export interface OperationRecord {
+  id: string;
+  owner_id: string;
+  kind: string;
+  target_id?: string;
+  target_name?: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled' | string;
+  progress: number;
+  request_json?: string;
+  result_json?: string;
+  error_msg?: string;
+  task_id?: string;
+  actor?: string;
+  trace_id?: string;
+  created_at: string;
+  started_at?: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
+/** Terminal or in-flight state of an asynchronous bulk task. */
+export interface BulkTaskRecord {
+  id: string;
+  action: string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'failed' | string;
+  stage?: string;
+  requested: number;
+  queued: number;
+  completed?: number;
+  succeeded: string[];
+  failed: BulkVMItemError[];
+  warnings?: BulkVMItemError[];
+  elapsed_ms?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BulkCreateVMsRequest {
+  items: CreateVMRequest[];
+  async?: boolean;
+}
+
+export interface BulkCloneItem extends CreateVMRequest {
+  source_id: string;
+}
+
+export interface BulkCloneVMsRequest {
+  source_id?: string;
+  names?: string[];
+  items?: BulkCloneItem[];
+  description?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  disk_mb?: number;
+  disk_gb?: number;
+  network_isolation?: NetworkIsolationMode;
+  network_isolated?: boolean;
+  auto_start?: boolean;
+  protected?: boolean;
+  worker_id?: string;
+  pool_id?: string;
+  async?: boolean;
+}
+
+export interface ResourceLimitErrorDetails {
+  code?: string;
+  resource?: 'cpu' | 'memory' | 'disk' | string;
+  limit_type?: 'hard' | 'soft' | string;
+  node_id?: string;
+  requested?: number;
+  available?: number;
+  limit?: number;
+  error?: string;
+  suggestion?: string;
+}
+
+export interface ExecVMRequest {
+  command: string;
+  user?: string;
+  timeout?: number;
+}
+
+export interface ExecVMResponse {
+  stdout: string;
+  stderr: string;
+  exit_code: number;
+  duration_ms: number;
+}
+
+export interface ExecStreamEvent {
+  stream?: 'stdout' | 'stderr' | string;
+  data?: string;
+  error?: string;
+  exit_code?: number;
 }

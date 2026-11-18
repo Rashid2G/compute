@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build an Ubuntu 24.04 ext4 root filesystem for Firecracker microVMs without
-# requiring Docker-in-Docker or host loop-mount tools. Designed to run inside
-# the compute-init container or directly as root on Linux.
+# requiring Docker-in-Docker or host loop-mount tools. Designed to run via
+# `computed init --images` or directly as root on Linux.
 #
 # Usage:
 #   build-rootfs-chroot.sh <output.ext4|images_dir> [size_mb] [ssh_pubkey_path]
@@ -266,9 +266,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mount -t tmpfs tmpfs /dev/shm 2>/dev/null || true
-mount -t tmpfs tmpfs /run 2>/dev/null || true
 mkdir -p /dev/pts /dev/shm /run/sshd /run/lock
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+chmod 1777 /dev/shm /tmp /var/tmp /run/lock 2>/dev/null || true
 chmod 0755 /run/sshd
 mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
 

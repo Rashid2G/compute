@@ -141,6 +141,9 @@ func TestRootfsPackagesAndPingConfig(t *testing.T) {
 	if !strings.Contains(initScript, "ping_group_range") || !strings.Contains(initScript, "0 2147483647") {
 		t.Fatal("builder /sbin/init missing ping_group_range configuration")
 	}
+	if !strings.Contains(initScript, "/sbin/getty") || !strings.Contains(initScript, "/sbin/agetty") {
+		t.Fatal("builder /sbin/init should support both /sbin/getty and /sbin/agetty")
+	}
 
 	repoRoot := filepath.Join("..", "..")
 	for _, rel := range []string{
@@ -164,5 +167,21 @@ func TestRootfsPackagesAndPingConfig(t *testing.T) {
 		if !strings.Contains(content, "chmod u+s /bin/ping") {
 			t.Fatalf("%s missing chmod u+s /bin/ping", rel)
 		}
+	}
+}
+
+func TestBuilder_CustomBuildCommands(t *testing.T) {
+	req := BuildRequest{
+		Name:     "node-custom",
+		Packages: []string{"nodejs", "npm"},
+		Command:  "npm install -g pnpm && pnpm --version",
+		Commands: []string{"echo build-stage-1 > /etc/stage"},
+	}
+	dockerfile := buildDockerfile(req)
+	if !strings.Contains(dockerfile, "npm install -g pnpm") {
+		t.Fatalf("expected custom command in dockerfile, got: %s", dockerfile)
+	}
+	if !strings.Contains(dockerfile, "echo build-stage-1") {
+		t.Fatalf("expected custom commands array in dockerfile, got: %s", dockerfile)
 	}
 }

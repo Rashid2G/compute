@@ -30,34 +30,6 @@ x-data-volume: &data-volume
   ${COMPUTE_HOST_DATA_DIR:-./data}:/var/lib/compute
 
 services:
-  # One-shot bootstrap: installs the kernel, builds the Ubuntu 24.04 rootfs,
-  # and generates the internal SSH key before the daemon starts. Idempotent.
-  compute-init:
-    <<: *daemon-image
-    restart: "no"
-    network_mode: host
-    # Required to mount proc/sysfs/devpts during first-run rootfs chroot build.
-    privileged: true
-    logging: *default-logging
-    volumes:
-      - *data-volume
-    environment:
-      COMPUTE_DATA_DIR: ${COMPUTE_DATA_DIR:-/var/lib/compute}
-      COMPUTE_IMAGES_DIR: ${COMPUTE_IMAGES_DIR:-/var/lib/compute/images}
-      COMPUTE_IMAGES_MODE: ${COMPUTE_IMAGES_MODE:-auto}
-      COMPUTE_IMAGE_MANIFEST_URL: ${COMPUTE_IMAGE_MANIFEST_URL:-}
-      COMPUTE_IMAGE_ALLOW_HTTP: ${COMPUTE_IMAGE_ALLOW_HTTP:-}
-      COMPUTE_KERNEL_SRC: ${COMPUTE_KERNEL_SRC:-}
-      COMPUTE_KERNEL_URL: ${COMPUTE_KERNEL_URL:-}
-      COMPUTE_KERNEL_SHA256: ${COMPUTE_KERNEL_SHA256:-}
-      COMPUTE_ROOTFS_SIZE_MB: ${COMPUTE_ROOTFS_SIZE_MB:-2048}
-      COMPUTE_ROOTFS_BUILDER: ${COMPUTE_ROOTFS_BUILDER:-}
-      COMPUTE_DEFAULT_KERNEL: ${COMPUTE_DEFAULT_KERNEL:-vmlinux}
-      COMPUTE_DEFAULT_ROOTFS: ${COMPUTE_DEFAULT_ROOTFS:-ubuntu-24.04.ext4}
-      COMPUTE_SSH_KEY_PATH: ${COMPUTE_SSH_KEY_PATH:-/var/lib/compute/images/ssh/id_ed25519}
-    entrypoint: ["/usr/local/bin/computed"]
-    command: ["init", "--images"]
-
   computed:
     <<: *daemon-image
     restart: unless-stopped
@@ -72,9 +44,6 @@ services:
     logging: *default-logging
     ulimits:
       nofile: 65536
-    depends_on:
-      compute-init:
-        condition: service_completed_successfully
     environment:
       COMPUTE_DATA_DIR: ${COMPUTE_DATA_DIR:-/var/lib/compute}
       COMPUTE_DB_PATH: ${COMPUTE_DB_PATH:-}
@@ -92,13 +61,20 @@ services:
       COMPUTE_ADMIN_SECRET: ${COMPUTE_ADMIN_SECRET:-}
       COMPUTE_TLS_CERT_FILE: ${COMPUTE_TLS_CERT_FILE:-}
       COMPUTE_TLS_KEY_FILE: ${COMPUTE_TLS_KEY_FILE:-}
+      COMPUTE_PUBLIC_URL: ${COMPUTE_PUBLIC_URL:-}
+      COMPUTE_SERVE_DOMAIN: ${COMPUTE_SERVE_DOMAIN:-}
+      COMPUTE_SERVE_BIND: ${COMPUTE_SERVE_BIND:-}
+      COMPUTE_SERVE_PORT_START: ${COMPUTE_SERVE_PORT_START:-18400}
+      COMPUTE_SERVE_PORT_END: ${COMPUTE_SERVE_PORT_END:-18500}
+      COMPUTE_SERVE_TLS_CERT_FILE: ${COMPUTE_SERVE_TLS_CERT_FILE:-}
+      COMPUTE_SERVE_TLS_KEY_FILE: ${COMPUTE_SERVE_TLS_KEY_FILE:-}
+      COMPUTE_SERVE_TOKEN_KEY: ${COMPUTE_SERVE_TOKEN_KEY:-}
       COMPUTE_EDGE_LISTEN: ${COMPUTE_EDGE_LISTEN:-}
       COMPUTE_CGROUP_ENFORCE: ${COMPUTE_CGROUP_ENFORCE:-}
       COMPUTE_JAILER_ENABLED: ${COMPUTE_JAILER_ENABLED:-}
       COMPUTE_JAILER_BIN: ${COMPUTE_JAILER_BIN:-}
       COMPUTE_JAILER_DIR: ${COMPUTE_JAILER_DIR:-}
       COMPUTE_ALLOW_UNREADY_STARTUP: ${COMPUTE_ALLOW_UNREADY_STARTUP:-}
-      COMPUTE_DEPLOYMENTS_INDEX: ${COMPUTE_DEPLOYMENTS_INDEX:-}
       COMPUTE_DNS_ENABLED: ${COMPUTE_DNS_ENABLED:-false}
       COMPUTE_DNS_LISTEN: ${COMPUTE_DNS_LISTEN:-}
       COMPUTE_DNS_BASE_DOMAIN: ${COMPUTE_DNS_BASE_DOMAIN:-${COMPUTE_DOMAIN:-}}

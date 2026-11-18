@@ -78,6 +78,10 @@ func (s *Server) handleVMFiles(w http.ResponseWriter, r *http.Request, vmID stri
 		httpError(w, "sandbox is not running", http.StatusConflict)
 		return
 	}
+	if vm.IsRemoteVM(v) {
+		s.proxyRemoteFiles(w, r, v, subParts)
+		return
+	}
 
 	subAction := ""
 	if len(subParts) > 0 {
@@ -315,6 +319,10 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 		httpError(w, "sandbox is not running", http.StatusConflict)
 		return
 	}
+	if vm.IsRemoteVM(v) {
+		s.proxyRemoteProcesses(w, r, v, subParts)
+		return
+	}
 
 	subAction := ""
 	if len(subParts) > 0 {
@@ -442,14 +450,4 @@ func (s *Server) handleVMProcesses(w http.ResponseWriter, r *http.Request, vmID 
 	default:
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-// handlePreviewProxy handles reverse-proxying HTTP/WebSocket traffic to microVM ports via unified IngressProxy.
-// URL pattern: /preview/:sandbox_id/:port/*
-func (s *Server) handlePreviewProxy(w http.ResponseWriter, r *http.Request) {
-	if s.ingressProxy != nil {
-		s.ingressProxy.ServeHTTP(w, r)
-		return
-	}
-	http.Error(w, "ingress proxy not initialized", http.StatusInternalServerError)
 }

@@ -38,6 +38,9 @@ func main() {
 	token := f.String("token", "", "worker token")
 	name := f.String("name", "", "worker name")
 	pool := f.String("pool", "", "pool ID")
+	maxVCPUs := f.Int("max-vcpus", 0, "maximum vCPUs to allocate on this worker")
+	maxMemoryMB := f.Int("max-memory-mb", 0, "maximum memory MB to allocate on this worker")
+	maxDiskMB := f.Int("max-disk-mb", 0, "maximum disk MB to allocate on this worker")
 	_ = f.Parse(os.Args[2:])
 	c, e := worker.LoadConfig(*configPath)
 	if e != nil && *cp == "" {
@@ -55,6 +58,15 @@ func main() {
 	if *pool != "" {
 		c.PoolID = *pool
 	}
+	if *maxVCPUs > 0 {
+		c.MaxVCPUs = *maxVCPUs
+	}
+	if *maxMemoryMB > 0 {
+		c.MaxMemoryMB = *maxMemoryMB
+	}
+	if *maxDiskMB > 0 {
+		c.MaxDiskMB = *maxDiskMB
+	}
 	if c.Token == "" && !c.AllowLocalExec {
 		log.Fatal("COMPUTE_WORKER_TOKEN is required to enroll a worker; create one with `compute worker token --name <name>`")
 	}
@@ -70,6 +82,7 @@ func main() {
 		}
 		defer cleanup()
 		client.Supervisor = supervisor
+		client.VMManager = supervisor.VMManager()
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -151,6 +164,11 @@ func newMicroVMSupervisor(c worker.Config) (*worker.MicroVMSupervisor, func(), e
 			MemoryMB:   2048,
 			DiskSizeMB: config.DiskSize50GB,
 			Image:      "ubuntu-24",
+		},
+		Resources: config.ResourceLimits{
+			MaxTotalVCPUs:    c.MaxVCPUs,
+			MaxTotalMemoryMB: c.MaxMemoryMB,
+			MaxTotalDiskMB:   int64(c.MaxDiskMB),
 		},
 	}, store, netMgr, storMgr)
 

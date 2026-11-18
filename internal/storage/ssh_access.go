@@ -59,6 +59,9 @@ func (m *Manager) ConfigureSSHAccess(diskPath string, access SSHAccess) error {
 	if _, err := os.Stat(diskPath); err != nil {
 		return fmt.Errorf("stat disk image: %w", err)
 	}
+	if !isExt4Image(diskPath) {
+		return fmt.Errorf("configure SSH access on %s: not an ext4 image", diskPath)
+	}
 
 	users := access.Users
 	if len(users) == 0 {
@@ -78,7 +81,13 @@ func (m *Manager) ConfigureSSHAccess(diskPath string, access SSHAccess) error {
 		})
 	}
 	attempts = append(attempts, func() error {
-		return applySSHAccess(newDebugfsImageFS(diskPath), access, users, keysContent)
+		dbg := newDebugfsImageFS(diskPath)
+		dbg.beginBatch()
+		if err := applySSHAccess(dbg, access, users, keysContent); err != nil {
+			dbg.discardBatch()
+			return err
+		}
+		return dbg.commitBatch()
 	})
 
 	var failures []string
@@ -126,12 +135,13 @@ func applySSHAccess(fs imageFS, access SSHAccess, users []string, keysContent st
 		// included, when the shadow password starts with "!" or "*"
 		// ("User ... not allowed because account is locked"). Install an
 		// unguessable random password instead and keep password
-		// authentication disabled in sshd_config.
+		// authentication disabled in sshd_config. Use MinCost since
+		// password login is disabled and the secret is never compared.
 		secret, err := randomShadowSecret()
 		if err != nil {
 			return fmt.Errorf("generate placeholder SSH password: %w", err)
 		}
-		hashed, err := bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)
+		hashed, err := bcrypt.GenerateFromPassword(secret, bcrypt.MinCost)
 		if err != nil {
 			return fmt.Errorf("hash placeholder SSH password: %w", err)
 		}
@@ -175,6 +185,9 @@ func (m *Manager) ConfigureAuthorizedKeys(diskPath string, pubKeys ...string) er
 	if _, err := os.Stat(diskPath); err != nil {
 		return fmt.Errorf("stat disk image: %w", err)
 	}
+	if !isExt4Image(diskPath) {
+		return fmt.Errorf("configure authorized_keys on %s: not an ext4 image", diskPath)
+	}
 
 	keysContent := m.sshAuthorizedKeys(pubKeys...)
 
@@ -194,10 +207,16 @@ func (m *Manager) ConfigureAuthorizedKeys(diskPath string, pubKeys ...string) er
 	}
 	attempts = append(attempts, func() error {
 		fs := newDebugfsImageFS(diskPath)
+		fs.beginBatch()
 		if err := applyAuthorizedKeys(fs, defaultSSHUsers, keysContent); err != nil {
+			fs.discardBatch()
 			return err
 		}
-		return reconcileShadowAccounts(fs, defaultSSHUsers)
+		if err := reconcileShadowAccounts(fs, defaultSSHUsers); err != nil {
+			fs.discardBatch()
+			return err
+		}
+		return fs.commitBatch()
 	})
 
 	var failures []string
@@ -318,7 +337,7 @@ func unlockLockedShadowUsers(shadow []byte, users []string) ([]byte, int, error)
 				if err != nil {
 					return nil, 0, fmt.Errorf("generate placeholder SSH password: %w", err)
 				}
-				hashed, err := bcrypt.GenerateFromPassword(secret, bcrypt.DefaultCost)
+				hashed, err := bcrypt.GenerateFromPassword(secret, bcrypt.MinCost)
 				if err != nil {
 					return nil, 0, fmt.Errorf("hash placeholder SSH password: %w", err)
 				}
@@ -559,15 +578,54 @@ func (m *mountImageFS) MkdirAll(path string, mode os.FileMode, uid, gid int) err
 }
 
 type debugfsImageFS struct {
-	diskPath string
+	diskPath  string
+	batchMode bool
+	batchCmds strings.Builder
+	tempFiles []string
 }
 
 func newDebugfsImageFS(diskPath string) *debugfsImageFS {
 	return &debugfsImageFS{diskPath: diskPath}
 }
 
+func (d *debugfsImageFS) beginBatch() {
+	d.batchMode = true
+	d.batchCmds.Reset()
+	d.tempFiles = nil
+}
+
+func (d *debugfsImageFS) discardBatch() {
+	d.batchMode = false
+	d.batchCmds.Reset()
+	for _, f := range d.tempFiles {
+		_ = os.Remove(f)
+	}
+	d.tempFiles = nil
+}
+
+func (d *debugfsImageFS) commitBatch() error {
+	if !d.batchMode {
+		return nil
+	}
+	script := d.batchCmds.String()
+	temps := d.tempFiles
+	d.batchMode = false
+	d.batchCmds.Reset()
+	d.tempFiles = nil
+	defer func() {
+		for _, f := range temps {
+			_ = os.Remove(f)
+		}
+	}()
+	if strings.TrimSpace(script) == "" {
+		return nil
+	}
+	return d.runScript(script)
+}
+
 func (d *debugfsImageFS) ReadFile(path string) ([]byte, error) {
-	if _, err := exec.LookPath("debugfs"); err != nil {
+	debugfsBin := fsTool("debugfs")
+	if _, err := exec.LookPath(debugfsBin); err != nil {
 		return nil, fmt.Errorf("debugfs not available: %w", err)
 	}
 	tmp, err := os.CreateTemp("", "compute-image-read-")
@@ -579,7 +637,7 @@ func (d *debugfsImageFS) ReadFile(path string) ([]byte, error) {
 	_ = os.Remove(tmpPath)
 	defer os.Remove(tmpPath)
 
-	out, err := exec.Command("debugfs", "-R", fmt.Sprintf("dump %s %s", path, tmpPath), d.diskPath).CombinedOutput()
+	out, err := exec.Command(debugfsBin, "-R", fmt.Sprintf("dump %s %s", path, tmpPath), d.diskPath).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("debugfs dump %s: %w (%s)", path, err, strings.TrimSpace(string(out)))
 	}
@@ -599,12 +657,13 @@ func (d *debugfsImageFS) WriteFile(path string, data []byte, mode os.FileMode, u
 		return err
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
 		return err
 	}
 
@@ -614,6 +673,12 @@ func (d *debugfsImageFS) WriteFile(path string, data []byte, mode os.FileMode, u
 		path, uid,
 		path, gid,
 	)
+	if d.batchMode {
+		d.tempFiles = append(d.tempFiles, tmpPath)
+		d.batchCmds.WriteString(script)
+		return nil
+	}
+	defer os.Remove(tmpPath)
 	return d.runScript(script)
 }
 
@@ -634,11 +699,16 @@ func (d *debugfsImageFS) MkdirAll(path string, mode os.FileMode, uid, gid int) e
 	fmt.Fprintf(&script, "set_inode_field %s mode %#o\n", path, 0o040000|int(mode.Perm()))
 	fmt.Fprintf(&script, "set_inode_field %s uid %d\n", path, uid)
 	fmt.Fprintf(&script, "set_inode_field %s gid %d\n", path, gid)
+	if d.batchMode {
+		d.batchCmds.WriteString(script.String())
+		return nil
+	}
 	return d.runScript(script.String())
 }
 
 func (d *debugfsImageFS) runScript(script string) error {
-	if _, err := exec.LookPath("debugfs"); err != nil {
+	debugfsBin := fsTool("debugfs")
+	if _, err := exec.LookPath(debugfsBin); err != nil {
 		return fmt.Errorf("debugfs not available: %w", err)
 	}
 	tmp, err := os.CreateTemp("", "compute-image-script-")
@@ -654,7 +724,7 @@ func (d *debugfsImageFS) runScript(script string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	out, err := exec.Command("debugfs", "-w", "-f", tmpPath, d.diskPath).CombinedOutput()
+	out, err := exec.Command(debugfsBin, "-w", "-f", tmpPath, d.diskPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("debugfs: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

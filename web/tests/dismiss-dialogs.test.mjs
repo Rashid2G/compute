@@ -155,6 +155,54 @@ function createMockServer() {
   let jobs = [];
   let portForwards = [];
   let pools = [{ id: 'pool-default', name: 'default' }];
+  let workers = [
+    {
+      id: 'nod_1',
+      name: 'worker-01',
+      pool_id: 'default',
+      role: 'worker',
+      status: 'ready',
+      underlay_ip: '10.0.0.11',
+      arch: 'amd64',
+      total_vcpus: 16,
+      allocated_vcpus: 16,
+      physical_vcpus: 16,
+      used_vcpus: 2,
+      total_mem_mb: 32768,
+      allocated_mem_mb: 32768,
+      physical_mem_mb: 32768,
+      used_mem_mb: 1024,
+      available_mem_mb: 31744,
+      total_disk_mb: 512000,
+      allocated_disk_mb: 512000,
+      physical_disk_mb: 512000,
+      used_disk_mb: 20480,
+      available_disk_mb: 491520,
+      running_vms: 1,
+      fc_version: '1.9.1',
+      agent_version: '1.0.0',
+      last_heartbeat: new Date().toISOString(),
+    },
+  ];
+  let workerTokens = [];
+  let schedulingPolicy = {
+    strategy: 'least_loaded',
+    cpu_weight: 1.0,
+    memory_weight: 1.0,
+    disk_weight: 0.5,
+    cpu_soft_overcommit_ratio: 4.0,
+    cpu_hard_overcommit_ratio: 6.0,
+    cpu_share_weight_base: 1024,
+    memory_hard_guarantee: true,
+    idle_ram_snapshot_enabled: true,
+    idle_threshold_seconds: 900,
+    auto_reclaim_on_pressure: true,
+    host_reserved_vcpus: 1,
+    host_reserved_memory_mb: 1024,
+    host_reserved_disk_mb: 4096,
+    disk_hard_enforcement: true,
+  };
+  let bulkDeleteCalls = [];
   let webhooks = [];
   let ciRepos = [];
   let apiKeys = [];
@@ -226,8 +274,30 @@ function createMockServer() {
           status: v.status,
         })));
       }
-      if (p === '/api/v1/workers') return json(200, []);
-      if (p === '/api/v1/workers/tokens') return json(200, []);
+      if (p === '/api/v1/workers' && req.method === 'GET') return json(200, workers);
+      const workerUpdateMatch = p.match(/^\/api\/v1\/workers\/([^/]+)$/);
+      if (workerUpdateMatch && (req.method === 'PATCH' || req.method === 'PUT')) {
+        workers = workers.map((w) => (w.id === workerUpdateMatch[1] ? { ...w, ...body } : w));
+        return json(200, workers.find((w) => w.id === workerUpdateMatch[1]) || {});
+      }
+      if (p === '/api/v1/workers/tokens' || (p === '/api/v1/worker-tokens' && req.method === 'GET')) {
+        return json(200, workerTokens);
+      }
+      if (p === '/api/v1/worker-tokens' && req.method === 'POST') {
+        const wt = { id: `wt-${Date.now()}`, token: `wt_tok_${Date.now()}`, prefix: 'wt_tok_', pool_id: body.pool_id || 'default', created_at: new Date().toISOString() };
+        workerTokens = [...workerTokens, wt];
+        return json(201, wt);
+      }
+      if (p.match(/^\/api\/v1\/worker-tokens\/[^/]+$/) && req.method === 'DELETE') {
+        const tid = p.split('/').pop();
+        workerTokens = workerTokens.filter((wt) => wt.id !== tid && wt.token !== tid);
+        return json(200, { status: 'revoked' });
+      }
+      if (p === '/api/v1/scheduler/policy' && req.method === 'GET') return json(200, schedulingPolicy);
+      if (p === '/api/v1/scheduler/policy' && req.method === 'PUT') {
+        schedulingPolicy = { ...schedulingPolicy, ...body, updated_at: new Date().toISOString() };
+        return json(200, schedulingPolicy);
+      }
       if (p === '/api/v1/events') return json(200, []);
       if (p === '/api/v1/events/stream') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -261,6 +331,22 @@ function createMockServer() {
         vms = [...vms, created];
         return json(201, created);
       }
+      if (p === '/api/v1/vms/bulk-delete' && req.method === 'POST') {
+        await sleep(DELAY_MS);
+        bulkDeleteCalls.push(body);
+        const ids = Array.isArray(body.ids) ? body.ids : (Array.isArray(body.vm_ids) ? body.vm_ids : []);
+        const succeeded = [];
+        const failed = [];
+        for (const id of ids) {
+          if (id === 'vm-fail') {
+            failed.push({ id, error: 'simulated delete failure' });
+          } else {
+            vms = vms.filter((v) => v.id !== id);
+            succeeded.push(id);
+          }
+        }
+        return json(202, { action: 'delete', status: 'queued', task_id: 'task_test_bulk_delete', requested: ids.length, queued: succeeded.length, succeeded: [], failed: [] });
+      }
 
       const vmMatch = p.match(/^\/api\/v1\/vms\/([^/]+)(?:\/(.*))?$/);
       if (vmMatch) {
@@ -287,6 +373,19 @@ function createMockServer() {
           await sleep(DELAY_MS);
           vms = vms.map((v) => (v.id === id ? { ...v, protected: false } : v));
           return json(200, { protected: false });
+        }
+        if (sub === 'migrate' && req.method === 'POST') {
+          await sleep(DELAY_MS);
+          vms = vms.map((v) =>
+            v.id === id
+              ? {
+                  ...v,
+                  worker_id: body.target_worker_id || v.worker_id,
+                  pool_id: body.target_pool_id || v.pool_id,
+                }
+              : v,
+          );
+          return json(200, vms.find((v) => v.id === id) || {});
         }
         if (sub === 'network' && req.method === 'GET') {
           return json(200, { vm_id: id, reachable: true, bridge_name: 'fcbr0', gateway: '172.16.0.1', connectivity: 'OK' });
@@ -431,6 +530,7 @@ function createMockServer() {
     }
   });
 
+  server.bulkDeleteCalls = bulkDeleteCalls;
   return server;
 }
 
@@ -628,9 +728,11 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await sleep(70);
       assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Delete 2 instances?')`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
-      assert(toastText.includes('Deleting 2 sandbox(es)'), `Expected bulk loading toast, got: ${toastText}`);
-      await waitFor(cdp, `window.__getToastsText().includes('Deleted 2 sandbox(es)')`, 3000, 'bulk delete toast success');
+      assert(toastText.includes('Queueing deletion of 2 sandbox(es)'), `Expected bulk loading toast, got: ${toastText}`);
+      await waitFor(cdp, `window.__getToastsText().includes('Queued deletion of 2 sandbox(es)')`, 3000, 'bulk delete toast success');
       await waitFor(cdp, `!(document.querySelector('tbody')?.innerText || '').includes('sbx-gamma') && !document.querySelector('[role="alertdialog"]')`, 3000, 'bulk delete refresh settled');
+      assert.equal(server.bulkDeleteCalls.length, 1, 'Expected single POST /api/v1/vms/bulk-delete request');
+      assert.deepEqual(server.bulkDeleteCalls[0].ids, ['vm-gamma', 'vm-delta']);
     });
 
     await t.test('Unprotect VM closes modal immediately while loading toast shows', async () => {
@@ -697,8 +799,8 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await sleep(70);
       assert.equal(await cdp.evalJS(`document.getElementById('advanced-create-title') === null`), true);
       const toastText = await cdp.evalJS(`window.__getToastsText()`);
-      assert(toastText.includes('Provisioning sbx-fast-close'), `Expected Provisioning toast, got: ${toastText}`);
-      await waitFor(cdp, `window.__getToastsText().includes('sbx-fast-close is running')`, 4000, 'create+boot toast success');
+      assert(toastText.includes('Provisioning & booting sbx-fast-close'), `Expected Provisioning toast, got: ${toastText}`);
+      await waitFor(cdp, `window.__getToastsText().includes('sbx-fast-close provisioned')`, 4000, 'create+boot toast success');
     });
 
     await t.test('SSHKeysDialog closes immediately on add and delete with loading toast', async () => {
@@ -824,7 +926,7 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await waitFor(cdp, `document.body.innerText.includes('DNAT Port Forwarding')`, 3000, 'network page');
       await cdp.evalJS(`window.__clickButtonByText('DNAT Port Forwarding')`);
       await waitFor(cdp, `window.__clickButtonByText('Add Port Rule')`, 3000, 'add port rule button');
-      await waitFor(cdp, `document.body.innerText.includes('Add DNAT Port Forward Rule')`, 3000, 'pf drawer open');
+      await waitFor(cdp, `document.body.innerText.includes('Add Port Exposure')`, 3000, 'pf drawer open');
       await cdp.evalJS(`
         (() => {
           const sel = document.querySelector('select[aria-label="Sandbox to forward"]');
@@ -836,9 +938,9 @@ test('operation dialogs and drawers close immediately while loading toasts persi
       await sleep(50);
       await cdp.evalJS(`document.querySelector('select[aria-label="Sandbox to forward"]').closest('form').requestSubmit()`);
       await sleep(70);
-      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Add DNAT Port Forward Rule')`), true);
-      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding DNAT port forward'));
-      await waitFor(cdp, `window.__getToastsText().includes('Added DNAT port forward')`, 3000, 'pf toast success');
+      assert.equal(await cdp.evalJS(`!document.body.innerText.includes('Add Port Exposure')`), true);
+      assert((await cdp.evalJS(`window.__getToastsText()`)).includes('Adding exposure'));
+      await waitFor(cdp, `window.__getToastsText().includes('Added exposure')`, 3000, 'pf toast success');
     });
 
     await t.test('Workers Create Pool form closes immediately while loading toast shows', async () => {

@@ -24,6 +24,7 @@ type SignupRequest struct {
 
 type LoginRequest struct {
 	Username string `json:"username"` // username or email
+	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
@@ -113,6 +114,7 @@ func (s *Server) handleAuthSignup(w http.ResponseWriter, r *http.Request) {
 				Path:     "/",
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
+				Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
 				MaxAge:   7 * 24 * 3600,
 			})
 			resp["token"] = token
@@ -140,6 +142,9 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Username) == "" {
+		req.Username = strings.TrimSpace(req.Email)
+	}
 
 	ip := r.RemoteAddr
 	userAgent := r.UserAgent()
@@ -156,6 +161,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
 		MaxAge:   7 * 24 * 3600,
 	})
 

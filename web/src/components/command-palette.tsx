@@ -3,9 +3,9 @@ import {
   Database,
   KeyRound,
   Play,
-  RefreshCw,
   Search,
   Server,
+  Terminal,
   X,
   Zap,
 } from 'lucide-react';
@@ -20,9 +20,9 @@ interface CommandPaletteProps {
   onNavigate: (page: PageId) => void;
   onNewSandbox: () => void;
   onOpenKeys: () => void;
-  onRefresh: () => void;
   vms: VM[];
   onSelectVM?: (vm: VM) => void;
+  onExecVM?: (vm: VM) => void;
   isAdmin?: boolean;
 }
 
@@ -32,9 +32,9 @@ export function CommandPalette({
   onNavigate,
   onNewSandbox,
   onOpenKeys,
-  onRefresh,
   vms,
   onSelectVM,
+  onExecVM,
   isAdmin = true,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
@@ -95,17 +95,6 @@ export function CommandPalette({
           onOpenKeys();
         },
       },
-      {
-        id: 'act-refresh',
-        group: 'Quick Actions',
-        label: 'Reconcile Cluster State & Refresh Telemetry',
-        shortcut: 'R',
-        icon: RefreshCw,
-        run: () => {
-          onOpenChange(false);
-          onRefresh();
-        },
-      },
       ...PAGES.filter((p) => !p.adminOnly || isAdmin).map((p) => ({
         id: `nav-${p.id}`,
         group: 'Navigation',
@@ -129,8 +118,19 @@ export function CommandPalette({
           else onNavigate('instances');
         },
       })),
+      ...vms.map((vm) => ({
+        id: `exec-${vm.id}`,
+        group: 'Execute Command',
+        label: `Execute command on ${vm.name} (${vm.id}) · ${vm.status.toUpperCase()}`,
+        shortcut: 'exec',
+        icon: Terminal,
+        run: () => {
+          onOpenChange(false);
+          if (onExecVM) onExecVM(vm);
+        },
+      })),
     ],
-    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onRefresh, onSelectVM, vms],
+    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onSelectVM, onExecVM, vms],
   );
 
   const filtered = useMemo(() => {
