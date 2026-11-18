@@ -3627,22 +3627,26 @@ func (m *Manager) InspectNetworkForOwner(ctx context.Context, vmID, ownerID stri
 
 // UpdateVMConfigRequest defines configuration options that can be updated on an existing VM
 type UpdateVMConfigRequest struct {
-	PublicIP         *bool   `json:"public_ip,omitempty"`
-	PublicIPEnabled  *bool   `json:"public_ip_enabled,omitempty"`
-	DedicatedIP      *bool   `json:"dedicated_ip,omitempty"`
-	Protected        *bool   `json:"protected,omitempty"`
-	NetworkIsolation *string `json:"network_isolation,omitempty"`
-	Isolated         *bool   `json:"isolated,omitempty"`
+	PublicIP           *bool   `json:"public_ip,omitempty"`
+	PublicIPEnabled    *bool   `json:"public_ip_enabled,omitempty"`
+	DedicatedIP        *bool   `json:"dedicated_ip,omitempty"`
+	Protected          *bool   `json:"protected,omitempty"`
+	NetworkIsolation   *string `json:"network_isolation,omitempty"`
+	Isolated           *bool   `json:"isolated,omitempty"`
+	Description        *string `json:"description,omitempty"`
+	SSHPasswordEnabled *bool   `json:"ssh_password_enabled,omitempty"`
+	PoolID             *string `json:"pool_id,omitempty"`
 }
 
 func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 	type Alias UpdateVMConfigRequest
 	aux := struct {
-		RawPublicIP    interface{} `json:"public_ip,omitempty"`
-		RawDedicatedIP interface{} `json:"dedicated_ip,omitempty"`
-		RawProtected   interface{} `json:"protected,omitempty"`
-		RawIsolated    interface{} `json:"isolated,omitempty"`
-		RawIsolate     interface{} `json:"isolate,omitempty"`
+		RawPublicIP           interface{} `json:"public_ip,omitempty"`
+		RawDedicatedIP        interface{} `json:"dedicated_ip,omitempty"`
+		RawProtected          interface{} `json:"protected,omitempty"`
+		RawIsolated           interface{} `json:"isolated,omitempty"`
+		RawIsolate            interface{} `json:"isolate,omitempty"`
+		RawSSHPasswordEnabled interface{} `json:"ssh_password_enabled,omitempty"`
 		*Alias
 	}{
 		Alias: (*Alias)(r),
@@ -3688,6 +3692,9 @@ func (r *UpdateVMConfigRequest) UnmarshalJSON(data []byte) error {
 		r.Isolated = b
 	} else if b := parseBool(aux.RawIsolate); b != nil {
 		r.Isolated = b
+	}
+	if b := parseBool(aux.RawSSHPasswordEnabled); b != nil {
+		r.SSHPasswordEnabled = b
 	}
 	return nil
 }
@@ -3763,6 +3770,29 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 	if isolationChanged {
 		vm.NetworkIsolation = nextNetworkIsolation
 		changed = true
+	}
+
+	if req.Description != nil {
+		trimmedDesc := strings.TrimSpace(*req.Description)
+		if vm.Description != trimmedDesc {
+			vm.Description = trimmedDesc
+			changed = true
+		}
+	}
+
+	if req.SSHPasswordEnabled != nil {
+		if vm.SSHPasswordEnabled != *req.SSHPasswordEnabled {
+			vm.SSHPasswordEnabled = *req.SSHPasswordEnabled
+			changed = true
+		}
+	}
+
+	if req.PoolID != nil && strings.TrimSpace(*req.PoolID) != "" {
+		trimmedPool := strings.TrimSpace(*req.PoolID)
+		if vm.PoolID != trimmedPool {
+			vm.PoolID = trimmedPool
+			changed = true
+		}
 	}
 
 	if changed {

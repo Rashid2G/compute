@@ -466,15 +466,27 @@ export const api = {
     id: string,
     payload: {
       public_ip?: boolean;
+      public_ip_enabled?: boolean;
+      dedicated_ip?: boolean;
       protected?: boolean;
       network_isolation?: NetworkIsolationMode;
       isolated?: boolean;
+      description?: string;
+      ssh_password_enabled?: boolean;
+      pool_id?: string;
     },
   ): Promise<VM> {
     return request<VM>(`/vms/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
+  },
+
+  reconcileVMSSH(id: string): Promise<{ status: string; message?: string }> {
+    return request<{ status: string; message?: string }>(
+      `/vms/${encodeURIComponent(id)}/reconcile-ssh`,
+      { method: 'POST' },
+    );
   },
 
   protectVM(id: string): Promise<VM> {
