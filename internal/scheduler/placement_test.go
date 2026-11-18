@@ -339,6 +339,45 @@ func TestSelectNodeForSandbox_ResourceLimits(t *testing.T) {
 		}, p)
 		assertLimitErr(t, err, "cpu")
 	})
+
+	t.Run("cpu_check_skipped_for_stopped_create", func(t *testing.T) {
+		n := &db.WorkerNode{
+			ID:             "w-cpu-skip",
+			Status:         "ready",
+			AllocatedVCPUs: 2,
+			AllocatedMemMB: 16384,
+		}
+		// A stopped sandbox reserves RAM/disk but not CPU until it runs.
+		chosen, err := SelectNodeForSandbox(ctx, []*db.WorkerNode{n}, nil, SandboxPlacementRequest{
+			VCPUs: 8, MemoryMB: 512, DiskMB: 1024, SkipCPUCheck: true,
+		}, p)
+		if err != nil || chosen.ID != "w-cpu-skip" {
+			t.Fatalf("expected skipped CPU check to allow oversized stopped sandbox, got %+v err=%v", chosen, err)
+		}
+	})
+
+	t.Run("configured_capacity_wins_over_physical", func(t *testing.T) {
+		n := &db.WorkerNode{
+			ID:              "w-configured",
+			Status:          "ready",
+			AllocatedVCPUs:  8,
+			AllocatedMemMB:  65536,
+			AllocatedDiskMB: 100000,
+			PhysicalVCPUs:   2,
+			PhysicalMemMB:   8192,
+			PhysicalDiskMB:  8192,
+			AvailableMemMB:  4096,
+			AvailableDiskMB: 4096,
+		}
+		// Explicit capacity is the admin-declared ceiling (clamped to physical
+		// capacity at startup/registration), so it must not be re-clamped here.
+		chosen, err := SelectNodeForSandbox(ctx, []*db.WorkerNode{n}, nil, SandboxPlacementRequest{
+			VCPUs: 4, MemoryMB: 16384, DiskMB: 50000,
+		}, p)
+		if err != nil || chosen.ID != "w-configured" {
+			t.Fatalf("expected configured capacity to be authoritative, got %+v err=%v", chosen, err)
+		}
+	})
 }
 
 type policyMockStore struct {

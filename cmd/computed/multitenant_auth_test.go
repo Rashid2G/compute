@@ -86,6 +86,7 @@ func newMultiTenantServer(t *testing.T) *multiTenantEnv {
 	cfg.Server.SignupEnabled = true
 	cfg.Server.AuthDBPath = filepath.Join(root, "db", "auth.db")
 	cfg.Server.AdminSecret = multiTenantAdminSecret
+	withTestHostCapacity(&cfg)
 
 	mk, err := pki.LoadOrCreateMasterKey(filepath.Join(root, "master.key"))
 	if err != nil {

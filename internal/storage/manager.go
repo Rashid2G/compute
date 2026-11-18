@@ -195,9 +195,12 @@ func (m *Manager) InitVMDiskFromImageWithResize(vmID string, baseRootfs string, 
 		return "", fmt.Errorf("failed to copy base rootfs: %w", err)
 	}
 
-	// Resize sparse file and ext4 filesystem if target size is specified
+	// Resize sparse file and ext4 filesystem if target size is specified and differs.
 	if diskMB > 0 {
-		_ = resizeDiskSparse(diskPath, diskMB)
+		targetBytes := int64(diskMB) * 1024 * 1024
+		if info, statErr := os.Stat(diskPath); statErr != nil || info.Size() != targetBytes {
+			_ = resizeDiskSparse(diskPath, diskMB)
+		}
 	}
 
 	return diskPath, nil
@@ -252,15 +255,31 @@ func (m *Manager) DeleteImageFile(imageName string) error {
 	return nil
 }
 
+// isExt4Image checks for the ext2/3/4 superblock magic (0xEF53 at offset 1080).
+func isExt4Image(diskPath string) bool {
+	f, err := os.Open(diskPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [2]byte
+	if _, err := f.ReadAt(magic[:], 1024+0x38); err != nil {
+		return false
+	}
+	return magic[0] == 0x53 && magic[1] == 0xef
+}
+
 func resizeDiskSparse(diskPath string, diskMB int) error {
-	// Truncate sparse file to target size in MB
-	truncateCmd := exec.Command("truncate", "-s", fmt.Sprintf("%dM", diskMB), diskPath)
-	if err := truncateCmd.Run(); err != nil {
+	targetBytes := int64(diskMB) * 1024 * 1024
+	if err := os.Truncate(diskPath, targetBytes); err != nil {
 		return err
 	}
+	if !isExt4Image(diskPath) {
+		return nil
+	}
 	// e2fsck check and resize2fs on ext4
-	_ = exec.Command("e2fsck", "-pf", diskPath).Run()
-	_ = exec.Command("resize2fs", "-f", diskPath).Run()
+	_ = exec.Command(fsTool("e2fsck"), "-pf", diskPath).Run()
+	_ = exec.Command(fsTool("resize2fs"), "-f", diskPath).Run()
 	return nil
 }
 

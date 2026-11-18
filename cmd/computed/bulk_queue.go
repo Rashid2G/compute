@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/scheduler"
@@ -315,11 +314,10 @@ func (s *Server) validateCreateItem(ctx context.Context, r *http.Request, ownerI
 	return nil
 }
 
-// createVMPlaced selects a placement target and creates the VM record while
-// holding createPlaceMu so concurrent creates cannot over-commit a worker.
-// The lock is released with defer before the caller starts the VM, so a panic
-// anywhere in placement or creation can never leave it locked forever.
-func (s *Server) createVMPlaced(ctx context.Context, req vm.CreateRequest, vcpus, memoryMB, diskMB int) (*db.VM, error) {
+// reserveNodePlacement selects a placement target and reserves in-flight CPU/RAM/Disk
+// capacity under createPlaceMu so concurrent creates run disk/SSH I/O in parallel
+// without over-committing any worker or nod_host_local.
+func (s *Server) reserveNodePlacement(ctx context.Context, req vm.CreateRequest, vcpus, memoryMB, diskMB int) (*db.WorkerNode, func(), error) {
 	s.createPlaceMu.Lock()
 	defer s.createPlaceMu.Unlock()
 
@@ -327,47 +325,90 @@ func (s *Server) createVMPlaced(ctx context.Context, req vm.CreateRequest, vcpus
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
 		workers, localNode, policy, pErr := s.buildPlacementNodes(ctx)
 		if pErr == nil && (len(workers) > 0 || localNode != nil) {
-			if len(workers) == 0 && req.WorkerID == "" && (req.PoolID == "" || (localNode != nil && localNode.PoolID == req.PoolID)) {
-				if localNode != nil && localNode.Status != "ready" {
-					return nil, &httpStatusError{
-						code: http.StatusBadRequest,
-						err:  fmt.Errorf("worker %q is not ready (status: %s)", localNode.ID, localNode.Status),
-					}
+			applyInFlight := func(n *db.WorkerNode) {
+				if n == nil {
+					return
 				}
-				selectedNode = localNode
-			} else {
-				chosen, selErr := scheduler.SelectNodeForSandbox(ctx, workers, localNode, scheduler.SandboxPlacementRequest{
-					WorkerID: req.WorkerID,
-					PoolID:   req.PoolID,
-					VCPUs:    vcpus,
-					MemoryMB: memoryMB,
-					DiskMB:   diskMB,
-				}, policy)
-				if selErr != nil {
-					var rle *api.ResourceLimitError
-					if errors.As(selErr, &rle) {
-						return nil, selErr
-					}
-					if strings.Contains(selErr.Error(), "not found") {
-						return nil, &httpStatusError{code: http.StatusNotFound, err: selErr}
-					}
-					return nil, &httpStatusError{code: http.StatusBadRequest, err: selErr}
+				if v := s.inFlightNodeVCPUs[n.ID]; v > 0 {
+					n.UsedVCPUs += v
 				}
-				selectedNode = chosen
+				if v := s.inFlightNodeMemMB[n.ID]; v > 0 {
+					n.UsedMemMB += v
+				}
+				if v := s.inFlightNodeDisk[n.ID]; v > 0 {
+					n.UsedDiskMB += v
+				}
 			}
+			for _, w := range workers {
+				applyInFlight(w)
+			}
+			applyInFlight(localNode)
+
+			chosen, selErr := scheduler.SelectNodeForSandbox(ctx, workers, localNode, scheduler.SandboxPlacementRequest{
+				WorkerID:     req.WorkerID,
+				PoolID:       req.PoolID,
+				VCPUs:        vcpus,
+				MemoryMB:     memoryMB,
+				DiskMB:       diskMB,
+				SkipCPUCheck: !req.AutoStart,
+			}, policy)
+			if selErr != nil {
+				var rle *api.ResourceLimitError
+				if errors.As(selErr, &rle) {
+					return nil, nil, selErr
+				}
+				if strings.Contains(selErr.Error(), "not found") {
+					return nil, nil, &httpStatusError{code: http.StatusNotFound, err: selErr}
+				}
+				return nil, nil, &httpStatusError{code: http.StatusBadRequest, err: selErr}
+			}
+			selectedNode = chosen
 		}
 	}
 
-	if selectedNode != nil && selectedNode.ID != "nod_host_local" {
-		return s.dispatchRemoteVMCreate(ctx, req, selectedNode)
+	if selectedNode == nil {
+		return nil, func() {}, nil
 	}
-	if selectedNode != nil {
-		req.WorkerID = selectedNode.ID
-		if req.PoolID == "" && selectedNode.PoolID != "" {
-			req.PoolID = selectedNode.PoolID
+
+	if s.inFlightNodeVCPUs == nil {
+		s.inFlightNodeVCPUs = make(map[string]int)
+	}
+	if s.inFlightNodeMemMB == nil {
+		s.inFlightNodeMemMB = make(map[string]int)
+	}
+	if s.inFlightNodeDisk == nil {
+		s.inFlightNodeDisk = make(map[string]int)
+	}
+	nodeID := selectedNode.ID
+	resVCPUs := 0
+	if req.AutoStart {
+		resVCPUs = vcpus
+	}
+	s.inFlightNodeVCPUs[nodeID] += resVCPUs
+	s.inFlightNodeMemMB[nodeID] += memoryMB
+	s.inFlightNodeDisk[nodeID] += diskMB
+
+	var released atomic.Bool
+	release := func() {
+		if !released.CompareAndSwap(false, true) {
+			return
 		}
+		s.createPlaceMu.Lock()
+		s.inFlightNodeVCPUs[nodeID] -= resVCPUs
+		if s.inFlightNodeVCPUs[nodeID] <= 0 {
+			delete(s.inFlightNodeVCPUs, nodeID)
+		}
+		s.inFlightNodeMemMB[nodeID] -= memoryMB
+		if s.inFlightNodeMemMB[nodeID] <= 0 {
+			delete(s.inFlightNodeMemMB, nodeID)
+		}
+		s.inFlightNodeDisk[nodeID] -= diskMB
+		if s.inFlightNodeDisk[nodeID] <= 0 {
+			delete(s.inFlightNodeDisk, nodeID)
+		}
+		s.createPlaceMu.Unlock()
 	}
-	return s.vmMgr.CreateVM(ctx, req)
+	return selectedNode, release, nil
 }
 
 func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.CreateRequest) (*db.VM, error) {
@@ -376,7 +417,29 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
 	}
 
-	created, err := s.createVMPlaced(ctx, req, vcpus, memoryMB, diskMB)
+	selectedNode, releasePlacement, err := s.reserveNodePlacement(ctx, req, vcpus, memoryMB, diskMB)
+	if err != nil {
+		var rle *api.ResourceLimitError
+		if errors.As(err, &rle) {
+			return nil, err
+		}
+		return nil, err
+	}
+	defer releasePlacement()
+
+	var created *db.VM
+	if selectedNode != nil && selectedNode.ID != "nod_host_local" {
+		created, err = s.dispatchRemoteVMCreate(ctx, req, selectedNode)
+	} else {
+		if selectedNode != nil {
+			req.WorkerID = selectedNode.ID
+			if req.PoolID == "" && selectedNode.PoolID != "" {
+				req.PoolID = selectedNode.PoolID
+			}
+		}
+		created, err = s.vmMgr.CreateVM(ctx, req)
+	}
+
 	if err != nil {
 		var rle *api.ResourceLimitError
 		if errors.As(err, &rle) {
@@ -394,9 +457,8 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 		return nil, err
 	}
 
-	// Auto-start runs outside createPlaceMu so slow boots never serialize
-	// placement. A failure here leaves a valid stopped VM behind; report it as
-	// a warning so callers do not claim the sandbox is running.
+	// Auto-start runs outside createPlaceMu while the node placement reservation
+	// remains held until RunVM updates the VM status in SQLite.
 	var startErr error
 	if created != nil && req.AutoStart {
 		if qErr := s.enforceRunQuotaWithAdmin(ctx, isAdmin, created); qErr != nil {
@@ -406,9 +468,7 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 		} else if started, gErr := s.vmMgr.GetVM(ctx, created.ID); gErr == nil && started != nil {
 			created = started
 			if created.Status == db.StatusRunning {
-				s.mountAttachedVolumes(ctx, created)
-				s.applyEnvironment(ctx, created)
-				s.applyPortForwardsForVM(ctx, created)
+				s.schedulePostBootSetup(ctx, created)
 			}
 		}
 		if startErr != nil {
@@ -419,6 +479,7 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 			})
 		}
 	}
+	releasePlacement()
 
 	s.broadcastClusterUpdate()
 	if startErr != nil && created != nil {
@@ -432,6 +493,34 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
 	}
+	placeReq := req
+	if placeReq.WorkerID == "" && s.vmMgr != nil {
+		if src, gErr := s.vmMgr.GetVM(ctx, sourceVMID); gErr == nil && src != nil {
+			if src.WorkerID != "" {
+				placeReq.WorkerID = src.WorkerID
+			} else {
+				placeReq.WorkerID = "nod_host_local"
+			}
+			if placeReq.PoolID == "" {
+				placeReq.PoolID = src.PoolID
+			}
+			if req.VCPUs <= 0 && src.VCPUs > 0 {
+				vcpus = src.VCPUs
+			}
+			if req.MemoryMB <= 0 && src.MemoryMB > 0 {
+				memoryMB = src.MemoryMB
+			}
+			if req.DiskMB <= 0 && req.DiskGB <= 0 && src.DiskMB > 0 {
+				diskMB = src.DiskMB
+			}
+		}
+	}
+	_, releasePlacement, pErr := s.reserveNodePlacement(ctx, placeReq, vcpus, memoryMB, diskMB)
+	if pErr != nil {
+		return nil, pErr
+	}
+	defer releasePlacement()
+
 	cloned, err := s.vmMgr.CloneVM(ctx, sourceVMID, req)
 	if err != nil {
 		var rle *api.ResourceLimitError
@@ -455,9 +544,7 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 		} else if started, getErr := s.vmMgr.GetVM(ctx, cloned.ID); getErr == nil && started != nil {
 			cloned = started
 			if cloned.Status == db.StatusRunning {
-				s.mountAttachedVolumes(ctx, cloned)
-				s.applyEnvironment(ctx, cloned)
-				s.applyPortForwardsForVM(ctx, cloned)
+				s.schedulePostBootSetup(ctx, cloned)
 			}
 		}
 		if startErr != nil {
@@ -468,6 +555,7 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 			})
 		}
 	}
+	releasePlacement()
 	s.broadcastClusterUpdate()
 	if startErr != nil && cloned != nil {
 		return cloned, &vmStartWarning{vmID: cloned.ID, reason: startErr.Error()}
@@ -475,10 +563,8 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 	return cloned, nil
 }
 
-// restartSingleVM restarts one VM. When waitSSH is true it blocks until the
-// guest SSH port answers (so a synchronous caller returns a usable VM);
-// background queue workers pass false to avoid occupying a worker for the
-// full SSH wait timeout.
+// restartSingleVM restarts one VM and runs post-boot guest setup asynchronously
+// when attached volumes or environment profiles exist.
 func (s *Server) restartSingleVM(ctx context.Context, isAdmin bool, v *db.VM, waitSSH bool) (*db.VM, error) {
 	if v == nil {
 		return nil, fmt.Errorf("vm not found")
@@ -524,12 +610,8 @@ func (s *Server) restartSingleVM(ctx context.Context, isAdmin bool, v *db.VM, wa
 	}
 	v, _ = s.vmMgr.GetVM(ctx, vmKey)
 	if v != nil && v.Status == db.StatusRunning {
-		if waitSSH {
-			s.waitGuestSSH(ctx, v, 30*time.Second)
-		}
-		s.mountAttachedVolumes(ctx, v)
-		s.applyEnvironment(ctx, v)
-		s.applyPortForwardsForVM(ctx, v)
+		_ = waitSSH
+		s.schedulePostBootSetup(ctx, v)
 	}
 	s.broadcastClusterUpdate()
 	return v, nil
@@ -618,8 +700,14 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 			failed := append([]api.BulkVMItemError{}, resp.Failed...)
 			warnings := make([]api.BulkVMItemError, 0)
 
-			finish := func() {
+			finish := func(lastLabel string) {
 				if remaining.Add(-1) != 0 {
+					mu.Lock()
+					done := len(succeeded) + len(failed)
+					stage := fmt.Sprintf("Provisioning sandboxes (%d/%d finished · %s)", done, len(req.Items), lastLabel)
+					s.recordTaskProgress(ownerID, taskID, "create", len(req.Items), succeeded, failed, warnings, stage)
+					mu.Unlock()
+					s.broadcastClusterUpdate()
 					return
 				}
 				mu.Lock()
@@ -664,13 +752,13 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 					}
 					mu.Unlock()
-					finish()
+					finish(target.label)
 				})
 				if enqErr != nil {
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.label, Error: enqErr.Error()})
 					mu.Unlock()
-					finish()
+					finish(target.label)
 				}
 			}
 		}
@@ -869,8 +957,14 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 			succeeded := make([]string, 0, validCount)
 			failed := append([]api.BulkVMItemError{}, resp.Failed...)
 
-			finish := func() {
+			finish := func(lastLabel string) {
 				if remaining.Add(-1) != 0 {
+					mu.Lock()
+					done := len(succeeded) + len(failed)
+					stage := fmt.Sprintf("Cloning sandboxes (%d/%d finished · %s)", done, len(items), lastLabel)
+					s.recordTaskProgress(ownerID, taskID, "clone", len(items), succeeded, failed, nil, stage)
+					mu.Unlock()
+					s.broadcastClusterUpdate()
 					return
 				}
 				mu.Lock()
@@ -908,13 +1002,13 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 					}
 					mu.Unlock()
-					finish()
+					finish(target.label)
 				})
 				if enqErr != nil {
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.label, Error: enqErr.Error()})
 					mu.Unlock()
-					finish()
+					finish(target.label)
 				}
 			}
 		}

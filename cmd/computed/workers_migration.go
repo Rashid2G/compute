@@ -1167,8 +1167,13 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 			reconcileOwners := make(map[string]bool)
 			localDeleted := false
 
-			finish := func(bgCtx context.Context) {
+			finish := func(bgCtx context.Context, lastID string) {
 				if remaining.Add(-1) != 0 {
+					mu.Lock()
+					done := len(succeeded) + len(failed)
+					stage := fmt.Sprintf("Deleting sandboxes (%d/%d finished · %s)", done, len(req.IDs), lastID)
+					s.recordTaskProgress(callerOwner, taskID, "delete", len(req.IDs), succeeded, failed, nil, stage)
+					mu.Unlock()
 					return
 				}
 				mu.Lock()
@@ -1220,13 +1225,13 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 					}
 					mu.Unlock()
 					s.broadcastClusterUpdate()
-					finish(bgCtx)
+					finish(bgCtx, target.requestedID)
 				})
 				if enqErr != nil {
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
 					mu.Unlock()
-					finish(context.Background())
+					finish(context.Background(), target.requestedID)
 				}
 			}
 		}
@@ -1495,8 +1500,13 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 			reconcileOwners := make(map[string]bool)
 			localNeedsReconcile := false
 
-			finish := func(bgCtx context.Context) {
+			finish := func(bgCtx context.Context, lastID string) {
 				if remaining.Add(-1) != 0 {
+					mu.Lock()
+					done := len(succeeded) + len(failed)
+					stage := fmt.Sprintf("Running %s (%d/%d finished · %s)", action, done, len(req.IDs), lastID)
+					s.recordTaskProgress(callerOwner, taskID, action, len(req.IDs), succeeded, failed, nil, stage)
+					mu.Unlock()
 					return
 				}
 				mu.Lock()
@@ -1548,13 +1558,13 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					}
 					mu.Unlock()
 					s.broadcastClusterUpdate()
-					finish(bgCtx)
+					finish(bgCtx, target.requestedID)
 				})
 				if enqErr != nil {
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
 					mu.Unlock()
-					finish(context.Background())
+					finish(context.Background(), target.requestedID)
 				}
 			}
 		}

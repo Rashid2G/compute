@@ -84,12 +84,15 @@ type Server struct {
 	adminResourcesCache *adminResourcesResponse
 	adminResourcesAt    time.Time
 
-	opQueueOnce   sync.Once
-	opQueue       *serverOpQueue
-	createPlaceMu sync.Mutex
-	taskMu        sync.Mutex
-	tasks         map[string]*taskRecord
-	taskOrder     []string
+	opQueueOnce       sync.Once
+	opQueue           *serverOpQueue
+	createPlaceMu     sync.Mutex
+	inFlightNodeVCPUs map[string]int
+	inFlightNodeMemMB map[string]int
+	inFlightNodeDisk  map[string]int
+	taskMu            sync.Mutex
+	tasks             map[string]*taskRecord
+	taskOrder         []string
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -741,6 +744,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/sandboxes/", s.wrapAuth(s.handleVMActions))
 
 	// Asynchronous bulk task status
+	s.mux.HandleFunc("/api/v1/tasks", s.wrapAuth(s.handleListTasks))
 	s.mux.HandleFunc("/api/v1/tasks/", s.wrapAuth(s.handleGetTask))
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
@@ -1162,6 +1166,50 @@ func (s *Server) waitGuestSSH(ctx context.Context, v *db.VM, timeout time.Durati
 	}
 }
 
+func (s *Server) needsPostBootSSHSetup(ctx context.Context, v *db.VM) bool {
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil || v == nil {
+		return false
+	}
+	st := s.vmMgr.GetStore()
+	if envs, err := st.ListEnvironments(ctx); err == nil && len(envs) > 0 {
+		for _, env := range envs {
+			if (env.SecretsEnabled && strings.TrimSpace(env.Secrets) != "") ||
+				(env.GitHubReposEnabled && len(env.GitHubRepos) > 0) {
+				return true
+			}
+		}
+	}
+	if vols, err := st.ListVolumes(ctx); err == nil {
+		for _, vol := range vols {
+			if vol.Path != "" && volumeAttachedToVM(vol, v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// schedulePostBootSetup applies host-side port forwards immediately and runs
+// guest SSH volume mounting / environment injection in the background only
+// when there are attached volumes or environment profiles to apply.
+func (s *Server) schedulePostBootSetup(ctx context.Context, v *db.VM) {
+	if v == nil {
+		return
+	}
+	s.applyPortForwardsForVM(ctx, v)
+	if !s.needsPostBootSSHSetup(ctx, v) {
+		return
+	}
+	vmCopy := *v
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		s.waitGuestSSH(bgCtx, &vmCopy, 30*time.Second)
+		s.mountAttachedVolumes(bgCtx, &vmCopy)
+		s.applyEnvironment(bgCtx, &vmCopy)
+	}()
+}
+
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1481,10 +1529,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				}
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
 				if out != nil && out.Status == db.StatusRunning {
-					s.waitGuestSSH(bgCtx, out, 30*time.Second)
-					s.mountAttachedVolumes(bgCtx, out)
-					s.applyEnvironment(bgCtx, out)
-					s.applyPortForwardsForVM(bgCtx, out)
+					s.schedulePostBootSetup(bgCtx, out)
 				}
 			}
 			s.recordEvent("sandbox.started", actor, vmID, "delivered", 35, nil)
@@ -1568,10 +1613,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				}
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
 				if out != nil && out.Status == db.StatusRunning {
-					s.waitGuestSSH(bgCtx, out, 30*time.Second)
-					s.mountAttachedVolumes(bgCtx, out)
-					s.applyEnvironment(bgCtx, out)
-					s.applyPortForwardsForVM(bgCtx, out)
+					s.schedulePostBootSetup(bgCtx, out)
 				}
 			}
 			s.recordEvent("sandbox.resumed", actor, vmID, "delivered", 25, nil)
@@ -2241,6 +2283,36 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 		// resolve to another tenant's template inside the manager.
 		tplID := templateIdentifier(tpl)
 		launchedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.createPlaceMu.Lock()
+			workers, localNode, policy, pErr := s.buildPlacementNodes(bgCtx)
+			if pErr == nil {
+				normVCPUs, normMemMB, normDiskMB, normErr := config.ValidateAndNormalizeSpecs(vcpus, memoryMB, diskMB)
+				if normErr != nil {
+					s.createPlaceMu.Unlock()
+					return nil, normErr
+				}
+				placeReq := scheduler.SandboxPlacementRequest{
+					WorkerID: req.WorkerID,
+					PoolID:   req.PoolID,
+					VCPUs:    normVCPUs,
+					MemoryMB: normMemMB,
+					DiskMB:   normDiskMB,
+				}
+				if localNode != nil {
+					// Template launch runs locally on nod_host_local; validate local node fits.
+					if _, selErr := scheduler.SelectNodeForSandbox(bgCtx, nil, localNode, placeReq, policy); selErr != nil {
+						s.createPlaceMu.Unlock()
+						return nil, selErr
+					}
+				} else if len(workers) > 0 {
+					if _, selErr := scheduler.SelectNodeForSandbox(bgCtx, workers, localNode, placeReq, policy); selErr != nil {
+						s.createPlaceMu.Unlock()
+						return nil, selErr
+					}
+				}
+			}
+			s.createPlaceMu.Unlock()
+
 			vOut, lErr := s.vmMgr.LaunchTemplate(bgCtx, tplID, req)
 			if lErr == nil {
 				s.broadcastClusterUpdate()
@@ -3930,6 +4002,17 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		if maxD := capabilityInt(hello.Capabilities, "max_disk_mb"); maxD > 0 && (allocDiskMB == 0 || maxD < allocDiskMB) {
 			allocDiskMB = maxD
 		}
+		// Never advertise more schedulable capacity than the worker physically
+		// reported, even if max_* config is larger.
+		if physVCPUs > 0 && allocVCPUs > physVCPUs {
+			allocVCPUs = physVCPUs
+		}
+		if physMemMB > 0 && allocMemMB > physMemMB {
+			allocMemMB = physMemMB
+		}
+		if physDiskMB > 0 && allocDiskMB > physDiskMB {
+			allocDiskMB = physDiskMB
+		}
 
 		node := &db.WorkerNode{
 			ID:               workerID,
@@ -4162,10 +4245,29 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 
 	var allVMs []*db.VM
 	var allVols []*db.Volume
+	var allTpls []*db.Template
+	var allImgs []*db.CustomImage
+	hasLocal := false
+	for _, n := range nodes {
+		if n != nil && n.ID == "nod_host_local" {
+			hasLocal = true
+			break
+		}
+	}
+	ctx := context.Background()
+	var st *db.Store
 	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		ctx := context.Background()
-		allVMs, _ = s.vmMgr.GetStore().ListVMs(ctx)
-		allVols, _ = s.vmMgr.GetStore().ListVolumes(ctx)
+		st = s.vmMgr.GetStore()
+		allVMs, _ = st.ListVMs(ctx)
+		if hasLocal {
+			allVols, _ = st.ListVolumes(ctx)
+			if tpls, err := st.ListTemplates(ctx); err == nil {
+				allTpls = tpls
+			}
+			if imgs, err := st.ListImages(ctx); err == nil {
+				allImgs = imgs
+			}
+		}
 	}
 
 	for _, n := range nodes {
@@ -4242,7 +4344,7 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 			n.UnderlayIP = "127.0.0.1"
 		}
 
-		// Compute live usage from VMs (and data volumes for nod_host_local)
+		// Compute live usage from VMs (and volumes/templates/images for nod_host_local)
 		usedVCPUs, usedMemMB, usedDiskMB, runningVMs := 0, 0, 0, 0
 		for _, v := range allVMs {
 			belongs := v.WorkerID == n.ID || (n.ID == "nod_host_local" && v.WorkerID == "")
@@ -4250,10 +4352,14 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				continue
 			}
 			usedDiskMB += v.DiskMB
+			if v.Status != db.StatusPaused {
+				usedMemMB += v.MemoryMB
+			}
+			if v.Status == db.StatusRunning || v.Status == db.StatusQueued {
+				usedVCPUs += v.VCPUs
+			}
 			if v.Status == db.StatusRunning {
 				runningVMs++
-				usedVCPUs += v.VCPUs
-				usedMemMB += v.MemoryMB
 			}
 		}
 		if n.ID == "nod_host_local" {
@@ -4261,7 +4367,27 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 				if strings.HasPrefix(vol.ID, "vol_root_") || vol.Path == "" {
 					continue
 				}
-				usedDiskMB += vol.SizeGB * 1024
+				usedDiskMB += vol.SizeGB * 1024 * (1 + vol.Snapshots)
+			}
+			for _, tpl := range allTpls {
+				if tpl == nil {
+					continue
+				}
+				if tpl.DiskMB > 0 {
+					usedDiskMB += tpl.DiskMB
+				} else if tpl.DiskPath != "" {
+					usedDiskMB += int(vm.FileAllocatedMB(tpl.DiskPath))
+				}
+			}
+			for _, img := range allImgs {
+				if img == nil || img.Status == db.ImageStatusFailed {
+					continue
+				}
+				if img.SizeMB > 0 {
+					usedDiskMB += img.SizeMB
+				} else if img.RootfsPath != "" {
+					usedDiskMB += int(vm.FileAllocatedMB(img.RootfsPath))
+				}
 			}
 			if n.AvailableMemMB == 0 && s.vmMgr != nil {
 				n.AvailableMemMB = int(s.vmMgr.HostMemoryAvailableMB())

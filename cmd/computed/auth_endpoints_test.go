@@ -59,6 +59,7 @@ func newTestAuthServer(t *testing.T) (*httptest.Server, *auth.Manager) {
 	cfg.Jobs.LocalExecution = false
 	cfg.Server.AuthEnabled = true
 	cfg.Server.AuthDBPath = filepath.Join(root, "db", "auth.db")
+	withTestHostCapacity(&cfg)
 
 	mk, err := pki.LoadOrCreateMasterKey(filepath.Join(root, "master.key"))
 	if err != nil {

@@ -9,12 +9,20 @@ export interface QueuedTaskLabels {
   noun: string;
 }
 
-const TASK_POLL_INTERVAL_MS = 2000;
-const TASK_POLL_TIMEOUT_MS = 120000;
+const TASK_POLL_INTERVAL_MS = 1500;
+const TASK_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 
 function describe(items?: { id: string; error: string }[]): string | undefined {
   if (!items || items.length === 0) return undefined;
   return items.map((item) => `${item.id}: ${item.error}`).join('; ');
+}
+
+function elapsedLabel(ms?: number): string | undefined {
+  if (!ms || ms < 1000) return undefined;
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s elapsed`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s elapsed`;
 }
 
 /**
@@ -39,7 +47,19 @@ export async function resolveQueuedTask(
     } catch {
       return;
     }
-    if (!task || task.status === 'queued') continue;
+    if (!task) return;
+
+    if (task.status === 'queued' || task.status === 'running') {
+      const done = task.completed ?? task.succeeded?.length ?? 0;
+      const progress =
+        task.requested > 0 ? `${done}/${task.requested}` : `${done}`;
+      const stage = task.stage || `${labels.doneVerb} ${labels.noun}…`;
+      toast.loading(`${stage} · ${progress}`, {
+        id: toastID,
+        description: elapsedLabel(task.elapsed_ms),
+      });
+      continue;
+    }
 
     const done = task.succeeded?.length ?? 0;
     const warningText = describe(task.warnings);
@@ -61,4 +81,9 @@ export async function resolveQueuedTask(
     }
     return;
   }
+
+  toast.warning(`${labels.doneVerb} is still running in the background`, {
+    id: toastID,
+    description: 'You can keep working; check the sandboxes list for progress.',
+  });
 }
