@@ -353,4 +353,8 @@ type BulkVMsResponse struct {
 	// Warnings reports items that were created but could not fully start, so a
 	// queued bulk create does not silently look like a clean success.
 	Warnings []BulkVMItemError `json:"warnings,omitempty"`
+	// OperationIDs lists the durable operation records created for this
+	// request, in item order. Each ID can be resolved through
+	// GET /api/v1/operations/{id} while the work is still in flight.
+	OperationIDs []string `json:"operation_ids,omitempty"`
 }

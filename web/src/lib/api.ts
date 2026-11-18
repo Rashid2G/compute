@@ -29,6 +29,7 @@ import type {
   NetworkInspectResult,
   NetworkIsolationMode,
   OTelConfigRecord,
+  OperationRecord,
   PoolMigrationResponse,
   PortForwardRecord,
   ProcessInfo,
@@ -357,6 +358,27 @@ export const api = {
   /** Resolve a queued bulk task's final outcome. */
   getBulkTask(taskID: string): Promise<BulkTaskRecord> {
     return request<BulkTaskRecord>(`/tasks/${encodeURIComponent(taskID)}`);
+  },
+
+  /** List durable long-running operations, newest first. */
+  listOperations(params?: {
+    status?: string;
+    taskId?: string;
+    kind?: string;
+    limit?: number;
+  }): Promise<OperationRecord[]> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set('status', params.status);
+    if (params?.taskId) search.set('task_id', params.taskId);
+    if (params?.kind) search.set('kind', params.kind);
+    if (params?.limit) search.set('limit', String(params.limit));
+    const query = search.toString();
+    return request<OperationRecord[]>(`/operations${query ? `?${query}` : ''}`);
+  },
+
+  /** Fetch a single durable operation by ID. */
+  getOperation(id: string): Promise<OperationRecord> {
+    return request<OperationRecord>(`/operations/${encodeURIComponent(id)}`);
   },
 
   migrateVM(id: string, payload: MigrateVMRequest): Promise<VM> {
