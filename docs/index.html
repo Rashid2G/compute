@@ -236,16 +236,16 @@
 
           <div class="tab-panel active" data-tab-panel="compose">
             <div class="code-block">
-              <div class="code-header"><span>1. start with zero-config auto-bootstrap (loopback :18080 API + embedded UI, admin / admin)</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>docker compose up -d
+              <div class="code-header"><span>1. prepare host, build base images &amp; start daemon (loopback :18080 API + embedded UI, admin / admin)</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>./scripts/install.sh
+docker compose up -d
 curl -fsS http://127.0.0.1:18080/api/v1/ready | python3 -m json.tool</code></pre>
             </div>
             <div class="code-block">
-              <div class="code-header"><span>2. optional preflight, .env customization, and host image builds</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>./scripts/preflight.sh
+              <div class="code-header"><span>2. optional .env customization and individual host/image commands</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>cp .env.example .env &amp;&amp; chmod 600 .env
+./scripts/preflight.sh
 sudo ./scripts/host-prepare.sh
-cp .env.example .env &amp;&amp; chmod 600 .env
-# Only required if switching COMPUTE_IMAGES_MODE=build or prebuilt:
 make build-images          # builds vmlinux + ubuntu-24.04.ext4 into ./data/images</code></pre>
             </div>
           </div>
@@ -278,12 +278,10 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
         </div>
 
         <div class="note-box warn">
-          <div class="note-label">COMPUTE_IMAGES_MODE: auto vs. build / prebuilt</div>
-          <code>COMPUTE_IMAGES_MODE=auto</code> (the default) automatically downloads <code>vmlinux</code>, builds
-          <code>ubuntu-24.04.ext4</code>, and generates the SSH key inside <code>compute-init</code>. Switching to
-          <code>build</code> or <code>prebuilt</code> <strong>requires</strong> building or placing <code>vmlinux</code> and
-          <code>ubuntu-24.04.ext4</code> under <code>./data/images</code> first (<code>make build-images</code> or
-          <code>scripts/build-kernel.sh</code> + <code>scripts/build-rootfs.sh</code>); otherwise startup fails with missing <code>vmlinux</code>.
+          <div class="note-label">Host Setup &amp; Base Images (./scripts/install.sh)</div>
+          Run <code>./scripts/install.sh</code> (or <code>make up</code>) on a fresh host before starting <code>docker compose up -d</code>.
+          It prepares host kernel modules, downloads and SHA-256-verifies <code>vmlinux</code>, generates <code>./data/images/ssh/id_ed25519</code>,
+          and builds <code>./data/images/ubuntu-24.04.ext4</code> with live terminal progress so Docker Compose runs only <code>computed</code> without a blocking init container.
         </div>
 
         <p>

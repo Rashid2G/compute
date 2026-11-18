@@ -158,7 +158,7 @@ func checkKernel(imagesDir, name string) Check {
 	path := filepath.Join(imagesDir, firstNonEmpty(name, "vmlinux"))
 	if err := validateELF(path); err != nil {
 		return fail("kernel", Critical, err.Error(),
-			"Run `computed init --images` (or docker compose up to run compute-init) so the kernel is downloaded/verified.")
+			"Run `./scripts/install.sh` (or `make build-images`) so the kernel is downloaded and verified.")
 	}
 	return ok("kernel", Critical, path)
 }
@@ -167,7 +167,7 @@ func checkRootfs(imagesDir, name string) Check {
 	path := filepath.Join(imagesDir, firstNonEmpty(name, "ubuntu-24.04.ext4"))
 	if err := validateExt4(path); err != nil {
 		return fail("rootfs", Critical, err.Error(),
-			"Run `computed init --images` (or docker compose up to run compute-init) so the root filesystem is downloaded/verified.")
+			"Run `./scripts/install.sh` (or `make build-images`) so the root filesystem is built and verified.")
 	}
 	return ok("rootfs", Critical, path)
 }
@@ -179,11 +179,11 @@ func checkSSHKey(path string) Check {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fail("ssh_key", Critical, fmt.Sprintf("read %s: %v", path, err),
-			"Run `computed init --images` to generate the internal SSH key, or set COMPUTE_SSH_KEY_PATH to a valid key.")
+			"Run `./scripts/install.sh` (or `make build-images`) to generate the internal SSH key, or set COMPUTE_SSH_KEY_PATH to a valid key.")
 	}
 	if _, err := ssh.ParsePrivateKey(data); err != nil {
 		return fail("ssh_key", Critical, fmt.Sprintf("%s is not a valid private key: %v", path, err),
-			"Move the invalid key aside and re-run `computed init --images`; do not reuse a corrupted key.")
+			"Move the invalid key aside and re-run `./scripts/install.sh`; do not reuse a corrupted key.")
 	}
 	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0077 != 0 {
 		return fail("ssh_key", Warning, fmt.Sprintf("%s permissions are %o", path, info.Mode().Perm()),
@@ -199,7 +199,7 @@ func checkImagesDir(path string) Check {
 	info, err := os.Stat(path)
 	if err != nil || !info.IsDir() {
 		return fail("images_dir", Critical, fmt.Sprintf("images directory %s is missing", path),
-			"Create it or run `computed init --images`; the data volume must be mounted at /var/lib/compute.")
+			"Create it or run `./scripts/install.sh`; the data volume must be mounted at /var/lib/compute.")
 	}
 	return ok("images_dir", Critical, path)
 }
