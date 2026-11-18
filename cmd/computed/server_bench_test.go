@@ -93,8 +93,9 @@ func BenchmarkServerListVMs100(b *testing.B) {
 
 func BenchmarkServerListTasks100(b *testing.B) {
 	srv, _ := newBenchServer(b)
+	ctx := context.Background()
 	for i := 0; i < 100; i++ {
-		srv.saveTask(&taskRecord{
+		_ = srv.saveTask(ctx, &taskRecord{
 			ID:        fmt.Sprintf("task-bench-%04d", i),
 			Action:    "create",
 			Status:    "completed",

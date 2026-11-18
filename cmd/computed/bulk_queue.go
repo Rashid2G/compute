@@ -650,6 +650,7 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 		label      string
 		req        vm.CreateRequest
 		resolveErr string
+		op         *db.Operation
 	}
 	targets := make([]createTarget, len(req.Items))
 	validCount := 0
@@ -690,7 +691,32 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(ownerID, resp)
+		// Persist every queued item before dispatch so the user can see what is
+		// pending and the audit trail exists before execution starts.
+		specs := make([]bulkOperationSpec, len(targets))
+		for i, t := range targets {
+			specs[i] = bulkOperationSpec{
+				TargetName: t.label,
+				Skip:       t.resolveErr != "",
+				Request:    summarizeCreateRequest(t.req),
+			}
+		}
+		ops, opErr := s.prepareBulkOperations(ctx, ownerID, "sandbox.create", taskID, actor, specs)
+		if opErr != nil {
+			httpError(w, "could not persist queued operations: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		for i := range ops {
+			targets[i].op = ops[i]
+		}
+		resp.OperationIDs = operationIDs(ops)
+		if err := s.recordQueuedTask(ctx, ownerID, resp); err != nil {
+			for _, op := range ops {
+				s.finishOperation(ctx, op, nil, err)
+			}
+			httpError(w, "could not persist task record: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if validCount > 0 {
 			var remaining atomic.Int64
@@ -700,12 +726,12 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 			failed := append([]api.BulkVMItemError{}, resp.Failed...)
 			warnings := make([]api.BulkVMItemError, 0)
 
-			finish := func(lastLabel string) {
+			finish := func(bgCtx context.Context, lastLabel string) {
 				if remaining.Add(-1) != 0 {
 					mu.Lock()
 					done := len(succeeded) + len(failed)
 					stage := fmt.Sprintf("Provisioning sandboxes (%d/%d finished · %s)", done, len(req.Items), lastLabel)
-					s.recordTaskProgress(ownerID, taskID, "create", len(req.Items), succeeded, failed, warnings, stage)
+					s.recordTaskProgress(bgCtx, ownerID, taskID, "create", len(req.Items), succeeded, failed, warnings, stage)
 					mu.Unlock()
 					s.broadcastClusterUpdate()
 					return
@@ -721,7 +747,7 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 					Warnings:  warnings,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(ownerID, summary)
+				s.recordTaskSummary(bgCtx, ownerID, summary)
 				s.recordEvent("sandbox.bulk_created", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 80, summary)
 				s.broadcastClusterUpdate()
 			}
@@ -732,7 +758,9 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 				}
 				target := t
 				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
+					s.startOperation(bgCtx, target.op)
 					created, err := s.executeCreateVM(bgCtx, isAdmin, target.req)
+					s.finishOperation(bgCtx, target.op, created, err)
 					mu.Lock()
 					switch {
 					case created != nil:
@@ -752,13 +780,14 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 					}
 					mu.Unlock()
-					finish(target.label)
+					finish(bgCtx, target.label)
 				})
 				if enqErr != nil {
+					s.finishOperation(context.Background(), target.op, nil, enqErr)
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.label, Error: enqErr.Error()})
 					mu.Unlock()
-					finish(target.label)
+					finish(context.Background(), target.label)
 				}
 			}
 		}
@@ -770,14 +799,32 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	syncSpecs := make([]bulkOperationSpec, len(targets))
+	for i, t := range targets {
+		syncSpecs[i] = bulkOperationSpec{
+			TargetName: t.label,
+			Skip:       t.resolveErr != "",
+			Request:    summarizeCreateRequest(t.req),
+		}
+	}
+	syncOps, syncOpErr := s.prepareBulkOperations(ctx, ownerID, "sandbox.create", taskID, actor, syncSpecs)
+	if syncOpErr != nil {
+		httpError(w, "could not persist operations: "+syncOpErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	for i := range syncOps {
+		targets[i].op = syncOps[i]
+	}
+
 	resp, _, disconnected := runDetached(r, func(bgCtx context.Context) (api.BulkVMsResponse, error) {
 		out := api.BulkVMsResponse{
-			Action:    "create",
-			Status:    "completed",
-			TaskID:    taskID,
-			Requested: len(req.Items),
-			Succeeded: []string{},
-			Failed:    []api.BulkVMItemError{},
+			Action:       "create",
+			Status:       "completed",
+			TaskID:       taskID,
+			Requested:    len(req.Items),
+			Succeeded:    []string{},
+			Failed:       []api.BulkVMItemError{},
+			OperationIDs: operationIDs(syncOps),
 		}
 		const maxWorkers = 4
 		sem := make(chan struct{}, maxWorkers)
@@ -795,7 +842,9 @@ func (s *Server) handleBulkCreateVMs(w http.ResponseWriter, r *http.Request) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
+				s.startOperation(bgCtx, target.op)
 				created, err := s.executeCreateVM(bgCtx, isAdmin, target.req)
+				s.finishOperation(bgCtx, target.op, created, err)
 				resMu.Lock()
 				switch {
 				case created != nil:
@@ -885,6 +934,7 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 		sourceID   string
 		req        vm.CreateRequest
 		resolveErr string
+		op         *db.Operation
 	}
 	targets := make([]cloneTarget, len(items))
 	validCount := 0
@@ -948,7 +998,34 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(ownerID, resp)
+		// Persist every queued clone before dispatch so the user can see what is
+		// pending and the audit trail exists before execution starts.
+		specs := make([]bulkOperationSpec, len(targets))
+		for i, t := range targets {
+			request := summarizeCreateRequest(t.req)
+			request["source_id"] = t.sourceID
+			specs[i] = bulkOperationSpec{
+				TargetName: t.label,
+				Skip:       t.resolveErr != "",
+				Request:    request,
+			}
+		}
+		ops, opErr := s.prepareBulkOperations(ctx, ownerID, "sandbox.clone", taskID, actor, specs)
+		if opErr != nil {
+			httpError(w, "could not persist queued operations: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		for i := range ops {
+			targets[i].op = ops[i]
+		}
+		resp.OperationIDs = operationIDs(ops)
+		if err := s.recordQueuedTask(ctx, ownerID, resp); err != nil {
+			for _, op := range ops {
+				s.finishOperation(ctx, op, nil, err)
+			}
+			httpError(w, "could not persist task record: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if validCount > 0 {
 			var remaining atomic.Int64
@@ -957,12 +1034,12 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 			succeeded := make([]string, 0, validCount)
 			failed := append([]api.BulkVMItemError{}, resp.Failed...)
 
-			finish := func(lastLabel string) {
+			finish := func(bgCtx context.Context, lastLabel string) {
 				if remaining.Add(-1) != 0 {
 					mu.Lock()
 					done := len(succeeded) + len(failed)
 					stage := fmt.Sprintf("Cloning sandboxes (%d/%d finished · %s)", done, len(items), lastLabel)
-					s.recordTaskProgress(ownerID, taskID, "clone", len(items), succeeded, failed, nil, stage)
+					s.recordTaskProgress(bgCtx, ownerID, taskID, "clone", len(items), succeeded, failed, nil, stage)
 					mu.Unlock()
 					s.broadcastClusterUpdate()
 					return
@@ -977,7 +1054,7 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 					Failed:    failed,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(ownerID, summary)
+				s.recordTaskSummary(bgCtx, ownerID, summary)
 				s.recordEvent("sandbox.bulk_cloned", actor, fmt.Sprintf("%d sandboxes", len(summary.Succeeded)), "delivered", 60, summary)
 				s.broadcastClusterUpdate()
 			}
@@ -988,7 +1065,9 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 				}
 				target := t
 				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
+					s.startOperation(bgCtx, target.op)
 					cloned, err := s.executeCloneVM(bgCtx, isAdmin, target.sourceID, target.req)
+					s.finishOperation(bgCtx, target.op, cloned, err)
 					mu.Lock()
 					switch {
 					case cloned != nil:
@@ -1002,13 +1081,14 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 						failed = append(failed, api.BulkVMItemError{ID: target.label, Error: err.Error()})
 					}
 					mu.Unlock()
-					finish(target.label)
+					finish(bgCtx, target.label)
 				})
 				if enqErr != nil {
+					s.finishOperation(context.Background(), target.op, nil, enqErr)
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.label, Error: enqErr.Error()})
 					mu.Unlock()
-					finish(target.label)
+					finish(context.Background(), target.label)
 				}
 			}
 		}
@@ -1020,14 +1100,34 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	syncSpecs := make([]bulkOperationSpec, len(targets))
+	for i, t := range targets {
+		request := summarizeCreateRequest(t.req)
+		request["source_id"] = t.sourceID
+		syncSpecs[i] = bulkOperationSpec{
+			TargetName: t.label,
+			Skip:       t.resolveErr != "",
+			Request:    request,
+		}
+	}
+	syncOps, syncOpErr := s.prepareBulkOperations(ctx, ownerID, "sandbox.clone", taskID, actor, syncSpecs)
+	if syncOpErr != nil {
+		httpError(w, "could not persist operations: "+syncOpErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	for i := range syncOps {
+		targets[i].op = syncOps[i]
+	}
+
 	resp, _, disconnected := runDetached(r, func(bgCtx context.Context) (api.BulkVMsResponse, error) {
 		out := api.BulkVMsResponse{
-			Action:    "clone",
-			Status:    "completed",
-			TaskID:    taskID,
-			Requested: len(items),
-			Succeeded: []string{},
-			Failed:    []api.BulkVMItemError{},
+			Action:       "clone",
+			Status:       "completed",
+			TaskID:       taskID,
+			Requested:    len(items),
+			Succeeded:    []string{},
+			Failed:       []api.BulkVMItemError{},
+			OperationIDs: operationIDs(syncOps),
 		}
 		const maxWorkers = 4
 		sem := make(chan struct{}, maxWorkers)
@@ -1045,7 +1145,9 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
+				s.startOperation(bgCtx, target.op)
 				cloned, err := s.executeCloneVM(bgCtx, isAdmin, target.sourceID, target.req)
+				s.finishOperation(bgCtx, target.op, cloned, err)
 				resMu.Lock()
 				switch {
 				case cloned != nil:

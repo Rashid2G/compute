@@ -225,7 +225,10 @@ test('GitHub Pages documentation site (docs/index.html) renders, filters section
         const scheduler = document.getElementById('multi-node-scheduler')?.innerText || '';
         const workers = document.getElementById('distributed-jobs')?.innerText || '';
         return {
-          hasImagesMode: quickstart.includes('COMPUTE_IMAGES_MODE=auto') && quickstart.includes('vmlinux'),
+          hasInstallScript:
+            quickstart.includes('./scripts/install.sh') &&
+            quickstart.includes('vmlinux') &&
+            !quickstart.includes('compute-init'),
           hasEmbeddedUiNote: quickstart.includes(':18080') && quickstart.includes('compute-gui'),
           hasNonLoopbackNote: authEnv.includes('COMPUTE_BIND_ADDRESS=0.0.0.0') && authEnv.includes('COMPUTE_ADMIN_SECRET'),
           hasSchedulerStrategies: scheduler.includes('least_loaded') && scheduler.includes('bin_pack') && scheduler.includes('ResourceLimitError'),
@@ -234,7 +237,7 @@ test('GitHub Pages documentation site (docs/index.html) renders, filters section
         };
       })()
     `);
-    assert.ok(contentCheck.hasImagesMode, 'Quickstart must explain COMPUTE_IMAGES_MODE=auto vs build/prebuilt');
+    assert.ok(contentCheck.hasInstallScript, 'Quickstart must explain ./scripts/install.sh and vmlinux without compute-init');
     assert.ok(contentCheck.hasEmbeddedUiNote, 'Quickstart must clarify embedded UI on :18080 vs optional compute-gui');
     assert.ok(contentCheck.hasNonLoopbackNote, 'Auth section must document COMPUTE_BIND_ADDRESS=0.0.0.0 credential requirements');
     assert.ok(contentCheck.hasSchedulerStrategies, 'Scheduler section must document load balancer strategies & ResourceLimitError');

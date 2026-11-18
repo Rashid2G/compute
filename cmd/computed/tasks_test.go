@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,15 +12,18 @@ import (
 
 func TestTaskProgressAndList(t *testing.T) {
 	s := &Server{}
+	ctx := context.Background()
 
-	s.recordQueuedTask("alice", api.BulkVMsResponse{
+	if err := s.recordQueuedTask(ctx, "alice", api.BulkVMsResponse{
 		TaskID:    "task-progress-1",
 		Action:    "create",
 		Requested: 3,
 		Queued:    3,
-	})
-	s.recordTaskProgress("alice", "task-progress-1", "create", 3, []string{"a"}, nil, nil, "Provisioning sandboxes (1/3 finished · a)")
-	s.recordTaskSummary("alice", api.BulkVMsResponse{
+	}); err != nil && err != errTaskStoreUnavailable {
+		t.Fatalf("record queued task: %v", err)
+	}
+	s.recordTaskProgress(ctx, "alice", "task-progress-1", "create", 3, []string{"a"}, nil, nil, "Provisioning sandboxes (1/3 finished · a)")
+	s.recordTaskSummary(ctx, "alice", api.BulkVMsResponse{
 		TaskID:    "task-progress-1",
 		Action:    "create",
 		Requested: 3,
@@ -27,7 +31,7 @@ func TestTaskProgressAndList(t *testing.T) {
 		Failed:    []api.BulkVMItemError{},
 	})
 
-	rec, ok := s.getTask("task-progress-1")
+	rec, ok := s.getTask(ctx, "task-progress-1")
 	if !ok || rec == nil {
 		t.Fatal("expected task to exist")
 	}

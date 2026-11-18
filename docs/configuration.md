@@ -104,18 +104,7 @@ rules for the sandbox subnet.
 | `COMPUTE_KERNEL_URL` | — | Custom kernel HTTPS URL (must pair with `COMPUTE_KERNEL_SHA256`). |
 | `COMPUTE_KERNEL_SHA256` | — | Expected SHA-256 hex digest for `COMPUTE_KERNEL_URL` or `COMPUTE_KERNEL_SRC`. |
 
-The bootstrap (`computed init --images`, run by the `compute-init` service)
-defaults to `auto`: when `COMPUTE_IMAGE_MANIFEST_URL` is unset, it downloads
-and SHA-256-verifies the pinned Firecracker CI kernel (`vmlinux`), builds the
-Ubuntu 24.04 rootfs (`ubuntu-24.04.ext4`) via chroot inside the container,
-generates the internal Ed25519 SSH key, and records `.installed.json` for
-idempotency.
-
-Using `COMPUTE_IMAGES_MODE=build` or `prebuilt` **requires** `vmlinux` and
-`ubuntu-24.04.ext4` to already be built or placed under
-`COMPUTE_HOST_DATA_DIR/images` (`./data/images`) before starting (`make
-build-images` or `scripts/build-kernel.sh` + `scripts/build-rootfs.sh`);
-otherwise `compute-init` / `computed` fails with a missing `vmlinux` error.
+Host image bootstrap is performed by `./scripts/install.sh` (or `make build-images` / `make up`), which downloads and SHA-256-verifies the pinned Firecracker CI kernel (`vmlinux`), generates the internal Ed25519 SSH key (`./data/images/ssh/id_ed25519`), and builds the Ubuntu 24.04 rootfs (`ubuntu-24.04.ext4`) under `COMPUTE_HOST_DATA_DIR/images` (`./data/images`) before starting `computed`. Standalone CLI deployments can also run `computed init --images` (`COMPUTE_IMAGES_MODE=auto|download|prebuilt|build|none`).
 
 ## DNS
 
