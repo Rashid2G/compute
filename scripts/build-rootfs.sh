@@ -16,7 +16,10 @@ if [ "$(id -u)" -ne 0 ]; then
     fi
 fi
 
-mkdir -p "${DEST_DIR}" "${KEY_DIR}"
+mkdir -p "${DEST_DIR}" "${KEY_DIR}" 2>/dev/null || $SUDO mkdir -p "${DEST_DIR}" "${KEY_DIR}"
+if [ "$(id -u)" -ne 0 ] && { [ ! -w "${DEST_DIR}" ] || [ ! -w "${KEY_DIR}" ]; }; then
+    $SUDO chown -R "$(id -u):$(id -g)" "${DEST_DIR}" 2>/dev/null || true
+fi
 chmod 700 "${KEY_DIR}" 2>/dev/null || true
 
 is_valid_ext4() {
