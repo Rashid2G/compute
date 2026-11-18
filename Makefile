@@ -1,4 +1,4 @@
-.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean preflight host-prepare setup-host build-images validate-compose benchmark install systemd release-tarballs
+.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean preflight host-prepare setup-host build-images validate-compose benchmark bench install systemd release-tarballs
 
 VERSION ?= 1.0.0
 RELEASE_NAME ?= Compute
@@ -92,6 +92,9 @@ validate-compose: ## Validate docker-compose.yml and .env.example contract
 
 benchmark: build ## Run automated control-plane and microVM lifecycle benchmarks
 	./scripts/benchmark.sh 127.0.0.1:18080 benchmark-results.json
+
+bench: ## Run Go microbenchmarks for control-plane hot paths
+	go test ./cmd/computed ./internal/scheduler ./internal/db -run '^$$' -bench . -benchmem
 
 install: build ## Install compiled binaries to /usr/local/bin
 	sudo install -d /usr/local/bin

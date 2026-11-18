@@ -894,12 +894,15 @@ export interface OperationRecord {
 export interface BulkTaskRecord {
   id: string;
   action: string;
-  status: 'queued' | 'completed' | 'partial' | 'failed' | string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'failed' | string;
+  stage?: string;
   requested: number;
   queued: number;
+  completed?: number;
   succeeded: string[];
   failed: BulkVMItemError[];
   warnings?: BulkVMItemError[];
+  elapsed_ms?: number;
   created_at: string;
   updated_at: string;
 }
