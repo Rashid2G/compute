@@ -437,11 +437,42 @@ func TestMilestone1_HTTP429ResourceLimitResponses(t *testing.T) {
 		assert429(t, "BuildImage disk limit", respImg, bodyImg, "disk")
 	})
 
+	t.Run("memory_limits", func(t *testing.T) {
+		ts, _, _ := newMilestone1Server(t, config.ResourceLimits{
+			MaxTotalVCPUs:      8,
+			MaxTotalMemoryMB:   1024,
+			MaxTotalDiskMB:     512000,
+			MinFreeDiskSpaceMB: 0,
+		})
+
+		// 1. Two 512 MB sandboxes fit exactly within the 1024 MB ceiling.
+		for i, name := range []string{"vm-mem-a", "vm-mem-b"} {
+			resp, body := doJSONRequest(t, http.MethodPost, ts.URL+"/api/v1/vms", map[string]interface{}{
+				"name":      name,
+				"vcpus":     1,
+				"memory_mb": 512,
+				"disk_mb":   1024,
+			})
+			if resp.StatusCode != http.StatusCreated {
+				t.Fatalf("create %s (index %d) failed: %d %s", name, i, resp.StatusCode, string(body))
+			}
+		}
+
+		// 2. A third 256 MB sandbox exceeds committed host RAM -> 429.
+		respOver, bodyOver := doJSONRequest(t, http.MethodPost, ts.URL+"/api/v1/vms", map[string]interface{}{
+			"name":      "vm-mem-over",
+			"vcpus":     1,
+			"memory_mb": 256,
+			"disk_mb":   1024,
+		})
+		assert429(t, "CreateVM memory limit", respOver, bodyOver, "memory")
+	})
+
 	t.Run("cpu_template_and_savestate_limits", func(t *testing.T) {
 		ts, vmMgr, store := newMilestone1Server(t, config.ResourceLimits{
 			MaxTotalVCPUs:      1,
-			MaxTotalMemoryMB:   512,
-			MaxTotalDiskMB:     0,
+			MaxTotalMemoryMB:   4096,
+			MaxTotalDiskMB:     512000,
 			MinFreeDiskSpaceMB: 0,
 		})
 		ctx := context.Background()

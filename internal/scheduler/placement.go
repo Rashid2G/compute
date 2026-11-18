@@ -15,12 +15,13 @@ import (
 
 // SandboxPlacementRequest describes the placement constraints and resource needs of a sandbox or job.
 type SandboxPlacementRequest struct {
-	WorkerID string            `json:"worker_id,omitempty"`
-	PoolID   string            `json:"pool_id,omitempty"`
-	VCPUs    int               `json:"vcpus"`
-	MemoryMB int               `json:"memory_mb"`
-	DiskMB   int               `json:"disk_mb"`
-	Labels   map[string]string `json:"labels,omitempty"`
+	WorkerID     string            `json:"worker_id,omitempty"`
+	PoolID       string            `json:"pool_id,omitempty"`
+	VCPUs        int               `json:"vcpus"`
+	MemoryMB     int               `json:"memory_mb"`
+	DiskMB       int               `json:"disk_mb"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	SkipCPUCheck bool              `json:"-"`
 }
 
 var roundRobinCounter atomic.Uint64
@@ -167,15 +168,15 @@ func nodeEffectiveMemMB(n *db.WorkerNode, policy db.ClusterSchedulingPolicy) int
 	if n.AllocatedMemMB > 0 {
 		return n.AllocatedMemMB
 	}
-	if n.TotalMemMB > 0 {
-		return n.TotalMemMB
-	}
 	if n.PhysicalMemMB > 0 {
 		avail := n.PhysicalMemMB - policy.HostReservedMemoryMB
 		if avail < 0 {
 			avail = 0
 		}
 		return avail
+	}
+	if n.TotalMemMB > 0 {
+		return n.TotalMemMB
 	}
 	return 0
 }
@@ -184,15 +185,15 @@ func nodeEffectiveDiskMB(n *db.WorkerNode, policy db.ClusterSchedulingPolicy) in
 	if n.AllocatedDiskMB > 0 {
 		return n.AllocatedDiskMB
 	}
-	if n.TotalDiskMB > 0 {
-		return n.TotalDiskMB
-	}
 	if n.PhysicalDiskMB > 0 {
 		avail := n.PhysicalDiskMB - policy.HostReservedDiskMB
 		if avail < 0 {
 			avail = 0
 		}
 		return avail
+	}
+	if n.TotalDiskMB > 0 {
+		return n.TotalDiskMB
 	}
 	return 0
 }
@@ -234,7 +235,8 @@ func checkNodeFits(n *db.WorkerNode, req SandboxPlacementRequest, policy db.Clus
 			Suggestion: "Free host disk space or select another worker",
 		}
 	}
-	if n.AvailableDiskMB > 0 && req.DiskMB > 0 && n.AvailableDiskMB < req.DiskMB {
+	if effDisk <= 0 && n.AvailableDiskMB > 0 && req.DiskMB > 0 && n.AvailableDiskMB < req.DiskMB {
+		// Without an explicit logical capacity, fall back to observed free disk.
 		return &api.ResourceLimitError{
 			Code:       api.ErrCodeResourceLimitExceeded,
 			Resource:   "disk",
@@ -268,8 +270,10 @@ func checkNodeFits(n *db.WorkerNode, req SandboxPlacementRequest, policy db.Clus
 				Suggestion: "Stop or snapshot idle sandboxes or pick another worker",
 			}
 		}
-	}
-	if n.AvailableMemMB > 0 && req.MemoryMB > 0 && n.AvailableMemMB < req.MemoryMB {
+	} else if n.AvailableMemMB > 0 && req.MemoryMB > 0 && n.AvailableMemMB < req.MemoryMB {
+		// Only fall back to observed host availability when no explicit memory
+		// capacity is configured; otherwise the configured allocation limit and
+		// the manager's reclamation path are authoritative.
 		return &api.ResourceLimitError{
 			Code:       api.ErrCodeResourceLimitExceeded,
 			Resource:   "memory",
@@ -283,32 +287,34 @@ func checkNodeFits(n *db.WorkerNode, req SandboxPlacementRequest, policy db.Clus
 		}
 	}
 
-	// 3. CPU hard overcommit limit
-	allocVCPUs := nodeEffectiveVCPUs(n, policy)
-	if allocVCPUs > 0 && req.VCPUs > 0 {
-		hardRatio := policy.CPUHardOvercommitRatio
-		if hardRatio < 1.0 {
-			hardRatio = 1.0
-		}
-		hardLimit := int(math.Floor(float64(allocVCPUs) * hardRatio))
-		if hardLimit < allocVCPUs {
-			hardLimit = allocVCPUs
-		}
-		if n.UsedVCPUs+req.VCPUs > hardLimit {
-			avail := hardLimit - n.UsedVCPUs
-			if avail < 0 {
-				avail = 0
+	// 3. CPU hard overcommit / split threshold limit
+	if !req.SkipCPUCheck {
+		allocVCPUs := nodeEffectiveVCPUs(n, policy)
+		if allocVCPUs > 0 && req.VCPUs > 0 {
+			hardRatio := policy.CPUHardOvercommitRatio
+			if hardRatio < 1.0 {
+				hardRatio = 1.0
 			}
-			return &api.ResourceLimitError{
-				Code:       api.ErrCodeResourceLimitExceeded,
-				Resource:   "cpu",
-				LimitType:  "hard",
-				NodeID:     n.ID,
-				Requested:  int64(req.VCPUs),
-				Available:  int64(avail),
-				Limit:      int64(hardLimit),
-				Message:    fmt.Sprintf("worker %s hard vCPU limit exceeded: %d used + %d requested > %d hard limit", n.ID, n.UsedVCPUs, req.VCPUs, hardLimit),
-				Suggestion: "Select another worker or stop idle sandboxes",
+			hardLimit := int(math.Floor(float64(allocVCPUs) * hardRatio))
+			if hardLimit < allocVCPUs {
+				hardLimit = allocVCPUs
+			}
+			if n.UsedVCPUs+req.VCPUs > hardLimit {
+				avail := hardLimit - n.UsedVCPUs
+				if avail < 0 {
+					avail = 0
+				}
+				return &api.ResourceLimitError{
+					Code:       api.ErrCodeResourceLimitExceeded,
+					Resource:   "cpu",
+					LimitType:  "hard",
+					NodeID:     n.ID,
+					Requested:  int64(req.VCPUs),
+					Available:  int64(avail),
+					Limit:      int64(hardLimit),
+					Message:    fmt.Sprintf("worker %s hard vCPU limit exceeded: %d used + %d requested > %d hard limit", n.ID, n.UsedVCPUs, req.VCPUs, hardLimit),
+					Suggestion: "Select another worker, increase CPU hard overcommit ratio, or stop idle sandboxes",
+				}
 			}
 		}
 	}

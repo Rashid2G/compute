@@ -77,6 +77,10 @@ type Manager struct {
 	vmLocks               sync.Map // canonicalKey -> *sync.RWMutex
 	admissionMu           sync.Mutex
 	diskMu                sync.Mutex
+	ipAllocMu             sync.Mutex
+	inFlightDiskMB        atomic.Int64
+	inFlightMemMB         atomic.Int64
+	inFlightNames         map[string]struct{}
 }
 
 func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *storage.Manager) *Manager {
@@ -441,17 +445,30 @@ func (m *Manager) CheckDiskCapacity(ctx context.Context, requestedLogicalMB int6
 		}
 	}
 
-	effectiveLimitMB := m.resourceLimits.MaxTotalDiskMB
+	var localNode *db.WorkerNode
 	if m.store != nil {
-		if localNode, err := m.store.GetWorkerNode(ctx, "nod_host_local"); err == nil && localNode != nil && localNode.AllocatedDiskMB > 0 {
-			if effectiveLimitMB <= 0 || int64(localNode.AllocatedDiskMB) < effectiveLimitMB {
-				effectiveLimitMB = int64(localNode.AllocatedDiskMB)
-			}
+		if n, err := m.store.GetWorkerNode(ctx, "nod_host_local"); err == nil && n != nil {
+			localNode = n
 		}
 	}
 
+	effectiveLimitMB := m.resourceLimits.MaxTotalDiskMB
+	if localNode != nil && localNode.AllocatedDiskMB > 0 {
+		if effectiveLimitMB <= 0 || int64(localNode.AllocatedDiskMB) < effectiveLimitMB {
+			effectiveLimitMB = int64(localNode.AllocatedDiskMB)
+		}
+	}
+	if localNode != nil && localNode.PhysicalDiskMB > 0 && effectiveLimitMB <= 0 {
+		policy := m.effectiveSchedulingPolicy(ctx)
+		physCap := int64(localNode.PhysicalDiskMB) - int64(policy.HostReservedDiskMB)
+		if physCap < 0 {
+			physCap = 0
+		}
+		effectiveLimitMB = physCap
+	}
+
 	if effectiveLimitMB > 0 && requestedLogicalMB > 0 {
-		var allocatedLogicalMB int64
+		allocatedLogicalMB := m.inFlightDiskMB.Load()
 		if m.store != nil {
 			if vms, err := m.store.ListVMs(ctx); err == nil {
 				for _, v := range vms {
@@ -495,7 +512,7 @@ func (m *Manager) CheckDiskCapacity(ctx context.Context, requestedLogicalMB int6
 			}
 		} else if m.storMgr != nil {
 			if usedMB, err := m.storMgr.GetTotalVMsDiskUsageMB(); err == nil {
-				allocatedLogicalMB = usedMB
+				allocatedLogicalMB += usedMB
 			}
 		}
 		if allocatedLogicalMB+requestedLogicalMB > effectiveLimitMB {
@@ -514,6 +531,116 @@ func (m *Manager) CheckDiskCapacity(ctx context.Context, requestedLogicalMB int6
 				Message:    fmt.Sprintf("disk capacity exceeded: %d MB allocated + %d MB requested > %d MB limit", allocatedLogicalMB, requestedLogicalMB, effectiveLimitMB),
 				Suggestion: "Delete unused VMs or data volumes, or request a smaller disk",
 			}
+		}
+	}
+
+	return nil
+}
+
+// CheckMemoryCapacity verifies that creating a new local VM with requestedMemoryMB
+// will not exceed configured or physical host RAM capacity.
+func (m *Manager) CheckMemoryCapacity(ctx context.Context, requestedMemoryMB int) error {
+	if requestedMemoryMB <= 0 {
+		return nil
+	}
+
+	// Single VM can never exceed an explicitly configured memory cap.
+	if m.resourceLimits.MaxTotalMemoryMB > 0 && requestedMemoryMB > m.resourceLimits.MaxTotalMemoryMB {
+		return &api.ResourceLimitError{
+			Code:       api.ErrCodeResourceLimitExceeded,
+			Resource:   "memory",
+			LimitType:  "hard",
+			NodeID:     "nod_host_local",
+			Requested:  int64(requestedMemoryMB),
+			Available:  int64(m.resourceLimits.MaxTotalMemoryMB),
+			Limit:      int64(m.resourceLimits.MaxTotalMemoryMB),
+			Message:    fmt.Sprintf("memory capacity exceeded: requested %d MB > %d MB host limit", requestedMemoryMB, m.resourceLimits.MaxTotalMemoryMB),
+			Suggestion: "Request less memory or increase host RAM",
+		}
+	}
+
+	if m.store == nil {
+		return nil
+	}
+	localNode, err := m.store.GetWorkerNode(ctx, "nod_host_local")
+	if err != nil || localNode == nil {
+		return nil
+	}
+
+	policy := m.effectiveSchedulingPolicy(ctx)
+	effectiveMemMB := m.resourceLimits.MaxTotalMemoryMB
+	if localNode.AllocatedMemMB > 0 {
+		if effectiveMemMB <= 0 || localNode.AllocatedMemMB < effectiveMemMB {
+			effectiveMemMB = localNode.AllocatedMemMB
+		}
+	}
+	if localNode.PhysicalMemMB > 0 {
+		if effectiveMemMB <= 0 {
+			physCap := localNode.PhysicalMemMB - policy.HostReservedMemoryMB
+			if physCap < 0 {
+				physCap = 0
+			}
+			effectiveMemMB = physCap
+		} else if m.resourceLimits.MaxTotalMemoryMB <= 0 && effectiveMemMB > localNode.PhysicalMemMB {
+			effectiveMemMB = localNode.PhysicalMemMB
+		}
+	}
+	if effectiveMemMB <= 0 {
+		return nil
+	}
+
+	if requestedMemoryMB > effectiveMemMB {
+		return &api.ResourceLimitError{
+			Code:       api.ErrCodeResourceLimitExceeded,
+			Resource:   "memory",
+			LimitType:  "hard",
+			NodeID:     "nod_host_local",
+			Requested:  int64(requestedMemoryMB),
+			Available:  int64(effectiveMemMB),
+			Limit:      int64(effectiveMemMB),
+			Message:    fmt.Sprintf("memory capacity exceeded: requested %d MB > %d MB usable host RAM", requestedMemoryMB, effectiveMemMB),
+			Suggestion: "Request less memory or pick a larger worker node",
+		}
+	}
+
+	sumAllocatedMem := func() int64 {
+		used := m.inFlightMemMB.Load()
+		if vms, lErr := m.store.ListVMs(ctx); lErr == nil {
+			for _, v := range vms {
+				if v.WorkerID != "" && v.WorkerID != "nod_host_local" {
+					continue
+				}
+				if v.Status == db.StatusPaused {
+					continue
+				}
+				used += int64(v.MemoryMB)
+			}
+		}
+		return used
+	}
+
+	usedMemMB := sumAllocatedMem()
+	if usedMemMB+int64(requestedMemoryMB) > int64(effectiveMemMB) && policy.AutoReclaimOnPressure {
+		deficit := int(usedMemMB + int64(requestedMemoryMB) - int64(effectiveMemMB))
+		if reclaimed, _ := m.ReclaimIdleMemoryToSSD(ctx, deficit, ""); reclaimed > 0 {
+			usedMemMB = sumAllocatedMem()
+		}
+	}
+	if usedMemMB+int64(requestedMemoryMB) > int64(effectiveMemMB) {
+		avail := int64(effectiveMemMB) - usedMemMB
+		if avail < 0 {
+			avail = 0
+		}
+		return &api.ResourceLimitError{
+			Code:       api.ErrCodeResourceLimitExceeded,
+			Resource:   "memory",
+			LimitType:  "hard",
+			NodeID:     "nod_host_local",
+			Requested:  int64(requestedMemoryMB),
+			Available:  avail,
+			Limit:      int64(effectiveMemMB),
+			Message:    fmt.Sprintf("memory capacity exceeded: %d MB allocated + %d MB requested > %d MB limit", usedMemMB, requestedMemoryMB, effectiveMemMB),
+			Suggestion: "Delete or snapshot unused sandboxes, or request less memory",
 		}
 	}
 
@@ -1243,7 +1370,14 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 
 	m.diskMu.Lock()
-	defer m.diskMu.Unlock()
+	diskLocked := true
+	unlockDiskMu := func() {
+		if diskLocked {
+			diskLocked = false
+			m.diskMu.Unlock()
+		}
+	}
+	defer unlockDiskMu()
 
 	var externalID, name string
 	if strings.TrimSpace(req.Name) != "" {
@@ -1256,12 +1390,25 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 			return nil, fmt.Errorf("invalid sandbox name %q: names must be lowercase letters, digits, and dashes (a DNS label, max %d chars) so they can be used as <name>.<username>.<base-domain> hostnames", name, dns.MaxLabelLength)
 		}
 		externalID = name
+		nameKey := ownerID + ":" + name
+		if _, pending := m.inFlightNames[nameKey]; pending {
+			return nil, fmt.Errorf("a VM named %q already exists for owner %q", name, ownerID)
+		}
 		existing, _ := m.store.GetVMByOwner(ctx, ownerID, name)
 		if existing != nil {
 			return nil, fmt.Errorf("a VM named %q already exists for owner %q", name, ownerID)
 		}
 	} else {
-		name = m.generateNickname(ctx, ownerID)
+		for attempt := 0; attempt < 8; attempt++ {
+			candidate := m.generateNickname(ctx, ownerID)
+			if _, pending := m.inFlightNames[ownerID+":"+candidate]; !pending {
+				name = candidate
+				break
+			}
+		}
+		if name == "" {
+			name = "sbx-" + cleanU[:8]
+		}
 		externalID = name
 	}
 
@@ -1348,7 +1495,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		}
 	}
 
-	// 1. Check hard disk space constraints on creation (physical headroom + logical allocation ceiling)
+	// 1. Check hard disk & memory constraints on creation before doing any disk I/O
 	var requestedPhysicalMB int64
 	if req.Template != "" && tpl != nil {
 		requestedPhysicalMB = fileAllocatedMB(tpl.DiskPath)
@@ -1364,6 +1511,38 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	if err := m.CheckDiskCapacity(ctx, int64(diskMB), requestedPhysicalMB); err != nil {
 		return nil, err
 	}
+	if err := m.CheckMemoryCapacity(ctx, memoryMB); err != nil {
+		return nil, err
+	}
+
+	// Reserve disk, memory, and name while disk cloning/resizing/SSH injection run unlocked.
+	if m.inFlightNames == nil {
+		m.inFlightNames = make(map[string]struct{})
+	}
+	nameKey := ownerID + ":" + name
+	m.inFlightDiskMB.Add(int64(diskMB))
+	m.inFlightMemMB.Add(int64(memoryMB))
+	m.inFlightNames[nameKey] = struct{}{}
+	reserved := true
+	releaseReservation := func() {
+		if !reserved {
+			return
+		}
+		reserved = false
+		m.diskMu.Lock()
+		m.inFlightDiskMB.Add(-int64(diskMB))
+		if m.inFlightDiskMB.Load() < 0 {
+			m.inFlightDiskMB.Store(0)
+		}
+		m.inFlightMemMB.Add(-int64(memoryMB))
+		if m.inFlightMemMB.Load() < 0 {
+			m.inFlightMemMB.Store(0)
+		}
+		delete(m.inFlightNames, nameKey)
+		m.diskMu.Unlock()
+	}
+	defer releaseReservation()
+	unlockDiskMu()
 
 	var diskPath string
 	var rootfsPath, kernelPath string
@@ -1569,9 +1748,11 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		return nil, fmt.Errorf("invalid ssh password: sandbox disk is not available")
 	}
 
-	// 2. Fetch current IP allocations
+	// 2. Fetch current IP allocations and persist VM atomically under ipAllocMu.
+	m.ipAllocMu.Lock()
 	usedIPs, err := m.store.GetAllocatedIPs(ctx)
 	if err != nil {
+		m.ipAllocMu.Unlock()
 		return nil, fmt.Errorf("failed to fetch used IPs: %w", err)
 	}
 	gw := m.netMgr.GetGatewayIP()
@@ -1606,6 +1787,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		}
 	} else if req.IPAddress != "" {
 		if err := m.netMgr.ValidateIP(req.IPAddress, usedIPs); err != nil {
+			m.ipAllocMu.Unlock()
 			return nil, fmt.Errorf("invalid requested IP: %w", err)
 		}
 		ip = req.IPAddress
@@ -1617,6 +1799,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	} else {
 		ip, mac, err = m.netMgr.AllocateIP(usedIPs)
 		if err != nil {
+			m.ipAllocMu.Unlock()
 			return nil, fmt.Errorf("failed to allocate IP: %w", err)
 		}
 		if req.MACAddress != "" {
@@ -1690,10 +1873,13 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 	}
 
 	if err := m.saveVMRecord(ctx, vm); err != nil {
+		m.ipAllocMu.Unlock()
 		m.storMgr.CleanupVM(internalID)
 		m.storMgr.CleanupVM(externalID)
 		return nil, fmt.Errorf("failed to save VM in DB: %w", err)
 	}
+	m.ipAllocMu.Unlock()
+	releaseReservation()
 
 	return vm, nil
 }
@@ -2189,7 +2375,11 @@ func (m *Manager) evaluatePlacement(ctx context.Context, candidate *db.VM, allow
 			}
 		}
 		if projectedVCPUs > baseVCPUs {
-			cpuWeight = (baseWeight * baseVCPUs) / projectedVCPUs
+			physCores := baseVCPUs
+			if localNode != nil && localNode.PhysicalVCPUs > 0 && localNode.PhysicalVCPUs < physCores {
+				physCores = localNode.PhysicalVCPUs
+			}
+			cpuWeight = (baseWeight * physCores) / projectedVCPUs
 			if cpuWeight < 10 {
 				cpuWeight = 10
 			}
@@ -2197,13 +2387,32 @@ func (m *Manager) evaluatePlacement(ctx context.Context, candidate *db.VM, allow
 				cpuWeight = 10000
 			}
 			log.Printf("[vm-manager] Soft CPU overcommit active for vm %s (%d/%d base vCPUs, hard limit %d): cpu.weight=%d", candidate.ID, projectedVCPUs, baseVCPUs, hardVCPULimit, cpuWeight)
+		} else if localNode != nil && localNode.PhysicalVCPUs > 0 && projectedVCPUs > localNode.PhysicalVCPUs {
+			cpuWeight = (baseWeight * localNode.PhysicalVCPUs) / projectedVCPUs
+			if cpuWeight < 10 {
+				cpuWeight = 10
+			}
+			if cpuWeight > 10000 {
+				cpuWeight = 10000
+			}
+			log.Printf("[vm-manager] CPU share split active for vm %s (%d vCPUs across %d physical cores): cpu.weight=%d", candidate.ID, projectedVCPUs, localNode.PhysicalVCPUs, cpuWeight)
 		}
 	}
 
 	// RAM hard guarantee + idle-RAM SSD reclamation on pressure
 	memLimit := m.resourceLimits.MaxTotalMemoryMB
-	if memLimit <= 0 && localNode != nil && localNode.AllocatedMemMB > 0 {
-		memLimit = localNode.AllocatedMemMB
+	if memLimit <= 0 && localNode != nil {
+		if localNode.AllocatedMemMB > 0 {
+			memLimit = localNode.AllocatedMemMB
+			if localNode.PhysicalMemMB > 0 && memLimit > localNode.PhysicalMemMB {
+				memLimit = localNode.PhysicalMemMB
+			}
+		} else if localNode.PhysicalMemMB > 0 {
+			memLimit = localNode.PhysicalMemMB - policy.HostReservedMemoryMB
+			if memLimit < 0 {
+				memLimit = 0
+			}
+		}
 	}
 
 	computeMemPressure := func(currRunningMem int) (deficit int, avail int, limit int) {
@@ -2837,7 +3046,7 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 	vmLock := m.getVMLock(vmID)
 	vmLock.Lock()
 
-	err := m.stopVMUnlocked(ctx, vmID, false)
+	err := m.stopVMUnlocked(ctx, vmID, false, false)
 	vmLock.Unlock()
 
 	if err == nil {
@@ -2850,12 +3059,12 @@ func (m *Manager) StopVM(ctx context.Context, vmID string) error {
 func (m *Manager) StopVMDeferred(ctx context.Context, vmID string) error {
 	vmLock := m.getVMLock(vmID)
 	vmLock.Lock()
-	err := m.stopVMUnlocked(ctx, vmID, true)
+	err := m.stopVMUnlocked(ctx, vmID, true, false)
 	vmLock.Unlock()
 	return err
 }
 
-func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile bool) error {
+func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile bool, forceKill bool) error {
 	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
@@ -2867,52 +3076,71 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 	}
 
 	if vm.PID > 0 && m.isAlive(vm.PID) {
-		// 1. Try graceful sync over SSH if accessible
-		if vm.IPAddress != "" && vm.SSHKeyPath != "" {
-			syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Second)
-			sshCmd := exec.CommandContext(syncCtx, "ssh",
-				"-i", vm.SSHKeyPath,
-				"-o", "StrictHostKeyChecking=no",
-				"-o", "UserKnownHostsFile=/dev/null",
-				"-o", "ConnectTimeout=1",
-				fmt.Sprintf("compute@%s", vm.IPAddress),
-				"sudo sync; sudo poweroff",
-			)
-			if err := sshCmd.Run(); err != nil {
-				fallbackCmd := exec.CommandContext(syncCtx, "ssh",
-					"-i", vm.SSHKeyPath,
-					"-o", "StrictHostKeyChecking=no",
-					"-o", "UserKnownHostsFile=/dev/null",
-					"-o", "ConnectTimeout=1",
-					fmt.Sprintf("root@%s", vm.IPAddress),
-					"sync; poweroff",
-				)
-				_ = fallbackCmd.Run()
+		if !forceKill {
+			// 1. Try graceful sync over SSH only if guest SSH is actually reachable.
+			if m.launcher == nil && vm.SocketPath != "" && vm.IPAddress != "" && vm.IPAddress != "dhcp" && vm.SSHKeyPath != "" {
+				if conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(vm.IPAddress, "22"), 150*time.Millisecond); dialErr == nil {
+					_ = conn.Close()
+					syncCtx, syncCancel := context.WithTimeout(ctx, 2*time.Second)
+					sshCmd := exec.CommandContext(syncCtx, "ssh",
+						"-i", vm.SSHKeyPath,
+						"-o", "StrictHostKeyChecking=no",
+						"-o", "UserKnownHostsFile=/dev/null",
+						"-o", "ConnectTimeout=1",
+						fmt.Sprintf("compute@%s", vm.IPAddress),
+						"sudo sync; sudo poweroff",
+					)
+					if err := sshCmd.Run(); err != nil {
+						fallbackCmd := exec.CommandContext(syncCtx, "ssh",
+							"-i", vm.SSHKeyPath,
+							"-o", "StrictHostKeyChecking=no",
+							"-o", "UserKnownHostsFile=/dev/null",
+							"-o", "ConnectTimeout=1",
+							fmt.Sprintf("root@%s", vm.IPAddress),
+							"sync; poweroff",
+						)
+						_ = fallbackCmd.Run()
+					}
+					syncCancel()
+
+					// Wait briefly for guest poweroff
+					for i := 0; i < 5; i++ {
+						if !m.isAlive(vm.PID) {
+							break
+						}
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
 			}
-			syncCancel()
-		}
 
-		// Wait briefly for guest poweroff
-		for i := 0; i < 5; i++ {
-			if !m.isAlive(vm.PID) {
-				break
+			// 2. If still alive, attempt SendCtrlAltDel
+			if m.isAlive(vm.PID) && vm.SocketPath != "" {
+				fcClient := firecracker.NewClient(vm.SocketPath)
+				_ = fcClient.SendCtrlAltDel(ctx)
+				for i := 0; i < 3; i++ {
+					if !m.isAlive(vm.PID) {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
 			}
-			time.Sleep(150 * time.Millisecond)
 		}
 
-		// 2. If still alive, attempt SendCtrlAltDel
-		if m.isAlive(vm.PID) && vm.SocketPath != "" {
-			fcClient := firecracker.NewClient(vm.SocketPath)
-			_ = fcClient.SendCtrlAltDel(ctx)
-			time.Sleep(300 * time.Millisecond)
-		}
-
-		// 3. If still alive, SIGTERM then SIGKILL
+		// 3. SIGTERM then SIGKILL
 		if m.isAlive(vm.PID) {
-			syscall.Kill(vm.PID, syscall.SIGTERM)
-			time.Sleep(200 * time.Millisecond)
+			_ = syscall.Kill(vm.PID, syscall.SIGTERM)
+			waitStep := 200 * time.Millisecond
+			if forceKill {
+				waitStep = 40 * time.Millisecond
+			}
+			for elapsed := time.Duration(0); elapsed < waitStep; elapsed += 10 * time.Millisecond {
+				if !m.isAlive(vm.PID) {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			if m.isAlive(vm.PID) {
-				syscall.Kill(vm.PID, syscall.SIGKILL)
+				_ = syscall.Kill(vm.PID, syscall.SIGKILL)
 			}
 		}
 	}
@@ -3020,7 +3248,8 @@ func (m *Manager) deleteVMInternal(ctx context.Context, vmID string, deferred bo
 	}
 
 	// Always stop using the exact record we resolved. Internal IDs are unique
-	// across tenants, unlike names/IDs which can collide.
+	// across tenants, unlike names/IDs which can collide. Force-kill since the
+	// disk and VM directory are immediately removed below.
 	stopKey := vmID
 	if vm != nil {
 		stopKey = vm.InternalID
@@ -3028,7 +3257,7 @@ func (m *Manager) deleteVMInternal(ctx context.Context, vmID string, deferred bo
 			stopKey = vm.ID
 		}
 	}
-	_ = m.stopVMUnlocked(ctx, stopKey, deferred)
+	_ = m.stopVMUnlocked(ctx, stopKey, deferred, true)
 
 	m.dequeue(vmID)
 	if vm != nil {
@@ -3101,7 +3330,7 @@ func (m *Manager) CleanupLocalVMFiles(ctx context.Context, vmID string) error {
 	if vm != nil && vm.InternalID != "" {
 		stopKey = vm.InternalID
 	}
-	_ = m.stopVMUnlocked(ctx, stopKey, false)
+	_ = m.stopVMUnlocked(ctx, stopKey, false, true)
 	m.dequeue(vmID)
 	if vm != nil {
 		m.dequeue(vm.ID)

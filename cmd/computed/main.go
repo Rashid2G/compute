@@ -226,6 +226,17 @@ func main() {
 		log.Fatalf("Failed to initialize storage manager: %v", err)
 	}
 
+	// Enforce physical ownership ceilings for RAM and Disk on daemon startup.
+	_, physMemMB, physDiskMB := getHostResources(0, 0, 0)
+	if physMemMB > 0 && globalCfg.Resources.MaxTotalMemoryMB > physMemMB {
+		log.Printf("[computed] Warning: configured max_total_memory_mb (%d MB) exceeds physical RAM (%d MB); clamping to physical capacity", globalCfg.Resources.MaxTotalMemoryMB, physMemMB)
+		globalCfg.Resources.MaxTotalMemoryMB = physMemMB
+	}
+	if physDiskMB > 0 && globalCfg.Resources.MaxTotalDiskMB > int64(physDiskMB) {
+		log.Printf("[computed] Warning: configured max_total_disk_mb (%d MB) exceeds physical disk (%d MB); clamping to physical capacity", globalCfg.Resources.MaxTotalDiskMB, physDiskMB)
+		globalCfg.Resources.MaxTotalDiskMB = int64(physDiskMB)
+	}
+
 	// 5. Initialize VM Manager with Defaults, Resource Limits, Jailer, and Cgroups
 	vmMgr := vm.NewManager(vm.Config{
 		FirecrackerBinary: globalCfg.Server.FirecrackerBin,

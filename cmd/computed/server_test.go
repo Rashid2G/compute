@@ -37,6 +37,15 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return server
 }
 
+// withTestHostCapacity gives unit-test hosts a generous logical capacity so
+// tests can exercise explicit disk/memory sizes without depending on the size
+// of the CI runner's root filesystem.
+func withTestHostCapacity(cfg *config.GlobalConfig) {
+	cfg.Resources.MaxTotalVCPUs = 256
+	cfg.Resources.MaxTotalMemoryMB = 1 << 20
+	cfg.Resources.MaxTotalDiskMB = 1 << 20
+}
+
 func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
 	t.Helper()
 	root := t.TempDir()
@@ -69,7 +78,11 @@ func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
 	cfg.ConfigPath = "config/daemon.json"
 	// Unit tests should not boot job sandboxes in the background.
 	cfg.Jobs.LocalExecution = false
-	vmMgr := vm.NewManager(vm.Config{}, store, netMgr, storMgr)
+	// Keep unit-test disks small: the test host root filesystem is often a few
+	// GB, and physical capacity is now enforced during placement.
+	cfg.Defaults.DiskSizeMB = 1024
+	withTestHostCapacity(&cfg)
+	vmMgr := vm.NewManager(vm.Config{Defaults: cfg.Defaults, Resources: cfg.Resources}, store, netMgr, storMgr)
 	server := httptest.NewServer(NewServer(vmMgr, cfg))
 	t.Cleanup(server.Close)
 	return server, vmMgr
@@ -525,12 +538,15 @@ func TestImageAndTemplateEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vmMgr := vm.NewManager(vm.Config{}, store, netMgr, storMgr)
+	cfg := config.DefaultConfig()
+	cfg.Defaults.DiskSizeMB = 1024
+	withTestHostCapacity(&cfg)
+	vmMgr := vm.NewManager(vm.Config{Defaults: cfg.Defaults, Resources: cfg.Resources}, store, netMgr, storMgr)
 	vmMgr.GetImageBuilder().SetBuildFunc(func(ctx context.Context, req vm.BuildImageRequest, outputPath string, sshPubKey string) error {
 		return os.WriteFile(outputPath, []byte("pkg-installed-rootfs"), 0644)
 	})
 
-	srv := httptest.NewServer(NewServer(vmMgr, config.DefaultConfig()))
+	srv := httptest.NewServer(NewServer(vmMgr, cfg))
 	defer srv.Close()
 
 	// 1. GET /api/v1/images
