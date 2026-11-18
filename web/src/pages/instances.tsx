@@ -19,6 +19,7 @@ import {
   Scaling,
   Server,
   Shield,
+  SlidersHorizontal,
   Square,
   Terminal,
   Trash2,
@@ -50,6 +51,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { SandboxOptionsDialog } from '@/components/sandbox-options-dialog';
 import { SSHTerminal, type SSHTerminalHandle } from '@/components/ssh-terminal';
 import { UnprotectVMDialog } from '@/components/unprotect-vm-dialog';
 import { api, errorMessage } from '@/lib/api';
@@ -183,6 +185,7 @@ export function InstancesPage({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [cloneTarget, setCloneTarget] = useState<VM | null>(null);
   const [snapshotTarget, setSnapshotTarget] = useState<VM | null>(null);
+  const [optionsTarget, setOptionsTarget] = useState<VM | null>(null);
   const [stopConfirmTargets, setStopConfirmTargets] = useState<VM[] | null>(null);
 
   // Selected sandbox detail view state
@@ -236,6 +239,14 @@ export function InstancesPage({
   const selectedVM = useMemo(
     () => vms.find((v) => v.id === selectedVMId) ?? null,
     [vms, selectedVMId],
+  );
+
+  const liveOptionsTarget = useMemo(
+    () =>
+      optionsTarget
+        ? vms.find((v) => v.id === optionsTarget.id) ?? optionsTarget
+        : null,
+    [vms, optionsTarget],
   );
 
   const selectedAccess = useMemo(() => sandboxAccess(selectedVM), [selectedVM]);
@@ -1411,11 +1422,16 @@ export function InstancesPage({
                                 <MoreHorizontal className="h-3 w-3" />
                               </button>
                             </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-48">
+                            <DropdownMenuContent align="end" className="w-52">
+                              <DropdownMenuItem onSelect={() => setOptionsTarget(vm)}>
+                                <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+                                Options &amp; Settings
+                              </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => onExec?.(vm)}>
                                 <Play className="h-3.5 w-3.5" />
                                 Execute Command
                               </DropdownMenuItem>
+                              <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onSelect={() =>
                                   openSSHTerminalWindow(vm.id, vm.name, 'compute')
@@ -1488,16 +1504,19 @@ export function InstancesPage({
         </div>
       </div>
 
-      {/* Redesigned Calm Sandbox Detail View (Item #6 & #7) */}
+      {/* Streamlined Sandbox Detail View - Pure Terminal View */}
       {selectedVM && (
         <div
           data-testid="sandbox-detail-panel"
-          className="border border-border bg-background"
+          className="border border-border bg-background shadow-xs"
         >
-          {/* Clean Header */}
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-muted/20 px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-              <span className="font-display text-[15px] font-medium text-foreground">
+          {/* Streamlined Terminal Top Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border bg-muted/20 px-4 py-2.5">
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center border border-border bg-background text-primary">
+                <Terminal className="h-3.5 w-3.5" />
+              </span>
+              <span className="font-display text-[14px] font-semibold text-foreground truncate">
                 {selectedVM.name}
               </span>
               <span
@@ -1532,127 +1551,130 @@ export function InstancesPage({
                   Protected
                 </span>
               )}
-              <span className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[10.5px] text-muted-foreground">
-                <span>
-                  {(selectedVM.worker_id && workerNameById[selectedVM.worker_id]) ||
-                    selectedVM.worker_id ||
-                    'local'}
-                </span>
-                <span>·</span>
-                <span>pool:{selectedVM.pool_id || 'default'}</span>
-              </span>
 
-              {selectedVM.ip_address && (
-                <button
-                  type="button"
-                  onClick={() => copyText(selectedVM.ip_address)}
-                  title="Copy IP address"
-                  className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
-                >
-                  <span>{selectedVM.ip_address}</span>
-                  {copiedId === selectedVM.ip_address ? (
-                    <Check className="h-3 w-3 text-success" />
-                  ) : (
-                    <Copy className="h-3 w-3 text-muted-foreground" />
-                  )}
-                </button>
-              )}
-
-              {selectedVM.ip_address && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    copyText(selectedAccess.ssh || `ssh compute@${selectedVM.ip_address}`)
-                  }
-                  title="Copy SSH command"
-                  className="inline-flex items-center gap-1 border border-border bg-background px-2 py-0.5 font-mono text-[11px] text-muted-foreground hover:text-foreground hover:border-primary transition-colors"
-                >
-                  <span>
-                    {selectedAccess.ssh || `ssh compute@${selectedVM.ip_address}`}
+              {/* Terminal User Toggle (only when running) */}
+              {selectedVM.status === 'running' && (
+                <div className="ml-2 flex items-center gap-1.5 border-l border-border pl-2.5">
+                  <span className="font-mono text-[10.5px] text-muted-foreground">
+                    User:
                   </span>
-                  <Copy className="h-3 w-3" />
-                </button>
+                  <div className="inline-flex border border-border bg-background">
+                    {(['compute', 'root'] as const).map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setTerminalUser(u)}
+                        className={cn(
+                          'px-2 py-0.5 font-mono text-[10.5px] transition-colors',
+                          terminalUser === u
+                            ? 'bg-primary text-primary-foreground font-medium'
+                            : 'text-muted-foreground hover:text-foreground',
+                        )}
+                      >
+                        {u}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               )}
             </div>
 
+            {/* Actions Toolbar */}
             <div className="flex flex-wrap items-center gap-1.5">
-              {selectedVM.status === 'running' ? (
+              {selectedVM.status === 'running' && (
                 <>
                   <button
                     type="button"
-                    onClick={() => setStopConfirmTargets([selectedVM])}
-                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-warning hover:text-warning transition-colors"
-                  >
-                    <Square className="h-3 w-3" />
-                    <span>Stop</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={restartingId === selectedVM.id}
-                    onClick={() => void handleRestartVM(selectedVM)}
-                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-primary transition-colors disabled:opacity-50"
+                    onClick={() => terminalRef.current?.reconnect()}
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
+                    title="Reconnect SSH terminal session"
                   >
                     <RotateCcw className="h-3 w-3" />
-                    <span>
-                      {restartingId === selectedVM.id ? 'Restarting…' : 'Restart'}
-                    </span>
+                    <span>Reconnect</span>
                   </button>
                   <button
                     type="button"
                     onClick={() =>
-                      openSSHTerminalWindow(selectedVM.id, selectedVM.name, terminalUser)
+                      openSSHTerminalWindow(
+                        selectedVM.id,
+                        selectedVM.name,
+                        terminalUser,
+                      )
                     }
-                    className="inline-flex h-7 items-center gap-1.5 bg-primary px-2.5 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 font-mono text-[11px] text-foreground hover:border-primary transition-colors"
+                    title="Open terminal in a separate window"
                   >
                     <ExternalLink className="h-3 w-3" />
-                    <span>Pop Out Terminal</span>
+                    <span>Pop Out</span>
                   </button>
                 </>
-              ) : selectedVM.status === 'paused' ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onResume(selectedVM)}
-                    className="inline-flex h-7 items-center gap-1.5 border border-success/40 bg-success/10 px-2.5 text-[11.5px] font-medium text-success hover:bg-success/20 transition-colors"
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    <span>Resume</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setStopConfirmTargets([selectedVM])}
-                    className="inline-flex h-7 items-center gap-1.5 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-warning hover:text-warning transition-colors"
-                  >
-                    <Square className="h-3 w-3" />
-                    <span>Stop</span>
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onRun(selectedVM)}
-                  className="inline-flex h-7 items-center gap-1.5 bg-primary px-3 text-[11.5px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
-                >
-                  <Play className="h-3 w-3" />
-                  <span>Start</span>
-                </button>
               )}
 
+              {/* Dedicated All-in-One Options & Settings Popup Trigger */}
+              <button
+                type="button"
+                onClick={() => setOptionsTarget(selectedVM)}
+                className="inline-flex h-7 items-center gap-1.5 border border-primary/50 bg-primary/10 px-2.5 font-mono text-[11px] font-medium text-primary hover:bg-primary hover:text-primary-foreground transition-colors"
+                title="View all sandbox options, compute specs, volumes, network & settings in one place"
+              >
+                <SlidersHorizontal className="h-3 w-3" />
+                <span>Options &amp; Settings</span>
+              </button>
+
+              {/* More Dropdown Menu */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
                     type="button"
-                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2.5 text-[11.5px] text-foreground hover:border-primary transition-colors"
+                    className="inline-flex h-7 items-center gap-1 border border-border bg-background px-2 text-[11px] text-foreground hover:border-primary transition-colors"
                   >
                     <span>More</span>
                     <ChevronDown className="h-3 w-3 text-muted-foreground" />
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuItem onSelect={() => setOptionsTarget(selectedVM)}>
+                    <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
+                    All Options &amp; Settings
+                  </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => onExec?.(selectedVM)}>
                     <Play className="h-3.5 w-3.5" />
                     Execute Command
                   </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  {selectedVM.status === 'running' ? (
+                    <>
+                      <DropdownMenuItem onSelect={() => void handleRestartVM(selectedVM)}>
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        Restart Sandbox
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => setStopConfirmTargets([selectedVM])}>
+                        <Square className="h-3.5 w-3.5 text-warning" />
+                        Stop Sandbox
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
+                        <Pause className="h-3.5 w-3.5" />
+                        Pause &amp; Save State
+                      </DropdownMenuItem>
+                    </>
+                  ) : selectedVM.status === 'paused' ? (
+                    <>
+                      <DropdownMenuItem onSelect={() => onResume(selectedVM)}>
+                        <RotateCcw className="h-3.5 w-3.5 text-success" />
+                        Resume Sandbox
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onSelect={() => setStopConfirmTargets([selectedVM])}>
+                        <Square className="h-3.5 w-3.5 text-warning" />
+                        Stop Sandbox
+                      </DropdownMenuItem>
+                    </>
+                  ) : (
+                    <DropdownMenuItem onSelect={() => onRun(selectedVM)}>
+                      <Play className="h-3.5 w-3.5 text-success" />
+                      Start Sandbox
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onSelect={() => setSnapshotTarget(selectedVM)}>
                     <Camera className="h-3.5 w-3.5" />
                     Snapshot
@@ -1671,15 +1693,7 @@ export function InstancesPage({
                       Migrate Sandbox
                     </DropdownMenuItem>
                   )}
-                  {selectedVM.status === 'running' && (
-                    <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
-                      <Pause className="h-3.5 w-3.5" />
-                      Pause &amp; Save State
-                    </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem
-                    onSelect={() => void toggleProtection(selectedVM)}
-                  >
+                  <DropdownMenuItem onSelect={() => void toggleProtection(selectedVM)}>
                     <Shield className="h-3.5 w-3.5" />
                     {selectedVM.protected ? 'Unprotect' : 'Protect'}
                   </DropdownMenuItem>
@@ -1699,11 +1713,12 @@ export function InstancesPage({
                 </DropdownMenuContent>
               </DropdownMenu>
 
+              {/* Close Detail Panel */}
               <button
                 type="button"
                 onClick={() => setSelectedVMId(null)}
-                className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-foreground"
-                title="Close detail panel"
+                className="flex h-7 w-7 items-center justify-center border border-border text-muted-foreground hover:text-foreground hover:border-border/80 transition-colors"
+                title="Close terminal panel"
                 aria-label="Close detail panel"
               >
                 <X className="h-3.5 w-3.5" />
@@ -1711,75 +1726,24 @@ export function InstancesPage({
             </div>
           </div>
 
-          {/* Embedded Pure Interactive SSH Terminal */}
-          <div className="border-b border-border">
+          {/* Pure Interactive SSH Terminal - No Bloat Below */}
+          <div>
             {selectedVM.status === 'running' ? (
-              <div>
-                <div className="flex items-center justify-between border-b border-border bg-muted/15 px-4 py-1.5">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-[11px] text-muted-foreground">
-                      Terminal User
-                    </span>
-                    <div className="inline-flex border border-border bg-background">
-                      {(['compute', 'root'] as const).map((u) => (
-                        <button
-                          key={u}
-                          type="button"
-                          onClick={() => setTerminalUser(u)}
-                          className={cn(
-                            'px-2 py-0.5 font-mono text-[11px] transition-colors',
-                            terminalUser === u
-                              ? 'bg-primary text-primary-foreground font-medium'
-                              : 'text-muted-foreground hover:text-foreground',
-                          )}
-                        >
-                          {u}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => terminalRef.current?.reconnect()}
-                      className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      <span>Reconnect</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openSSHTerminalWindow(
-                          selectedVM.id,
-                          selectedVM.name,
-                          terminalUser,
-                        )
-                      }
-                      className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground hover:border-primary"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                      <span>Pop Out</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="h-[360px] w-full bg-[#0a0a0a]">
-                  <SSHTerminal
-                    ref={terminalRef}
-                    vmId={selectedVM.id}
-                    user={terminalUser}
-                    raw
-                    autoFocus={false}
-                    className="h-full w-full"
-                  />
-                </div>
+              <div className="h-[420px] w-full bg-[#0a0a0a]">
+                <SSHTerminal
+                  ref={terminalRef}
+                  vmId={selectedVM.id}
+                  user={terminalUser}
+                  raw
+                  autoFocus={false}
+                  className="h-full w-full"
+                />
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center gap-3 bg-muted/10 px-4 py-12 text-center">
-                <Terminal className="h-6 w-6 text-muted-foreground" />
+              <div className="flex flex-col items-center justify-center gap-3 bg-muted/10 px-4 py-14 text-center">
+                <Terminal className="h-7 w-7 text-muted-foreground" />
                 <div className="space-y-1">
-                  <p className="text-[13px] font-medium text-foreground">
+                  <p className="text-[13.5px] font-medium text-foreground">
                     Sandbox is {selectedVM.status}
                   </p>
                   <p className="text-[11.5px] text-muted-foreground">
@@ -1792,7 +1756,7 @@ export function InstancesPage({
                   <button
                     type="button"
                     onClick={() => onResume(selectedVM)}
-                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     <span>Resume Sandbox</span>
@@ -1801,7 +1765,7 @@ export function InstancesPage({
                   <button
                     type="button"
                     onClick={() => onRun(selectedVM)}
-                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover"
+                    className="inline-flex h-8 items-center gap-1.5 bg-primary px-3.5 text-[12px] font-medium text-primary-foreground hover:bg-primary-hover transition-colors"
                   >
                     <Play className="h-3.5 w-3.5" />
                     <span>Start Sandbox</span>
@@ -1809,295 +1773,6 @@ export function InstancesPage({
                 )}
               </div>
             )}
-          </div>
-
-          {/* Focused Resource & Connectivity Cards */}
-          <div className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-3">
-            {/* Card 1: Compute Specs */}
-            <div className="border border-border bg-background p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[12px] font-medium text-foreground">
-                  Compute Specs
-                </span>
-                <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
-              </div>
-              <div className="grid grid-cols-2 gap-y-2 font-mono text-[11.5px]">
-                <span className="text-muted-foreground">vCPUs</span>
-                <span className="text-right text-foreground">
-                  {selectedVM.vcpus} vCPU
-                </span>
-                <span className="text-muted-foreground">Memory</span>
-                <span className="text-right text-foreground">
-                  {formatMemory(selectedVM.memory_mb)}
-                </span>
-                <span className="text-muted-foreground">Disk</span>
-                <span className="text-right text-foreground">
-                  {Math.max(
-                    1,
-                    Math.round((selectedVM.disk_mb || DEFAULT_DISK_MB) / 1024),
-                  )}{' '}
-                  GB
-                </span>
-                <span className="text-muted-foreground">Worker Node</span>
-                <span className="text-right text-foreground truncate" title={selectedVM.worker_id || ''}>
-                  {(selectedVM.worker_id && workerNameById[selectedVM.worker_id]) ||
-                    selectedVM.worker_id ||
-                    'nod_host_local'}
-                </span>
-                <span className="text-muted-foreground">Pool</span>
-                <span className="text-right text-foreground">
-                  {selectedVM.pool_id || 'default'}
-                </span>
-                {selectedVM.auto_hibernated && (
-                  <>
-                    <span className="text-muted-foreground">Hibernation</span>
-                    <span
-                      className="text-right text-warning truncate"
-                      title={selectedVM.hibernate_reason || 'Auto-hibernated to SSD'}
-                    >
-                      SSD Hibernated
-                    </span>
-                  </>
-                )}
-                <span className="text-muted-foreground">OS Image</span>
-                <span className="text-right text-foreground">Ubuntu 24.04 LTS</span>
-                <span className="text-muted-foreground">Created</span>
-                <span className="text-right text-muted-foreground">
-                  {formatRelativeTime(selectedVM.created_at)}
-                </span>
-              </div>
-            </div>
-
-            {/* Card 2: Attached Volumes */}
-            <div className="border border-border bg-background p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[12px] font-medium text-foreground">
-                  Attached Volumes ({attachedVolumes.length})
-                </span>
-                <HardDrive className="h-3.5 w-3.5 text-muted-foreground" />
-              </div>
-
-              {volumesLoading && attachedVolumes.length === 0 ? (
-                <div className="font-mono text-[11px] text-muted-foreground">
-                  Loading volumes…
-                </div>
-              ) : attachedVolumes.length === 0 ? (
-                <div className="text-[11.5px] text-muted-foreground">
-                  No block volumes attached.
-                </div>
-              ) : (
-                <div className="divide-y divide-border border border-border">
-                  {attachedVolumes.map((vol) => (
-                    <div
-                      key={vol.id}
-                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 font-mono text-[11px]"
-                    >
-                      <div className="min-w-0">
-                        <div className="truncate font-medium text-foreground">
-                          {vol.name}
-                        </div>
-                        <div className="text-[10px] text-muted-foreground">
-                          {vol.size_gb} GB · {vol.filesystem} · {vol.mount_point || '/mnt'}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void handleDetachVolume(vol)}
-                        className="inline-flex h-6 shrink-0 items-center gap-1 border border-border px-2 text-[10.5px] text-muted-foreground hover:border-warning hover:text-warning"
-                      >
-                        <Unplug className="h-3 w-3" />
-                        <span>Detach</span>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {availableVolumes.length > 0 && (
-                <form
-                  onSubmit={(e) => void handleAttachVolume(e)}
-                  className="flex items-center gap-1.5 pt-1"
-                >
-                  <select
-                    aria-label="Attach volume"
-                    value={attachVolumeId}
-                    onChange={(e) => setAttachVolumeId(e.target.value)}
-                    className="h-7 flex-1 border border-border bg-background px-2 font-mono text-[11px] text-foreground focus:border-primary focus:outline-none"
-                  >
-                    <option value="">Select available volume…</option>
-                    {availableVolumes.map((vol) => (
-                      <option key={vol.id} value={vol.id}>
-                        {vol.name} ({vol.size_gb} GB)
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="submit"
-                    disabled={!attachVolumeId}
-                    className="h-7 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover disabled:opacity-50"
-                  >
-                    Attach
-                  </button>
-                </form>
-              )}
-            </div>
-
-            {/* Card 3: Port Forwards & Public Ingress */}
-            <div className="border border-border bg-background p-3.5 space-y-2.5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5">
-                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-[12px] font-medium text-foreground">
-                    Port Forwards &amp; Ingress
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setAddForwardOpen((v) => !v)}
-                  className="inline-flex h-6 items-center gap-1 border border-border bg-background px-2 text-[10.5px] text-foreground hover:border-primary"
-                >
-                  <Plus className="h-3 w-3" />
-                  <span>Add</span>
-                </button>
-              </div>
-
-              {selectedAccess.url && (
-                <div className="flex items-center justify-between gap-2 border border-border bg-muted/20 px-2.5 py-1.5 font-mono text-[11px]">
-                  <a
-                    href={selectedAccess.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="truncate text-[color:var(--link)] hover:underline"
-                  >
-                    {selectedAccess.url}
-                  </a>
-                  <CopyButton
-                    value={selectedAccess.url}
-                    label="Copy ingress URL"
-                    className="h-4 w-4 shrink-0"
-                  />
-                </div>
-              )}
-
-              {forwardsLoading && vmPortForwards.length === 0 ? (
-                <div className="font-mono text-[11px] text-muted-foreground">
-                  Loading port exposures…
-                </div>
-              ) : vmPortForwards.length === 0 ? (
-                <div className="text-[11.5px] text-muted-foreground">
-                  No ports exposed yet.
-                </div>
-              ) : (
-                <div className="divide-y divide-border border border-border">
-                  {vmPortForwards.map((pf) => (
-                    <div
-                      key={pf.id}
-                      className="flex items-center justify-between gap-2 px-2.5 py-1.5 font-mono text-[11px]"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-foreground">
-                          {pf.host_port > 0
-                            ? `port :${pf.host_port} → :${pf.guest_port}`
-                            : `subdomain → :${pf.guest_port}`}{' '}
-                          <span className="text-[10px] text-muted-foreground">
-                            ({pf.protocol}, {pf.public ? 'public' : 'private'})
-                          </span>
-                        </div>
-                        {pf.public_url && (
-                          <a
-                            href={pf.public_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="block truncate text-[10px] text-[color:var(--link)] hover:underline"
-                          >
-                            {pf.public_url}
-                          </a>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeletePortForward(pf)}
-                        aria-label={`Remove exposure for guest port ${pf.guest_port}`}
-                        className="flex h-6 w-6 shrink-0 items-center justify-center border border-border text-muted-foreground hover:border-destructive hover:text-destructive"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {addForwardOpen && (
-                <form
-                  onSubmit={(e) => void handleAddPortForward(e)}
-                  className="space-y-2 border border-border bg-muted/15 p-2.5"
-                >
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Guest Port
-                      </label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={65535}
-                        value={fwGuestPort}
-                        onChange={(e) => setFwGuestPort(e.target.value)}
-                        className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-muted-foreground mb-0.5">
-                        Protocol
-                      </label>
-                      <select
-                        value={fwProtocol}
-                        onChange={(e) =>
-                          setFwProtocol(e.target.value as 'TCP' | 'HTTP/HTTPS')
-                        }
-                        className="h-7 w-full border border-border bg-background px-1.5 font-mono text-[11px]"
-                      >
-                        <option value="TCP">TCP</option>
-                        <option value="HTTP/HTTPS">HTTP</option>
-                      </select>
-                    </div>
-                  </div>
-                  {fwProtocol === 'HTTP/HTTPS' && (
-                    <input
-                      type="text"
-                      value={fwSubdomain}
-                      onChange={(e) => setFwSubdomain(e.target.value)}
-                      placeholder="Optional subdomain (e.g. app)"
-                      className="h-7 w-full border border-border bg-background px-2 font-mono text-[11px]"
-                    />
-                  )}
-                  <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={fwPublic}
-                      onChange={(e) => setFwPublic(e.target.checked)}
-                      className="h-3.5 w-3.5 border border-border"
-                    />
-                    Public URL (anyone with the link can reach it)
-                  </label>
-                  <div className="flex justify-end gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setAddForwardOpen(false)}
-                      className="h-6.5 border border-border px-2 text-[11px] text-muted-foreground"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="h-6.5 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground hover:bg-primary-hover"
-                    >
-                      Expose Port
-                    </button>
-                  </div>
-                </form>
-              )}
-            </div>
           </div>
         </div>
       )}
@@ -2412,6 +2087,28 @@ export function InstancesPage({
         open={snapshotTarget !== null}
         onOpenChange={(open) => !open && setSnapshotTarget(null)}
         onCreated={() => onRefresh?.()}
+      />
+      <SandboxOptionsDialog
+        vm={liveOptionsTarget}
+        open={liveOptionsTarget !== null}
+        onOpenChange={(open) => !open && setOptionsTarget(null)}
+        workers={workers}
+        pools={pools}
+        volumes={volumes}
+        portForwards={portForwards}
+        isAdmin={isAdmin}
+        onRun={onRun}
+        onStop={(vm) => setStopConfirmTargets([vm])}
+        onResume={onResume}
+        onRestart={handleRestartVM}
+        onDelete={onDelete}
+        onSnapshot={setSnapshotTarget}
+        onClone={setCloneTarget}
+        onResize={openResizeModal}
+        onMigrate={openMigrateModal}
+        onToggleProtection={toggleProtection}
+        onInspectJson={onInspect}
+        onRefresh={onRefresh}
       />
     </div>
   );

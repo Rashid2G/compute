@@ -1055,7 +1055,12 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       assert(!detailText.includes('Execute Command'), 'Non-interactive exec must be removed');
       assert(!detailText.includes('Execute via SSH'), 'Legacy Execute via SSH section must be removed');
       assert(detailText.includes('Reconnect') && detailText.includes('Pop Out'), 'Embedded terminal controls must be present');
-      assert(detailText.includes('Compute Specs') && detailText.includes('Attached Volumes') && detailText.includes('Port Forwards & Ingress'), 'Resource and connectivity cards must render');
+      assert(!detailText.includes('Attached Volumes'), 'Detail panel must not contain bloated cards');
+
+      await cdp.evalJS(`Array.from(document.querySelectorAll('[data-testid="sandbox-detail-panel"] button')).find(b => b.innerText.includes('Options & Settings')).click()`);
+      await waitFor(cdp, `document.body.innerText.includes('Compute Specs') && document.body.innerText.includes('Attached Volumes') && document.body.innerText.includes('Port Forwards & Ingress')`, 3000, 'options dialog open');
+      await cdp.evalJS(`document.querySelector('[data-slot="dialog-close"]')?.click() || document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+      await sleep(150);
 
       await cdp.evalJS(`document.querySelector('button[aria-label="Snapshot sbx-alpha"]').click()`);
       await waitFor(cdp, `document.getElementById('create-snapshot-title') !== null`, 3000, 'snapshot modal open');
