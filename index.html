@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Compute v1.0.0 — Operator Manual &amp; Reference</title>
-  <meta name="description" content="Operator manual and API reference for Compute v1.0.0: Firecracker microVM sandboxes, host bridge networking, snapshots, replication, distributed jobs, CLI, REST API, and SDKs." />
+  <meta name="description" content="Operator manual and API reference for Compute v1.0.0: Firecracker microVM sandboxes, multi-node workers, load balancing, live migration, resource limits, CLI, REST/WS API, and SDKs." />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -53,9 +53,9 @@
       <div class="nav-group">
         <div class="nav-group-title">MicroVM Lifecycle</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#sandboxes"><span class="nav-num">04</span>Sandboxes &amp; Exec</a></li>
+          <li><a class="nav-link" href="#sandboxes"><span class="nav-num">04</span>Sandboxes, Exec &amp; Bulk</a></li>
           <li><a class="nav-link" href="#replicating"><span class="nav-num">05</span>Replication (Clone)</a></li>
-          <li><a class="nav-link" href="#pausing"><span class="nav-num">06</span>Pause &amp; Resume State</a></li>
+          <li><a class="nav-link" href="#pausing"><span class="nav-num">06</span>Pause &amp; Auto-Hibernate</a></li>
           <li><a class="nav-link" href="#snapshots"><span class="nav-num">07</span>Snapshots &amp; Templates</a></li>
         </ul>
       </div>
@@ -63,17 +63,19 @@
       <div class="nav-group">
         <div class="nav-group-title">Cluster &amp; Network</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#distributed-jobs"><span class="nav-num">08</span>Workers &amp; Jobs</a></li>
-          <li><a class="nav-link" href="#networking-dns-ssh"><span class="nav-num">09</span>Bridge, DNS &amp; SSH</a></li>
+          <li><a class="nav-link" href="#distributed-jobs"><span class="nav-num">08</span>Workers, Pools &amp; Jobs</a></li>
+          <li><a class="nav-link" href="#multi-node-scheduler"><span class="nav-num">09</span>Load Balancing &amp; Migration</a></li>
+          <li><a class="nav-link" href="#serving"><span class="nav-num">10</span>Serving Apps</a></li>
+          <li><a class="nav-link" href="#networking-dns-ssh"><span class="nav-num">11</span>Bridge, DNS &amp; SSH</a></li>
         </ul>
       </div>
 
       <div class="nav-group">
         <div class="nav-group-title">Interfaces</div>
         <ul class="nav-list">
-          <li><a class="nav-link" href="#cli-reference"><span class="nav-num">10</span>CLI Reference</a></li>
-          <li><a class="nav-link" href="#rest-api"><span class="nav-num">11</span>REST API</a></li>
-          <li><a class="nav-link" href="#sdks"><span class="nav-num">12</span>TypeScript &amp; Python SDKs</a></li>
+          <li><a class="nav-link" href="#cli-reference"><span class="nav-num">12</span>CLI Reference</a></li>
+          <li><a class="nav-link" href="#rest-api"><span class="nav-num">13</span>REST &amp; WebSocket API</a></li>
+          <li><a class="nav-link" href="#sdks"><span class="nav-num">14</span>TypeScript &amp; Python SDKs</a></li>
         </ul>
       </div>
 
@@ -87,15 +89,15 @@
         <div class="manual-meta">COMPUTE(7) &middot; OPERATOR &amp; API MANUAL &middot; LINUX / KVM</div>
         <h1>Self-Hosted Firecracker MicroVM Sandboxes</h1>
         <p class="manual-lead">
-          Compute runs hardware-isolated Firecracker microVMs and ephemeral job workers on Linux hosts with
-          <code>/dev/kvm</code>. Every sandbox boots an uncompressed Linux kernel (<code>vmlinux</code>) and dedicated
-          ext4 root filesystem attached to host bridge <code>mft3br0</code>, managed through <code>computed</code>,
-          the <code>compute</code> CLI, HTTP/WebSocket APIs, and an embedded web console.
+          Compute runs hardware-isolated Firecracker microVMs and distributed worker pools on Linux hosts with
+          <code>/dev/kvm</code>. A single <code>computed</code> control plane serves the REST/WebSocket APIs, real-time
+          <code>/api/v1/ws</code> UI sync, and embedded Web Dashboard on <code>:18080</code>, while remote
+          <code>compute-worker</code> nodes connect outbound with zero inbound ports required.
         </p>
         <div class="manual-actions">
           <a class="btn-primary" href="#quickstart">Install &amp; Boot</a>
-          <a class="btn-secondary" href="#cli-reference">CLI Commands</a>
-          <a class="btn-secondary" href="#rest-api">REST Endpoints</a>
+          <a class="btn-secondary" href="#multi-node-scheduler">Load Balancing &amp; Limits</a>
+          <a class="btn-secondary" href="#rest-api">REST &amp; WS Endpoints</a>
         </div>
 
         <div class="spec-matrix" role="list" aria-label="Platform Specifications">
@@ -104,12 +106,12 @@
             <div class="spec-val">Firecracker + KVM</div>
           </div>
           <div class="spec-cell" role="listitem">
-            <div class="spec-label">Default Bridge</div>
-            <div class="spec-val">mft3br0 &middot; 172.16.0.0/16</div>
+            <div class="spec-label">Control Plane &amp; UI</div>
+            <div class="spec-val">:18080 &middot; /api/v1/ws</div>
           </div>
           <div class="spec-cell" role="listitem">
-            <div class="spec-label">Control Plane</div>
-            <div class="spec-val">127.0.0.1:18080 &middot; SQLite</div>
+            <div class="spec-label">Load Balancer</div>
+            <div class="spec-val">least_loaded &middot; bin_pack &middot; spread</div>
           </div>
           <div class="spec-cell" role="listitem">
             <div class="spec-label">Authentication</div>
@@ -119,7 +121,7 @@
       </header>
 
       <!-- 01. Architecture -->
-      <section id="overview" class="doc-section" data-keywords="overview architecture firecracker microvm computed compute-worker cli kvm topology">
+      <section id="overview" class="doc-section" data-keywords="overview architecture firecracker microvm computed compute-worker cli kvm topology embedded ui websocket">
         <div class="section-head">
           <span class="section-id">01</span>
           <h2>Architecture &amp; Binaries</h2>
@@ -143,15 +145,15 @@
 
             <line x1="172" y1="56" x2="220" y2="56" stroke="var(--accent-bright)" stroke-width="1.4"/>
             <polygon points="220,56 213,52 213,60" fill="var(--accent-bright)"/>
-            <text x="176" y="47" fill="var(--fg-muted)" font-family="monospace" font-size="9">HTTP/WS</text>
+            <text x="174" y="47" fill="var(--fg-muted)" font-family="monospace" font-size="9">HTTP / WS</text>
 
             <rect x="220" y="14" width="215" height="114" fill="var(--bg-2)" stroke="var(--accent)" stroke-width="1.4"/>
             <text x="234" y="36" fill="var(--accent-bright)" font-family="monospace" font-size="11" font-weight="600">computed</text>
             <text x="310" y="36" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">:18080</text>
-            <text x="234" y="55" fill="var(--fg-muted)" font-family="monospace" font-size="10">- REST API + Embedded UI</text>
-            <text x="234" y="71" fill="var(--fg-muted)" font-family="monospace" font-size="10">- Auth / RBAC + compute.db</text>
+            <text x="234" y="55" fill="var(--fg-muted)" font-family="monospace" font-size="10">- API + Embedded UI + /ws</text>
+            <text x="234" y="71" fill="var(--fg-muted)" font-family="monospace" font-size="10">- Scheduler + Live Migration</text>
             <text x="234" y="87" fill="var(--fg-muted)" font-family="monospace" font-size="10">- DNS (:53) + Edge (:80)</text>
-            <text x="234" y="103" fill="var(--fg-muted)" font-family="monospace" font-size="10">- cgroup v2 + Disk Manager</text>
+            <text x="234" y="103" fill="var(--fg-muted)" font-family="monospace" font-size="10">- cgroup v2 + Disk Limits</text>
 
             <line x1="435" y1="62" x2="488" y2="62" stroke="var(--border-strong)" stroke-width="1.2"/>
             <polygon points="488,62 481,58 481,66" fill="var(--border-strong)"/>
@@ -172,11 +174,11 @@
 
             <line x1="327" y1="128" x2="327" y2="162" stroke="var(--accent-bright)" stroke-width="1.2" stroke-dasharray="3 3"/>
             <polygon points="327,128 323,135 331,135" fill="var(--accent-bright)"/>
-            <text x="336" y="150" fill="var(--fg-muted)" font-family="monospace" font-size="9">Outbound WS/mTLS</text>
+            <text x="336" y="150" fill="var(--fg-muted)" font-family="monospace" font-size="9">Outbound WS RPC / TCP Tunnel</text>
 
             <rect x="220" y="162" width="586" height="54" fill="var(--bg-2)" stroke="var(--border-strong)" stroke-width="1.2"/>
-            <text x="234" y="184" fill="var(--fg)" font-family="monospace" font-size="10.5" font-weight="600">compute-worker (optional remote host pool)</text>
-            <text x="234" y="201" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">Zero inbound firewall ports &middot; executes queued jobs inside remote KVM microVMs &middot; streams logs back to computed</text>
+            <text x="234" y="184" fill="var(--fg)" font-family="monospace" font-size="10.5" font-weight="600">compute-worker (multi-node remote host pools)</text>
+            <text x="234" y="201" fill="var(--fg-muted)" font-family="monospace" font-size="9.5">Zero inbound ports &middot; runs remote sandboxes &amp; jobs &middot; supports live chunked disk/snapshot migration</text>
           </svg>
         </figure>
 
@@ -186,37 +188,38 @@
               <span class="component-name">computed</span>
               <span class="component-role">Control Plane</span>
             </div>
-            <p>Manages users, scoped API keys, microVM lifecycle, snapshots, TAP interfaces, iptables NAT, DNS/HTTP ingress, and embedded web UI assets.</p>
+            <p>Manages users, scoped API keys, microVM lifecycle, scheduler placement, live migration, TAP/NAT/DNS/edge, and the embedded Web UI on <code>:18080</code>.</p>
           </div>
           <div class="component-cell">
             <div class="component-head">
               <span class="component-name">compute</span>
               <span class="component-role">CLI &amp; UI</span>
             </div>
-            <p>Client CLI for sandboxes, SSH, streaming exec, <code>scp</code> file transfers, templates, distributed jobs, and standalone <code>compute gui</code> mode.</p>
+            <p>Client CLI for sandboxes, SSH, streaming exec, <code>scp</code> file transfers, templates, workers, pools, jobs, and optional standalone <code>compute gui</code> mode.</p>
           </div>
           <div class="component-cell">
             <div class="component-head">
               <span class="component-name">compute-worker</span>
               <span class="component-role">Worker Agent</span>
             </div>
-            <p>Outward-dialing host agent enrolled via single-use, name-pinned tokens (<code>compute worker token create</code>) for remote job pools.</p>
+            <p>Outward-dialing host agent enrolled via tokens (<code>compute worker token create</code>); runs sandboxes and jobs over multiplexed WS RPC/TCP tunnels.</p>
           </div>
         </div>
 
         <div class="note-box">
-          <div class="note-label">Capacity Accounting</div>
-          Compute enforces physical capacity and admission limits (<code>COMPUTE_MAX_RUNNING_VMS</code>, <code>COMPUTE_MAX_TOTAL_VCPUS</code>,
-          <code>COMPUTE_MAX_TOTAL_MEMORY_MB</code>, <code>COMPUTE_MIN_FREE_DISK_MB=512</code>). When host free memory cannot satisfy a boot request,
-          sandboxes enter the admission queue rather than overcommitting the kernel.
+          <div class="note-label">Resource Enforcement &amp; Embedded Web UI</div>
+          <code>computed</code> enforces hard disk ceilings, soft + hard CPU overcommit cgroup weights, and RAM hard guarantees
+          with idle SSD auto-hibernation (<code>auto_hibernated</code>). Rejections return HTTP <code>429 Too Many Requests</code>
+          with a structured <code>ResourceLimitError</code>. Port <code>:18080</code> serves both the API and the embedded Web Dashboard;
+          <code>compute-gui</code> (<code>:8080</code>) is strictly optional and disabled by default.
         </div>
       </section>
 
       <!-- 02. Quickstart -->
-      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs kernel build auto">
+      <section id="quickstart" class="doc-section" data-keywords="quickstart install docker compose setup host kvm preflight rootfs kernel build auto prebuilt vmlinux compute-gui embedded ui credentials default password user login admin compute">
         <div class="section-head">
           <span class="section-id">02</span>
-          <h2>Host Setup &amp; Boot</h2>
+          <h2>Host Setup, Images &amp; Boot</h2>
         </div>
         <p>
           Requires Linux (<code>x86_64</code> or <code>arm64</code>), read/write <code>/dev/kvm</code>, unified cgroup v2 hierarchy,
@@ -233,30 +236,30 @@
 
           <div class="tab-panel active" data-tab-panel="compose">
             <div class="code-block">
-              <div class="code-header"><span>1. start with zero-config auto-bootstrap (loopback only, admin / admin)</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>docker compose up -d
+              <div class="code-header"><span>1. prepare host, build base images &amp; start daemon (loopback :18080 API + embedded UI, admin / admin)</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>./scripts/install.sh
+docker compose up -d
 curl -fsS http://127.0.0.1:18080/api/v1/ready | python3 -m json.tool</code></pre>
             </div>
             <div class="code-block">
-              <div class="code-header"><span>2. optional preflight, .env customization, and host image builds</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>./scripts/preflight.sh
+              <div class="code-header"><span>2. optional .env customization and individual host/image commands</span><button class="copy-btn" type="button">Copy</button></div>
+              <pre><code>cp .env.example .env &amp;&amp; chmod 600 .env
+./scripts/preflight.sh
 sudo ./scripts/host-prepare.sh
-cp .env.example .env &amp;&amp; chmod 600 .env
-# Optional: build kernel + rootfs on the host instead of in compute-init
-make build-images          # runs scripts/build-kernel.sh + scripts/build-rootfs.sh</code></pre>
+make build-images          # builds vmlinux + ubuntu-24.04.ext4 into ./data/images</code></pre>
             </div>
           </div>
 
           <div class="tab-panel" data-tab-panel="binaries">
             <div class="code-block">
               <div class="code-header"><span>1. download and install pre-built compute CLI (Linux x86_64 / arm64)</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
 compute --version</code></pre>
             </div>
             <div class="code-block">
               <div class="code-header"><span>2. download complete suite or verify SHA-256 checksums</span><button class="copy-btn" type="button">Copy</button></div>
               <pre><code># Download full suite (compute, computed, compute-worker, compute-bench)
-curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.1.0_linux_amd64.tar.gz
 curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
 sha256sum --check --ignore-missing checksums.txt</code></pre>
             </div>
@@ -264,9 +267,9 @@ sha256sum --check --ignore-missing checksums.txt</code></pre>
 
           <div class="tab-panel" data-tab-panel="source">
             <div class="code-block">
-              <div class="code-header"><span>build web bundle + Go binaries (Go 1.24+, Node 20+)</span><button class="copy-btn" type="button">Copy</button></div>
+              <div class="code-header"><span>build web bundle + Go binaries (Go 1.26+, Node 20+)</span><button class="copy-btn" type="button">Copy</button></div>
               <pre><code>cd web &amp;&amp; npm ci &amp;&amp; cd ..
-make build-ui              # outputs into internal/gui/assets/
+make build-ui              # embeds Web UI assets into computed &amp; compute gui
 make build                 # outputs compute, computed, compute-worker, compute-bench in ./bin/
 make build-images
 COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
@@ -274,14 +277,86 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
           </div>
         </div>
 
+        <div class="note-box warn">
+          <div class="note-label">Host Setup &amp; Base Images (./scripts/install.sh)</div>
+          Run <code>./scripts/install.sh</code> (or <code>make up</code>) on a fresh host before starting <code>docker compose up -d</code>.
+          It prepares host kernel modules, downloads and SHA-256-verifies <code>vmlinux</code>, generates <code>./data/images/ssh/id_ed25519</code>,
+          and builds <code>./data/images/ubuntu-24.04.ext4</code> with live terminal progress so Docker Compose runs only <code>computed</code> without a blocking init container.
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Default Value</th>
+                <th>Quickstart Usage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Web Dashboard URL</strong></td>
+                <td><code>http://127.0.0.1:18080/</code></td>
+                <td>Embedded Web UI served directly on loopback (no extra container).</td>
+              </tr>
+              <tr>
+                <td><strong>Default User</strong></td>
+                <td><code>admin</code></td>
+                <td>Initial system administrator username (<code>COMPUTE_ADMIN_USERNAME</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>Default Password</strong></td>
+                <td><code>admin</code></td>
+                <td>Initial administrator password on loopback (<code>COMPUTE_ADMIN_PASSWORD</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>Admin Email</strong></td>
+                <td><code>admin@compute.local</code></td>
+                <td>Default admin email address (<code>COMPUTE_ADMIN_EMAIL</code>).</td>
+              </tr>
+              <tr>
+                <td><strong>CLI Login</strong></td>
+                <td><code>compute auth login --username admin --password admin</code></td>
+                <td>Logs in against local daemon at <code>http://127.0.0.1:18080</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox Guest User</strong></td>
+                <td><code>compute</code></td>
+                <td>Default guest user (UID 1000) with passwordless <code>sudo</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox Root User</strong></td>
+                <td><code>root</code></td>
+                <td>Guest root account (UID 0); switch via <code>sudo su -</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox SSH Key</strong></td>
+                <td><code>./data/images/ssh/id_ed25519</code></td>
+                <td>Ed25519 key generated during install; used by <code>compute sandbox ssh &lt;name&gt;</code>.</td>
+              </tr>
+              <tr>
+                <td><strong>Sandbox Password Auth</strong></td>
+                <td><em>Disabled by default</em></td>
+                <td>sshd key-only by default; opt-in with <code>--ssh-password &lt;pass&gt;</code> on create.</td>
+              </tr>
+              <tr>
+                <td><strong>Base Image &amp; Kernel</strong></td>
+                <td><code>ubuntu-24</code> / <code>vmlinux</code></td>
+                <td>Ubuntu 24.04 LTS (<code>ubuntu-24.04.ext4</code>) with 1 vCPU, 2048 MB RAM, 50 GB disk.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
         <p>
           <code>/api/v1/health</code> checks process liveness; <code>/api/v1/ready</code> inspects KVM, Firecracker binary,
           base kernel/rootfs, internal Ed25519 SSH key, SQLite DB, cgroup v2, and <code>mft3br0</code> bridge usability (also exposed via <code>compute doctor</code>).
+          Open the full Web Dashboard at <code>http://&lt;host&gt;:18080/</code> — the standalone <code>compute-gui</code> container (<code>:8080</code>, <code>--profile gui</code>) is strictly optional.
         </p>
       </section>
 
       <!-- 03. Authentication & Configuration -->
-      <section id="auth-env" class="doc-section" data-keywords="auth authentication login signup env admin bootstrap password secret users cmp_ config daemon.json">
+      <section id="auth-env" class="doc-section" data-keywords="auth authentication login signup env admin bootstrap password secret bind 0.0.0.0 healthcheck users cmp_ config daemon.json">
         <div class="section-head">
           <span class="section-id">03</span>
           <h2>Authentication &amp; Configuration Precedence</h2>
@@ -293,11 +368,22 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
         </p>
 
         <div class="note-box warn">
-          <div class="note-label">Security Defaults</div>
-          Authentication is enabled by default (<code>COMPUTE_AUTH_ENABLED=true</code>) and public signup is closed
-          (<code>COMPUTE_SIGNUP_ENABLED=false</code>). The daemon refuses to start if both <code>COMPUTE_ADMIN_PASSWORD</code>
-          and <code>COMPUTE_ADMIN_SECRET</code> are empty. Replace the default <code>.env.example</code> password before binding
-          beyond loopback (<code>COMPUTE_BIND_ADDRESS=0.0.0.0</code>).
+          <div class="note-label">Non-Loopback Bind Credentials (COMPUTE_BIND_ADDRESS=0.0.0.0)</div>
+          Setting <code>COMPUTE_BIND_ADDRESS=0.0.0.0</code> (or any non-loopback IP) <strong>without</strong> setting a non-default
+          <code>COMPUTE_ADMIN_PASSWORD</code> (or explicitly clearing <code>COMPUTE_ADMIN_PASSWORD=</code> and setting
+          <code>COMPUTE_ADMIN_SECRET</code>) in <code>.env</code> causes <code>computed</code> to refuse startup.
+          If binding a specific non-loopback IP (e.g. <code>10.0.0.5</code>), also set <code>COMPUTE_HEALTHCHECK_HOST=10.0.0.5</code>.
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span>.env snippet for non-loopback / LAN / Tailscale exposure</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code>COMPUTE_BIND_ADDRESS=0.0.0.0
+COMPUTE_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
+# Or use a static admin secret instead of a seeded password:
+# COMPUTE_ADMIN_PASSWORD=
+# COMPUTE_ADMIN_SECRET=replace-with-openssl-rand-base64-32
+# If binding a specific IP (e.g. 10.0.0.5), match healthcheck host:
+# COMPUTE_HEALTHCHECK_HOST=10.0.0.5</code></pre>
         </div>
 
         <div class="table-wrap">
@@ -316,6 +402,11 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
                 <td>Full listen address; overrides <code>COMPUTE_BIND_ADDRESS</code> and <code>COMPUTE_API_PORT</code>.</td>
               </tr>
               <tr>
+                <td><code>COMPUTE_HEALTHCHECK_HOST</code></td>
+                <td><code>127.0.0.1</code></td>
+                <td>Host probed by Compose healthcheck; set to <code>COMPUTE_BIND_ADDRESS</code> when binding a specific non-loopback IP.</td>
+              </tr>
+              <tr>
                 <td><code>COMPUTE_AUTH_ENABLED</code></td>
                 <td><code>true</code></td>
                 <td>Enforces session cookie (<code>compute_session</code>) or <code>Authorization: Bearer cmp_...</code> on API/WS/UI routes.</td>
@@ -332,13 +423,13 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
               </tr>
               <tr>
                 <td><code>COMPUTE_ADMIN_PASSWORD</code></td>
-                <td><code>admin</code> <em>(in .env.example)</em></td>
-                <td>Admin password synced on boot; rotate with <code>openssl rand -base64 32</code> for non-loopback binds.</td>
+                <td><code>admin</code> <em>(loopback only)</em></td>
+                <td>Admin password synced on boot; must be rotated or cleared (<code>COMPUTE_ADMIN_PASSWORD=</code>) on non-loopback binds.</td>
               </tr>
               <tr>
                 <td><code>COMPUTE_ADMIN_SECRET</code></td>
                 <td>&mdash;</td>
-                <td>Optional static bearer token resolving directly to the bootstrap admin identity.</td>
+                <td>Optional static bearer secret resolving directly to the bootstrap admin identity.</td>
               </tr>
               <tr>
                 <td><code>COMPUTE_DATA_DIR</code></td>
@@ -356,28 +447,63 @@ COMPUTE_ADMIN_PASSWORD=dev-only-secret ./bin/computed</code></pre>
       </section>
 
       <!-- 04. Sandboxes -->
-      <section id="sandboxes" class="doc-section" data-keywords="sandbox create start stop ssh exec console web preview vcpus memory disk scp files process">
+      <section id="sandboxes" class="doc-section" data-keywords="sandbox create start stop ssh exec command build-command console web preview options settings vcpus memory disk scp files process bulk-delete bulk-action">
         <div class="section-head">
           <span class="section-id">04</span>
-          <h2>Creating &amp; Operating Sandboxes</h2>
+          <h2>Creating, Operating &amp; Bulk Managing Sandboxes</h2>
         </div>
         <p>
           Each sandbox allocates an ext4 root volume copied from a base image (default <code>ubuntu-24</code>, 50 GiB sparse),
           a MAC/IP lease on <code>mft3br0</code>, a dedicated TAP interface (<code>mftap-*</code>), and an interactive SSH/exec target.
+          Pin placement to a specific pool or node using <code>pool_id</code> / <code>worker_id</code> in <code>POST /api/v1/vms</code>
+          or the Web UI (the scheduler selects automatically otherwise).
+          Execute commands inside running guests using <code>compute exec &lt;sandbox&gt; -- &lt;cmd...&gt;</code> with real-time streamed
+          feedback, exit codes, and durations. Newly provisioned machines can run automatic post-boot setup routines via
+          <code>--command &lt;cmd&gt;</code> / <code>--build-command &lt;cmd&gt;</code>, triggering <code>sandbox.build_command_executed</code> audit logging.
+          In the Web Console, use the interactive <strong>Execute Command dialog</strong> (Cmd+K or sandbox action menu) with command presets,
+          and configure sandboxes via the <strong>Sandbox Options &amp; Settings</strong> dialog featuring sidebar navigation across Overview,
+          Access &amp; Keys, Networking, Preview &amp; Terminal Settings, Resource Ceilings, and Danger Zone.
+          Bulk lifecycle operations run concurrently in a single request via <code>POST /api/v1/vms/bulk-create</code>,
+          <code>POST /api/v1/vms/bulk-clone</code>, <code>POST /api/v1/vms/bulk-delete</code>, and
+          <code>POST /api/v1/vms/bulk-action</code> / <code>POST /api/v1/vms/bulk-actions</code> (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>,
+          <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>).
+          Send <code>"async": true</code> to queue the work on the daemon: it returns <code>202</code> with a
+          <code>task_id</code> and keeps running even if the browser refreshes or disconnects. Poll
+          <code>GET /api/v1/tasks/{id}</code> for the final per-item outcome. Requests are capped at 100 items and
+          rejected with <code>429</code> when the backend queue is saturated.
         </p>
 
         <div class="code-block">
-          <div class="code-header"><span>sandbox lifecycle, streaming exec, file copy, and preview discovery</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Provision and start a 2 vCPU / 2048 MiB sandbox
-compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk 20480 --image ubuntu-24 --start
+          <div class="code-header"><span>sandbox lifecycle, streaming exec, build commands, file copy, and bulk actions</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Provision and start a 2 vCPU / 2048 MiB sandbox with post-boot build command
+compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk 20480 --image ubuntu-24 --command "npm install &amp;&amp; npm run build" --start
 
 # Interactive shell or streamed command execution
 compute sandbox ssh dev-api
-compute sandbox exec dev-api -- uname -a
+compute exec dev-api -- uname -a
+compute exec --json dev-api -- cat /etc/os-release
 
-# Copy local directory tree into guest /workspace and print port-3000 HTTP preview URL
+# Copy local directory tree into guest /workspace and publish it over HTTP ingress
 compute scp -r ./my-service dev-api:/workspace/
-compute url --port 3000 dev-api</code></pre>
+compute expose dev-api 3000        # -> http://dev-api-3000.localhost:18080/ (loopback default)
+compute ports dev-api
+compute unexpose dev-api 3000
+
+# Single-request bulk stop across multiple sandboxes (synchronous by default)
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/bulk-action \
+  -H "Authorization: Bearer $COMPUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"ids":["dev-api","staging-box"],"action":"stop"}'
+
+# Queue 10 sandboxes for durable creation; work survives a refresh/disconnect
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/bulk-create \
+  -H "Authorization: Bearer $COMPUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"async":true,"items":[{"name":"worker-1","vcpus":2,"memory_mb":2048,"auto_start":true}]}'
+
+# Resolve the queued task: queued | completed | partial | failed
+curl -fsS http://127.0.0.1:18080/api/v1/tasks/task_1a2b3c4d \
+  -H "Authorization: Bearer $COMPUTE_API_KEY"</code></pre>
         </div>
       </section>
 
@@ -393,7 +519,7 @@ compute url --port 3000 dev-api</code></pre>
         </p>
         <ul>
           <li><strong>Web UI</strong>: Use <em>Replicate</em> on any sandbox row or Inspector toolbar to create 1&ndash;5 numbered replicas (<code>&lt;base&gt;-1 .. &lt;base&gt;-N</code>) with per-tier overrides and optional auto-start.</li>
-          <li><strong>API / CLI</strong>: Invoke <code>POST /api/v1/vms/{id}/clone</code> (or <code>compute sandbox clone</code> if built into your CLI build; see REST API below).</li>
+          <li><strong>REST API</strong>: Invoke <code>POST /api/v1/vms/{id}/clone</code> (see REST API below).</li>
         </ul>
 
         <div class="code-block">
@@ -412,20 +538,25 @@ compute url --port 3000 dev-api</code></pre>
         </div>
       </section>
 
-      <!-- 06. Pausing -->
-      <section id="pausing" class="doc-section" data-keywords="pause resume save-state freeze memory cpu snapshot firecracker state saved">
+      <!-- 06. Pausing & Auto-Hibernation -->
+      <section id="pausing" class="doc-section" data-keywords="pause resume save-state freeze memory cpu snapshot firecracker state saved auto_hibernated ssd idle reclaim">
         <div class="section-head">
           <span class="section-id">06</span>
-          <h2>Pausing &amp; Resuming Memory State</h2>
+          <h2>Pausing, Resuming &amp; Idle SSD Auto-Hibernation</h2>
         </div>
         <p>
           <code>save-state</code> checkpoints a running Firecracker microVM via the Firecracker snapshot API, writing exact vCPU registers,
-          virtio device state, and guest RAM pages (<code>vm.snap</code> + <code>vm.mem</code>) to disk before stopping the VMM process.
+          virtio device state, and guest RAM pages (<code>vm.snap</code> + <code>vm.mem</code>) to SSD before stopping the VMM process.
           Host CPU and RAM capacity return to the scheduler while the sandbox state changes to <code>paused</code> (<code>PAUSED (STATE SAVED)</code> in the Web UI).
+        </p>
+        <p>
+          When <code>idle_ram_snapshot_enabled=true</code> (default), the control plane also automatically snapshots idle non-protected sandboxes
+          to SSD after <code>idle_threshold_seconds</code> (default <code>900</code>s) &mdash; or earlier under memory pressure when
+          <code>auto_reclaim_on_pressure=true</code> &mdash; marking them <code>auto_hibernated=true</code> so active workloads keep guaranteed RAM.
         </p>
 
         <div class="code-block">
-          <div class="code-header"><span>serialize live guest state to disk and resume</span><button class="copy-btn" type="button">Copy</button></div>
+          <div class="code-header"><span>serialize live guest state to SSD and resume</span><button class="copy-btn" type="button">Copy</button></div>
           <pre><code>compute sandbox save-state dev-api
 compute sandbox resume dev-api</code></pre>
         </div>
@@ -452,32 +583,220 @@ compute template launch rust-toolchain --name build-runner-01 --tier 4vcpu</code
         </div>
       </section>
 
-      <!-- 08. Distributed Jobs & Workers -->
-      <section id="distributed-jobs" class="doc-section" data-keywords="distributed jobs worker compute-worker pool ci build test token">
+      <!-- 08. Workers, Pools & Distributed Jobs -->
+      <section id="distributed-jobs" class="doc-section" data-keywords="distributed jobs worker compute-worker pool ci build test token enroll outbound tunnel precedence">
         <div class="section-head">
           <span class="section-id">08</span>
-          <h2>Distributed Jobs &amp; Workers</h2>
+          <h2>Workers, Pools &amp; Distributed Jobs</h2>
         </div>
         <p>
-          <code>compute job run</code> archives a local directory, streams it to an enrolled <code>compute-worker</code> (or falls back to
-          a local microVM when <code>jobs.local_execution</code> is true), executes the command inside a fresh microVM, streams
-          <code>stdout</code>/<code>stderr</code>, and destroys the VM on exit.
+          Remote <code>compute-worker</code> nodes enroll over an <strong>outbound WebSocket RPC &amp; multiplexed TCP tunnel</strong>
+          to <code>computed</code> &mdash; <strong>zero inbound ports</strong> are needed on worker hosts. Control-plane SSH, file APIs,
+          streaming exec, process control, and disk migrations tunnel back over that outbound session.
+        </p>
+        <p>
+          <strong>Pool precedence on enrollment:</strong> <code>token.pool_id</code> (if set on the token) &rarr;
+          worker <code>--pool</code> / <code>COMPUTE_POOL_ID</code> &rarr; <code>default</code>. Tokens created with <code>--name</code>
+          pin to that worker name; unnamed tokens bind to the first worker that enrolls and allow seamless reconnects across restarts.
         </p>
 
         <div class="code-block">
-          <div class="code-header"><span>dispatch ephemeral job &amp; mint name-pinned worker enrollment token</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Sync local workspace and run tests inside an ephemeral Ubuntu 24 microVM
-compute job run --image ubuntu-24 --files ./ --cwd /workspace -- go test ./...
+          <div class="code-header"><span>enroll a remote worker into a pool and dispatch a distributed job</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># 1. Mint an enrollment token on the control plane
+compute worker token create --name gpu-node-01 --pool gpu-pool
 
-# Create an enrollment token pinned to worker name "gpu-node-01" in pool "default"
-compute worker token create --name gpu-node-01 --pool default</code></pre>
+# 2. Start compute-worker on the remote KVM host (zero inbound firewall ports needed)
+compute-worker run \
+  --control-plane http://&lt;control-plane-host&gt;:18080 \
+  --token &lt;printed-token&gt; \
+  --name gpu-node-01 \
+  --pool gpu-pool \
+  --max-vcpus 16 --max-memory-mb 32768 --max-disk-mb 204800
+
+# 3. Dispatch an ephemeral job with workspace sync and live log streaming
+compute job run --image ubuntu-24 --pool gpu-pool --files ./ --cwd /workspace -- go test ./...</code></pre>
         </div>
       </section>
 
-      <!-- 09. Networking, DNS & SSH -->
-      <section id="networking-dns-ssh" class="doc-section" data-keywords="network bridge mft3br0 mftap nat dns ssh port forward preview ingress iptables tailscale">
+      <!-- 09. Load Balancing, Limits & Live Migration -->
+      <section id="multi-node-scheduler" class="doc-section" data-keywords="load balancer scheduler policy least_loaded round_robin bin_pack spread cpu overcommit ram hard disk 429 ResourceLimitError migrate pool live sync ws">
         <div class="section-head">
           <span class="section-id">09</span>
+          <h2>Load Balancing, Resource Limits &amp; Live Migration</h2>
+        </div>
+        <p>
+          The cluster scheduler places sandboxes and jobs across ready workers (plus the local control-plane node <code>nod_host_local</code>)
+          using configurable placement policies, per-node allocation caps, strict resource enforcement, and live sandbox/pool migration.
+          The embedded Web Dashboard maintains a persistent <code>/api/v1/ws</code> WebSocket connection for real-time cluster sync.
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Mechanism / Policy</th>
+                <th>Behavior &amp; Endpoints</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Node Allocation Limits</td>
+                <td><code>PATCH /api/v1/workers/{id}</code> updates <code>allocated_vcpus</code>, <code>allocated_mem_mb</code>, <code>allocated_disk_mb</code>, <code>pool_id</code>, <code>labels</code>, and <code>status</code> (<code>ready</code>, <code>cordoned</code>, <code>draining</code>, <code>offline</code>) immediately.</td>
+              </tr>
+              <tr>
+                <td>Load Balancer Strategies</td>
+                <td><code>GET/PUT /api/v1/scheduler/policy</code> configures <code>strategy</code>: <code>least_loaded</code> (weighted CPU/RAM/Disk headroom), <code>round_robin</code>, <code>bin_pack</code> (fullest fit first), or <code>spread</code> (fewest running VMs).</td>
+              </tr>
+              <tr>
+                <td>CPU Soft + Hard Overcommit</td>
+                <td><code>cpu_soft_overcommit_ratio</code> (<code>1.5</code>) &amp; <code>cpu_hard_overcommit_ratio</code> (<code>2.0</code>): full cgroup CPU weight below soft ratio, proportional weight scaling between soft &amp; hard, hard rejection above ceiling.</td>
+              </tr>
+              <tr>
+                <td>RAM Hard Guarantee + Idle SSD</td>
+                <td><code>memory_hard_guarantee=true</code> forbids RAM overcommit; idle non-protected VMs auto-snapshot to SSD (<code>auto_hibernated=true</code>) via <code>idle_threshold_seconds</code> / <code>auto_reclaim_on_pressure</code>.</td>
+              </tr>
+              <tr>
+                <td>Disk Hard-Limit-Only &amp; HTTP 429</td>
+                <td><code>disk_hard_enforcement=true</code> enforces <code>allocated_disk_mb</code>, <code>host_reserved_disk_mb</code> (<code>2048</code> MB), and free disk. Any disk/RAM/CPU hard limit breach returns HTTP <code>429</code> <code>ResourceLimitError</code> (<code>RESOURCE_LIMIT_EXCEEDED</code>).</td>
+              </tr>
+              <tr>
+                <td>Sandbox &amp; Pool Migration</td>
+                <td><code>POST /api/v1/vms/{id}/migrate</code> streams chunked gzipped disk + snapshot/mem state to <code>target_worker_id</code> or <code>target_pool_id</code> (<code>force: true</code> stops &amp; restarts running VMs). <code>POST /api/v1/pools/{id}/migrate</code> moves workers and capacity-preflighted sandboxes.</td>
+              </tr>
+              <tr>
+                <td>Persistent <code>/api/v1/ws</code> Sync</td>
+                <td>Single RBAC-scoped WebSocket pushes immediate snapshots on connect and cluster mutations across sandboxes, workers, pools, templates, images, port forwards, and events.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="code-block">
+          <div class="code-header"><span>configure scheduler policy, cap node resources, and migrate a sandbox</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Switch cluster load balancer to spread with 1.5x soft / 2.0x hard CPU overcommit
+curl -fsS -X PUT http://127.0.0.1:18080/api/v1/scheduler/policy \
+  -H "Authorization: Bearer $COMPUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "strategy": "spread",
+    "cpu_soft_overcommit_ratio": 1.5,
+    "cpu_hard_overcommit_ratio": 2.0,
+    "memory_hard_guarantee": true,
+    "idle_ram_snapshot_enabled": true,
+    "disk_hard_enforcement": true
+  }'
+
+# Cap allocation limits on a worker node
+curl -fsS -X PATCH http://127.0.0.1:18080/api/v1/workers/gpu-node-01 \
+  -H "Authorization: Bearer $COMPUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"allocated_vcpus": 12, "allocated_mem_mb": 24576, "allocated_disk_mb": 153600}'
+
+# Migrate a sandbox to another worker or pool
+curl -fsS -X POST http://127.0.0.1:18080/api/v1/vms/dev-api/migrate \
+  -H "Authorization: Bearer $COMPUTE_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"target_pool_id": "gpu-pool", "force": true}'</code></pre>
+        </div>
+      </section>
+
+      <!-- 10. Serving apps from sandboxes -->
+      <section id="serving" class="doc-section" data-keywords="serve expose publish port ingress subdomain localhost wildcard tls tailnet origin redirect spa cookies websocket private token public_url">
+        <div class="section-head">
+          <span class="section-id">10</span>
+          <h2>Serving Apps at Their Own Origin</h2>
+        </div>
+        <p>
+          Every published guest port gets a dedicated origin instead of a path prefix. The app sees
+          <code>/</code> as its root, so redirects, <code>history.pushState</code>, absolute asset imports,
+          cookies and service workers behave exactly as they do when the app runs locally. No HTML or
+          JavaScript rewriting is involved.
+        </p>
+
+        <div class="code-block">
+          <div class="code-header"><span>publish a port and inspect its origin</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Public: anyone with the URL can reach the app
+compute expose web 8080
+# -> http://web-8080.localhost:18080/            (loopback daemon, no DNS needed)
+
+# Private: owning tenant session or short-lived token
+compute expose web 8080 --private
+
+# Preferred label (made globally unique)
+compute expose web 8080 --subdomain my-app
+
+compute ports web
+compute unexpose web 8080</code></pre>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Mode</th><th>URL shape</th><th>Selected when</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Subdomain</td>
+                <td><code>https://&lt;slug&gt;.&lt;serve-domain&gt;/</code></td>
+                <td><code>COMPUTE_SERVE_DOMAIN</code> is set, or the API binds loopback (domain defaults to <code>localhost</code>). Requires a wildcard DNS record and wildcard certificate for public domains.</td>
+              </tr>
+              <tr>
+                <td>Port</td>
+                <td><code>https://&lt;daemon-host&gt;:&lt;serve-port&gt;/</code></td>
+                <td><code>COMPUTE_PUBLIC_URL</code> points at a non-loopback host, or the API binds a non-loopback address without a serve domain. Listeners are allocated from <code>COMPUTE_SERVE_PORT_START..COMPUTE_SERVE_PORT_END</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note-box">
+          <div class="note-label">Wildcard DNS + TLS for public subdomains</div>
+          Point <code>*.serves.example.com</code> at the daemon and set
+          <code>COMPUTE_SERVE_DOMAIN=serves.example.com</code>. Terminate TLS either at the daemon
+          (<code>COMPUTE_SERVE_TLS_CERT_FILE</code> / <code>COMPUTE_SERVE_TLS_KEY_FILE</code>) or in front of it
+          (Caddy/nginx wildcard). For a tailnet or bare public IP, use port mode: map each allocated port with
+          <code>tailscale serve --bg --tcp=&lt;port&gt; tcp://127.0.0.1:&lt;port&gt;</code> (tailnet-only HTTP) or
+          <code>--https=8443</code> (Tailscale can terminate HTTPS only on 443/8443/10000). Port-mode URLs use
+          <code>http://</code> unless <code>COMPUTE_SERVE_TLS_*</code> is configured.
+        </div>
+
+        <p>
+          <strong>Access control.</strong> A <code>public</code> exposure bypasses tenant authentication.
+          A <code>private</code> exposure accepts the daemon session/bearer credentials, or a short-lived
+          HMAC token minted by <code>POST /api/v1/sandboxes/&lt;id&gt;/serve-token</code>. Browsers are bounced through
+          <code>GET /api/v1/serve/authorize</code>, which exchanges the daemon session for a
+          <code>compute_serve</code> cookie scoped to the serve origin. Tokens are signed with
+          <code>COMPUTE_SERVE_TOKEN_KEY</code> (or a key derived from <code>COMPUTE_ADMIN_SECRET</code>).
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Environment</th><th>Default</th><th>Behavior</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>COMPUTE_PUBLIC_URL</code></td><td>&mdash;</td><td>Externally reachable daemon base URL used in port-mode serve URLs and advertised on <code>/api/v1/version</code>.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_DOMAIN</code></td><td>&mdash;</td><td>Enables subdomain mode: <code>&lt;slug&gt;.&lt;serve-domain&gt;</code>.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_BIND</code></td><td><code>127.0.0.1</code></td><td>Bind address for port-mode listeners; use <code>0.0.0.0</code> for direct public exposure.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_PORT_START</code> / <code>_END</code></td><td><code>18400</code> / <code>18500</code></td><td>Inclusive port range for port-mode serve listeners.</td></tr>
+              <tr><td><code>COMPUTE_SERVE_TLS_CERT_FILE</code> / <code>_KEY_FILE</code></td><td>&mdash;</td><td>Optional TLS for port-mode listeners (falls back to the API listener's certificate).</td></tr>
+              <tr><td><code>COMPUTE_SERVE_TOKEN_KEY</code></td><td>&mdash;</td><td>HMAC key for private-serve tokens. Empty derives from <code>COMPUTE_ADMIN_SECRET</code>, else a random per-process key.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="note-box warn">
+          <div class="note-label">Port mode and cookies</div>
+          Distinct ports are distinct origins for storage, service workers and CORS, but browsers scope cookies by
+          host, not port. Use subdomain mode when apps must not share cookies. Apps that hard-code an absolute
+          base URL at build time still need their own base-URL configuration.
+        </div>
+      </section>
+
+      <!-- 11. Networking, DNS & SSH -->
+      <section id="networking-dns-ssh" class="doc-section" data-keywords="network bridge mft3br0 mftap nat dns ssh port forward ingress iptables tailscale">
+        <div class="section-head">
+          <span class="section-id">11</span>
           <h2>Networking, DNS &amp; SSH Routing</h2>
         </div>
         <p>
@@ -505,21 +824,21 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
               </tr>
               <tr>
                 <td>DNS Responder (<code>:53</code>)</td>
-                <td>When <code>COMPUTE_DNS_ENABLED=true</code> and <code>COMPUTE_DOMAIN</code> is set, resolves <code>&lt;sandbox&gt;.&lt;user&gt;.&lt;zone&gt;</code> (tailnet IP first, guest IP fallback) plus apex/<code>api</code>/<code>gui</code>/<code>www</code>.</td>
+                <td>When <code>COMPUTE_DNS_ENABLED=true</code> and <code>COMPUTE_DNS_BASE_DOMAIN</code> (or <code>COMPUTE_DOMAIN</code> in Compose) is set, resolves <code>&lt;sandbox&gt;.&lt;user&gt;.&lt;zone&gt;</code> (tailnet IP first, guest IP fallback) plus apex/<code>api</code>/<code>gui</code>/<code>www</code>.</td>
               </tr>
               <tr>
-                <td>HTTP Edge (<code>:80</code>) &amp; Port Forwards</td>
-                <td>Routes wildcard hostnames and <code>/preview/&lt;vm&gt;/&lt;port&gt;/</code> HTTP/WebSocket traffic directly into guest ports. See <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
+                <td>HTTP Edge (<code>:80</code>) &amp; Port Exposures</td>
+                <td>Routes wildcard hostnames to sandboxes. Published ports use their own origin (subdomain or dedicated port) instead of a shared path prefix; see <a href="#serving">Serving Apps</a>, <a href="dns-ssh.md">docs/dns-ssh.md</a> and <a href="domain-options.md">docs/domain-options.md</a>.</td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- 10. CLI Reference -->
-      <section id="cli-reference" class="doc-section" data-keywords="cli reference commands flags compute sandbox template job auth keys worker pool scp url">
+      <!-- 12. CLI Reference -->
+      <section id="cli-reference" class="doc-section" data-keywords="cli reference commands flags compute sandbox template job auth keys worker pool scp url serve expose">
         <div class="section-head">
-          <span class="section-id">10</span>
+          <span class="section-id">12</span>
           <h2>CLI Reference (<code>compute</code>)</h2>
         </div>
         <div class="table-wrap">
@@ -537,7 +856,11 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
               </tr>
               <tr>
                 <td><code>compute sandbox</code></td>
-                <td><code>list</code>, <code>create --name --tier|--vcpus --memory --disk --image --template --isolated --protected --start</code>, <code>start</code>, <code>stop</code>, <code>delete</code>, <code>info</code>.</td>
+                <td><code>list</code>, <code>create --name --tier|--vcpus --memory --disk --image --template --command &lt;cmd&gt; --ssh-key &lt;name|path&gt; --ssh-password --isolated --protected --start</code>, <code>start</code>, <code>stop</code>, <code>delete</code>, <code>info</code>.</td>
+              </tr>
+              <tr>
+                <td><code>compute exec</code></td>
+                <td><code>[user@]&lt;target&gt; [--] &lt;command...&gt;</code>: executes command inside sandbox with real-time streaming feedback, exit codes, and durations (flags: <code>--no-stream</code>, <code>--json</code>, <code>--timeout</code>, <code>--user</code>). Also accessible via <code>compute sandbox exec</code>.</td>
               </tr>
               <tr>
                 <td><code>compute sandbox save-state|resume</code></td>
@@ -552,12 +875,16 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
                 <td><code>scp [-r] &lt;src&gt; &lt;dst&gt;</code> using <code>&lt;sandbox&gt;:&lt;path&gt;</code>; <code>url [--port &lt;n&gt;] [--json] &lt;sandbox&gt;</code>.</td>
               </tr>
               <tr>
+                <td><code>compute expose|ports|unexpose</code></td>
+                <td><code>expose [--private] [--subdomain &lt;label&gt;] &lt;sandbox&gt; &lt;guest-port&gt;</code> publishes the port at its own origin; <code>ports &lt;sandbox&gt;</code> lists the absolute serve URLs; <code>unexpose &lt;sandbox&gt; &lt;guest-port&gt;</code> removes the exposure and closes its listener.</td>
+              </tr>
+              <tr>
                 <td><code>compute template</code></td>
                 <td><code>list</code>, <code>create &lt;name&gt; --vm &lt;sandbox&gt; [--desc]</code>, <code>launch &lt;name&gt; [--name] [--tier] [--isolated]</code>, <code>inspect</code>, <code>delete</code>.</td>
               </tr>
               <tr>
                 <td><code>compute image</code></td>
-                <td><code>list</code>, <code>build --name &lt;name&gt; [--base] [--packages a,b] [--size]</code>, <code>inspect</code>, <code>delete</code>.</td>
+                <td><code>list</code>, <code>build --name &lt;name&gt; [--base &lt;image&gt;] [--packages a,b] [--command &lt;cmd&gt;] [--size &lt;MiB&gt;] [--desc &lt;text&gt;]</code>, <code>inspect</code>, <code>delete</code>.</td>
               </tr>
               <tr>
                 <td><code>compute job</code> / <code>worker</code> / <code>pool</code></td>
@@ -568,11 +895,11 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
         </div>
       </section>
 
-      <!-- 11. REST API Reference -->
-      <section id="rest-api" class="doc-section" data-keywords="rest api endpoints http json vms sandboxes clone save-state resume templates users auth jobs workers">
+      <!-- 13. REST & WebSocket API Reference -->
+      <section id="rest-api" class="doc-section" data-keywords="rest api endpoints http json vms sandboxes clone save-state resume migrate bulk-delete bulk-action scheduler policy workers pools ws websocket serve expose token">
         <div class="section-head">
-          <span class="section-id">11</span>
-          <h2>REST API Reference (<code>/api/v1</code>)</h2>
+          <span class="section-id">13</span>
+          <h2>REST &amp; WebSocket API Reference (<code>/api/v1</code>)</h2>
         </div>
         <p>
           Control-plane routes serve JSON under <code>/api/v1</code>. Authenticate using the <code>compute_session</code> HttpOnly cookie
@@ -610,14 +937,14 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
                 <td>Admin-only user listing, provisioning, and deletion (protects bootstrap admin and caller).</td>
               </tr>
               <tr>
-                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-patch">PATCH</span> / <span class="method-badge method-delete">DELETE</span></td>
                 <td><code>/api/v1/vms</code> &middot; <code>/api/v1/vms/{id}</code></td>
-                <td>List, create, inspect, patch, or delete microVM sandboxes.</td>
+                <td>List, create (optional <code>pool_id</code> / <code>worker_id</code> placement), inspect, patch, or delete microVM sandboxes (returns HTTP <code>429</code> <code>ResourceLimitError</code> if node limits exceeded).</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
                 <td><code>/api/v1/vms/{id}/run</code> &middot; <code>/stop</code> &middot; <code>/exec</code></td>
-                <td>Boot microVM, stop microVM, or execute shell command synchronously via SSH.</td>
+                <td>Boot microVM, stop microVM, or execute shell command with real-time streaming output (also available at <code>/api/v1/sandboxes/{id}/exec</code>).</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
@@ -627,27 +954,67 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
                 <td><code>/api/v1/vms/{id}/save-state</code> &middot; <code>/resume</code></td>
-                <td>Serialize running Firecracker vCPU/memory state to disk or resume from saved state.</td>
+                <td>Serialize running Firecracker vCPU/memory state to SSD or resume from saved state.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/templates</code> &middot; <code>/api/v1/templates/{id}/launch</code></td>
-                <td>Capture reusable disk template from <code>vm_id</code> and spawn new sandboxes from a template.</td>
+                <td><code>/api/v1/vms/{id}/migrate</code></td>
+                <td>Migrate sandbox disk (and snapshot/mem if paused) to <code>target_worker_id</code> or <code>target_pool_id</code> (<code>force: true</code> for running VMs).</td>
               </tr>
               <tr>
-                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span></td>
-                <td><code>/api/v1/jobs</code> &middot; <code>/api/v1/workers</code></td>
-                <td>Submit/stream distributed jobs and manage enrolled worker nodes &amp; enrollment tokens.</td>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code>/api/v1/vms/bulk-create</code> &middot; <code>/bulk-clone</code> &middot; <code>/bulk-delete</code> &middot; <code>/bulk-action</code></td>
+                <td>Single-request bulk create, clone, delete, or lifecycle action (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>, <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>; accepts <code>/bulk-actions</code>). Send <code>"async": true</code> to queue durably and resolve via <code>GET /api/v1/tasks/{id}</code>.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
+                <td><code>/api/v1/templates</code> &middot; <code>/api/v1/templates/{id}</code> &middot; <code>/launch</code></td>
+                <td>List, create from <code>vm_id</code>, inspect, delete, or launch new sandboxes from reusable disk templates.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-patch">PATCH</span></td>
+                <td><code>/api/v1/workers</code> &middot; <code>/api/v1/workers/{id}</code></td>
+                <td>List workers or update node <code>allocated_vcpus</code>, <code>allocated_mem_mb</code>, <code>allocated_disk_mb</code>, <code>pool_id</code>, <code>labels</code>, and <code>status</code>.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code>/api/v1/pools/{id}/migrate</code></td>
+                <td>Migrate workers (<code>migrate_workers</code>) and/or capacity-preflighted sandboxes (<code>migrate_sandboxes</code>) out of a pool.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-patch">PUT</span></td>
+                <td><code>/api/v1/scheduler/policy</code></td>
+                <td>Read or update cluster load balancer strategy (<code>least_loaded</code>, <code>round_robin</code>, <code>bin_pack</code>, <code>spread</code>), CPU overcommit ratios, RAM/idle SSD rules, and disk limits.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
+                <td><code>/api/v1/sandboxes/{id}/expose</code> &middot; <code>/ports/{port}</code></td>
+                <td>Publish or remove a guest port. Responses include the absolute <code>public_url</code> for the exposure's own origin.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-post">POST</span></td>
+                <td><code>/api/v1/sandboxes/{id}/serve-token</code></td>
+                <td>Mint a short-lived URL for a private exposure (<code>{"guest_port":8080}</code>).</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">GET</span></td>
+                <td><code>/api/v1/serve/authorize</code></td>
+                <td>Browser auth hop for private serves: exchanges the daemon session for a serve-scoped token.</td>
+              </tr>
+              <tr>
+                <td><span class="method-badge method-get">WS</span></td>
+                <td><code>/api/v1/ws</code></td>
+                <td>Persistent RBAC-scoped WebSocket streaming real-time cluster state snapshots to the Web Dashboard and live clients.</td>
               </tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- 12. SDKs -->
-      <section id="sdks" class="doc-section" data-keywords="sdk python typescript javascript client programmatic commands files process">
+      <!-- 14. SDKs -->
+      <section id="sdks" class="doc-section" data-keywords="sdk python typescript javascript client programmatic commands files process serve expose">
         <div class="section-head">
-          <span class="section-id">12</span>
+          <span class="section-id">14</span>
           <h2>TypeScript &amp; Python SDKs</h2>
         </div>
         <p>
@@ -665,7 +1032,7 @@ compute worker token create --name gpu-node-01 --pool default</code></pre>
           <div class="tab-panel active" data-tab-panel="ts">
             <div class="code-block">
               <div class="code-header"><span>sdk/typescript &mdash; create, write file, run command, kill</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>import { Sandbox } from "@compute-dev/sdk";
+              <pre><code>import { Sandbox } from "@compute/sdk";
 
 const sbx = await Sandbox.create({
   host: "http://127.0.0.1:18080",
@@ -704,7 +1071,7 @@ with Sandbox.create(
       </section>
 
       <footer class="doc-footer">
-        <span>Compute v1.0.0 &middot; MIT License</span>
+        <span>Compute v1.1.0 &middot; MIT License</span>
         <div class="doc-footer-links">
           <a href="install.md">install.md</a>
           <a href="configuration.md">configuration.md</a>

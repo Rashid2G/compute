@@ -66,7 +66,7 @@ body {
   color: var(--fg);
   font-family: var(--font-sans);
   font-size: 14.5px;
-  line-height: 1.62;
+  line-height: 1.7;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -320,7 +320,7 @@ summary code {
 
 /* Content Column */
 .content {
-  padding: 2rem 3rem 4rem;
+  padding: 2.75rem 3.5rem 5.5rem;
   max-width: 960px;
   width: 100%;
 }
@@ -328,8 +328,8 @@ summary code {
 /* Manual Header */
 .manual-header {
   border-bottom: 1px solid var(--border);
-  padding-bottom: 1.75rem;
-  margin-bottom: 2.25rem;
+  padding-bottom: 2.5rem;
+  margin-bottom: 3.75rem;
 }
 
 .manual-meta {
@@ -338,29 +338,30 @@ summary code {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--accent-bright);
-  margin-bottom: 0.55rem;
+  margin-bottom: 0.65rem;
 }
 
 .manual-header h1 {
   font-size: 1.95rem;
-  line-height: 1.15;
+  line-height: 1.18;
   letter-spacing: -0.025em;
-  margin: 0 0 0.75rem;
+  margin: 0 0 0.85rem;
   font-weight: 600;
 }
 
 .manual-lead {
   font-size: 0.98rem;
+  line-height: 1.68;
   color: var(--fg-muted);
   max-width: 72ch;
-  margin: 0 0 1.25rem;
+  margin: 0 0 1.65rem;
 }
 
 .manual-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 1.4rem;
+  gap: 0.55rem;
+  margin-bottom: 1.75rem;
 }
 
 .btn-primary {
@@ -412,7 +413,7 @@ summary code {
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
-  padding: 0.65rem 0.8rem;
+  padding: 0.7rem 0.85rem;
 }
 
 .spec-label {
@@ -433,8 +434,8 @@ summary code {
 
 /* Sections */
 .doc-section {
-  margin-bottom: 2.75rem;
-  padding-bottom: 2.25rem;
+  margin-bottom: 4.5rem;
+  padding-bottom: 3.75rem;
   border-bottom: 1px solid var(--border);
 }
 
@@ -449,8 +450,8 @@ summary code {
 .section-head {
   display: flex;
   align-items: baseline;
-  gap: 0.6rem;
-  margin-bottom: 0.75rem;
+  gap: 0.65rem;
+  margin-bottom: 1.25rem;
 }
 
 .section-id {
@@ -462,45 +463,45 @@ summary code {
 
 h2 {
   font-size: 1.38rem;
-  line-height: 1.25;
+  line-height: 1.28;
   letter-spacing: -0.015em;
   margin: 0;
   font-weight: 600;
 }
 
 h3 {
-  font-size: 1rem;
-  line-height: 1.35;
-  margin: 1.4rem 0 0.55rem;
+  font-size: 1.02rem;
+  line-height: 1.38;
+  margin: 2.15rem 0 0.85rem;
   font-weight: 600;
 }
 
 p {
-  margin: 0 0 0.85rem;
+  margin: 0 0 1.15rem;
 }
 
 ul,
 ol {
-  margin: 0 0 0.9rem;
-  padding-left: 1.25rem;
+  margin: 0 0 1.2rem;
+  padding-left: 1.35rem;
 }
 
 li {
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.5rem;
 }
 
 /* Topology SVG Figure */
 .figure-frame {
   border: 1px solid var(--border);
   background: var(--bg-2);
-  margin: 1.15rem 0 1.25rem;
+  margin: 1.65rem 0 1.85rem;
 }
 
 .figure-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.35rem 0.75rem;
+  padding: 0.4rem 0.85rem;
   border-bottom: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: 0.7rem;
@@ -513,7 +514,7 @@ li {
   display: block;
   width: 100%;
   height: auto;
-  padding: 0.85rem;
+  padding: 0.95rem;
   background: var(--bg);
 }
 
@@ -523,14 +524,14 @@ li {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   border-top: 1px solid var(--border);
   border-left: 1px solid var(--border);
-  margin: 1.1rem 0;
+  margin: 1.65rem 0;
 }
 
 .component-cell {
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
-  padding: 0.85rem 0.95rem;
+  padding: 0.95rem 1.05rem;
 }
 
 .component-head {
@@ -538,7 +539,7 @@ li {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.45rem;
 }
 
 .component-name {
@@ -563,7 +564,7 @@ li {
   font-size: 0.82rem;
   color: var(--fg-muted);
   margin: 0;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 /* Technical Notes */
@@ -571,9 +572,10 @@ li {
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   background: var(--bg-2);
-  padding: 0.75rem 0.95rem;
-  margin: 1rem 0;
+  padding: 0.95rem 1.15rem;
+  margin: 1.5rem 0;
   font-size: 0.86rem;
+  line-height: 1.65;
 }
 
 .note-box.warn {
@@ -587,12 +589,12 @@ li {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--fg);
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.35rem;
 }
 
 /* Tabs */
 .tab-group {
-  margin: 1rem 0 1.25rem;
+  margin: 1.5rem 0 1.75rem;
 }
 
 .tab-bar {
@@ -633,12 +635,13 @@ li {
 
 .tab-panel .code-block {
   margin-top: 0;
+  margin-bottom: 1.25rem;
 }
 
 /* Code Blocks */
 .code-block {
   position: relative;
-  margin: 0.8rem 0 1.15rem;
+  margin: 1.35rem 0 1.65rem;
   border: 1px solid var(--border);
   background: var(--code-bg);
 }
@@ -647,7 +650,7 @@ li {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.3rem 0.75rem;
+  padding: 0.35rem 0.85rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg-2);
   font-family: var(--font-mono);
@@ -676,17 +679,17 @@ li {
 
 pre {
   margin: 0;
-  padding: 0.85rem 1rem;
+  padding: 0.95rem 1.1rem;
   overflow-x: auto;
   font-size: 0.8rem;
-  line-height: 1.54;
+  line-height: 1.56;
   color: var(--code-fg);
 }
 
 /* Tables */
 .table-wrap {
   overflow-x: auto;
-  margin: 0.85rem 0 1.25rem;
+  margin: 1.35rem 0 1.75rem;
   border: 1px solid var(--border);
 }
 
@@ -699,7 +702,7 @@ table {
 th,
 td {
   text-align: left;
-  padding: 0.52rem 0.75rem;
+  padding: 0.65rem 0.85rem;
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
@@ -737,6 +740,11 @@ tr:last-child td {
   border-color: rgba(217, 78, 31, 0.35);
 }
 
+.method-patch {
+  color: var(--warning);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
 .method-get {
   color: var(--success);
   border-color: rgba(74, 222, 128, 0.35);
@@ -749,8 +757,8 @@ tr:last-child td {
 
 /* Footer */
 .doc-footer {
-  margin-top: 2rem;
-  padding-top: 1.15rem;
+  margin-top: 2.75rem;
+  padding-top: 1.5rem;
   border-top: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: 0.75rem;
@@ -791,7 +799,7 @@ tr:last-child td {
   }
 
   .content {
-    padding: 1.5rem 1.15rem 3rem;
+    padding: 1.85rem 1.25rem 3.5rem;
   }
 
   .spec-matrix {
