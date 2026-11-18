@@ -175,6 +175,9 @@ func (s *Server) dispatchRemoteVMCreate(ctx context.Context, req vm.CreateReques
 		AuthorizedSSHKeys: globalKeys,
 		SSHPassword:       req.SSHPassword,
 		Protected:         req.Protected,
+		Command:           req.Command,
+		BuildCommand:      req.BuildCommand,
+		ExecUser:          req.ExecUser,
 		PoolID:            poolID,
 		WorkerID:          targetNode.ID,
 	}

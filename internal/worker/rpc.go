@@ -301,6 +301,9 @@ func (c *Client) dispatchRPC(ctx context.Context, req api.WorkerRPCRequest) (int
 			AuthorizedSSHKeys: payload.AuthorizedSSHKeys,
 			SSHPassword:       payload.SSHPassword,
 			Protected:         payload.Protected,
+			Command:           payload.Command,
+			BuildCommand:      payload.BuildCommand,
+			ExecUser:          payload.ExecUser,
 			PoolID:            payload.PoolID,
 			// On the worker itself, leave WorkerID local ("nod_host_local").
 		}

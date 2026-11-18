@@ -469,6 +469,9 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 			created = started
 			if created.Status == db.StatusRunning {
 				s.schedulePostBootSetup(ctx, created)
+				if strings.TrimSpace(req.Command) != "" {
+					s.schedulePostBootBuildCommand(ctx, created, req.Command, req.ExecUser)
+				}
 			}
 		}
 		if startErr != nil {

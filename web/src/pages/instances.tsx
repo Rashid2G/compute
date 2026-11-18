@@ -85,6 +85,7 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole?: (vm: VM) => void;
+  onExec?: (vm: VM, initialCommand?: string) => void;
   onRefresh?: () => void | Promise<void>;
 }
 
@@ -128,6 +129,7 @@ export function InstancesPage({
   onDelete,
   onBulkDelete,
   onInspect,
+  onExec,
   onRefresh,
 }: InstancesPageProps) {
   const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
@@ -1410,6 +1412,10 @@ export function InstancesPage({
                               </button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent align="end" className="w-48">
+                              <DropdownMenuItem onSelect={() => onExec?.(vm)}>
+                                <Play className="h-3.5 w-3.5" />
+                                Execute Command
+                              </DropdownMenuItem>
                               <DropdownMenuItem
                                 onSelect={() =>
                                   openSSHTerminalWindow(vm.id, vm.name, 'compute')
@@ -1643,6 +1649,10 @@ export function InstancesPage({
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem onSelect={() => onExec?.(selectedVM)}>
+                    <Play className="h-3.5 w-3.5" />
+                    Execute Command
+                  </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => setSnapshotTarget(selectedVM)}>
                     <Camera className="h-3.5 w-3.5" />
                     Snapshot

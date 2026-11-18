@@ -760,6 +760,12 @@ type CreateRequest struct {
 
 	Protected *bool `json:"protected,omitempty"`
 
+	// Command specifies an optional build-time command/script to execute inside
+	// the sandbox after it boots.
+	Command      string `json:"command,omitempty"`
+	BuildCommand string `json:"build_command,omitempty"`
+	ExecUser     string `json:"exec_user,omitempty"`
+
 	PoolID            string   `json:"pool_id,omitempty"`
 	WorkerID          string   `json:"worker_id,omitempty"`
 	AuthorizedSSHKeys []string `json:"authorized_ssh_keys,omitempty"`
@@ -837,6 +843,9 @@ func (r *CreateRequest) UnmarshalJSON(data []byte) error {
 	}
 	if b := parseBool(aux.RawProtected); b != nil {
 		r.Protected = b
+	}
+	if r.Command == "" && r.BuildCommand != "" {
+		r.Command = r.BuildCommand
 	}
 	return nil
 }

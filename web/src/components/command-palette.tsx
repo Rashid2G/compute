@@ -5,6 +5,7 @@ import {
   Play,
   Search,
   Server,
+  Terminal,
   X,
   Zap,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ interface CommandPaletteProps {
   onOpenKeys: () => void;
   vms: VM[];
   onSelectVM?: (vm: VM) => void;
+  onExecVM?: (vm: VM) => void;
   isAdmin?: boolean;
 }
 
@@ -32,6 +34,7 @@ export function CommandPalette({
   onOpenKeys,
   vms,
   onSelectVM,
+  onExecVM,
   isAdmin = true,
 }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
@@ -115,8 +118,19 @@ export function CommandPalette({
           else onNavigate('instances');
         },
       })),
+      ...vms.map((vm) => ({
+        id: `exec-${vm.id}`,
+        group: 'Execute Command',
+        label: `Execute command on ${vm.name} (${vm.id}) · ${vm.status.toUpperCase()}`,
+        shortcut: 'exec',
+        icon: Terminal,
+        run: () => {
+          onOpenChange(false);
+          if (onExecVM) onExecVM(vm);
+        },
+      })),
     ],
-    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onSelectVM, vms],
+    [isAdmin, onNavigate, onNewSandbox, onOpenChange, onOpenKeys, onSelectVM, onExecVM, vms],
   );
 
   const filtered = useMemo(() => {

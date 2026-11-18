@@ -1244,6 +1244,67 @@ func (s *Server) schedulePostBootSetup(ctx context.Context, v *db.VM) {
 	}()
 }
 
+// schedulePostBootBuildCommand executes an initial build command/script inside
+// a sandbox after it boots and logs the execution output to audit events.
+func (s *Server) schedulePostBootBuildCommand(ctx context.Context, v *db.VM, cmd string, user string) {
+	if v == nil || strings.TrimSpace(cmd) == "" {
+		return
+	}
+	vmCopy := *v
+	if user == "" {
+		user = "compute"
+	}
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
+		start := time.Now()
+		var res *vm.ExecResponse
+		var err error
+		if vm.IsRemoteVM(&vmCopy) {
+			var remoteRes vm.ExecResponse
+			err = s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
+				VMID:           s.remoteVMTargetID(&vmCopy),
+				Command:        cmd,
+				User:           user,
+				TimeoutSeconds: 90,
+			}, &remoteRes)
+			res = &remoteRes
+		} else {
+			res, err = s.vmMgr.ExecVM(bgCtx, vmCopy.ID, vm.ExecRequest{
+				Command: cmd,
+				User:    user,
+				Timeout: 90,
+			})
+		}
+		durationMs := int(time.Since(start).Milliseconds())
+		status := "succeeded"
+		exitCode := 0
+		var stdout, stderr string
+		if res != nil {
+			exitCode = res.ExitCode
+			stdout = res.Stdout
+			stderr = res.Stderr
+			if exitCode != 0 {
+				status = "failed"
+			}
+		}
+		if err != nil {
+			status = "failed"
+			stderr = err.Error()
+			exitCode = 1
+		}
+		s.recordEvent("sandbox.build_command_executed", "system", vmCopy.ID, status, durationMs, map[string]interface{}{
+			"command":   cmd,
+			"user":      user,
+			"exit_code": exitCode,
+			"stdout":    stdout,
+			"stderr":    stderr,
+		})
+		s.broadcastClusterUpdate()
+	}()
+}
+
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)

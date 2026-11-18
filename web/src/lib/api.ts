@@ -14,6 +14,9 @@ import type {
   CreateVMRequest,
   DaemonConfig,
   EnvironmentProfileRecord,
+  ExecStreamEvent,
+  ExecVMRequest,
+  ExecVMResponse,
   FileEntry,
   FileReadResponse,
   GitHubConnectionRecord,
@@ -353,6 +356,77 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  /** Execute a command inside a sandbox and return buffered output. */
+  execVM(id: string, req: ExecVMRequest): Promise<ExecVMResponse> {
+    return request<ExecVMResponse>(`/vms/${encodeURIComponent(id)}/exec`, {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
+  },
+
+  /** Execute a command inside a sandbox and stream real-time output chunks. */
+  async execVMStream(
+    id: string,
+    req: ExecVMRequest,
+    onEvent: (ev: ExecStreamEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const token = getStoredToken();
+    const authHeaders: Record<string, string> = {};
+    if (token) {
+      authHeaders['Authorization'] = `Bearer ${token}`;
+    }
+    const response = await fetch(`${BASE_PATH}/vms/${encodeURIComponent(id)}/exec-stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...authHeaders,
+      },
+      body: JSON.stringify(req),
+      signal,
+    });
+    if (!response.ok) {
+      let message = `Command execution failed (${response.status})`;
+      try {
+        const body = (await response.json()) as { message?: string; error?: string };
+        if (body.message) message = body.message;
+        else if (body.error) message = body.error;
+      } catch {}
+      throw new ApiError(message, response.status);
+    }
+    if (!response.body) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() ?? '';
+      for (const block of blocks) {
+        for (const line of block.split('\n')) {
+          if (line.startsWith('data: ')) {
+            try {
+              const ev = JSON.parse(line.slice(6)) as ExecStreamEvent;
+              onEvent(ev);
+            } catch {}
+          }
+        }
+      }
+    }
+    if (buffer.trim()) {
+      for (const line of buffer.split('\n')) {
+        if (line.startsWith('data: ')) {
+          try {
+            const ev = JSON.parse(line.slice(6)) as ExecStreamEvent;
+            onEvent(ev);
+          } catch {}
+        }
+      }
+    }
   },
 
   /** Resolve a queued bulk task's final outcome. */

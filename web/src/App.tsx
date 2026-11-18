@@ -7,6 +7,7 @@ import { resolveQueuedTask } from '@/lib/queued-task';
 import { CommandPalette } from '@/components/command-palette';
 import { CreateVMDialog } from '@/components/create-vm-dialog';
 import { DeleteVMDialog } from '@/components/delete-vm-dialog';
+import { ExecuteCommandDialog } from '@/components/execute-command-dialog';
 import { InspectVMDialog } from '@/components/inspect-vm-dialog';
 import { LoginDialog } from '@/components/login-dialog';
 import { Sidebar } from '@/components/layout/sidebar';
@@ -97,7 +98,16 @@ export default function App() {
   const [commandOpen, setCommandOpen] = useState(false);
   const [inspectTarget, setInspectTarget] = useState<VM | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<VM | null>(null);
+  const [execTarget, setExecTarget] = useState<VM | null>(null);
+  const [execInitialCmd, setExecInitialCmd] = useState('');
+  const [execAutoRun, setExecAutoRun] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+
+  const openExec = useCallback((vm: VM, initialCmd = '', autoRun = false) => {
+    setExecTarget(vm);
+    setExecInitialCmd(initialCmd);
+    setExecAutoRun(autoRun);
+  }, []);
 
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);
@@ -369,6 +379,9 @@ export default function App() {
             : 'Address assigned automatically.',
         });
       }
+      if (payload.command && created) {
+        openExec(created, payload.command, created.status === 'running');
+      }
       await cluster.refresh(true);
     } catch (error) {
       toast.error(`Could not provision ${targetName}`, {
@@ -549,6 +562,7 @@ export default function App() {
             onBulkDelete={bulkDeleteVMs}
             onInspect={setInspectTarget}
             onConsole={openConsole}
+            onExec={openExec}
             onRefresh={() => void cluster.refresh(true)}
           />
         );
@@ -813,6 +827,7 @@ export default function App() {
           onNewSandbox={openNew}
           onOpenKeys={() => setKeysOpen(true)}
           vms={visibleVMs}
+          onExecVM={openExec}
           isAdmin={isAdmin}
         />
 
@@ -826,6 +841,20 @@ export default function App() {
           open={liveInspectTarget !== null}
           onOpenChange={(open) => !open && setInspectTarget(null)}
           onUpdated={() => void cluster.refresh(true)}
+        />
+
+        <ExecuteCommandDialog
+          vm={execTarget}
+          open={execTarget !== null}
+          onOpenChange={(open) => {
+            if (!open) {
+              setExecTarget(null);
+              setExecInitialCmd('');
+              setExecAutoRun(false);
+            }
+          }}
+          initialCommand={execInitialCmd}
+          autoRun={execAutoRun}
         />
 
         <DeleteVMDialog
