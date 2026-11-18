@@ -10,6 +10,7 @@ import {
   Globe,
   HardDrive,
   HelpCircle,
+  Loader2,
   MoreHorizontal,
   Pause,
   Play,
@@ -57,6 +58,7 @@ import { primarySandboxAddress, sandboxAccess } from '@/lib/sandbox-access';
 import { openSSHTerminalWindow } from '@/lib/terminal';
 import type {
   AuditEventRecord,
+  OperationRecord,
   PortForwardRecord,
   VM,
   VolumeRecord,
@@ -129,6 +131,36 @@ export function InstancesPage({
   onRefresh,
 }: InstancesPageProps) {
   const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
+
+  // Surface accepted-but-unfinished work (queued creations, clones, deletes)
+  // directly above the table so a queued request is never invisible.
+  const [activeOperations, setActiveOperations] = useState<OperationRecord[]>(
+    [],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const ops = await api.listOperations({
+          status: 'queued,running',
+          limit: 50,
+        });
+        if (!cancelled) {
+          setActiveOperations(
+            (ops || []).filter((op) => op.kind.startsWith('sandbox.')),
+          );
+        }
+      } catch {
+        // Visibility is best-effort; the table still renders from cluster state.
+      }
+    };
+    void load();
+    const timer = window.setInterval(load, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const workerNameById = useMemo(() => {
     const map: Record<string, string> = {};
@@ -942,6 +974,43 @@ export function InstancesPage({
           </div>
         )}
       </div>
+
+      {activeOperations.length > 0 && (
+        <div className="border border-warning/40 bg-warning/5 px-3 py-2.5">
+          <div className="flex items-center gap-2 text-[12px] font-medium text-warning">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>
+              {activeOperations.length} operation
+              {activeOperations.length === 1 ? '' : 's'} in progress
+            </span>
+            <span className="font-normal text-muted-foreground">
+              persisted before execution
+            </span>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {activeOperations.slice(0, 8).map((op) => (
+              <li
+                key={op.id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]"
+              >
+                <span className="w-40 shrink-0 truncate text-foreground">
+                  {op.target_name || op.target_id || op.id}
+                </span>
+                <span className="text-muted-foreground">{op.kind}</span>
+                <span className="border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] uppercase text-warning">
+                  {op.status}
+                </span>
+                <span className="text-muted-foreground">{op.progress}%</span>
+              </li>
+            ))}
+          </ul>
+          {activeOperations.length > 8 && (
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              +{activeOperations.length - 8} more — see Events → Operations
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Sandboxes Table */}
       <div className="border border-border bg-background">

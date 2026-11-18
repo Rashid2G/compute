@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build an Ubuntu 24.04 ext4 root filesystem for Firecracker microVMs without
-# requiring Docker-in-Docker or host loop-mount tools. Designed to run inside
-# the compute-init container or directly as root on Linux.
+# requiring Docker-in-Docker or host loop-mount tools. Designed to run via
+# `computed init --images` or directly as root on Linux.
 #
 # Usage:
 #   build-rootfs-chroot.sh <output.ext4|images_dir> [size_mb] [ssh_pubkey_path]

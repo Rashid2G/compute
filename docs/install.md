@@ -1,14 +1,16 @@
 # Install Compute on a fresh Linux host
 
 This is the supported installer path: a Linux host with Docker and `/dev/kvm`
+prepares host kernel modules and base images with `./scripts/install.sh`, then
 runs the control plane (`computed`) and its embedded web UI directly with
-`docker compose up -d`. **No `.env` file, no host `firecracker` binary, and no
-manual image build commands are required.**
+`docker compose up -d` (or in a single command via `make up`). **No `.env` file
+and no host `firecracker` binary are required.**
 
-The default install runs **only the daemon** on the host. Sandboxes are
-Firecracker microVMs created and supervised by that daemon (the Firecracker and
-Jailer binaries are bundled inside the container image). Multi-host workers and
-a separate GUI container are opt-in profiles.
+The default install runs **only the daemon** container (`computed`) on the host
+— there is no background init container. Sandboxes are Firecracker microVMs
+created and supervised by that daemon (the Firecracker and Jailer binaries are
+bundled inside the container image). Multi-host workers and a separate GUI
+container are opt-in profiles.
 
 ## Host Dependencies
 
@@ -21,7 +23,7 @@ a separate GUI container are opt-in profiles.
 | Firecracker | **Not required on host** — bundled inside the daemon/worker container image |
 | Disk | 10 GB free minimum; base images plus VM disks need additional sparse/disk headroom |
 | Memory | 4 GB recommended; sandboxes default to 2 GB RAM and queue when host memory is insufficient |
-| Privileges | `compute-init` and `computed` run `privileged` with `network_mode: host` and `cgroup: host` |
+| Privileges | `computed` runs `privileged` with `network_mode: host` and `cgroup: host` |
 
 Verify KVM support on your host (especially inside a cloud VM, Proxmox, or VMware guest):
 
@@ -30,27 +32,37 @@ ls -l /dev/kvm
 grep -E 'vmx|svm' /proc/cpuinfo
 ```
 
-## 1. Quickstart (`docker compose up -d`)
+## 1. Quickstart (`./scripts/install.sh` + `docker compose up -d`)
 
 From a fresh clone:
 
 ```bash
+# Step 1: Prepare host, download Firecracker kernel, build Ubuntu 24.04 rootfs, and generate internal SSH key
+./scripts/install.sh
+
+# Step 2: Start the daemon container
 docker compose up -d
 ```
 
-What happens automatically:
-
-1. Compose builds the container image from `Dockerfile.daemon` (includes `computed`, `compute`, `firecracker`, `jailer`, and rootfs tools).
-2. `compute-init` runs once (`COMPUTE_IMAGES_MODE=auto`):
-   - generates the internal SSH key at `./data/images/ssh/id_ed25519`
-   - downloads and SHA-256-verifies the pinned Firecracker CI kernel (`./data/images/vmlinux`)
-   - builds the Ubuntu 24.04 ext4 root filesystem (`./data/images/ubuntu-24.04.ext4`)
-3. `computed` starts on `127.0.0.1:18080`, configures the `mft3br0` bridge, NAT/forwarding rules, and `net.ipv4.ip_forward=1`, and mounts the **embedded Web Dashboard** on the same `:18080` port.
-
-Watch progress during the initial bootstrap:
+Or run both in one step with `make up` (which automatically runs `./scripts/install.sh` when `./data/images` is missing):
 
 ```bash
-docker compose logs -f compute-init computed
+make up
+```
+
+What `./scripts/install.sh` does with live progress output:
+
+1. Loads required host kernel modules (`tun`, `bridge`, `br_netfilter`, `vhost_net`, `nf_nat`) and enables `net.ipv4.ip_forward=1` (`./scripts/host-prepare.sh`).
+2. Runs read-only host readiness checks (`./scripts/preflight.sh`).
+3. Downloads and SHA-256-verifies the pinned Firecracker CI kernel (`./data/images/vmlinux`) via `./scripts/build-kernel.sh`.
+4. Generates the internal Ed25519 SSH key at `./data/images/ssh/id_ed25519` and builds the Ubuntu 24.04 ext4 root filesystem (`./data/images/ubuntu-24.04.ext4`) via `./scripts/build-rootfs.sh`.
+
+Then `docker compose up -d` builds/starts `computed` on `127.0.0.1:18080`, configures the `mft3br0` bridge and NAT/forwarding rules, and mounts the **embedded Web Dashboard** on the same `:18080` port.
+
+Watch daemon logs:
+
+```bash
+docker compose logs -f computed
 ```
 
 ### Embedded Web UI vs. Optional `compute-gui`
@@ -61,12 +73,12 @@ docker compose logs -f compute-init computed
 
 ## 2. Preflight & `.env` Configuration (Required for Non-Loopback)
 
-If a pre-check is desired before starting (for instance on a custom kernel):
+If you want to run individual setup steps manually before starting:
 
 ```bash
 ./scripts/preflight.sh
-# Optional if kernel modules need loading ahead of time:
 sudo ./scripts/host-prepare.sh
+make build-images
 ```
 
 Out of the box, no `.env` file is needed. The daemon binds to loopback
@@ -102,32 +114,33 @@ COMPUTE_ADMIN_SECRET=replace-with-openssl-rand-base64-32
 
 `.env` is git-ignored; never commit it. See [configuration.md](configuration.md) for every variable.
 
-### Base Images (`COMPUTE_IMAGES_MODE=auto` vs. `build` / `prebuilt`)
+### Base Images & Rebuilding (`./scripts/install.sh` / `make build-images`)
 
-`compute-init` bootstraps the kernel, root filesystem, and internal SSH key before the daemon starts. Select a mode with `COMPUTE_IMAGES_MODE`:
-
-| Mode | Behavior |
-| --- | --- |
-| `auto` (default) | Automatically downloads and SHA-256-verifies `vmlinux`, builds `ubuntu-24.04.ext4` via chroot inside `compute-init`, and generates `./data/images/ssh/id_ed25519` (or fetches `COMPUTE_IMAGE_MANIFEST_URL` if set). Existing valid files are reused. |
-| `download` | Fetches the checksummed manifest at `COMPUTE_IMAGE_MANIFEST_URL`, verifies SHA-256, and installs the artifacts. |
-| `prebuilt` | **Requires** `vmlinux` and `ubuntu-24.04.ext4` to already exist under `./data/images` (`COMPUTE_HOST_DATA_DIR/images`) before starting. |
-| `build` | Same as `prebuilt` — **requires** building `vmlinux` + `ubuntu-24.04.ext4` under `./data/images` first (`make build-images` or `scripts/build-kernel.sh` + `scripts/build-rootfs.sh`). |
-| `none` | Skips validation; readiness reports the missing files. |
-
-> **Startup Trap — Missing `vmlinux` in `build` / `prebuilt` Mode**: If you switch `COMPUTE_IMAGES_MODE` to `build` or `prebuilt` without building or placing `vmlinux` and `ubuntu-24.04.ext4` into `./data/images` first, `compute-init` / `computed` fails with `kernel is missing at .../vmlinux`.
-
-To pre-build base images on the host (`make build-images`):
+`./scripts/install.sh` (or `make build-images`) bootstraps the kernel, root filesystem, and internal SSH key under `./data/images` (`COMPUTE_HOST_DATA_DIR/images`) before the daemon starts:
 
 ```bash
-sudo ./scripts/build-kernel.sh ./data/images
-sudo ./scripts/build-rootfs.sh ./data/images 2048
+# Run full host + image setup (idempotent; skips existing verified images):
+./scripts/install.sh
+
+# Or bootstrap only the images/SSH key:
+./scripts/install.sh --images-only
+
+# Or run the underlying scripts directly:
+./scripts/build-kernel.sh ./data/images
+./scripts/build-rootfs.sh ./data/images 2048
+```
+
+To force a fresh rebuild of `ubuntu-24.04.ext4`:
+
+```bash
+./scripts/install.sh --images-only --force
 ```
 
 On an air-gapped host, supply a local uncompressed ELF kernel with
 `COMPUTE_KERNEL_SRC=/path/to/vmlinux` (or `COMPUTE_KERNEL_URL` +
-`COMPUTE_KERNEL_SHA256`), or pre-populate `./data/images/` and set
-`COMPUTE_IMAGES_MODE=prebuilt`. The bootstrap is idempotent and safe to run on
-every `docker compose up`.
+`COMPUTE_KERNEL_SHA256`), or pre-populate `./data/images/` before starting
+`docker compose up -d`. The bootstrap is idempotent and reuses existing verified
+artifacts.
 
 ## 3. Verify
 
@@ -352,9 +365,8 @@ The host prep changes (`sysctl net.ipv4.ip_forward=1`, loaded modules, the
 | Symptom | Fix |
 | --- | --- |
 | Daemon refuses startup on `0.0.0.0` | Set a non-default `COMPUTE_ADMIN_PASSWORD` in `.env`, or set `COMPUTE_ADMIN_PASSWORD=` (empty) with `COMPUTE_ADMIN_SECRET=...`. |
-| `compute-init` fails in `auto` mode | Ensure outbound HTTPS is reachable from `compute-init` (or set `COMPUTE_KERNEL_SRC` / `COMPUTE_IMAGE_MANIFEST_URL` / `COMPUTE_IMAGES_MODE=prebuilt`), then re-run `docker compose up -d`. |
-| `compute-init` fails with `kernel is missing at .../vmlinux` | Use the default `COMPUTE_IMAGES_MODE=auto` so `compute-init` installs it automatically, or run `make build-images` (`scripts/build-kernel.sh` + `scripts/build-rootfs.sh`) before using `build` or `prebuilt`. |
-| Readiness fails with `kernel`/`rootfs` | Check `COMPUTE_HOST_DATA_DIR/images`, re-run `docker compose up compute-init`, and confirm the image files are valid ELF/ext4. |
+| Startup preflight fails with missing `kernel`, `rootfs`, or `ssh_key` | Run `./scripts/install.sh` (or `make build-images` / `make up`) on the host to download `vmlinux`, build `ubuntu-24.04.ext4`, and generate `./data/images/ssh/id_ed25519`, then run `docker compose up -d`. |
+| Readiness fails with `kernel`/`rootfs` | Check `COMPUTE_HOST_DATA_DIR/images`, re-run `./scripts/install.sh --images-only --force`, and confirm the image files are valid ELF/ext4. |
 | Readiness fails with `kvm` | Enable virtualization/nested KVM on the host and ensure `/dev/kvm` is passed through (`chmod 666 /dev/kvm` on the host if needed). |
 | `host_network` readiness failure | `computed` must keep `network_mode: host` and set `COMPUTE_HOST_NETWORK=1`; bridge-mode networking hides the bridge/TAPs from the host. `docker run` users need the same flag. |
 | `bridge` readiness failure | The daemon creates `mft3br0`; check `docker compose logs computed` for NET_ADMIN or permission errors, and run `scripts/host-prepare.sh`. |

@@ -1,4 +1,4 @@
-.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build up down clean preflight host-prepare setup-host build-images validate-compose benchmark install systemd release-tarballs
+.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean preflight host-prepare setup-host build-images validate-compose benchmark install systemd release-tarballs
 
 VERSION ?= 1.0.0
 RELEASE_NAME ?= Compute
@@ -55,7 +55,18 @@ vet: ## Run go vet across all packages
 docker-build: ## Build Docker Compose images for daemon and worker
 	docker compose build
 
-up: ## Start Compute stack via Docker Compose
+setup: ## Prepare host and build Firecracker kernel, Ubuntu 24.04 rootfs, and SSH key
+	./scripts/install.sh
+
+up: ## Start Compute stack via Docker Compose (bootstraps host/images if missing)
+	@set -e; \
+	if [ -f .env ]; then set -a; . ./.env; set +a; fi; \
+	img_dir="$${COMPUTE_IMAGES_DIR:-$${COMPUTE_HOST_DATA_DIR:+$$COMPUTE_HOST_DATA_DIR/images}}"; \
+	img_dir="$${img_dir:-$(IMAGES_DIR)}"; \
+	if [ ! -f "$$img_dir/vmlinux" ] || [ ! -f "$$img_dir/ubuntu-24.04.ext4" ] || [ ! -f "$$img_dir/ssh/id_ed25519" ]; then \
+		echo "==> Base images or internal SSH key missing in $$img_dir; running ./scripts/install.sh..."; \
+		./scripts/install.sh; \
+	fi
 	docker compose up -d
 
 down: ## Stop Compute Docker Compose stack
@@ -74,12 +85,11 @@ setup-host: ## Configure host bridge and NAT rules for Firecracker sandboxes
 	./scripts/setup-host.sh
 
 build-images: ## Install the Firecracker kernel and build the rootfs into IMAGES_DIR
-	sudo env \
-		COMPUTE_KERNEL_SRC="$(COMPUTE_KERNEL_SRC)" \
-		COMPUTE_KERNEL_URL="$(COMPUTE_KERNEL_URL)" \
-		COMPUTE_KERNEL_SHA256="$(COMPUTE_KERNEL_SHA256)" \
-		./scripts/build-kernel.sh $(IMAGES_DIR)
-	sudo ./scripts/build-rootfs.sh $(IMAGES_DIR) 2048
+	COMPUTE_KERNEL_SRC="$(COMPUTE_KERNEL_SRC)" \
+	COMPUTE_KERNEL_URL="$(COMPUTE_KERNEL_URL)" \
+	COMPUTE_KERNEL_SHA256="$(COMPUTE_KERNEL_SHA256)" \
+	./scripts/build-kernel.sh $(IMAGES_DIR)
+	./scripts/build-rootfs.sh $(IMAGES_DIR) 2048
 
 validate-compose: ## Validate docker-compose.yml and .env.example contract
 	./scripts/validate-compose.sh

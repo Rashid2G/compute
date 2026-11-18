@@ -181,21 +181,23 @@ if [ -n "${SYSCTL_BIN}" ]; then
 fi
 
 section "Image build tools"
-if [ "${IMAGES_MODE}" = "build" ]; then
-    # Host-side tools are only needed when running scripts/build-rootfs.sh directly.
-    missing_build_tools=""
-    for cmd in curl sha256sum ssh-keygen mkfs.ext4 mount truncate tar; do
-        if have_cmd "${cmd}"; then
-            say_ok "${cmd} available"
-        else
-            missing_build_tools="${missing_build_tools} ${cmd}"
-        fi
-    done
-    if [ -n "${missing_build_tools}" ]; then
-        say_fail "missing image build tools:${missing_build_tools} (install curl, coreutils, openssh-client, e2fsprogs, util-linux, tar; or use COMPUTE_IMAGES_MODE=auto)"
+missing_build_tools=""
+for cmd in curl sha256sum truncate tar; do
+    if have_cmd "${cmd}"; then
+        say_ok "${cmd} available"
+    else
+        missing_build_tools="${missing_build_tools} ${cmd}"
     fi
-else
-    say_ok "host image build tools not required for COMPUTE_IMAGES_MODE=${IMAGES_MODE} (compute-init handles bootstrap inside the container)"
+done
+for opt_cmd in ssh-keygen mkfs.ext4; do
+    if have_cmd "${opt_cmd}"; then
+        say_ok "${opt_cmd} available"
+    else
+        say_info "${opt_cmd} not on host (scripts/build-rootfs.sh will fall back to Docker container)"
+    fi
+done
+if [ -n "${missing_build_tools}" ]; then
+    say_fail "missing required host tools:${missing_build_tools} (install curl, coreutils, and tar before running ./scripts/install.sh)"
 fi
 
 section "Network ports"

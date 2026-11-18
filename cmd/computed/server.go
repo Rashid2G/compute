@@ -219,6 +219,19 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 			})
 		}
 
+		// 3b. Prune finished operation/task history past its retention window.
+		retentionCutoff := time.Now().UTC().Add(-operationRetention)
+		_, _ = st.PruneOperations(initCtx, retentionCutoff)
+		_, _ = st.PruneTaskRecords(initCtx, retentionCutoff)
+
+		// 3c. The in-memory execution queue does not survive a restart. Mark
+		// anything that was queued/running as interrupted so its visible status
+		// stays truthful instead of appearing pending forever.
+		if n, err := st.FailInterruptedOperations(initCtx, "interrupted by daemon restart"); err == nil && n > 0 {
+			log.Printf("[computed] marked %d interrupted operation(s) as failed", n)
+		}
+		_, _ = st.FailInterruptedTaskRecords(initCtx)
+
 		// 4. Auto-seed "base" default environment profile if environments table is empty
 		if envs, err := st.ListEnvironments(initCtx); err == nil && len(envs) == 0 {
 			_ = st.SaveEnvironment(initCtx, &db.EnvironmentProfile{
@@ -410,6 +423,44 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	return s
 }
 
+// persistAuditEvent writes an audit event to the durable audit trail. Unlike
+// recordEvent it surfaces the write error so callers that require audit-before-
+// execution can refuse to dispatch unaudited work.
+func (s *Server) persistAuditEvent(auditEvt *db.AuditEvent) error {
+	if auditEvt == nil {
+		return errors.New("audit event is required")
+	}
+	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
+		return errors.New("audit store unavailable")
+	}
+	return s.vmMgr.GetStore().SaveAuditEvent(context.Background(), auditEvt)
+}
+
+// publishAuditEvent fans a persisted audit event out to live subscribers and
+// webhook consumers. Persistence is deliberately separate so a failed write can
+// abort the operation before execution.
+func (s *Server) publishAuditEvent(auditEvt *db.AuditEvent) {
+	if auditEvt == nil {
+		return
+	}
+	s.eventMu.RLock()
+	for ch := range s.eventSubs {
+		select {
+		case ch <- auditEvt:
+		default:
+		}
+	}
+	s.eventMu.RUnlock()
+
+	// Fan the event out to subscribed webhook endpoints without blocking the
+	// API caller.
+	s.deliverWebhooks(auditEvt)
+
+	if auditEvt.Event != "ssh.tunnel_attempt" {
+		s.broadcastClusterUpdate()
+	}
+}
+
 func (s *Server) recordEvent(event, actor, target, status string, durationMs int, payload interface{}) *db.AuditEvent {
 	if actor == "" {
 		actor = "system"
@@ -442,27 +493,8 @@ func (s *Server) recordEvent(event, actor, target, status string, durationMs int
 		Payload:    payloadStr,
 	}
 
-	if s.vmMgr != nil && s.vmMgr.GetStore() != nil {
-		_ = s.vmMgr.GetStore().SaveAuditEvent(context.Background(), auditEvt)
-	}
-
-	s.eventMu.RLock()
-	for ch := range s.eventSubs {
-		select {
-		case ch <- auditEvt:
-		default:
-		}
-	}
-	s.eventMu.RUnlock()
-
-	// Fan the event out to subscribed webhook endpoints without blocking the
-	// API caller.
-	s.deliverWebhooks(auditEvt)
-
-	if event != "ssh.tunnel_attempt" {
-		s.broadcastClusterUpdate()
-	}
-
+	_ = s.persistAuditEvent(auditEvt)
+	s.publishAuditEvent(auditEvt)
 	return auditEvt
 }
 
@@ -742,6 +774,8 @@ func (s *Server) routes() {
 
 	// Asynchronous bulk task status
 	s.mux.HandleFunc("/api/v1/tasks/", s.wrapAuth(s.handleGetTask))
+	s.mux.HandleFunc("/api/v1/operations", s.wrapAuth(s.handleOperations))
+	s.mux.HandleFunc("/api/v1/operations/", s.wrapAuth(s.handleOperations))
 
 	s.mux.HandleFunc("/api/v1/queue", s.wrapAuth(s.handleQueue))
 	s.mux.HandleFunc("/api/v1/config", s.wrapAuth(s.handleConfig))
@@ -1224,8 +1258,21 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    ownerID,
+			Kind:       "sandbox.create",
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    summarizeCreateRequest(req),
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		created, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			vmOut, execErr := s.executeCreateVM(bgCtx, isAdmin, req)
+			s.finishOperation(bgCtx, op, vmOut, execErr)
 			if vmOut != nil {
 				s.recordEvent("sandbox.created", actor, vmOut.Name, "delivered", 85, map[string]interface{}{
 					"vm_id":     vmOut.ID,
@@ -1240,6 +1287,7 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if created == nil {
 			if err != nil {
 				writeDetachedError(w, r, err)
@@ -1310,7 +1358,20 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			_, isAdmin := s.currentOwnerID(r)
 			actor := getActor(r)
+			op, opErr := s.createOperation(ctx, operationSpec{
+				OwnerID:    v.OwnerID,
+				Kind:       "sandbox.delete",
+				TargetID:   vmIdentifier(v),
+				TargetName: displayName,
+				Actor:      actor,
+				Request:    map[string]interface{}{"id": requestedID},
+			})
+			if opErr != nil {
+				httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			delErr, disconnected := runDetachedErr(r, func(bgCtx context.Context) error {
+				s.startOperation(bgCtx, op)
 				s.removePortForwardsForVM(bgCtx, v, true)
 				var err error
 				if vm.IsRemoteVM(v) {
@@ -1332,6 +1393,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 					s.recordEvent("sandbox.deleted", actor, requestedID, "delivered", 40, map[string]string{"id": requestedID})
 					s.broadcastClusterUpdate()
 				}
+				s.finishOperation(bgCtx, op, nil, err)
 				return err
 			})
 			if disconnected {
@@ -1427,13 +1489,27 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
-		_, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		callerOwner, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
 		if !ok {
 			return
 		}
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    callerOwner,
+			Kind:       "sandbox.clone",
+			TargetID:   vmID,
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    summarizeCreateRequest(req),
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		cloned, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			c, cErr := s.executeCloneVM(bgCtx, isAdmin, vmID, req)
+			s.finishOperation(bgCtx, op, c, cErr)
 			if c != nil {
 				s.recordEvent("sandbox.cloned", actor, c.Name, "delivered", 60, map[string]string{"source_id": vmID, "cloned_id": c.ID})
 			}
@@ -1442,6 +1518,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if cloned == nil {
 			if err != nil {
 				writeDetachedError(w, r, err)
@@ -1464,19 +1541,34 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	case "run", "start":
 		_, isAdmin := s.currentOwnerID(r)
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.start",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		startedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				s.finishOperation(bgCtx, op, nil, qErr)
 				return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
 			}
 			out := v
 			if vm.IsRemoteVM(out) {
 				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.start")
 				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
 					return nil, uErr
 				}
 				out = updated
 			} else {
 				if rErr := s.vmMgr.RunVM(bgCtx, vmID); rErr != nil {
+					s.finishOperation(bgCtx, op, nil, rErr)
 					return nil, rErr
 				}
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
@@ -1489,11 +1581,13 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			s.recordEvent("sandbox.started", actor, vmID, "delivered", 35, nil)
 			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
 			return out, nil
 		})
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			writeDetachedError(w, r, err)
 			return
@@ -1503,8 +1597,21 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	case "restart":
 		_, isAdmin := s.currentOwnerID(r)
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.restart",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		restartedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			out, rErr := s.restartSingleVM(bgCtx, isAdmin, v, true)
+			s.finishOperation(bgCtx, op, out, rErr)
 			if rErr == nil {
 				s.recordEvent("sandbox.restarted", actor, vmID, "delivered", 40, nil)
 			}
@@ -1513,6 +1620,7 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			writeDetachedError(w, r, err)
 			return
@@ -1521,27 +1629,43 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 
 	case "save-state", "snapshot":
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.snapshot",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		savedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			out := v
 			if vm.IsRemoteVM(out) {
 				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.save_state")
 				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
 					return nil, uErr
 				}
 				out = updated
 			} else {
 				if sErr := s.vmMgr.SaveState(bgCtx, vmID); sErr != nil {
+					s.finishOperation(bgCtx, op, nil, sErr)
 					return nil, sErr
 				}
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
 			}
 			s.recordEvent("snapshot.created", actor, vmID, "delivered", 50, nil)
 			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
 			return out, nil
 		})
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			writeDetachedError(w, r, err)
 			return
@@ -1551,19 +1675,34 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	case "resume":
 		_, isAdmin := s.currentOwnerID(r)
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.resume",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		resumedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			if qErr := s.enforceRunQuotaWithAdmin(bgCtx, isAdmin, v); qErr != nil {
+				s.finishOperation(bgCtx, op, nil, qErr)
 				return nil, &httpStatusError{code: http.StatusTooManyRequests, err: qErr}
 			}
 			out := v
 			if vm.IsRemoteVM(out) {
 				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.resume")
 				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
 					return nil, uErr
 				}
 				out = updated
 			} else {
 				if rErr := s.vmMgr.ResumeVM(bgCtx, vmID); rErr != nil {
+					s.finishOperation(bgCtx, op, nil, rErr)
 					return nil, rErr
 				}
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
@@ -1576,11 +1715,13 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			s.recordEvent("sandbox.resumed", actor, vmID, "delivered", 25, nil)
 			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
 			return out, nil
 		})
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			writeDetachedError(w, r, err)
 			return
@@ -1590,11 +1731,24 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 	case "stop":
 		_, isAdmin := s.currentOwnerID(r)
 		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    v.OwnerID,
+			Kind:       "sandbox.stop",
+			TargetID:   vmID,
+			TargetName: displayName,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		stoppedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			out := v
 			if vm.IsRemoteVM(out) {
 				updated, uErr := s.callRemoteVMLifecycle(bgCtx, out, "vm.stop")
 				if uErr != nil {
+					s.finishOperation(bgCtx, op, nil, uErr)
 					return nil, uErr
 				}
 				out = updated
@@ -1604,9 +1758,11 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				if isAdmin {
 					if sErr := s.vmMgr.StopVM(bgCtx, vmID); sErr != nil {
+						s.finishOperation(bgCtx, op, nil, sErr)
 						return nil, sErr
 					}
 				} else if sErr := s.vmMgr.StopVMForOwner(bgCtx, out.OwnerID, vmID); sErr != nil {
+					s.finishOperation(bgCtx, op, nil, sErr)
 					return nil, sErr
 				}
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
@@ -1616,11 +1772,13 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 			}
 			s.recordEvent("sandbox.stopped", actor, vmID, "delivered", 30, nil)
 			s.broadcastClusterUpdate()
+			s.finishOperation(bgCtx, op, out, nil)
 			return out, nil
 		})
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			writeDetachedError(w, r, err)
 			return
@@ -1982,7 +2140,33 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		} else {
 			req.OwnerID = ownerID
 		}
-		img, err := s.vmMgr.BuildImage(ctx, req)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    ownerID,
+			Kind:       "image.build",
+			TargetName: req.Name,
+			Actor:      actor,
+			Request: map[string]interface{}{
+				"name":       req.Name,
+				"base_image": req.BaseImage,
+				"packages":   req.Packages,
+				"size_mb":    req.SizeMB,
+			},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		img, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.CustomImage, error) {
+			s.startOperation(bgCtx, op)
+			out, bErr := s.vmMgr.BuildImage(bgCtx, req)
+			s.finishOperation(bgCtx, op, out, bErr)
+			return out, bErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			if writeResourceLimitError(w, r, err) {
 				return
@@ -2123,7 +2307,29 @@ func (s *Server) handleTemplates(w http.ResponseWriter, r *http.Request) {
 			// tenant can never be snapshotted.
 			req.VMID = vmIdentifier(src)
 		}
-		tpl, err := s.vmMgr.CreateTemplate(ctx, req)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    ownerID,
+			Kind:       "template.create",
+			TargetID:   req.VMID,
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    map[string]interface{}{"name": req.Name, "description": req.Description, "vm_id": req.VMID},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		tpl, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.Template, error) {
+			s.startOperation(bgCtx, op)
+			created, cErr := s.vmMgr.CreateTemplate(bgCtx, req)
+			s.finishOperation(bgCtx, op, created, cErr)
+			return created, cErr
+		})
+		if disconnected {
+			return
+		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			if writeResourceLimitError(w, r, err) {
 				return
@@ -2212,7 +2418,7 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "sandbox name prefix 'job-' is reserved for ephemeral CI jobs", http.StatusBadRequest)
 			return
 		}
-		_, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
+		callerOwner, isAdmin, ok := s.authorizeCreateRequest(w, r, &req)
 		if !ok {
 			return
 		}
@@ -2240,8 +2446,23 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 		// Pin to the unique internal ID so duplicate template names cannot
 		// resolve to another tenant's template inside the manager.
 		tplID := templateIdentifier(tpl)
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    callerOwner,
+			Kind:       "sandbox.create",
+			TargetID:   tplID,
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    summarizeCreateRequest(req),
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
 		launchedVM, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+			s.startOperation(bgCtx, op)
 			vOut, lErr := s.vmMgr.LaunchTemplate(bgCtx, tplID, req)
+			s.finishOperation(bgCtx, op, vOut, lErr)
 			if lErr == nil {
 				s.broadcastClusterUpdate()
 			}
@@ -2250,6 +2471,7 @@ func (s *Server) handleTemplateActions(w http.ResponseWriter, r *http.Request) {
 		if disconnected {
 			return
 		}
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		if err != nil {
 			if writeResourceLimitError(w, r, err) {
 				return

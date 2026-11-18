@@ -228,13 +228,26 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    volOwner,
+			Kind:       "volume.create",
+			TargetName: req.Name,
+			Actor:      actor,
+			Request:    map[string]interface{}{"name": req.Name, "size_gb": req.SizeGB, "filesystem": req.Filesystem, "attached_vm": req.AttachedVM},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.startOperation(ctx, op)
 		var vol *db.Volume
 		var statusCode int
-		var opErr error
+		var opErrRun error
 		_ = s.vmMgr.WithDiskLock(func() error {
 			if err := s.vmMgr.CheckDiskCapacity(ctx, int64(req.SizeGB)*1024, 16); err != nil {
 				statusCode = http.StatusTooManyRequests
-				opErr = err
+				opErrRun = err
 				return err
 			}
 
@@ -242,8 +255,8 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			path, err := s.vmMgr.GetStorageManager().CreateDataVolume(volID, req.SizeGB, req.Filesystem)
 			if err != nil {
 				statusCode = http.StatusBadRequest
-				opErr = fmt.Errorf("failed to allocate volume: %w", err)
-				return opErr
+				opErrRun = fmt.Errorf("failed to allocate volume: %w", err)
+				return opErrRun
 			}
 
 			candidate := &db.Volume{
@@ -268,20 +281,22 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 			if err := st.SaveVolume(ctx, candidate); err != nil {
 				_ = s.vmMgr.GetStorageManager().DeleteDataVolume(path)
 				statusCode = http.StatusInternalServerError
-				opErr = err
+				opErrRun = err
 				return err
 			}
 			vol = candidate
 			return nil
 		})
-		if opErr != nil {
-			if writeResourceLimitError(w, r, opErr) {
+		s.finishOperation(ctx, op, vol, opErrRun)
+		if opErrRun != nil {
+			if writeResourceLimitError(w, r, opErrRun) {
 				return
 			}
-			httpError(w, opErr.Error(), statusCode)
+			httpError(w, opErrRun.Error(), statusCode)
 			return
 		}
 
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
 		s.recordEvent("volume.created", getActor(r), vol.Name, "delivered", 25, vol)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(vol)
@@ -442,35 +457,51 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, err.Error(), http.StatusTooManyRequests)
 			return
 		}
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    vol.OwnerID,
+			Kind:       "volume.expand",
+			TargetID:   vol.ID,
+			TargetName: vol.Name,
+			Actor:      actor,
+			Request:    map[string]interface{}{"add_gb": req.AddGB},
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.startOperation(ctx, op)
 		var statusCode int
-		var opErr error
+		var opErrRun error
 		_ = s.vmMgr.WithDiskLock(func() error {
 			if err := s.vmMgr.CheckDiskCapacity(ctx, int64(req.AddGB)*1024, 16); err != nil {
 				statusCode = http.StatusTooManyRequests
-				opErr = err
+				opErrRun = err
 				return err
 			}
 			if err := s.vmMgr.GetStorageManager().ExpandDataVolume(vol.Path, vol.SizeGB+req.AddGB, vol.Filesystem); err != nil {
 				statusCode = http.StatusBadRequest
-				opErr = fmt.Errorf("failed to expand volume: %w", err)
-				return opErr
+				opErrRun = fmt.Errorf("failed to expand volume: %w", err)
+				return opErrRun
 			}
 			vol.SizeGB += req.AddGB
 			if err := st.SaveVolume(ctx, vol); err != nil {
 				statusCode = http.StatusInternalServerError
-				opErr = err
+				opErrRun = err
 				return err
 			}
 			return nil
 		})
-		if opErr != nil {
-			if writeResourceLimitError(w, r, opErr) {
+		s.finishOperation(ctx, op, vol, opErrRun)
+		if opErrRun != nil {
+			if writeResourceLimitError(w, r, opErrRun) {
 				return
 			}
-			httpError(w, opErr.Error(), statusCode)
+			httpError(w, opErrRun.Error(), statusCode)
 			return
 		}
-		s.recordEvent("volume.expanded", getActor(r), vol.Name, "delivered", 20, map[string]interface{}{"added_gb": req.AddGB, "new_size": vol.SizeGB})
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		s.recordEvent("volume.expanded", actor, vol.Name, "delivered", 20, map[string]interface{}{"added_gb": req.AddGB, "new_size": vol.SizeGB})
 		json.NewEncoder(w).Encode(vol)
 
 	case "snapshot":
@@ -480,8 +511,21 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		actor := getActor(r)
+		op, opErr := s.createOperation(ctx, operationSpec{
+			OwnerID:    vol.OwnerID,
+			Kind:       "volume.snapshot",
+			TargetID:   vol.ID,
+			TargetName: vol.Name,
+			Actor:      actor,
+		})
+		if opErr != nil {
+			httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.startOperation(ctx, op)
 		var statusCode int
-		var opErr error
+		var opErrRun error
 		_ = s.vmMgr.WithDiskLock(func() error {
 			reqLogicalMB := int64(vol.SizeGB) * 1024
 			if reqLogicalMB < 16 {
@@ -493,30 +537,32 @@ func (s *Server) handleVolumeActions(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := s.vmMgr.CheckDiskCapacity(ctx, reqLogicalMB, reqPhysMB); err != nil {
 				statusCode = http.StatusTooManyRequests
-				opErr = err
+				opErrRun = err
 				return err
 			}
 			if _, err := s.vmMgr.GetStorageManager().SnapshotDataVolume(vol.Path, vol.Snapshots+1); err != nil {
 				statusCode = http.StatusBadRequest
-				opErr = fmt.Errorf("failed to snapshot volume: %w", err)
-				return opErr
+				opErrRun = fmt.Errorf("failed to snapshot volume: %w", err)
+				return opErrRun
 			}
 			vol.Snapshots++
 			if err := st.SaveVolume(ctx, vol); err != nil {
 				statusCode = http.StatusInternalServerError
-				opErr = err
+				opErrRun = err
 				return err
 			}
 			return nil
 		})
-		if opErr != nil {
-			if writeResourceLimitError(w, r, opErr) {
+		s.finishOperation(ctx, op, vol, opErrRun)
+		if opErrRun != nil {
+			if writeResourceLimitError(w, r, opErrRun) {
 				return
 			}
-			httpError(w, opErr.Error(), statusCode)
+			httpError(w, opErrRun.Error(), statusCode)
 			return
 		}
-		s.recordEvent("volume.snapshot.created", getActor(r), vol.Name, "delivered", 35, map[string]interface{}{"snapshots": vol.Snapshots})
+		w.Header().Set("X-Compute-Operation-ID", op.ID)
+		s.recordEvent("volume.snapshot.created", actor, vol.Name, "delivered", 35, map[string]interface{}{"snapshots": vol.Snapshots})
 		json.NewEncoder(w).Encode(vol)
 
 	default:

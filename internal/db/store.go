@@ -474,6 +474,40 @@ func (s *Store) initSchema() error {
 		payload TEXT NOT NULL DEFAULT '{}'
 	);
 
+	CREATE TABLE IF NOT EXISTS operations (
+		id TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT 'default',
+		kind TEXT NOT NULL,
+		target_id TEXT NOT NULL DEFAULT '',
+		target_name TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'queued',
+		progress INTEGER NOT NULL DEFAULT 0,
+		request_json TEXT NOT NULL DEFAULT '{}',
+		result_json TEXT NOT NULL DEFAULT '',
+		error_msg TEXT NOT NULL DEFAULT '',
+		task_id TEXT NOT NULL DEFAULT '',
+		actor TEXT NOT NULL DEFAULT '',
+		trace_id TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMP NOT NULL,
+		started_at TIMESTAMP,
+		updated_at TIMESTAMP NOT NULL,
+		finished_at TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS task_records (
+		id TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT 'default',
+		action TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'queued',
+		requested INTEGER NOT NULL DEFAULT 0,
+		queued INTEGER NOT NULL DEFAULT 0,
+		succeeded_json TEXT NOT NULL DEFAULT '[]',
+		failed_json TEXT NOT NULL DEFAULT '[]',
+		warnings_json TEXT NOT NULL DEFAULT '[]',
+		created_at TIMESTAMP NOT NULL,
+		updated_at TIMESTAMP NOT NULL
+	);
+
 	CREATE TABLE IF NOT EXISTS access_api_keys (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -616,6 +650,11 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_volumes_status ON volumes(status);
 	CREATE INDEX IF NOT EXISTS idx_volumes_owner ON volumes(owner_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_events_ts ON audit_events(timestamp DESC);
+	CREATE INDEX IF NOT EXISTS idx_operations_owner_created ON operations(owner_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
+	CREATE INDEX IF NOT EXISTS idx_operations_task ON operations(task_id);
+	CREATE INDEX IF NOT EXISTS idx_operations_target ON operations(target_id);
+	CREATE INDEX IF NOT EXISTS idx_task_records_owner ON task_records(owner_id, updated_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_vm ON port_forwards(vm_id);
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_owner ON port_forwards(owner_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_port_forwards_host_port ON port_forwards(host_port) WHERE host_port > 0;

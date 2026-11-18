@@ -495,8 +495,23 @@ func (s *Server) handleVMMigrate(w http.ResponseWriter, r *http.Request, v *db.V
 	}
 
 	actor := getActor(r)
+	ctx := r.Context()
+	op, opErr := s.createOperation(ctx, operationSpec{
+		OwnerID:    v.OwnerID,
+		Kind:       "sandbox.migrate",
+		TargetID:   vmIdentifier(v),
+		TargetName: v.Name,
+		Actor:      actor,
+		Request:    map[string]interface{}{"target_worker_id": req.TargetWorkerID, "target_pool_id": req.TargetPoolID, "force": req.Force},
+	})
+	if opErr != nil {
+		httpError(w, "could not record operation: "+opErr.Error(), http.StatusInternalServerError)
+		return
+	}
 	migrated, err, disconnected := runDetached(r, func(bgCtx context.Context) (*db.VM, error) {
+		s.startOperation(bgCtx, op)
 		m, mErr := s.migrateSingleVM(bgCtx, v, req)
+		s.finishOperation(bgCtx, op, m, mErr)
 		if mErr == nil && m != nil {
 			s.recordEvent("sandbox.migrated", actor, m.Name, "delivered", 100, map[string]interface{}{
 				"vm_id":     m.ID,
@@ -510,6 +525,7 @@ func (s *Server) handleVMMigrate(w http.ResponseWriter, r *http.Request, v *db.V
 	if disconnected {
 		return
 	}
+	w.Header().Set("X-Compute-Operation-ID", op.ID)
 	if err != nil {
 		if writeResourceLimitError(w, r, err) {
 			return
@@ -1092,6 +1108,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		requestedID string
 		vm          *db.VM
 		resolveErr  string
+		op          *db.Operation
 	}
 	targets := make([]deleteTarget, len(req.IDs))
 	validCount := 0
@@ -1137,8 +1154,8 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		return delErr
 	}
 
+	taskID := "task_" + uuid.NewString()[:8]
 	if req.Async {
-		taskID := "task_" + uuid.NewString()[:8]
 		resp := api.BulkVMsResponse{
 			Action:    "delete",
 			Status:    "queued",
@@ -1157,7 +1174,37 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(callerOwner, resp)
+		specs := make([]bulkOperationSpec, len(targets))
+		for i, t := range targets {
+			targetID := t.requestedID
+			targetName := t.requestedID
+			if t.vm != nil {
+				targetID = vmIdentifier(t.vm)
+				targetName = t.vm.Name
+			}
+			specs[i] = bulkOperationSpec{
+				TargetID:   targetID,
+				TargetName: targetName,
+				Skip:       t.resolveErr != "",
+				Request:    map[string]interface{}{"id": t.requestedID},
+			}
+		}
+		ops, opErr := s.prepareBulkOperations(ctx, callerOwner, "sandbox.delete", taskID, actor, specs)
+		if opErr != nil {
+			httpError(w, "could not persist queued operations: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		for i := range ops {
+			targets[i].op = ops[i]
+		}
+		resp.OperationIDs = operationIDs(ops)
+		if err := s.recordQueuedTask(ctx, callerOwner, resp); err != nil {
+			for _, op := range ops {
+				s.finishOperation(ctx, op, nil, err)
+			}
+			httpError(w, "could not persist task record: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -1186,7 +1233,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 					Failed:    failed,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(callerOwner, summary)
+				s.recordTaskSummary(bgCtx, callerOwner, summary)
 				if doReconcile && s.vmMgr != nil {
 					for _, owner := range ownersCopy {
 						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
@@ -1203,7 +1250,9 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 				}
 				target := t
 				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
+					s.startOperation(bgCtx, target.op)
 					delErr := execOneDelete(bgCtx, target.vm)
+					s.finishOperation(bgCtx, target.op, nil, delErr)
 					mu.Lock()
 					if delErr != nil {
 						failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: delErr.Error()})
@@ -1223,6 +1272,7 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 					finish(bgCtx)
 				})
 				if enqErr != nil {
+					s.finishOperation(context.Background(), target.op, nil, enqErr)
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
 					mu.Unlock()
@@ -1237,6 +1287,30 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	syncSpecs := make([]bulkOperationSpec, len(targets))
+	for i, t := range targets {
+		targetID := t.requestedID
+		targetName := t.requestedID
+		if t.vm != nil {
+			targetID = vmIdentifier(t.vm)
+			targetName = t.vm.Name
+		}
+		syncSpecs[i] = bulkOperationSpec{
+			TargetID:   targetID,
+			TargetName: targetName,
+			Skip:       t.resolveErr != "",
+			Request:    map[string]interface{}{"id": t.requestedID},
+		}
+	}
+	syncOps, syncOpErr := s.prepareBulkOperations(ctx, callerOwner, "sandbox.delete", taskID, actor, syncSpecs)
+	if syncOpErr != nil {
+		httpError(w, "could not persist operations: "+syncOpErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	for i := range syncOps {
+		targets[i].op = syncOps[i]
+	}
+
 	resp, _, disconnected := runDetached(r, func(bgCtx context.Context) (api.BulkVMsResponse, error) {
 		const maxBulkWorkers = 4
 		sem := make(chan struct{}, maxBulkWorkers)
@@ -1244,10 +1318,11 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 		var resMu sync.Mutex
 
 		out := api.BulkVMsResponse{
-			Action:    "delete",
-			Requested: len(req.IDs),
-			Succeeded: []string{},
-			Failed:    []api.BulkVMItemError{},
+			Action:       "delete",
+			Requested:    len(req.IDs),
+			Succeeded:    []string{},
+			Failed:       []api.BulkVMItemError{},
+			OperationIDs: operationIDs(syncOps),
 		}
 		reconcileOwners := make(map[string]bool)
 		localDeleted := false
@@ -1265,7 +1340,9 @@ func (s *Server) handleBulkDeleteVMs(w http.ResponseWriter, r *http.Request) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
+				s.startOperation(bgCtx, t.op)
 				delErr := execOneDelete(bgCtx, t.vm)
+				s.finishOperation(bgCtx, t.op, nil, delErr)
 
 				resMu.Lock()
 				if delErr != nil {
@@ -1341,6 +1418,7 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 		requestedID string
 		vm          *db.VM
 		resolveErr  string
+		op          *db.Operation
 	}
 	targets := make([]actionTarget, len(req.IDs))
 	validCount := 0
@@ -1465,8 +1543,8 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
+	taskID := "task_" + uuid.NewString()[:8]
 	if req.Async {
-		taskID := "task_" + uuid.NewString()[:8]
 		resp := api.BulkVMsResponse{
 			Action:    action,
 			Status:    "queued",
@@ -1485,7 +1563,37 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, errBackendQueueFull.Error(), http.StatusTooManyRequests)
 			return
 		}
-		s.recordQueuedTask(callerOwner, resp)
+		specs := make([]bulkOperationSpec, len(targets))
+		for i, t := range targets {
+			targetID := t.requestedID
+			targetName := t.requestedID
+			if t.vm != nil {
+				targetID = vmIdentifier(t.vm)
+				targetName = t.vm.Name
+			}
+			specs[i] = bulkOperationSpec{
+				TargetID:   targetID,
+				TargetName: targetName,
+				Skip:       t.resolveErr != "",
+				Request:    map[string]interface{}{"id": t.requestedID, "action": action},
+			}
+		}
+		ops, opErr := s.prepareBulkOperations(ctx, callerOwner, "sandbox."+action, taskID, actor, specs)
+		if opErr != nil {
+			httpError(w, "could not persist queued operations: "+opErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		for i := range ops {
+			targets[i].op = ops[i]
+		}
+		resp.OperationIDs = operationIDs(ops)
+		if err := s.recordQueuedTask(ctx, callerOwner, resp); err != nil {
+			for _, op := range ops {
+				s.finishOperation(ctx, op, nil, err)
+			}
+			httpError(w, "could not persist task record: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if validCount > 0 {
 			var remaining atomic.Int64
 			remaining.Store(int64(validCount))
@@ -1514,7 +1622,7 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					Failed:    failed,
 				}
 				mu.Unlock()
-				s.recordTaskSummary(callerOwner, summary)
+				s.recordTaskSummary(bgCtx, callerOwner, summary)
 				if doReconcile && s.vmMgr != nil {
 					for _, owner := range ownersCopy {
 						s.vmMgr.ReconcileAccountNetworkIsolation(bgCtx, owner)
@@ -1531,7 +1639,9 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 				}
 				target := t
 				enqErr := s.enqueueBackendOp(func(bgCtx context.Context) {
+					s.startOperation(bgCtx, target.op)
 					opErr := execOneAction(bgCtx, target.vm)
+					s.finishOperation(bgCtx, target.op, nil, opErr)
 					mu.Lock()
 					if opErr != nil {
 						failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: opErr.Error()})
@@ -1551,6 +1661,7 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					finish(bgCtx)
 				})
 				if enqErr != nil {
+					s.finishOperation(context.Background(), target.op, nil, enqErr)
 					mu.Lock()
 					failed = append(failed, api.BulkVMItemError{ID: target.requestedID, Error: enqErr.Error()})
 					mu.Unlock()
@@ -1565,6 +1676,30 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	syncSpecs := make([]bulkOperationSpec, len(targets))
+	for i, t := range targets {
+		targetID := t.requestedID
+		targetName := t.requestedID
+		if t.vm != nil {
+			targetID = vmIdentifier(t.vm)
+			targetName = t.vm.Name
+		}
+		syncSpecs[i] = bulkOperationSpec{
+			TargetID:   targetID,
+			TargetName: targetName,
+			Skip:       t.resolveErr != "",
+			Request:    map[string]interface{}{"id": t.requestedID, "action": action},
+		}
+	}
+	syncOps, syncOpErr := s.prepareBulkOperations(ctx, callerOwner, "sandbox."+action, taskID, actor, syncSpecs)
+	if syncOpErr != nil {
+		httpError(w, "could not persist operations: "+syncOpErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	for i := range syncOps {
+		targets[i].op = syncOps[i]
+	}
+
 	resp, _, disconnected := runDetached(r, func(bgCtx context.Context) (api.BulkVMsResponse, error) {
 		const maxBulkWorkers = 4
 		sem := make(chan struct{}, maxBulkWorkers)
@@ -1572,10 +1707,11 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 		var resMu sync.Mutex
 
 		out := api.BulkVMsResponse{
-			Action:    action,
-			Requested: len(req.IDs),
-			Succeeded: []string{},
-			Failed:    []api.BulkVMItemError{},
+			Action:       action,
+			Requested:    len(req.IDs),
+			Succeeded:    []string{},
+			Failed:       []api.BulkVMItemError{},
+			OperationIDs: operationIDs(syncOps),
 		}
 		reconcileOwners := make(map[string]bool)
 		localNeedsReconcile := false
@@ -1593,7 +1729,9 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
+				s.startOperation(bgCtx, t.op)
 				opErr := execOneAction(bgCtx, t.vm)
+				s.finishOperation(bgCtx, t.op, nil, opErr)
 
 				resMu.Lock()
 				if opErr != nil {
