@@ -54,10 +54,20 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	} else if bind != "" || port != 0 {
 		host := bind
 		if host == "" {
+			host = cfg.Server.ListenHost()
+		}
+		if host == "" {
 			host = "127.0.0.1"
 		}
 		if port == 0 {
-			port = 18080
+			if _, pStr, err := net.SplitHostPort(strings.TrimPrefix(strings.TrimSpace(cfg.Server.ListenAddr), "tcp://")); err == nil {
+				if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+					port = p
+				}
+			}
+			if port == 0 {
+				port = 18080
+			}
 		}
 		cfg.Server.ListenAddr = net.JoinHostPort(host, strconv.Itoa(port))
 	}
@@ -188,7 +198,20 @@ func (e *envReader) boolValue(name string) *bool {
 }
 
 func (e *envReader) intInto(name string, dst *int) {
-	if v := e.intValue(name); v != 0 {
+	raw, ok := os.LookupEnv(name)
+	if !ok {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		e.fail(name, "an integer", raw)
+		return
+	}
+	if v >= 0 {
 		*dst = v
 	}
 }

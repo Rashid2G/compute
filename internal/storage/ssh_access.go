@@ -567,7 +567,8 @@ func newDebugfsImageFS(diskPath string) *debugfsImageFS {
 }
 
 func (d *debugfsImageFS) ReadFile(path string) ([]byte, error) {
-	if _, err := exec.LookPath("debugfs"); err != nil {
+	debugfsBin := fsTool("debugfs")
+	if _, err := exec.LookPath(debugfsBin); err != nil {
 		return nil, fmt.Errorf("debugfs not available: %w", err)
 	}
 	tmp, err := os.CreateTemp("", "compute-image-read-")
@@ -579,7 +580,7 @@ func (d *debugfsImageFS) ReadFile(path string) ([]byte, error) {
 	_ = os.Remove(tmpPath)
 	defer os.Remove(tmpPath)
 
-	out, err := exec.Command("debugfs", "-R", fmt.Sprintf("dump %s %s", path, tmpPath), d.diskPath).CombinedOutput()
+	out, err := exec.Command(debugfsBin, "-R", fmt.Sprintf("dump %s %s", path, tmpPath), d.diskPath).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("debugfs dump %s: %w (%s)", path, err, strings.TrimSpace(string(out)))
 	}
@@ -638,7 +639,8 @@ func (d *debugfsImageFS) MkdirAll(path string, mode os.FileMode, uid, gid int) e
 }
 
 func (d *debugfsImageFS) runScript(script string) error {
-	if _, err := exec.LookPath("debugfs"); err != nil {
+	debugfsBin := fsTool("debugfs")
+	if _, err := exec.LookPath(debugfsBin); err != nil {
 		return fmt.Errorf("debugfs not available: %w", err)
 	}
 	tmp, err := os.CreateTemp("", "compute-image-script-")
@@ -654,7 +656,7 @@ func (d *debugfsImageFS) runScript(script string) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	out, err := exec.Command("debugfs", "-w", "-f", tmpPath, d.diskPath).CombinedOutput()
+	out, err := exec.Command(debugfsBin, "-w", "-f", tmpPath, d.diskPath).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("debugfs: %w (%s)", err, strings.TrimSpace(string(out)))
 	}

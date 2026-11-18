@@ -32,25 +32,25 @@ dev-ui: ## Run the Vite Web UI development server
 	cd web && (bun run dev || npm run dev)
 
 dev: build setup-host ## Build binaries, configure host networking, and start computed locally
-	./bin/computed -listen 127.0.0.1:18080
+	COMPUTE_ADMIN_PASSWORD=$${COMPUTE_ADMIN_PASSWORD:-admin} ./bin/computed -listen 127.0.0.1:18080
 
 run: dev ## Alias for dev
 
 test: ## Run Go unit and integration tests
-	go test -count=1 ./...
+	go test -count=1 ./cmd/... ./internal/... ./pkg/...
 
 test-web: ## Typecheck and run Web UI test suite
 	cd web && npm run typecheck && npm test
 
 test-coverage: ## Run Go tests with coverage report
-	go test -coverprofile=coverage.out ./...
+	go test -coverprofile=coverage.out ./cmd/... ./internal/... ./pkg/...
 	go tool cover -func=coverage.out
 
 test-features: build ## Run end-to-end Firecracker feature test suite (requires KVM + running daemon)
 	./scripts/test-all-features.sh ./bin/compute 127.0.0.1:18080
 
 vet: ## Run go vet across all packages
-	go vet ./...
+	go vet ./cmd/... ./internal/... ./pkg/...
 
 docker-build: ## Build Docker Compose images for daemon and worker
 	docker compose build
@@ -87,11 +87,13 @@ validate-compose: ## Validate docker-compose.yml and .env.example contract
 benchmark: build ## Run automated control-plane and microVM lifecycle benchmarks
 	./scripts/benchmark.sh 127.0.0.1:18080 benchmark-results.json
 
-install: build ## Install compiled binaries to /usr/local/bin
-	sudo install -d /usr/local/bin
+install: build ## Install compiled binaries, helper scripts, and default config
+	sudo install -d /usr/local/bin /usr/local/share/compute /etc/compute
 	sudo install -m 755 bin/compute /usr/local/bin/compute
 	sudo install -m 755 bin/computed /usr/local/bin/computed
 	@if [ -f bin/compute-worker ]; then sudo install -m 755 bin/compute-worker /usr/local/bin/compute-worker; fi
+	@if [ -f scripts/build-rootfs-chroot.sh ]; then sudo install -m 755 scripts/build-rootfs-chroot.sh /usr/local/share/compute/build-rootfs-chroot.sh; fi
+	@if [ -f config/daemon.json ] && [ ! -f /etc/compute/daemon.json ]; then sudo install -m 644 config/daemon.json /etc/compute/daemon.json; fi
 
 systemd: ## Install systemd unit files to /etc/systemd/system
 	sudo install -d /etc/systemd/system

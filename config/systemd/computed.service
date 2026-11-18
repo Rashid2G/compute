@@ -1,19 +1,20 @@
 [Unit]
 Description=Compute Daemon
-After=network.target compute-net.service
-Wants=compute-net.service
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/var/lib/compute
-# Tailscale admin API credentials live in an untracked, mode-600 file:
+# Default Tailscale settings before EnvironmentFile so /etc/compute/compute.env can override them:
+Environment=COMPUTE_TAILSCALE_ENABLED=false
+Environment=COMPUTE_TAILSCALE_TAILNET=-
+# Tailscale admin API credentials and overrides live in an untracked, mode-600 file:
 #   COMPUTE_TAILSCALE_API_KEY=<key>
 # The leading '-' makes the file optional for hosts without the integration.
 EnvironmentFile=-/etc/compute/compute.env
-Environment=COMPUTE_TAILSCALE_ENABLED=false
-Environment=COMPUTE_TAILSCALE_TAILNET=-
-ExecStart=/usr/local/bin/computed -listen 0.0.0.0:18080
+ExecStart=/usr/local/bin/computed --config /etc/compute/daemon.json -listen 0.0.0.0:18080
 # Keep Firecracker microVM processes alive across daemon restarts/upgrades.
 # Reconciliation re-adopts them by PID when the daemon comes back.
 KillMode=process

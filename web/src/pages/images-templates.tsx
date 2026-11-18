@@ -709,6 +709,7 @@ export function ImagesTemplatesPage({
                             .then(() => {
                               toast.success(`Deleted template ${tpl.name}`);
                               void loadSnapshots();
+                              onRefreshCluster?.();
                             })
                             .catch((err) => toast.error(errorMessage(err)));
                         }}
@@ -730,7 +731,10 @@ export function ImagesTemplatesPage({
         vms={vms}
         open={createSnapOpen}
         onOpenChange={setCreateSnapOpen}
-        onCreated={() => void loadSnapshots()}
+        onCreated={() => {
+          void loadSnapshots();
+          onRefreshCluster?.();
+        }}
       />
 
       {launchModalTpl && (

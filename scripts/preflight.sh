@@ -40,13 +40,24 @@ version_ge() {
 }
 
 port_in_use() {
-    local port="$1" proto="${2:-tcp}"
+    local port="$1" proto="${2:-tcp}" bind_addr="${3:-}"
     command -v ss >/dev/null 2>&1 || return 1
+    local addrs
     if [ "$proto" = "udp" ]; then
-        ss -H -lun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
+        addrs="$(ss -H -lun 2>/dev/null | awk '{print $4}')"
     else
-        ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${port}$"
+        addrs="$(ss -H -ltn 2>/dev/null | awk '{print $4}')"
     fi
+    [ -n "${addrs}" ] || return 1
+    if [ -z "${bind_addr}" ] || [ "${bind_addr}" = "0.0.0.0" ] || [ "${bind_addr}" = "*" ] || [ "${bind_addr}" = "::" ] || [ "${bind_addr}" = "[::]" ]; then
+        printf '%s\n' "${addrs}" | grep -Eq "[:.]${port}$"
+        return $?
+    fi
+    # When checking a specific bind address (e.g. 127.0.0.1), only conflict with
+    # wildcard listeners (0.0.0.0, *, [::]) or that exact bind address.
+    local escaped_bind
+    escaped_bind="$(printf '%s' "${bind_addr}" | sed 's/[.[\\*^$()+?{|]/\\&/g')"
+    printf '%s\n' "${addrs}" | grep -Eq "^(0\.0\.0\.0|\\*|\\[::\\]|::|${escaped_bind})(:|\\.)${port}$"
 }
 
 section "Operating system and architecture"
@@ -195,10 +206,10 @@ case "${BIND_ADDRESS}" in
         say_warn "API binds a non-loopback address (${BIND_ADDRESS}): keep COMPUTE_AUTH_ENABLED=true and restrict access with a firewall"
         ;;
 esac
-if port_in_use "${API_PORT}" tcp; then
-    say_warn "TCP ${API_PORT} is already in use (an existing daemon or another service)"
+if port_in_use "${API_PORT}" tcp "${BIND_ADDRESS}"; then
+    say_warn "TCP ${BIND_ADDRESS}:${API_PORT} is already in use (an existing daemon or another service)"
 else
-    say_ok "TCP ${API_PORT} is free"
+    say_ok "TCP ${BIND_ADDRESS}:${API_PORT} is free"
 fi
 if [ "${EDGE_LISTEN}" = "-" ]; then
     say_info "HTTP edge explicitly disabled"

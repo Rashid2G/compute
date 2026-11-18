@@ -259,8 +259,8 @@ func resizeDiskSparse(diskPath string, diskMB int) error {
 		return err
 	}
 	// e2fsck check and resize2fs on ext4
-	_ = exec.Command("e2fsck", "-pf", diskPath).Run()
-	_ = exec.Command("resize2fs", "-f", diskPath).Run()
+	_ = exec.Command(fsTool("e2fsck"), "-pf", diskPath).Run()
+	_ = exec.Command(fsTool("resize2fs"), "-f", diskPath).Run()
 	return nil
 }
 

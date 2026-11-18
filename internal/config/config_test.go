@@ -341,3 +341,33 @@ func TestServePortRangeAndScheme(t *testing.T) {
 		t.Fatalf("scheme with serve TLS = %q, want https", got)
 	}
 }
+
+func TestEnvAPIPortPreservesListenHostAndZeroIntOverride(t *testing.T) {
+	clearEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "daemon.json")
+	content := `{
+		"server": {"listen": "0.0.0.0:18080"},
+		"resources": {"max_running_vms": 5, "min_free_disk_space_mb": 1024}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COMPUTE_API_PORT", "19090")
+	t.Setenv("COMPUTE_MAX_RUNNING_VMS", "0")
+	t.Setenv("COMPUTE_MIN_FREE_DISK_MB", "0")
+
+	cfg, err := LoadConfigFile(path)
+	if err != nil {
+		t.Fatalf("LoadConfigFile: %v", err)
+	}
+	if cfg.Server.ListenAddr != "0.0.0.0:19090" {
+		t.Fatalf("expected ListenAddr 0.0.0.0:19090, got %s", cfg.Server.ListenAddr)
+	}
+	if cfg.Resources.MaxRunningVMs != 0 {
+		t.Fatalf("expected MaxRunningVMs 0, got %d", cfg.Resources.MaxRunningVMs)
+	}
+	if cfg.Resources.MinFreeDiskSpaceMB != 0 {
+		t.Fatalf("expected MinFreeDiskSpaceMB 0, got %d", cfg.Resources.MinFreeDiskSpaceMB)
+	}
+}

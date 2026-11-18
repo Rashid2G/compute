@@ -221,7 +221,7 @@ export function AccessPage({
   async function handleCreateWorkerToken() {
     try {
       const created = await api.createWorkerToken({
-        name: 'cluster-enroll',
+        name: '',
         pool_id: tokenPool,
       });
       setCreatedWorkerToken(created.token);

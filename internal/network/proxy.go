@@ -178,20 +178,6 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
 
-	for _, domain := range p.baseDomains {
-		domain = strings.ToLower(strings.TrimSpace(domain))
-		if domain == "" {
-			continue
-		}
-		suffix := "." + domain
-		if strings.HasSuffix(host, suffix) {
-			subdomain := strings.TrimSuffix(host, suffix)
-			if m, ok := parseSubdomain(subdomain, r.URL.Path); ok {
-				return m
-			}
-		}
-	}
-
 	// 1. Published serve subdomains: <slug>.<serve-domain>. Every exposure has
 	// its own origin, so the app sees "/" as its root and no URL rewriting is
 	// needed.
@@ -239,7 +225,81 @@ func (p *IngressProxy) ParseRoute(r *http.Request) RouteMatch {
 		}
 	}
 
+	// 3. Path-based preview routes:
+	//   /preview/<target>/<port>[/...]
+	//   /api/v1/sandboxes/<target>/preview/<port>[/...]
+	//   /api/v1/vms/<target>/preview/<port>[/...]
+	if r.URL != nil {
+		if m, ok := parsePreviewPath(r.URL.Path); ok {
+			return m
+		}
+	}
+
 	return RouteMatch{IsMatch: false}
+}
+
+func parsePreviewPath(rawPath string) (RouteMatch, bool) {
+	if strings.HasPrefix(rawPath, "/preview/") {
+		rest := strings.TrimPrefix(rawPath, "/preview/")
+		return splitTargetPortSubpath(rest)
+	}
+	for _, apiPrefix := range []string{"/api/v1/sandboxes/", "/api/v1/vms/"} {
+		if strings.HasPrefix(rawPath, apiPrefix) {
+			rest := strings.TrimPrefix(rawPath, apiPrefix)
+			slashIdx := strings.IndexByte(rest, '/')
+			if slashIdx <= 0 {
+				continue
+			}
+			target := rest[:slashIdx]
+			afterTarget := rest[slashIdx:]
+			if !strings.HasPrefix(afterTarget, "/preview/") {
+				continue
+			}
+			portAndRest := strings.TrimPrefix(afterTarget, "/preview/")
+			return splitPortSubpath(target, portAndRest)
+		}
+	}
+	return RouteMatch{}, false
+}
+
+func splitTargetPortSubpath(rest string) (RouteMatch, bool) {
+	slashIdx := strings.IndexByte(rest, '/')
+	if slashIdx <= 0 {
+		return RouteMatch{}, false
+	}
+	target := rest[:slashIdx]
+	portAndRest := rest[slashIdx+1:]
+	if strings.HasPrefix(target, "@") && len(target) > 1 {
+		owner := strings.ToLower(target[1:])
+		if m, ok := splitTargetPortSubpath(portAndRest); ok {
+			m.Owner = owner
+			return m, true
+		}
+		return RouteMatch{}, false
+	}
+	return splitPortSubpath(target, portAndRest)
+}
+
+func splitPortSubpath(target, portAndRest string) (RouteMatch, bool) {
+	if target == "" || portAndRest == "" {
+		return RouteMatch{}, false
+	}
+	portStr := portAndRest
+	subPath := "/"
+	if slashIdx := strings.IndexByte(portAndRest, '/'); slashIdx >= 0 {
+		portStr = portAndRest[:slashIdx]
+		subPath = portAndRest[slashIdx:]
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return RouteMatch{}, false
+	}
+	return RouteMatch{
+		Target:  target,
+		Port:    port,
+		SubPath: subPath,
+		IsMatch: true,
+	}, true
 }
 
 // parseSubdomain parses the labels preceding a base domain. A single label is
@@ -424,6 +484,11 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		isPublic = p.resolver.IsPortPublic(ctx, targetInfo.ID, match.Port) ||
 			p.resolver.IsPortPublic(ctx, targetInfo.Name, match.Port)
+	}
+	if match.SubPath != "" && r.URL != nil && r.URL.Path != match.SubPath {
+		r = r.Clone(ctx)
+		r.URL.Path = match.SubPath
+		r.URL.RawPath = ""
 	}
 	p.serveResolved(w, r, targetInfo, &Exposure{OwnerID: targetInfo.OwnerID, GuestPort: match.Port, Public: isPublic})
 }

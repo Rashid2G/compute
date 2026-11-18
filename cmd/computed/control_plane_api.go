@@ -101,9 +101,9 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 				status = "attached"
 				attachedVM = v.Name
 			}
-			sizeGB := v.MemoryMB / 1024
-			if sizeGB < 10 {
-				sizeGB = 10
+			sizeGB := v.DiskMB / 1024
+			if sizeGB <= 0 {
+				sizeGB = 50
 			}
 			volOwner := v.OwnerID
 			if volOwner == "" {
@@ -127,10 +127,11 @@ func (s *Server) handleVolumes(w http.ResponseWriter, r *http.Request) {
 					Snapshots:  0,
 				})
 			} else {
-				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner {
+				if existing.Status != status || existing.AttachedVM != attachedVM || existing.OwnerID != volOwner || existing.SizeGB != sizeGB {
 					existing.Status = status
 					existing.AttachedVM = attachedVM
 					existing.OwnerID = volOwner
+					existing.SizeGB = sizeGB
 					_ = st.SaveVolume(ctx, existing)
 				}
 			}

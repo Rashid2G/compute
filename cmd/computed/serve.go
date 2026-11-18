@@ -34,7 +34,10 @@ import (
 
 // serveSlugFor builds a DNS-safe, globally unique serve label for an exposure.
 func (s *Server) ensureServeSlug(ctx context.Context, st *db.Store, v *db.VM, guestPort int, requested string) (string, error) {
-	base := sanitizeServeSlug(requested)
+	base := ""
+	if strings.TrimSpace(requested) != "" {
+		base = sanitizeServeSlug(requested)
+	}
 	if base == "" {
 		base = sanitizeServeSlug(fmt.Sprintf("%s-%d", v.Name, guestPort))
 	}
@@ -89,11 +92,16 @@ func randomLabelSuffix() string {
 // serveURLFor renders the absolute URL for an exposure.
 func (s *Server) serveURLFor(slug string, hostPort int) string {
 	scheme := s.cfg.ServeScheme()
+	cert, key := s.serveTLSPaths()
+	hasTLS := cert != "" && key != ""
+	if hasTLS {
+		scheme = "https"
+	}
 	if s.cfg.ServeMode() == "subdomain" {
 		domain := s.cfg.ServeDomainResolved()
 		host := slug + "." + domain
 		if isLocalServeDomain(domain) {
-			if s.cfg.Server.ServeTLSCertFile == "" && s.cfg.Server.ServeTLSKeyFile == "" && !strings.HasPrefix(s.cfg.Server.NormalizedPublicURL(), "https://") {
+			if !hasTLS && s.cfg.Server.ServeTLSCertFile == "" && s.cfg.Server.ServeTLSKeyFile == "" && !strings.HasPrefix(s.cfg.Server.NormalizedPublicURL(), "https://") {
 				scheme = "http"
 			}
 			if port := s.apiListenPort(); port != "" && port != "80" && port != "443" {
@@ -118,6 +126,14 @@ func (s *Server) serveURLFor(slug string, hostPort int) string {
 func isLocalServeDomain(domain string) bool {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	return domain == "localhost" || strings.HasSuffix(domain, ".localhost")
+}
+
+func isLocalServeHost(host string) bool {
+	if isLocalServeDomain(host) {
+		return true
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) apiListenPort() string {
@@ -442,7 +458,11 @@ func (r *servePortRegistry) ensure(pf *db.PortForward) (int, error) {
 	start, end := r.server.cfg.ServePortRange()
 	bind := strings.TrimSpace(r.server.cfg.Server.ServeBind)
 	if bind == "" {
-		bind = "127.0.0.1"
+		if lh := strings.TrimSpace(r.server.cfg.Server.ListenHost()); lh != "" && !isLocalServeHost(lh) {
+			bind = lh
+		} else {
+			bind = "127.0.0.1"
+		}
 	}
 	for port := start; port <= end; port++ {
 		if r.portTakenLocked(port) {

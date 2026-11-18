@@ -616,6 +616,7 @@ func ResolveConfig(explicitPath string) (GlobalConfig, string, error) {
 		"config/compute.json",
 		"config/network.json",
 		"/etc/compute/config.json",
+		"/etc/compute/daemon.json",
 	}
 
 	for _, p := range candidatePaths {

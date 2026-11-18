@@ -344,10 +344,37 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 			_ = s.store.UpdateJobState(ctx, job.ID, "queued", "")
 		}
 
-		// No workers are connected at all: fall back to running the job on the
-		// control-plane host so CLI submissions make progress instead of
-		// sitting in the queue forever.
-		if !dispatched && s.local != nil && len(workers) == 0 {
+		// Fall back to running the job on the control-plane host when no
+		// eligible worker could accept it (either no workers are connected,
+		// the job targets the default pool, or no ready workers exist in the
+		// requested pool) so CLI submissions make progress instead of sitting
+		// in the queue forever.
+		canFallbackLocal := len(workers) == 0 || job.PoolID == "default"
+		if !canFallbackLocal {
+			hasReadyWorkerInPool := false
+			for _, w := range workers {
+				nv := nodeViews[w.ID]
+				if nv != nil && nv.Status == "ready" && (req.PoolID == "" || nv.PoolID == req.PoolID) {
+					hasReadyWorkerInPool = true
+					break
+				}
+			}
+			if !hasReadyWorkerInPool {
+				hasUnconnectedReadyDBNode := false
+				for id, n := range dbNodesByID {
+					if _, connected := workerByID[id]; !connected && n.Status == "ready" && (req.PoolID == "" || n.PoolID == req.PoolID) {
+						hasUnconnectedReadyDBNode = true
+						break
+					}
+				}
+				if !hasUnconnectedReadyDBNode {
+					canFallbackLocal = true
+				}
+			} else {
+				canFallbackLocal = true
+			}
+		}
+		if !dispatched && s.local != nil && canFallbackLocal {
 			if s.local.TryStart(ctx, job, spec) {
 				assigned++
 			}

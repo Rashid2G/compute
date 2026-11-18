@@ -1,13 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"text/tabwriter"
+	"time"
+
+	"golang.org/x/term"
 )
 
 type CLIConfigFile struct {
@@ -33,6 +39,51 @@ func saveCLIConfig(conf CLIConfigFile) error {
 	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600)
 }
 
+func formatKeyTimestamp(raw interface{}) string {
+	if raw == nil {
+		return "-"
+	}
+	var ms int64
+	switch v := raw.(type) {
+	case float64:
+		ms = int64(v)
+	case int64:
+		ms = v
+	case int:
+		ms = int64(v)
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			ms = i
+		} else if f, err := v.Float64(); err == nil {
+			ms = int64(f)
+		}
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return "-"
+		}
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			return t.UTC().Format("2006-01-02 15:04:05")
+		}
+		if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+			ms = i
+		} else if f, err := strconv.ParseFloat(s, 64); err == nil {
+			ms = int64(f)
+		} else {
+			return s
+		}
+	default:
+		return fmt.Sprintf("%v", raw)
+	}
+	if ms <= 0 {
+		return "-"
+	}
+	if ms > 1e11 {
+		return time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05")
+	}
+	return time.Unix(ms, 0).UTC().Format("2006-01-02 15:04:05")
+}
+
 func handleAuthCommand(ctx context.Context, client *DaemonClient, args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: compute auth <login|signup|whoami|keys|logout> [options]")
@@ -49,11 +100,30 @@ func handleAuthCommand(ctx context.Context, client *DaemonClient, args []string)
 		password := loginCmd.String("password", "", "User password")
 		loginCmd.Parse(subArgs)
 
-		if *username == "" || *password == "" {
+		var stdinReader *bufio.Reader
+		readLine := func() string {
+			if stdinReader == nil {
+				stdinReader = bufio.NewReader(os.Stdin)
+			}
+			line, _ := stdinReader.ReadString('\n')
+			return strings.TrimRight(line, "\r\n")
+		}
+
+		if *username == "" {
 			fmt.Print("Username/Email: ")
-			fmt.Scanln(username)
+			*username = strings.TrimSpace(readLine())
+		}
+		if *password == "" {
 			fmt.Print("Password: ")
-			fmt.Scanln(password)
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				pwBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Println()
+				if err == nil {
+					*password = strings.TrimRight(string(pwBytes), "\r\n")
+				}
+			} else {
+				*password = readLine()
+			}
 		}
 
 		if *username == "" || *password == "" {
@@ -168,7 +238,7 @@ func handleAuthCommand(ctx context.Context, client *DaemonClient, args []string)
 				} else if p, ok := k["key_prefix"].(string); ok {
 					prefix = p
 				}
-				fmt.Fprintf(w, "%v\t%v\t%s...\t%v\n", k["id"], k["name"], prefix, k["created_at"])
+				fmt.Fprintf(w, "%v\t%v\t%s...\t%s\n", k["id"], k["name"], prefix, formatKeyTimestamp(k["created_at"]))
 			}
 			w.Flush()
 			return

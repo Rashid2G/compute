@@ -3006,6 +3006,20 @@ func (s *Server) handleKeyActions(w http.ResponseWriter, r *http.Request) {
 
 // EnsureHostSSHKey auto-generates or loads the master host Ed25519 SSH key.
 func (s *Server) EnsureHostSSHKey() (ssh.Signer, string, error) {
+	explicitPath := strings.TrimSpace(s.cfg.Images.SSHKeyPath)
+	if explicitPath != "" && explicitPath != "/var/lib/compute/images/ssh/id_ed25519" {
+		if data, err := os.ReadFile(explicitPath); err == nil {
+			if signer, err := ssh.ParsePrivateKey(data); err == nil {
+				pubData, _ := os.ReadFile(explicitPath + ".pub")
+				return signer, string(pubData), nil
+			}
+		} else if os.IsNotExist(err) {
+			if signer, pubBytes, genErr := generateHostEd25519(explicitPath); genErr == nil {
+				return signer, string(pubBytes), nil
+			}
+		}
+	}
+
 	var candidates []string
 	if s.cfg.Images.SSHKeyPath != "" {
 		candidates = append(candidates, s.cfg.Images.SSHKeyPath)
@@ -3132,9 +3146,16 @@ func (s *Server) resolveSSHKey(keyPath, pubKey, keyName string) []ssh.AuthMethod
 	}
 
 	// Auto-provision master host Ed25519 private key if none exists on host
-	if len(signers) == 0 {
+	// or if an explicit SSHKeyPath is configured and does not exist yet.
+	needHostKey := len(signers) == 0
+	if !needHostKey && s.cfg.Images.SSHKeyPath != "" {
+		if _, err := os.Stat(s.cfg.Images.SSHKeyPath); os.IsNotExist(err) {
+			needHostKey = true
+		}
+	}
+	if needHostKey {
 		if signer, _, err := s.EnsureHostSSHKey(); err == nil && signer != nil {
-			signers = append(signers, signer)
+			signers = append([]ssh.Signer{signer}, signers...)
 		}
 	}
 

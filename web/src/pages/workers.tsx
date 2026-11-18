@@ -129,6 +129,7 @@ export function WorkersPage({
   const [newTokenName, setNewTokenName] = useState('');
   const [newTokenPool, setNewTokenPool] = useState('default');
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
+  const [generatedTokenName, setGeneratedTokenName] = useState('');
   const [copiedToken, setCopiedToken] = useState(false);
 
   const [createPoolOpen, setCreatePoolOpen] = useState(false);
@@ -466,12 +467,14 @@ export function WorkersPage({
 
   async function handleGenerateToken(e: React.FormEvent) {
     e.preventDefault();
+    const boundName = newTokenName.trim();
     try {
       const res = await api.createWorkerToken({
-        name: newTokenName.trim() || 'worker-enroll',
+        name: boundName,
         pool_id: newTokenPool || 'default',
       });
       setGeneratedToken(res.token);
+      setGeneratedTokenName(res.name ?? boundName);
       setNewTokenName('');
       toast.success('Generated mTLS worker enrollment token');
       await loadData();
@@ -679,13 +682,13 @@ export function WorkersPage({
           >
             <div>
               <label className="block text-[11px] text-muted-foreground mb-1">
-                Token Description
+                Bound Worker Name (optional — leave blank for any worker)
               </label>
               <input
                 type="text"
                 value={newTokenName}
                 onChange={(e) => setNewTokenName(e.target.value)}
-                placeholder="us-east-baremetal-02"
+                placeholder="Optional (e.g. us-east-baremetal-02)"
                 className="h-8 w-56 border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
               />
             </div>
@@ -727,7 +730,7 @@ export function WorkersPage({
                   type="button"
                   onClick={() => {
                     void navigator.clipboard.writeText(
-                      `sudo compute-worker run --control-plane http://${window.location.hostname}:18080 --token ${generatedToken} --pool ${newTokenPool}`,
+                      `sudo compute-worker run --control-plane ${window.location.origin} --token ${generatedToken}${generatedTokenName ? ` --name ${generatedTokenName}` : ''} --pool ${newTokenPool}`,
                     );
                     setCopiedToken(true);
                     setTimeout(() => setCopiedToken(false), 1500);
@@ -743,9 +746,7 @@ export function WorkersPage({
                 </button>
               </div>
               <pre className="overflow-x-auto bg-[#0a0a0b] p-2.5 font-mono text-[11.5px] text-[#f5f5f4]">
-                sudo compute-worker run --control-plane http://
-                {window.location.hostname}:18080 --token {generatedToken} --pool{' '}
-                {newTokenPool}
+                {`sudo compute-worker run --control-plane ${window.location.origin} --token ${generatedToken}${generatedTokenName ? ` --name ${generatedTokenName}` : ''} --pool ${newTokenPool}`}
               </pre>
             </div>
           )}

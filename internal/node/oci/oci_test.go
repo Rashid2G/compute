@@ -8,6 +8,9 @@ import (
 )
 
 func TestRootfsBuilder_BuildExt4(t *testing.T) {
+	if _, err := lookSystemBinary("mkfs.ext4"); err != nil {
+		t.Skipf("mkfs.ext4 not available: %v", err)
+	}
 	tmpDir := t.TempDir()
 	rootDir := filepath.Join(tmpDir, "rootfs")
 	_ = os.MkdirAll(filepath.Join(rootDir, "bin"), 0755)

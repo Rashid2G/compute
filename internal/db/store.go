@@ -164,7 +164,7 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 		return fmt.Errorf("invalid worker token")
 	}
 	boundName := strings.TrimSpace(t.Name)
-	if boundName == legacyUnboundTokenName {
+	if boundName == legacyUnboundTokenName || boundName == "worker-enroll" || boundName == "cluster-enroll" {
 		boundName = ""
 	}
 	workerName = strings.TrimSpace(workerName)
@@ -192,7 +192,7 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 		return fmt.Errorf("worker token expired")
 	}
 	bindName := boundName
-	if bindName == "" {
+	if workerName != "" {
 		bindName = workerName
 	}
 	now := time.Now().UTC()
