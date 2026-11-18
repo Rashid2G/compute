@@ -84,6 +84,43 @@ func formatKeyTimestamp(raw interface{}) string {
 	return time.Unix(ms, 0).UTC().Format("2006-01-02 15:04:05")
 }
 
+// apiKeyStatus reports whether an API key has been revoked.
+func apiKeyStatus(raw interface{}) string {
+	if raw == nil {
+		return "active"
+	}
+	switch v := raw.(type) {
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" || s == "-" || strings.HasPrefix(s, "0001-01-01") || strings.HasPrefix(s, "1970-01-01") {
+			return "active"
+		}
+		return "revoked"
+	case float64:
+		if v <= 0 {
+			return "active"
+		}
+		return "revoked"
+	case int64:
+		if v <= 0 {
+			return "active"
+		}
+		return "revoked"
+	case int:
+		if v <= 0 {
+			return "active"
+		}
+		return "revoked"
+	case json.Number:
+		if i, err := v.Int64(); err == nil && i <= 0 {
+			return "active"
+		}
+		return "revoked"
+	default:
+		return "revoked"
+	}
+}
+
 func handleAuthCommand(ctx context.Context, client *DaemonClient, args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: compute auth <login|signup|whoami|keys|logout> [options]")
@@ -230,7 +267,7 @@ func handleAuthCommand(ctx context.Context, client *DaemonClient, args []string)
 				return
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tKEY PREFIX\tCREATED AT")
+			fmt.Fprintln(w, "ID\tNAME\tKEY PREFIX\tSTATUS\tCREATED AT")
 			for _, k := range keys {
 				prefix := ""
 				if p, ok := k["prefix"].(string); ok {
@@ -238,7 +275,7 @@ func handleAuthCommand(ctx context.Context, client *DaemonClient, args []string)
 				} else if p, ok := k["key_prefix"].(string); ok {
 					prefix = p
 				}
-				fmt.Fprintf(w, "%v\t%v\t%s...\t%s\n", k["id"], k["name"], prefix, formatKeyTimestamp(k["created_at"]))
+				fmt.Fprintf(w, "%v\t%v\t%s...\t%s\t%s\n", k["id"], k["name"], prefix, apiKeyStatus(k["revoked_at"]), formatKeyTimestamp(k["created_at"]))
 			}
 			w.Flush()
 			return

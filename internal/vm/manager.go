@@ -606,6 +606,7 @@ type CreateRequest struct {
 	DiskGB           int    `json:"disk_gb,omitempty"`   // Optional convenience override in GB
 	Description      string `json:"description,omitempty"`
 	AutoStart        bool   `json:"auto_start,omitempty"`
+	Start            *bool  `json:"start,omitempty"`      // Alias for auto_start
 	Image            string `json:"image,omitempty"`      // Custom image, template, or "ubuntu-24"
 	Template         string `json:"template,omitempty"`   // VM Template name or ID to launch from
 	CloneFrom        string `json:"clone_from,omitempty"` // VM ID to clone persistent disk from
@@ -3134,7 +3135,6 @@ func (m *Manager) CleanupLocalVMFiles(ctx context.Context, vmID string) error {
 // ReconcileAndPrune synchronizes database records with live system processes,
 // cleans up stale state from dead microVMs, and removes orphaned TAP interfaces.
 func (m *Manager) ReconcileAndPrune(ctx context.Context) ([]string, error) {
-	log.Printf("[vm] ReconcileAndPrune invoked")
 	m.mu.Lock()
 
 	vms, err := m.store.ListVMs(ctx)

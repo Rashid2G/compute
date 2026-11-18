@@ -485,12 +485,24 @@ func (p *IngressProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		isPublic = p.resolver.IsPortPublic(ctx, targetInfo.ID, match.Port) ||
 			p.resolver.IsPortPublic(ctx, targetInfo.Name, match.Port)
 	}
+	exp := &Exposure{
+		ID:        fmt.Sprintf("preview:%s:%d", targetInfo.ID, match.Port),
+		OwnerID:   targetInfo.OwnerID,
+		GuestPort: match.Port,
+		Public:    isPublic,
+	}
+	// Authorize against the public request path first: rewriting r.URL.Path to
+	// the subpath below would drop "/preview/<target>/<port>/" from the
+	// authorize redirect's "next" URL.
+	if !exp.Public && !p.authorizePrivateServe(w, r, targetInfo, exp) {
+		return
+	}
 	if match.SubPath != "" && r.URL != nil && r.URL.Path != match.SubPath {
 		r = r.Clone(ctx)
 		r.URL.Path = match.SubPath
 		r.URL.RawPath = ""
 	}
-	p.serveResolved(w, r, targetInfo, &Exposure{OwnerID: targetInfo.OwnerID, GuestPort: match.Port, Public: isPublic})
+	p.serveResolved(w, r, targetInfo, exp)
 }
 
 // ServeExposure proxies a port-mode request bound to one exposure ID.
@@ -552,12 +564,90 @@ func (p *IngressProxy) authorizePrivateServe(w http.ResponseWriter, r *http.Requ
 			return true
 		}
 	}
-	if p.authorizeBaseURL != "" && acceptsHTML(r.Header.Get("Accept")) {
+	if base := p.authorizeBaseURLForRequest(r); base != "" && acceptsHTML(r.Header.Get("Accept")) {
 		next := serveRequestURL(r)
-		http.Redirect(w, r, p.authorizeBaseURL+"/api/v1/serve/authorize?next="+url.QueryEscape(next), http.StatusFound)
+		http.Redirect(w, r, base+"/api/v1/serve/authorize?next="+url.QueryEscape(next), http.StatusFound)
 		return false
 	}
 	http.Error(w, "unauthorized: private sandbox exposure requires authentication", http.StatusUnauthorized)
+	return false
+}
+
+// authorizeBaseURLForRequest returns the daemon base URL browsers should use to
+// authenticate. When the configured base URL points at loopback but the request
+// arrived through a public host (e.g. Tailscale Serve forwarding
+// "compute-lab.tailb1be99.ts.net" to 127.0.0.1:18080), the request's own scheme
+// and host are used so remote browsers are not redirected to loopback.
+func (p *IngressProxy) authorizeBaseURLForRequest(r *http.Request) string {
+	base := p.authorizeBaseURL
+	if base == "" || r == nil {
+		return base
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" || !isLoopbackHost(u.Hostname()) {
+		return base
+	}
+	host := requestForwardedHost(r)
+	if host == "" || isLoopbackHost(stripHostPort(host)) {
+		return base
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	u.Scheme = scheme
+	u.Host = normalizeRequestHost(scheme, host)
+	return strings.TrimRight(u.String(), "/")
+}
+
+// requestForwardedHost returns the externally visible host, preferring
+// X-Forwarded-Host over the request's Host header.
+func requestForwardedHost(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+		if idx := strings.IndexByte(fwd, ','); idx >= 0 {
+			fwd = strings.TrimSpace(fwd[:idx])
+		}
+		return fwd
+	}
+	return strings.TrimSpace(r.Host)
+}
+
+func stripHostPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return strings.Trim(host, "[]")
+}
+
+// normalizeRequestHost drops a port that is redundant for the given scheme.
+func normalizeRequestHost(scheme, host string) string {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		if strings.Contains(h, ":") {
+			return "[" + h + "]"
+		}
+		return h
+	}
+	return host
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(stripHostPort(host)))
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
 	return false
 }
 

@@ -2229,7 +2229,12 @@ func (s *Server) handleImageActions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "image not found", http.StatusNotFound)
 			return
 		}
-		json.NewEncoder(w).Encode(img)
+		// Custom images are always reported with kind "custom" so CLI and SDK
+		// clients can label the image type.
+		json.NewEncoder(w).Encode(struct {
+			*db.CustomImage
+			Kind string `json:"kind"`
+		}{CustomImage: img, Kind: "custom"})
 
 	case http.MethodDelete:
 		img, err := s.resolveAccessibleImage(ctx, r, nameOrID)
@@ -4599,6 +4604,14 @@ func (s *Server) handleWorkerActions(w http.ResponseWriter, r *http.Request) {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		httpError(w, "worker id required", http.StatusBadRequest)
+		return
+	}
+
+	// Alias /api/v1/workers/tokens[/<id>] to /api/v1/worker-tokens[/<id>].
+	if path == "tokens" || strings.HasPrefix(path, "tokens/") {
+		clone := r.Clone(r.Context())
+		clone.URL.Path = "/api/v1/worker-" + path
+		s.handleWorkerTokens(w, clone)
 		return
 	}
 

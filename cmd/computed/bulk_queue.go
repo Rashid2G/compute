@@ -243,6 +243,7 @@ type BulkCloneVMsRequest struct {
 	NetworkIsolation string          `json:"network_isolation,omitempty"`
 	NetworkIsolated  *bool           `json:"network_isolated,omitempty"`
 	AutoStart        bool            `json:"auto_start,omitempty"`
+	Start            *bool           `json:"start,omitempty"` // Alias for auto_start
 	Protected        *bool           `json:"protected,omitempty"`
 	WorkerID         string          `json:"worker_id,omitempty"`
 	PoolID           string          `json:"pool_id,omitempty"`
@@ -250,6 +251,9 @@ type BulkCloneVMsRequest struct {
 }
 
 func (s *Server) validateCreateItem(ctx context.Context, r *http.Request, ownerID string, isAdmin bool, authorizedOwners []string, req *vm.CreateRequest) error {
+	if !req.AutoStart && req.Start != nil && *req.Start {
+		req.AutoStart = true
+	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.Name)), "job-") {
 		return &httpStatusError{code: http.StatusBadRequest, err: errors.New("name prefix 'job-' is reserved for ephemeral CI jobs")}
 	}
@@ -371,6 +375,9 @@ func (s *Server) createVMPlaced(ctx context.Context, req vm.CreateRequest, vcpus
 }
 
 func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.CreateRequest) (*db.VM, error) {
+	if !req.AutoStart && req.Start != nil && *req.Start {
+		req.AutoStart = true
+	}
 	vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
 	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
@@ -428,6 +435,9 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 }
 
 func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID string, req vm.CreateRequest) (*db.VM, error) {
+	if !req.AutoStart && req.Start != nil && *req.Start {
+		req.AutoStart = true
+	}
 	vcpus, memoryMB, diskMB := s.estimateRequestResources(ctx, req)
 	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
@@ -815,7 +825,8 @@ func (s *Server) handleBulkCloneVMs(w http.ResponseWriter, r *http.Request) {
 					DiskGB:           req.DiskGB,
 					NetworkIsolation: req.NetworkIsolation,
 					NetworkIsolated:  req.NetworkIsolated,
-					AutoStart:        req.AutoStart,
+					AutoStart:        req.AutoStart || (req.Start != nil && *req.Start),
+					Start:            req.Start,
 					Protected:        req.Protected,
 					WorkerID:         req.WorkerID,
 					PoolID:           req.PoolID,

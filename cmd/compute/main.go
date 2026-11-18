@@ -1601,7 +1601,11 @@ func handleImageCommand(ctx context.Context, client *DaemonClient, args []string
 		}
 		fmt.Printf("Image Details: %s\n", img.Name)
 		fmt.Printf("  ID:       %s\n", img.ID)
-		fmt.Printf("  Kind:     %s\n", img.Kind)
+		kind := img.Kind
+		if kind == "" {
+			kind = "custom"
+		}
+		fmt.Printf("  Kind:     %s\n", kind)
 		fmt.Printf("  Status:   %s\n", img.Status)
 		fmt.Printf("  Size:     %d MB\n", img.SizeMB)
 		fmt.Printf("  Packages: %s\n", strings.Join(img.Packages, ", "))
