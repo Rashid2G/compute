@@ -253,13 +253,13 @@ make build-images          # builds vmlinux + ubuntu-24.04.ext4 into ./data/imag
           <div class="tab-panel" data-tab-panel="binaries">
             <div class="code-block">
               <div class="code-header"><span>1. download and install pre-built compute CLI (Linux x86_64 / arm64)</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
 compute --version</code></pre>
             </div>
             <div class="code-block">
               <div class="code-header"><span>2. download complete suite or verify SHA-256 checksums</span><button class="copy-btn" type="button">Copy</button></div>
               <pre><code># Download full suite (compute, computed, compute-worker, compute-bench)
-curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.0.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.1.0_linux_amd64.tar.gz
 curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
 sha256sum --check --ignore-missing checksums.txt</code></pre>
             </div>
@@ -383,7 +383,7 @@ COMPUTE_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
       </section>
 
       <!-- 04. Sandboxes -->
-      <section id="sandboxes" class="doc-section" data-keywords="sandbox create start stop ssh exec console web preview vcpus memory disk scp files process bulk-delete bulk-action">
+      <section id="sandboxes" class="doc-section" data-keywords="sandbox create start stop ssh exec command build-command console web preview options settings vcpus memory disk scp files process bulk-delete bulk-action">
         <div class="section-head">
           <span class="section-id">04</span>
           <h2>Creating, Operating &amp; Bulk Managing Sandboxes</h2>
@@ -393,9 +393,15 @@ COMPUTE_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
           a MAC/IP lease on <code>mft3br0</code>, a dedicated TAP interface (<code>mftap-*</code>), and an interactive SSH/exec target.
           Pin placement to a specific pool or node using <code>pool_id</code> / <code>worker_id</code> in <code>POST /api/v1/vms</code>
           or the Web UI (the scheduler selects automatically otherwise).
+          Execute commands inside running guests using <code>compute exec &lt;sandbox&gt; -- &lt;cmd...&gt;</code> with real-time streamed
+          feedback, exit codes, and durations. Newly provisioned machines can run automatic post-boot setup routines via
+          <code>--command &lt;cmd&gt;</code> / <code>--build-command &lt;cmd&gt;</code>, triggering <code>sandbox.build_command_executed</code> audit logging.
+          In the Web Console, use the interactive <strong>Execute Command dialog</strong> (Cmd+K or sandbox action menu) with command presets,
+          and configure sandboxes via the <strong>Sandbox Options &amp; Settings</strong> dialog featuring sidebar navigation across Overview,
+          Access &amp; Keys, Networking, Preview &amp; Terminal Settings, Resource Ceilings, and Danger Zone.
           Bulk lifecycle operations run concurrently in a single request via <code>POST /api/v1/vms/bulk-create</code>,
           <code>POST /api/v1/vms/bulk-clone</code>, <code>POST /api/v1/vms/bulk-delete</code>, and
-          <code>POST /api/v1/vms/bulk-action</code> (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>,
+          <code>POST /api/v1/vms/bulk-action</code> / <code>POST /api/v1/vms/bulk-actions</code> (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>,
           <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>).
           Send <code>"async": true</code> to queue the work on the daemon: it returns <code>202</code> with a
           <code>task_id</code> and keeps running even if the browser refreshes or disconnects. Poll
@@ -404,13 +410,14 @@ COMPUTE_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
         </p>
 
         <div class="code-block">
-          <div class="code-header"><span>sandbox lifecycle, streaming exec, file copy, and single-request bulk actions</span><button class="copy-btn" type="button">Copy</button></div>
-          <pre><code># Provision and start a 2 vCPU / 2048 MiB sandbox with real CLI flags
-compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk 20480 --image ubuntu-24 --start
+          <div class="code-header"><span>sandbox lifecycle, streaming exec, build commands, file copy, and bulk actions</span><button class="copy-btn" type="button">Copy</button></div>
+          <pre><code># Provision and start a 2 vCPU / 2048 MiB sandbox with post-boot build command
+compute sandbox create --name dev-api --vcpus 2 --memory 2048 --disk 20480 --image ubuntu-24 --command "npm install &amp;&amp; npm run build" --start
 
 # Interactive shell or streamed command execution
 compute sandbox ssh dev-api
-compute sandbox exec dev-api -- uname -a
+compute exec dev-api -- uname -a
+compute exec --json dev-api -- cat /etc/os-release
 
 # Copy local directory tree into guest /workspace and publish it over HTTP ingress
 compute scp -r ./my-service dev-api:/workspace/
@@ -785,7 +792,11 @@ compute unexpose web 8080</code></pre>
               </tr>
               <tr>
                 <td><code>compute sandbox</code></td>
-                <td><code>list</code>, <code>create --name --tier|--vcpus --memory --disk --image --template --isolated --protected --start</code>, <code>start</code>, <code>stop</code>, <code>delete</code>, <code>info</code>.</td>
+                <td><code>list</code>, <code>create --name --tier|--vcpus --memory --disk --image --template --command &lt;cmd&gt; --ssh-key &lt;name|path&gt; --ssh-password --isolated --protected --start</code>, <code>start</code>, <code>stop</code>, <code>delete</code>, <code>info</code>.</td>
+              </tr>
+              <tr>
+                <td><code>compute exec</code></td>
+                <td><code>[user@]&lt;target&gt; [--] &lt;command...&gt;</code>: executes command inside sandbox with real-time streaming feedback, exit codes, and durations (flags: <code>--no-stream</code>, <code>--json</code>, <code>--timeout</code>, <code>--user</code>). Also accessible via <code>compute sandbox exec</code>.</td>
               </tr>
               <tr>
                 <td><code>compute sandbox save-state|resume</code></td>
@@ -809,7 +820,7 @@ compute unexpose web 8080</code></pre>
               </tr>
               <tr>
                 <td><code>compute image</code></td>
-                <td><code>list</code>, <code>build --name &lt;name&gt; [--base] [--packages a,b] [--size]</code>, <code>inspect</code>, <code>delete</code>.</td>
+                <td><code>list</code>, <code>build --name &lt;name&gt; [--base &lt;image&gt;] [--packages a,b] [--command &lt;cmd&gt;] [--size &lt;MiB&gt;] [--desc &lt;text&gt;]</code>, <code>inspect</code>, <code>delete</code>.</td>
               </tr>
               <tr>
                 <td><code>compute job</code> / <code>worker</code> / <code>pool</code></td>
@@ -869,7 +880,7 @@ compute unexpose web 8080</code></pre>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
                 <td><code>/api/v1/vms/{id}/run</code> &middot; <code>/stop</code> &middot; <code>/exec</code></td>
-                <td>Boot microVM, stop microVM, or execute shell command synchronously via SSH.</td>
+                <td>Boot microVM, stop microVM, or execute shell command with real-time streaming output (also available at <code>/api/v1/sandboxes/{id}/exec</code>).</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
@@ -889,7 +900,7 @@ compute unexpose web 8080</code></pre>
               <tr>
                 <td><span class="method-badge method-post">POST</span></td>
                 <td><code>/api/v1/vms/bulk-create</code> &middot; <code>/bulk-clone</code> &middot; <code>/bulk-delete</code> &middot; <code>/bulk-action</code></td>
-                <td>Single-request bulk create, clone, delete, or lifecycle action (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>, <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>). Send <code>"async": true</code> to queue durably and resolve via <code>GET /api/v1/tasks/{id}</code>.</td>
+                <td>Single-request bulk create, clone, delete, or lifecycle action (<code>start</code>, <code>stop</code>, <code>restart</code>, <code>save-state</code>, <code>resume</code>, <code>protect</code>, <code>unprotect</code>, <code>delete</code>; accepts <code>/bulk-actions</code>). Send <code>"async": true</code> to queue durably and resolve via <code>GET /api/v1/tasks/{id}</code>.</td>
               </tr>
               <tr>
                 <td><span class="method-badge method-get">GET</span> / <span class="method-badge method-post">POST</span> / <span class="method-badge method-delete">DELETE</span></td>
@@ -996,7 +1007,7 @@ with Sandbox.create(
       </section>
 
       <footer class="doc-footer">
-        <span>Compute v1.0.0 &middot; MIT License</span>
+        <span>Compute v1.1.0 &middot; MIT License</span>
         <div class="doc-footer-links">
           <a href="install.md">install.md</a>
           <a href="configuration.md">configuration.md</a>

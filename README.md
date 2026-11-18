@@ -1,8 +1,8 @@
-# Compute v1.0.0 — Self-Hosted Firecracker MicroVM Platform
+# Compute v1.1.0 — Self-Hosted Firecracker MicroVM Platform
 
 Compute is an open-source, self-hosted platform for running hardware-isolated **Firecracker microVM sandboxes** and **distributed compute jobs** on Linux hosts with `/dev/kvm`.
 
-- **Sub-Second MicroVMs**: Boot, clone, pause/resume live memory (`save-state`), snapshot templates, stream terminals/exec, and serve guest HTTP ports at their own origin (subdomain or dedicated port) so redirects, cookies and SPAs just work.
+- **Sub-Second MicroVMs**: Boot, clone, pause/resume live memory (`save-state`), snapshot templates, stream terminals/exec, run build commands, and serve guest HTTP ports at their own origin (subdomain or dedicated port) so redirects, cookies and SPAs just work.
 - **Multi-Node Workers & Load Balancing**: Enroll remote `compute-worker` nodes over outbound WebSocket RPC/TCP tunnels (zero inbound worker ports) with configurable placement (`least_loaded`, `round_robin`, `bin_pack`, `spread`).
 - **Live Migration & Bulk Operations**: Migrate sandboxes and entire pools across workers (`POST /api/v1/vms/:id/migrate`, `POST /api/v1/pools/:id/migrate`) and run single-request bulk actions/deletes.
 - **Resource Management**: Hard disk ceilings, soft + hard CPU overcommit weights, RAM hard guarantees with idle SSD auto-hibernation (`auto_hibernated`), and HTTP 429 `ResourceLimitError` admission responses.
@@ -50,7 +50,7 @@ Requires Linux (`x86_64` or `arm64`) with `/dev/kvm`, cgroup v2, and rootful Doc
 **Pre-built `compute` CLI** (Linux `amd64` / `arm64`, see [GitHub Releases](https://github.com/Rashid2G/compute/releases)):
 
 ```bash
-curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.0.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
 compute --version
 ```
 
