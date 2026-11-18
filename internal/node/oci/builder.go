@@ -51,14 +51,30 @@ func (b *RootfsBuilder) BuildExt4(ctx context.Context, rootDir, outputPath strin
 	_ = os.Remove(outputPath)
 
 	// Execute mkfs.ext4 -F -d <rootDir> -L mfroot <outputPath> <sizeMB>M
+	mkfsBin, err := lookSystemBinary("mkfs.ext4")
+	if err != nil {
+		return fmt.Errorf("mkfs.ext4 failed: %w", err)
+	}
 	sizeArg := fmt.Sprintf("%dM", sizeMB)
-	cmd := exec.CommandContext(ctx, "mkfs.ext4", "-F", "-q", "-d", rootDir, "-L", "mfroot", outputPath, sizeArg)
+	cmd := exec.CommandContext(ctx, mkfsBin, "-F", "-q", "-d", rootDir, "-L", "mfroot", outputPath, sizeArg)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mkfs.ext4 failed (%v): %s", err, string(output))
 	}
 
 	return nil
+}
+
+func lookSystemBinary(name string) (string, error) {
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+	for _, candidate := range []string{"/usr/sbin/" + name, "/sbin/" + name, "/usr/local/sbin/" + name} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("executable %q not found in $PATH, /usr/sbin, or /sbin", name)
 }
 
 // ExtractTarToDir extracts a tarball to targetDir.

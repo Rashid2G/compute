@@ -164,7 +164,7 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 		return fmt.Errorf("invalid worker token")
 	}
 	boundName := strings.TrimSpace(t.Name)
-	if boundName == legacyUnboundTokenName {
+	if boundName == legacyUnboundTokenName || boundName == "worker-enroll" || boundName == "cluster-enroll" {
 		boundName = ""
 	}
 	workerName = strings.TrimSpace(workerName)
@@ -192,7 +192,7 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 		return fmt.Errorf("worker token expired")
 	}
 	bindName := boundName
-	if bindName == "" {
+	if workerName != "" {
 		bindName = workerName
 	}
 	now := time.Now().UTC()
@@ -1582,12 +1582,12 @@ func (s *Store) DeleteSSHKey(ctx context.Context, idOrName string) error {
 	return err
 }
 
-// GetWorkerPool retrieves a pool by ID
+// GetWorkerPool retrieves a pool by ID or name
 func (s *Store) GetWorkerPool(ctx context.Context, id string) (*WorkerPool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	p := new(WorkerPool)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, labels_json, policy_json, created_at, updated_at FROM worker_pools WHERE id = ?`, id).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, labels_json, policy_json, created_at, updated_at FROM worker_pools WHERE id = ? OR name = ?`, id, id).Scan(
 		&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &p.CreatedAt, &p.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1599,11 +1599,11 @@ func (s *Store) GetWorkerPool(ctx context.Context, id string) (*WorkerPool, erro
 	return p, nil
 }
 
-// DeleteWorkerPool deletes a worker pool
+// DeleteWorkerPool deletes a worker pool by ID or name
 func (s *Store) DeleteWorkerPool(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `DELETE FROM worker_pools WHERE id = ?`, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM worker_pools WHERE id = ? OR name = ?`, id, id)
 	return err
 }
 

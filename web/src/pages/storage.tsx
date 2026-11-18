@@ -127,9 +127,10 @@ export function StoragePage({
     () => volumes.reduce((acc, v) => acc + (v.used_gb || 0), 0),
     [volumes],
   );
-  const maxPoolGB = Math.round(
-    (config?.resources?.max_total_disk_mb || 512000) / 1024,
-  );
+  const maxPoolGB =
+    config?.resources?.max_total_disk_mb && config.resources.max_total_disk_mb > 0
+      ? Math.round(config.resources.max_total_disk_mb / 1024)
+      : null;
 
   function handleCreateVolume(e: React.FormEvent) {
     e.preventDefault();
@@ -276,7 +277,7 @@ export function StoragePage({
             Provisioned Capacity
           </div>
           <div className="font-mono text-[18px] font-medium text-foreground tabular">
-            {totalProvisionedGB} GB / {maxPoolGB} GB
+            {totalProvisionedGB} GB / {maxPoolGB !== null ? `${maxPoolGB} GB` : 'Unlimited'}
           </div>
           <div className="font-mono text-[11px] text-muted-foreground">
             Used: {totalUsedGB.toFixed(1)} GB
@@ -614,7 +615,12 @@ export function StoragePage({
                           type="button"
                           onClick={() => {
                             setAttachModalVol(vol);
-                            setSelectedVMForAttach(vms[0]?.name || '');
+                            setSelectedVMForAttach(
+                              vms.find(
+                                (v) =>
+                                  v.status !== 'running' && v.status !== 'paused',
+                              )?.name || '',
+                            );
                           }}
                           title="Attach to Sandbox"
                           className="inline-flex items-center gap-1 border border-border bg-background px-2 py-1 text-[11px] text-foreground hover:border-primary"

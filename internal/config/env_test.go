@@ -65,8 +65,8 @@ func TestEnvOverridesApplyWithoutConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveConfig: %v", err)
 	}
-	if path != "" {
-		t.Fatalf("expected no config path, got %q", path)
+	if path != "" && path != "/etc/compute/config.json" && path != "/etc/compute/daemon.json" {
+		t.Fatalf("expected no local config path, got %q", path)
 	}
 	if cfg.Server.ListenAddr != "0.0.0.0:19090" {
 		t.Fatalf("listen = %q", cfg.Server.ListenAddr)

@@ -158,7 +158,7 @@ func (m *Manager) createUserWithOrg(ctx context.Context, email, username, displa
 	if !dns.ValidLabel(username) {
 		return nil, fmt.Errorf("invalid username: must be lowercase letters, digits, and dashes (a DNS label, max %d chars) so sandboxes are reachable at <sandbox>.<username>.<base-domain>", dns.MaxLabelLength)
 	}
-	if role == "" {
+	if role == "" || role == "member" {
 		role = "user"
 	}
 	if role != "admin" && role != "user" {
@@ -362,32 +362,37 @@ func isQueryAuthPermitted(r *http.Request) bool {
 		"/api/v1/workers",
 	}
 
-	// Strictly allow only known WebSocket, SSE, exec terminal, preview proxy, and logs stream routes:
+	// Strictly allow only known WebSocket, SSE, exec/terminal, SSH, preview proxy, and logs stream routes:
 	// - WebSocket endpoint: path == "/api/v1/ws" || strings.HasPrefix(path, "/api/v1/ws/")
+	// - SSH WebSocket endpoint: strings.HasPrefix(path, "/api/v1/ssh/") && path != "/api/v1/ssh/"
 	// - Events endpoint: path == "/api/v1/events" || path == "/api/v1/events/stream"
-	// - Sandboxes/VMs exec terminal: strings.HasSuffix(path, "/exec")
+	// - Sandboxes/VMs exec or terminal: strings.HasSuffix(path, "/exec") || strings.HasSuffix(path, "/terminal") || strings.HasSuffix(path, "/ssh")
 	// - Sandboxes/VMs preview proxy: strings.Contains(path, "/preview/") || strings.HasPrefix(path, "/preview/")
 	// - Logs stream: strings.HasSuffix(path, "/logs")
+	isAllowedSandboxSubroute := strings.HasSuffix(path, "/exec") ||
+		strings.HasSuffix(path, "/terminal") ||
+		strings.HasSuffix(path, "/ssh") ||
+		strings.HasSuffix(path, "/logs") ||
+		strings.Contains(path, "/preview/")
+
 	isAllowedStreamingRoute := (path == "/api/v1/ws" || strings.HasPrefix(path, "/api/v1/ws/")) ||
+		(strings.HasPrefix(path, "/api/v1/ssh/") && strings.Trim(strings.TrimPrefix(path, "/api/v1/ssh/"), "/") != "") ||
 		(path == "/api/v1/events" || path == "/api/v1/events/stream") ||
-		strings.HasSuffix(path, "/exec") ||
-		(strings.Contains(path, "/preview/") || strings.HasPrefix(path, "/preview/")) ||
-		strings.HasSuffix(path, "/logs")
+		strings.HasPrefix(path, "/preview/") ||
+		isAllowedSandboxSubroute
 
 	if !isAllowedStreamingRoute {
 		return false
 	}
 
 	// For any standard REST CRUD endpoints, query auth is strictly forbidden unless
-	// accessing an allowed sub-route (/exec, /preview/..., /logs).
+	// accessing an allowed sub-route (/exec, /terminal, /ssh, /preview/..., /logs).
 	for _, prefix := range crudPrefixes {
 		if path == prefix || path == prefix+"/" {
 			return false
 		}
 		if strings.HasPrefix(path, prefix+"/") {
-			if !strings.HasSuffix(path, "/exec") &&
-				!strings.HasSuffix(path, "/logs") &&
-				!strings.Contains(path, "/preview/") {
+			if !isAllowedSandboxSubroute {
 				return false
 			}
 		}

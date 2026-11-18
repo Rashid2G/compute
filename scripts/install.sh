@@ -102,7 +102,10 @@ fi
 
 echo ""
 echo "==> [3/4] Installing Firecracker kernel (${IMAGES_DIR}/vmlinux)..."
-mkdir -p "${DATA_DIR}/data" "${IMAGES_DIR}/ssh" "${DATA_DIR}/vms"
+mkdir -p "${DATA_DIR}" "${IMAGES_DIR}/ssh" "${DATA_DIR}/vms" 2>/dev/null || sudo mkdir -p "${DATA_DIR}" "${IMAGES_DIR}/ssh" "${DATA_DIR}/vms"
+if [ "$(id -u)" -ne 0 ] && { [ ! -w "${IMAGES_DIR}" ] || [ ! -w "${IMAGES_DIR}/ssh" ]; }; then
+    sudo chown -R "$(id -u):$(id -g)" "${IMAGES_DIR}" 2>/dev/null || true
+fi
 chmod 700 "${IMAGES_DIR}/ssh" 2>/dev/null || true
 
 COMPUTE_KERNEL_SRC="${COMPUTE_KERNEL_SRC:-}" \

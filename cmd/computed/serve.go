@@ -34,7 +34,10 @@ import (
 
 // serveSlugFor builds a DNS-safe, globally unique serve label for an exposure.
 func (s *Server) ensureServeSlug(ctx context.Context, st *db.Store, v *db.VM, guestPort int, requested string) (string, error) {
-	base := sanitizeServeSlug(requested)
+	base := ""
+	if strings.TrimSpace(requested) != "" {
+		base = sanitizeServeSlug(requested)
+	}
 	if base == "" {
 		base = sanitizeServeSlug(fmt.Sprintf("%s-%d", v.Name, guestPort))
 	}
@@ -89,11 +92,16 @@ func randomLabelSuffix() string {
 // serveURLFor renders the absolute URL for an exposure.
 func (s *Server) serveURLFor(slug string, hostPort int) string {
 	scheme := s.cfg.ServeScheme()
+	cert, key := s.serveTLSPaths()
+	hasTLS := cert != "" && key != ""
+	if hasTLS {
+		scheme = "https"
+	}
 	if s.cfg.ServeMode() == "subdomain" {
 		domain := s.cfg.ServeDomainResolved()
 		host := slug + "." + domain
 		if isLocalServeDomain(domain) {
-			if s.cfg.Server.ServeTLSCertFile == "" && s.cfg.Server.ServeTLSKeyFile == "" && !strings.HasPrefix(s.cfg.Server.NormalizedPublicURL(), "https://") {
+			if !hasTLS && s.cfg.Server.ServeTLSCertFile == "" && s.cfg.Server.ServeTLSKeyFile == "" && !strings.HasPrefix(s.cfg.Server.NormalizedPublicURL(), "https://") {
 				scheme = "http"
 			}
 			if port := s.apiListenPort(); port != "" && port != "80" && port != "443" {
@@ -118,6 +126,14 @@ func (s *Server) serveURLFor(slug string, hostPort int) string {
 func isLocalServeDomain(domain string) bool {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	return domain == "localhost" || strings.HasSuffix(domain, ".localhost")
+}
+
+func isLocalServeHost(host string) bool {
+	if isLocalServeDomain(host) {
+		return true
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) apiListenPort() string {
@@ -160,8 +176,19 @@ func (s *Server) prepareServe(ctx context.Context, st *db.Store, pf *db.PortForw
 		}
 		slug = allocated
 	}
-	pf.HostPort = 0
 	pf.Subdomain = slug
+	// An explicitly requested host port also opens a dedicated listener in
+	// subdomain mode, so callers can reach the exposure by "<host>:<port>".
+	if pf.HostPort > 0 && s.servePorts != nil {
+		port, err := s.servePorts.ensure(pf)
+		if err != nil {
+			return err
+		}
+		pf.HostPort = port
+		pf.PublicURL = s.serveURLFor(slug, port)
+		return nil
+	}
+	pf.HostPort = 0
 	pf.PublicURL = s.serveURLFor(slug, 0)
 	return nil
 }
@@ -248,7 +275,7 @@ func (s *Server) handleServeAuthorize(w http.ResponseWriter, r *http.Request) {
 		httpError(w, "next must be an absolute serve URL", http.StatusBadRequest)
 		return
 	}
-	if !s.isServeHost(target.Hostname()) {
+	if !s.isServeHost(target.Hostname()) && !strings.EqualFold(target.Hostname(), requestHostname(r)) {
 		httpError(w, "next is not a serve URL of this daemon", http.StatusBadRequest)
 		return
 	}
@@ -345,29 +372,94 @@ func (s *Server) serveExposureForURL(ctx context.Context, u *url.URL) (*db.PortF
 	if s.cfg.ServeMode() == "subdomain" {
 		domain := s.cfg.ServeDomainResolved()
 		host := strings.ToLower(u.Hostname())
-		if !strings.HasSuffix(host, "."+domain) {
-			return nil, fmt.Errorf("not a serve host")
+		if strings.HasSuffix(host, "."+domain) {
+			slug := strings.TrimSuffix(host, "."+domain)
+			if slug != "" && !strings.Contains(slug, ".") {
+				pf, err := st.GetPortForwardBySubdomain(ctx, slug)
+				if err == nil && pf != nil {
+					return pf, nil
+				}
+			}
 		}
-		slug := strings.TrimSuffix(host, "."+domain)
-		if slug == "" || strings.Contains(slug, ".") {
-			return nil, fmt.Errorf("not a serve host")
-		}
-		return st.GetPortForwardBySubdomain(ctx, slug)
+		return s.servePreviewExposureForPath(ctx, st, u)
 	}
 	port, err := strconv.Atoi(u.Port())
-	if err != nil || port <= 0 {
-		return nil, fmt.Errorf("serve URL has no port")
-	}
-	pfs, err := st.ListPortForwards(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, pf := range pfs {
-		if pf != nil && pf.HostPort == port {
-			return pf, nil
+	if err == nil && port > 0 {
+		pfs, lerr := st.ListPortForwards(ctx)
+		if lerr != nil {
+			return nil, lerr
+		}
+		for _, pf := range pfs {
+			if pf != nil && pf.HostPort == port {
+				return pf, nil
+			}
 		}
 	}
-	return nil, fmt.Errorf("no exposure on port %d", port)
+	return s.servePreviewExposureForPath(ctx, st, u)
+}
+
+// servePreviewExposureForPath resolves a path-based preview URL
+// ("https://host/preview/<sandbox>/<port>/") to an exposure. The ID matches the
+// synthetic exposure ID the ingress proxy derives for path routes so minted
+// serve tokens verify correctly.
+func (s *Server) servePreviewExposureForPath(ctx context.Context, st *db.Store, u *url.URL) (*db.PortForward, error) {
+	if s.ingressProxy == nil || u == nil {
+		return nil, fmt.Errorf("not a serve host")
+	}
+	match := s.ingressProxy.ParseRoute(&http.Request{Host: u.Host, URL: u})
+	if !match.IsMatch || match.Target == "" || match.Port <= 0 {
+		return nil, fmt.Errorf("not a serve host")
+	}
+	var target *network.TargetInfo
+	var err error
+	if match.Owner != "" {
+		target, err = s.ResolveTargetForOwner(ctx, match.Target, match.Owner)
+	} else {
+		target, err = s.ResolveTarget(ctx, match.Target)
+	}
+	if err != nil || target == nil {
+		return nil, fmt.Errorf("sandbox %q not found", match.Target)
+	}
+	pf := &db.PortForward{
+		ID:        fmt.Sprintf("preview:%s:%d", target.ID, match.Port),
+		OwnerID:   target.OwnerID,
+		VMID:      target.ID,
+		VMName:    target.Name,
+		GuestPort: match.Port,
+		Public:    false,
+	}
+	if pfs, lerr := st.ListPortForwardsForVM(ctx, target.OwnerID, target.ID, target.Name); lerr == nil {
+		for _, existing := range pfs {
+			if existing == nil || existing.GuestPort != match.Port {
+				continue
+			}
+			pf.Public = existing.Public
+			pf.HostPort = existing.HostPort
+			pf.Subdomain = existing.Subdomain
+			pf.PublicURL = existing.PublicURL
+			break
+		}
+	}
+	return pf, nil
+}
+
+// requestHostname returns the externally visible request hostname, preferring
+// X-Forwarded-Host (set by reverse proxies such as Tailscale Serve).
+func requestHostname(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-Host"))
+	if idx := strings.IndexByte(host, ','); idx >= 0 {
+		host = strings.TrimSpace(host[:idx])
+	}
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.Trim(host, "[]"))
 }
 
 func (s *Server) isServeHost(host string) bool {
@@ -436,51 +528,74 @@ func (r *servePortRegistry) ensure(pf *db.PortForward) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e := r.entries[pf.ID]; e != nil {
-		return e.port, nil
+		if pf.HostPort <= 0 || e.port == pf.HostPort {
+			return e.port, nil
+		}
+		// The explicitly requested port changed: drop the old listener and
+		// reopen on the new port below.
+		delete(r.entries, pf.ID)
+		_ = e.srv.Close()
+		_ = e.ln.Close()
 	}
 
 	start, end := r.server.cfg.ServePortRange()
 	bind := strings.TrimSpace(r.server.cfg.Server.ServeBind)
 	if bind == "" {
-		bind = "127.0.0.1"
+		if lh := strings.TrimSpace(r.server.cfg.Server.ListenHost()); lh != "" && !isLocalServeHost(lh) {
+			bind = lh
+		} else {
+			bind = "127.0.0.1"
+		}
+	}
+	// Honor an explicitly requested host port before scanning the range.
+	if pf.HostPort > 0 && !r.portTakenLocked(pf.HostPort) {
+		if port, err := r.listenLocked(pf, bind, pf.HostPort); err == nil {
+			return port, nil
+		}
 	}
 	for port := start; port <= end; port++ {
 		if r.portTakenLocked(port) {
 			continue
 		}
-		ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
-		if err != nil {
-			continue
+		if port, err := r.listenLocked(pf, bind, port); err == nil {
+			return port, nil
 		}
-		id := pf.ID
-		handler := http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
-			if r.server.ingressProxy == nil {
-				http.Error(w, "ingress proxy not initialized", http.StatusInternalServerError)
-				return
-			}
-			r.server.ingressProxy.ServeExposure(w, rq, id)
-		})
-		srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-		// WebSocket upgrades require HTTP/1.1 hijacking; disable HTTP/2 on
-		// serve listeners so browsers do not negotiate extended CONNECT.
-		srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
-		entry := &servePortEntry{port: port, srv: srv, ln: ln}
-		r.entries[id] = entry
-		cert, key := r.server.serveTLSPaths()
-		go func() {
-			var err error
-			if cert != "" && key != "" {
-				err = srv.ServeTLS(ln, cert, key)
-			} else {
-				err = srv.Serve(ln)
-			}
-			if err != nil && err != http.ErrServerClosed {
-				log.Printf("[computed] serve listener :%d for %s stopped: %v", port, id, err)
-			}
-		}()
-		return port, nil
 	}
 	return 0, fmt.Errorf("no free serve port in %d-%d (increase COMPUTE_SERVE_PORT_END)", start, end)
+}
+
+// listenLocked starts the exposure listener on one port. Callers hold r.mu.
+func (r *servePortRegistry) listenLocked(pf *db.PortForward, bind string, port int) (int, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(bind, strconv.Itoa(port)))
+	if err != nil {
+		return 0, err
+	}
+	id := pf.ID
+	handler := http.HandlerFunc(func(w http.ResponseWriter, rq *http.Request) {
+		if r.server.ingressProxy == nil {
+			http.Error(w, "ingress proxy not initialized", http.StatusInternalServerError)
+			return
+		}
+		r.server.ingressProxy.ServeExposure(w, rq, id)
+	})
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	// WebSocket upgrades require HTTP/1.1 hijacking; disable HTTP/2 on
+	// serve listeners so browsers do not negotiate extended CONNECT.
+	srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
+	r.entries[id] = &servePortEntry{port: port, srv: srv, ln: ln}
+	cert, key := r.server.serveTLSPaths()
+	go func() {
+		var err error
+		if cert != "" && key != "" {
+			err = srv.ServeTLS(ln, cert, key)
+		} else {
+			err = srv.Serve(ln)
+		}
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("[computed] serve listener :%d for %s stopped: %v", port, id, err)
+		}
+	}()
+	return port, nil
 }
 
 func (r *servePortRegistry) portTakenLocked(port int) bool {
@@ -516,7 +631,8 @@ func (r *servePortRegistry) restore(ctx context.Context) {
 		return
 	}
 	for _, pf := range pfs {
-		// Only records that were assigned a listener port belong to port mode.
+		// Only records that own a listener port belong here: port-mode
+		// exposures, or subdomain exposures with an explicit host port.
 		if pf == nil || pf.HostPort <= 0 {
 			continue
 		}
@@ -525,7 +641,7 @@ func (r *servePortRegistry) restore(ctx context.Context) {
 			log.Printf("[computed] could not restore serve listener for %s: %v", pf.ID, err)
 			continue
 		}
-		wantURL := r.server.serveURLFor("", port)
+		wantURL := r.server.serveURLFor(pf.Subdomain, port)
 		if port != pf.HostPort || pf.PublicURL != wantURL {
 			pf.HostPort = port
 			pf.PublicURL = wantURL

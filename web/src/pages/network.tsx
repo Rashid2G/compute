@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Network,
@@ -16,6 +16,7 @@ import type {
   NetworkConfig,
   NetworkInspectResult,
   PortForwardRecord,
+  VM,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -23,14 +24,25 @@ interface NetworkPageProps {
   allocations: NetworkAllocation[];
   networkConfig: NetworkConfig | null;
   portForwards?: PortForwardRecord[];
+  vms?: VM[];
   onRefresh: () => void;
   embedded?: boolean;
+}
+
+function usableSubnetIPs(cidr?: string | null): number {
+  const raw = (cidr || '').trim();
+  const slashIdx = raw.indexOf('/');
+  if (slashIdx === -1) return 253;
+  const prefix = Number(raw.slice(slashIdx + 1));
+  if (!Number.isInteger(prefix) || prefix < 8 || prefix > 30) return 253;
+  return Math.max(1, Math.pow(2, 32 - prefix) - 3);
 }
 
 export function NetworkPage({
   allocations,
   networkConfig,
   portForwards: portForwardsProp,
+  vms: vmsProp,
   onRefresh,
   embedded = false,
 }: NetworkPageProps) {
@@ -44,6 +56,7 @@ export function NetworkPage({
   const [portForwards, setPortForwards] = useState<PortForwardRecord[]>(
     () => portForwardsProp ?? [],
   );
+  const [fetchedVMs, setFetchedVMs] = useState<VM[]>([]);
   const [addPfOpen, setAddPfOpen] = useState(false);
   const [pfGuestPort, setPfGuestPort] = useState(8080);
   const [pfVmId, setPfVmId] = useState('');
@@ -58,6 +71,45 @@ export function NetworkPage({
       setPortForwards(portForwardsProp);
     }
   }, [portForwardsProp]);
+
+  useEffect(() => {
+    if (vmsProp !== undefined || typeof api.listVMs !== 'function') return;
+    void api
+      .listVMs()
+      .then((list) => setFetchedVMs(list || []))
+      .catch(() => setFetchedVMs([]));
+  }, [vmsProp, addPfOpen]);
+
+  const targetSandboxes = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; ip_address: string }>();
+    const allVMs = vmsProp ?? fetchedVMs;
+    for (const v of allVMs) {
+      if (v.owner_id === 'jobs' || v.name?.startsWith('job-')) continue;
+      map.set(v.id, {
+        id: v.id,
+        name: v.name || v.id,
+        ip_address: v.ip_address || '',
+      });
+    }
+    for (const a of allocations) {
+      if (!map.has(a.vm_id)) {
+        map.set(a.vm_id, {
+          id: a.vm_id,
+          name: a.vm_name || a.vm_id,
+          ip_address: a.ip_address || '',
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [vmsProp, fetchedVMs, allocations]);
+
+  const usableIPs = useMemo(
+    () =>
+      usableSubnetIPs(
+        networkConfig?.subnet_cidr || networkConfig?.subnet || '172.16.0.0/24',
+      ),
+    [networkConfig],
+  );
 
   const loadPortForwards = useCallback(async (force = false) => {
     if (!force && hasPortForwardsPropRef.current) return;
@@ -108,11 +160,11 @@ export function NetworkPage({
   function handleCreatePortForward(e: React.FormEvent) {
     e.preventDefault();
     if (!pfVmId) return;
-    const vmAlloc = allocations.find((a) => a.vm_id === pfVmId);
+    const vmTarget = targetSandboxes.find((s) => s.id === pfVmId);
     const payload = {
       guest_port: pfGuestPort,
       vm_id: pfVmId,
-      vm_name: vmAlloc?.vm_name || pfVmId,
+      vm_name: vmTarget?.name || pfVmId,
       protocol: pfProto,
       public: pfPublic,
     };
@@ -125,6 +177,7 @@ export function NetworkPage({
       .then(async () => {
         toast.success(`Added exposure ${label}`, { id: toastID });
         await loadPortForwards(true);
+        onRefresh?.();
       })
       .catch((err) => {
         toast.error(errorMessage(err), { id: toastID });
@@ -211,7 +264,7 @@ export function NetworkPage({
             IP Leases
           </div>
           <div className="text-[13px] font-medium text-foreground tabular">
-            {allocations.length} / 253 IPs
+            {allocations.length} / {usableIPs} IPs
           </div>
           <div className="text-success text-[11px]">
             Live SQLite IPAM Allocations
@@ -439,9 +492,9 @@ export function NetworkPage({
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
                   >
                     <option value="">Select sandbox…</option>
-                    {allocations.map((a) => (
-                      <option key={a.vm_id} value={a.vm_id}>
-                        {a.vm_name} ({a.ip_address})
+                    {targetSandboxes.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name}{s.ip_address ? ` (${s.ip_address})` : ''}
                       </option>
                     ))}
                   </select>
@@ -469,7 +522,6 @@ export function NetworkPage({
                     className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[12px] text-foreground"
                   >
                     <option value="tcp">TCP</option>
-                    <option value="udp">UDP</option>
                   </select>
                 </div>
               </div>
@@ -569,9 +621,10 @@ export function NetworkPage({
                           onClick={() => {
                             void api
                               .deletePortForward(pf.id)
-                              .then(() => {
+                              .then(async () => {
                                 toast.success('Deleted port forward rule');
-                                void loadPortForwards(true);
+                                await loadPortForwards(true);
+                                onRefresh?.();
                               })
                               .catch((err) => toast.error(errorMessage(err)));
                           }}

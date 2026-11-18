@@ -2,7 +2,7 @@ import { AlertTriangle, ExternalLink, Globe, Info, Terminal } from 'lucide-react
 
 import { CopyButton } from '@/components/copy-button';
 import { sandboxAccess } from '@/lib/sandbox-access';
-import type { VM } from '@/lib/types';
+import type { PortForwardRecord, VM } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 function AccessValue({ value, href }: { value: string; href?: string }) {
@@ -63,14 +63,21 @@ function AccessRow({
 export function SandboxAccessCard({
   vm,
   user = 'compute',
+  portForwards,
   className,
 }: {
   vm: VM;
   user?: string;
+  portForwards?: PortForwardRecord[];
   className?: string;
 }) {
   const access = sandboxAccess(vm, { user });
   const running = vm.status === 'running';
+  const activeForwards = (portForwards ?? []).filter(
+    (pf) =>
+      (pf.vm_id === vm.id || pf.vm_name === vm.name || (!pf.vm_id && !pf.vm_name)) &&
+      pf.status !== 'inactive',
+  );
 
   return (
     <div
@@ -145,6 +152,53 @@ export function SandboxAccessCard({
           </div>
         </div>
       )}
+
+      {activeForwards.length > 0 ? (
+        <div className="space-y-1.5 pt-0.5">
+          {activeForwards.map((pf) => {
+            const url =
+              pf.public_url ||
+              (pf.host_port > 0
+                ? `${window.location.protocol}//${window.location.hostname}:${pf.host_port}`
+                : '');
+            return (
+              <div key={pf.id} className="flex items-center gap-2 min-w-0">
+                <span className="w-10 shrink-0 font-mono text-[10px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
+                  :{pf.guest_port}
+                </span>
+                <span
+                  className={cn(
+                    'shrink-0 border px-1.5 py-0.5 font-mono text-[9.5px] uppercase',
+                    pf.public
+                      ? 'border-success/40 bg-success/10 text-success'
+                      : 'border-border bg-muted/40 text-muted-foreground',
+                  )}
+                >
+                  {pf.public ? 'public' : 'private'}
+                </span>
+                {url ? (
+                  <>
+                    <AccessValue value={url} href={url} />
+                    <ExternalLink
+                      className="h-3 w-3 shrink-0 text-muted-foreground"
+                      aria-hidden="true"
+                    />
+                    <CopyButton
+                      value={url}
+                      label={`Copy exposed URL for port ${pf.guest_port}`}
+                      className="h-6 w-6 shrink-0"
+                    />
+                  </>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
+                    {pf.host_port > 0 ? `:${pf.host_port} → :${pf.guest_port}` : `:${pf.guest_port}`}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {access.cliSSH ? (
         <AccessRow label="CLI" value={access.cliSSH} copyLabel="Copy CLI command" />
