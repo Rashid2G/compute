@@ -615,9 +615,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mkdir -p /dev/pts /dev/shm /run/sshd /run/lock
+mkdir -p /dev/pts /dev/shm
 mount -t tmpfs -o mode=1777 tmpfs /dev/shm 2>/dev/null || true
 mount -t tmpfs tmpfs /run 2>/dev/null || true
+mkdir -p /run/sshd /run/lock
 chmod 1777 /dev/shm /tmp /var/tmp /run/lock 2>/dev/null || true
 chmod 0755 /run/sshd
 mount -t devpts devpts /dev/pts -o mode=620,ptmxmode=666,gid=5 2>/dev/null || true
