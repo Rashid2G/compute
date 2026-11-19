@@ -1,4 +1,4 @@
-.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean clean-hard clean-hard-all preflight host-prepare setup-host build-images validate-compose benchmark bench install systemd release-tarballs
+.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean clean-hard clean-hard-all preflight host-prepare setup-host build-images deploy-lab validate-compose benchmark bench install systemd release-tarballs
 
 VERSION ?= 1.1.0
 RELEASE_NAME ?= Compute
@@ -96,6 +96,9 @@ build-images: ## Install the Firecracker kernel and build the rootfs into IMAGES
 	COMPUTE_KERNEL_SHA256="$(COMPUTE_KERNEL_SHA256)" \
 	./scripts/build-kernel.sh $(IMAGES_DIR)
 	./scripts/build-rootfs.sh $(IMAGES_DIR) 2048
+
+deploy-lab: ## Deploy current worktree to compute-lab host (rebuilds daemon & updates CLI)
+	./scripts/deploy-compute-lab.sh
 
 validate-compose: ## Validate docker-compose.yml and .env.example contract
 	./scripts/validate-compose.sh

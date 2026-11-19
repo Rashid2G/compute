@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Deploy to Compute Lab",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/deploy-compute-lab.sh",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "new",
+        "focus": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Deploy to Compute Lab (Dry Run)",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/deploy-compute-lab.sh --dry-run",
+      "presentation": {
+        "reveal": "always",
+        "panel": "new"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
