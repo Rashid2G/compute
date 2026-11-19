@@ -166,24 +166,113 @@ func main() {
 		return
 
 	case "__complete":
-		if len(os.Args) >= 3 && os.Args[2] == "vms" {
+		if len(os.Args) >= 3 {
 			quickCtx, quickCancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
 			defer quickCancel()
-			vms, err := client.ListVMs(quickCtx)
-			if err == nil {
-				seen := make(map[string]bool)
-				for _, v := range vms {
-					if v.Name != "" && !seen[v.Name] {
-						fmt.Println(v.Name)
-						seen[v.Name] = true
+			switch os.Args[2] {
+			case "vms", "sandboxes":
+				vms, err := client.ListVMs(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, v := range vms {
+						if v.Name != "" && !seen[v.Name] {
+							fmt.Println(v.Name)
+							seen[v.Name] = true
+						}
+						if v.ID != "" && !seen[v.ID] {
+							fmt.Println(v.ID)
+							seen[v.ID] = true
+						}
+						if v.InternalID != "" && !seen[v.InternalID] {
+							fmt.Println(v.InternalID)
+							seen[v.InternalID] = true
+						}
 					}
-					if v.ID != "" && !seen[v.ID] {
-						fmt.Println(v.ID)
-						seen[v.ID] = true
+				}
+			case "images":
+				images, err := client.ListImages(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, img := range images {
+						if img.Name != "" && !seen[img.Name] {
+							fmt.Println(img.Name)
+							seen[img.Name] = true
+						}
+						if img.ID != "" && !seen[img.ID] {
+							fmt.Println(img.ID)
+							seen[img.ID] = true
+						}
 					}
-					if v.InternalID != "" && !seen[v.InternalID] {
-						fmt.Println(v.InternalID)
-						seen[v.InternalID] = true
+				}
+			case "templates":
+				tmpls, err := client.ListTemplates(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, t := range tmpls {
+						if t.Name != "" && !seen[t.Name] {
+							fmt.Println(t.Name)
+							seen[t.Name] = true
+						}
+						if t.ID != "" && !seen[t.ID] {
+							fmt.Println(t.ID)
+							seen[t.ID] = true
+						}
+					}
+				}
+			case "pools":
+				pools, err := client.ListPools(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, p := range pools {
+						if p.Name != "" && !seen[p.Name] {
+							fmt.Println(p.Name)
+							seen[p.Name] = true
+						}
+						if p.ID != "" && !seen[p.ID] {
+							fmt.Println(p.ID)
+							seen[p.ID] = true
+						}
+					}
+				}
+			case "workers":
+				workers, err := client.ListWorkers(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, w := range workers {
+						if w.Name != "" && !seen[w.Name] {
+							fmt.Println(w.Name)
+							seen[w.Name] = true
+						}
+						if w.ID != "" && !seen[w.ID] {
+							fmt.Println(w.ID)
+							seen[w.ID] = true
+						}
+					}
+				}
+			case "jobs":
+				jobs, err := client.ListJobs(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, j := range jobs {
+						if j.ID != "" && !seen[j.ID] {
+							fmt.Println(j.ID)
+							seen[j.ID] = true
+						}
+					}
+				}
+			case "keys":
+				keys, err := client.ListKeys(quickCtx)
+				if err == nil {
+					seen := make(map[string]bool)
+					for _, k := range keys {
+						if k.Name != "" && !seen[k.Name] {
+							fmt.Println(k.Name)
+							seen[k.Name] = true
+						}
+						if k.ID != "" && !seen[k.ID] {
+							fmt.Println(k.ID)
+							seen[k.ID] = true
+						}
 					}
 				}
 			}
