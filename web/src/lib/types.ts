@@ -783,6 +783,17 @@ export interface ImageListItem {
   created_at?: string;
 }
 
+export interface PrepareImageRequest {
+  name: string;
+  description?: string;
+  base_image?: string;
+  packages?: string[];
+  script?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  disk_mb?: number;
+}
+
 export type SchedulingStrategy = 'least_loaded' | 'round_robin' | 'bin_pack' | 'spread';
 
 export interface ClusterSchedulingPolicy {

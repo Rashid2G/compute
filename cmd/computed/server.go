@@ -423,6 +423,11 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	if cfg.ServeMode() == "port" {
 		s.servePorts.restore(context.Background())
 	}
+	if s.jobRunner != nil {
+		s.jobRunner.SetOnUpdate(func() {
+			s.broadcastClusterUpdate()
+		})
+	}
 	return s
 }
 
@@ -5044,6 +5049,65 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+
+		isImageBuild := req.Type == "image-build" || req.Type == "image.build" || req.Spec.TargetTemplate != ""
+		if isImageBuild {
+			targetTpl := strings.TrimSpace(req.Spec.TargetTemplate)
+			if targetTpl == "" {
+				targetTpl = strings.TrimSpace(req.Spec.RepoName)
+			}
+			if targetTpl == "" {
+				targetTpl = strings.TrimSpace(req.RepoName)
+			}
+			if targetTpl == "" {
+				httpError(w, "target_template name is required for image build jobs", http.StatusBadRequest)
+				return
+			}
+			for _, ch := range targetTpl {
+				if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.') {
+					httpError(w, fmt.Sprintf("invalid template name '%s': must contain only letters, numbers, dashes, underscores, and dots", targetTpl), http.StatusBadRequest)
+					return
+				}
+			}
+			if existingTpl, _ := s.vmMgr.GetStore().GetTemplateByOwner(ctx, ownerID, targetTpl); existingTpl != nil {
+				httpError(w, fmt.Sprintf("template with name '%s' already exists", targetTpl), http.StatusBadRequest)
+				return
+			}
+			if existingImg, _ := s.vmMgr.GetStore().GetImageByOwner(ctx, ownerID, targetTpl); existingImg != nil {
+				httpError(w, fmt.Sprintf("image with name '%s' already exists", targetTpl), http.StatusBadRequest)
+				return
+			}
+			if queuedJobs, err := s.vmMgr.GetStore().ListQueuedJobs(ctx); err == nil {
+				for _, qj := range queuedJobs {
+					if qj.OwnerID == ownerID && (qj.Type == "image-build" || qj.Type == "image.build") {
+						var qspec api.JobSpec
+						if err := json.Unmarshal([]byte(qj.SpecJSON), &qspec); err == nil {
+							if strings.EqualFold(qspec.TargetTemplate, targetTpl) {
+								httpError(w, fmt.Sprintf("an image build for template '%s' is already in progress", targetTpl), http.StatusBadRequest)
+								return
+							}
+						}
+					}
+				}
+			}
+			req.Spec.TargetTemplate = targetTpl
+			if req.Type == "" {
+				req.Type = "image-build"
+			}
+			if req.Spec.ImageID == "" {
+				req.Spec.ImageID = "ubuntu-24"
+			}
+			if req.Spec.VCPUs <= 0 {
+				req.Spec.VCPUs = 2
+			}
+			if req.Spec.MemoryMB <= 0 {
+				req.Spec.MemoryMB = 2048
+			}
+			if req.Spec.DiskMB <= 0 {
+				req.Spec.DiskMB = 10240
+			}
+		}
+
 		// Normalize default image to Ubuntu 24.04 LTS (Item #14)
 		req.Spec.ImageID = normalizeCIImageID(req.Spec.ImageID)
 

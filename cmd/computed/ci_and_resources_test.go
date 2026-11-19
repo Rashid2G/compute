@@ -518,3 +518,51 @@ func TestAdminResourcesEndpoint(t *testing.T) {
 		t.Fatalf("expected non-nil capacity_warnings slice")
 	}
 }
+
+func TestImageBuildJobLifecycle(t *testing.T) {
+	env := newMultiTenantServer(t)
+
+	mtSignup(t, env.ts, "dev@example.com", "dev", "Password123!")
+	devTok, _ := mtLogin(t, env.ts, "dev", "Password123!")
+
+	// 1. Missing target_template name should fail
+	badReq := map[string]interface{}{
+		"type": "image-build",
+		"spec": map[string]interface{}{
+			"packages": []string{"curl"},
+		},
+	}
+	resp, body := mtRequest(t, env.ts, http.MethodPost, "/api/v1/jobs", devTok, badReq)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing target_template, got %d: %s", resp.StatusCode, string(body))
+	}
+
+	// 2. Valid image build job
+	validReq := map[string]interface{}{
+		"type": "image-build",
+		"spec": map[string]interface{}{
+			"target_template":    "custom-node-dev",
+			"target_description": "NodeJS development template",
+			"packages":           []string{"curl", "git"},
+			"script":             "echo custom-build-done",
+		},
+	}
+	resp, body = mtRequest(t, env.ts, http.MethodPost, "/api/v1/jobs", devTok, validReq)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 for valid image build job, got %d: %s", resp.StatusCode, string(body))
+	}
+	var job db.Job
+	if err := json.Unmarshal(body, &job); err != nil {
+		t.Fatalf("failed to decode job: %v", err)
+	}
+	if job.Type != "image-build" {
+		t.Fatalf("expected job.Type == image-build, got %s", job.Type)
+	}
+
+	// 3. Duplicate template name should be rejected
+	resp, body = mtRequest(t, env.ts, http.MethodPost, "/api/v1/jobs", devTok, validReq)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for duplicate target_template, got %d: %s", resp.StatusCode, string(body))
+	}
+}
+

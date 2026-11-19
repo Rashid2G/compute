@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Database,
   KeyRound,
+  Layers,
   Play,
   Search,
   Server,
@@ -74,6 +75,17 @@ export function CommandPalette({
         },
       },
       {
+        id: 'act-image',
+        group: 'Quick Actions',
+        label: 'Prepare Images & Custom Packages',
+        shortcut: 'I',
+        icon: Layers,
+        run: () => {
+          onOpenChange(false);
+          onNavigate('image');
+        },
+      },
+      {
         id: 'act-env',
         group: 'Quick Actions',
         label: 'Manage Snapshots & Sandbox Templates',
@@ -81,7 +93,7 @@ export function CommandPalette({
         icon: Database,
         run: () => {
           onOpenChange(false);
-          onNavigate('images');
+          onNavigate('snapshots');
         },
       },
       {

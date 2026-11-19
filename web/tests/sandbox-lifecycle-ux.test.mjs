@@ -92,6 +92,7 @@ function createMockServer() {
     },
   ];
   let templates = [];
+  let customImages = [];
   let volumes = [
     {
       id: 'vol-data-1',
@@ -492,8 +493,59 @@ function createMockServer() {
         return json(201, job);
       }
       if (p === '/api/v1/jobs' && req.method === 'GET') return json(200, jobs);
+      if (p === '/api/v1/jobs' && req.method === 'POST') {
+        const spec = body.spec || body;
+        const targetTemplate = spec.target_template || body.target_template;
+        const isImageBuild = body.type === 'image-build' || Boolean(targetTemplate);
+        const job = {
+          id: `job-${jobs.length + 1}`,
+          owner_id: 'usr_admin',
+          pool_id: 'default',
+          type: isImageBuild ? 'image-build' : 'command',
+          state: 'succeeded',
+          priority: 10,
+          source: 'manual',
+          vm_id: isImageBuild ? `imgbuild-${targetTemplate}` : 'job-runner-1',
+          spec_json: JSON.stringify(spec),
+          result_json: isImageBuild ? JSON.stringify({ exit_code: 0, template_name: targetTemplate }) : '{"exit_code":0}',
+          queued_at: new Date().toISOString(),
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        jobs = [job, ...jobs];
+        if (isImageBuild && targetTemplate) {
+          templates = [...templates, {
+            id: `tpl-${templates.length + 1}`,
+            name: targetTemplate,
+            description: spec.target_description || 'Custom image template',
+            source_vm_id: job.vm_id,
+            disk_path: `/var/lib/compute/templates/${targetTemplate}.ext4`,
+            vcpus: spec.vcpus || 2,
+            memory_mb: spec.memory_mb || 2048,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }];
+          customImages = [...customImages, {
+            id: `img-${customImages.length + 1}`,
+            name: targetTemplate,
+            description: spec.target_description || 'Custom image template',
+            format: 'raw',
+            size_bytes: 10737418240,
+            status: 'ready',
+            created_at: new Date().toISOString(),
+          }];
+        }
+        return json(201, job);
+      }
+      if (p === '/api/v1/custom-images' && req.method === 'GET') return json(200, customImages);
       if (p.match(/^\/api\/v1\/jobs\/[^/]+\/logs$/) && req.method === 'GET') {
-        return json(200, [{ id: 'log-1', job_id: 'job-1', attempt_id: 'att-1', stream: 'stdout', seq: 1, data: 'All CI tests passed', created_at: new Date().toISOString() }]);
+        const jId = p.match(/^\/api\/v1\/jobs\/([^/]+)\/logs$/)[1];
+        return json(200, [
+          { id: 'log-1', job_id: jId, attempt_id: 'att-1', stream: 'stdout', seq: 1, data: '[IMAGE BUILD] Starting setup\n', created_at: new Date().toISOString() },
+          { id: 'log-2', job_id: jId, attempt_id: 'att-1', stream: 'stdout', seq: 2, data: 'All CI tests passed\n', created_at: new Date().toISOString() },
+        ]);
       }
 
       if (p === '/api/v1/vms' && req.method === 'GET') return json(200, vms);
@@ -1407,6 +1459,140 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
         'non-admin guard hides Create User and shows notice',
       );
       setUserRole('admin');
+    });
+
+    await t.test('Image section: renders custom image templates, build history, opens Prepare Image dialog, and supports launch', async () => {
+      await cdp.evalJS(`
+        localStorage.setItem('compute_auth_user', JSON.stringify({
+          id: 'usr_admin',
+          username: 'admin',
+          email: 'admin@compute.local',
+          role: 'admin',
+          status: 'active'
+        }));
+        window.location.hash = '#/image';
+      `);
+      await waitFor(
+        cdp,
+        `window.location.hash === '#/image' && document.body.innerText.includes('Built Image Templates')`,
+        4000,
+        'image section loaded',
+      );
+
+      // Verify header button
+      const hasPrepareBtn = await cdp.evalJS(
+        `Array.from(document.querySelectorAll('button')).some((b) => b.innerText.includes('Prepare Image'))`,
+      );
+      assert.equal(hasPrepareBtn, true, 'Prepare Image button should be present in page header');
+
+      // Click Prepare Image button
+      await cdp.evalJS(
+        `Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()`,
+      );
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open',
+      );
+
+      // Set target template name
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'ci-node-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Node build environment');
+          window.__setReactInput(document.getElementById('build-script'), 'npm -v');
+        })()
+      `);
+
+      // Click quick-package chip (+ nodejs)
+      await cdp.evalJS(`
+        (() => {
+          const chip = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('nodejs'));
+          if (chip) chip.click();
+        })()
+      `);
+
+      // Submit form
+      await cdp.evalJS(`
+        (() => {
+          document.getElementById('target-template').closest('form').requestSubmit();
+        })()
+      `);
+
+      // Wait for build logs modal or job entry
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('ci-node-box')`,
+        4000,
+        'build job created and rendered',
+      );
+
+      // Close the build log modal if open
+      await cdp.evalJS(`
+        (() => {
+          const closeBtn = document.querySelector('[aria-labelledby="build-log-title"] button');
+          if (closeBtn) closeBtn.click();
+        })()
+      `);
+
+      // Switch to Built Image Templates tab
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Built Image Templates'));
+          if (tab) tab.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('ci-node-box') && document.body.innerText.includes('Launch Sandbox')`,
+        4000,
+        'built image template appears in table',
+      );
+
+      // Verify the built template card has Launch Sandbox and Run Job buttons
+      const hasLaunch = await cdp.evalJS(
+        `document.body.innerText.includes('Launch Sandbox') && document.body.innerText.includes('Run Job')`,
+      );
+      assert.equal(hasLaunch, true, 'Template card must show Launch Sandbox and Run Job buttons');
+
+      // Switch to Build History & Logs tab
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Build History'));
+          if (tab) tab.click();
+        })()
+      `);
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('ci-node-box') && document.body.innerText.includes('View Logs')`,
+        3000,
+        'build history tab loaded',
+      );
+
+      // Open terminal build logs
+      await cdp.evalJS(`
+        (() => {
+          const btn = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('View Logs'));
+          if (btn) btn.click();
+        })()
+      `);
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('Build Logs') && document.body.innerText.includes('[IMAGE BUILD]')`,
+        3000,
+        'terminal logs viewer displayed',
+      );
+
+      // Test alias #/images
+      await cdp.evalJS(`window.location.hash = '#/images'`);
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('Built Image Templates')`,
+        3000,
+        '#/images alias routes to image page',
+      );
     });
   } finally {
     try { cdp.close(); } catch {}

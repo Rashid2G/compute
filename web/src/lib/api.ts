@@ -35,6 +35,7 @@ import type {
   OperationRecord,
   PoolMigrationResponse,
   PortForwardRecord,
+  PrepareImageRequest,
   ProcessInfo,
   QueueResult,
   ResourceLimitErrorDetails,
@@ -782,6 +783,32 @@ export const api = {
 
   listImages(): Promise<ImageListItem[]> {
     return request<ImageListItem[]>('/images');
+  },
+
+  prepareImage(payload: PrepareImageRequest): Promise<JobRecord> {
+    return request<JobRecord>('/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'image-build',
+        source: 'image-builder',
+        spec: {
+          target_template: payload.name,
+          target_description: payload.description,
+          packages: payload.packages,
+          script: payload.script,
+          image_id: payload.base_image || 'ubuntu-24',
+          vcpus: payload.vcpus || 2,
+          memory_mb: payload.memory_mb || 2048,
+          disk_mb: payload.disk_mb || 10240,
+        },
+      }),
+    });
+  },
+
+  deleteImage(id: string): Promise<{ status: string; id: string }> {
+    return request<{ status: string; id: string }>(`/images/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
   },
 
   listWorkerTokens(): Promise<WorkerTokenRecord[]> {
