@@ -130,6 +130,7 @@ export class Sandbox {
         ssh_password: options.sshPassword,
         network_isolation: options.networkIsolation,
         isolated: options.isolated,
+        startup_script: options.startupScript,
       }),
     });
 

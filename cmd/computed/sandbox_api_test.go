@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/Rashid2G/compute/internal/config"
@@ -186,3 +188,53 @@ func TestSandboxAPI_ServeProxy(t *testing.T) {
 		t.Fatalf("expected body %q, got %q", expectedBody, rr.Body.String())
 	}
 }
+
+func TestSandboxAPI_CreateWithStartupScript(t *testing.T) {
+	s, store := setupTestServerForSandboxAPI(t)
+	ctx := context.Background()
+
+	script := "#!/bin/bash\nset -e\necho 'hello from startup script' > /tmp/init.log\n"
+	body := fmt.Sprintf(`{"name":"sbx-script-test","vcpus":1,"memory_mb":512,"startup_script":%q}`, script)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var created db.VM
+	if err := json.NewDecoder(rr.Body).Decode(&created); err != nil {
+		t.Fatalf("failed to decode created VM response: %v", err)
+	}
+	if created.StartupScript != script {
+		t.Fatalf("created VM startup_script mismatch: got %q, want %q", created.StartupScript, script)
+	}
+
+	// Verify persistence in store
+	fromStore, err := store.GetVM(ctx, created.ID)
+	if err != nil || fromStore == nil {
+		t.Fatalf("GetVM from store failed: %v", err)
+	}
+	if fromStore.StartupScript != script {
+		t.Fatalf("store VM startup_script mismatch: got %q, want %q", fromStore.StartupScript, script)
+	}
+
+	// Verify GET /api/v1/sandboxes/:id returns startup_script
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+created.ID, nil)
+	getRR := httptest.NewRecorder()
+	s.ServeHTTP(getRR, getReq)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from GET, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+	var inspected db.VM
+	if err := json.NewDecoder(getRR.Body).Decode(&inspected); err != nil {
+		t.Fatalf("failed to decode GET response: %v", err)
+	}
+	if inspected.StartupScript != script {
+		t.Fatalf("inspected VM startup_script mismatch: got %q, want %q", inspected.StartupScript, script)
+	}
+}
+

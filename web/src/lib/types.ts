@@ -44,6 +44,7 @@ export interface VM {
   pid?: number;
   socket_path?: string;
   protected?: boolean;
+  startup_script?: string;
   pool_id?: string;
   worker_id?: string;
   last_activity_at?: string | null;
@@ -117,6 +118,7 @@ export interface CreateVMRequest {
   ssh_no_default_key?: boolean;
   command?: string;
   build_command?: string;
+  startup_script?: string;
   exec_user?: string;
 }
 

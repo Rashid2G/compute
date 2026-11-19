@@ -476,6 +476,9 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 			created = started
 			if created.Status == db.StatusRunning {
 				s.schedulePostBootSetup(ctx, created)
+				if strings.TrimSpace(created.StartupScript) != "" {
+					s.schedulePostBootStartupScript(ctx, created, created.StartupScript, req.ExecUser)
+				}
 				if strings.TrimSpace(req.Command) != "" {
 					s.schedulePostBootBuildCommand(ctx, created, req.Command, req.ExecUser)
 				}
@@ -625,6 +628,9 @@ func (s *Server) restartSingleVM(ctx context.Context, isAdmin bool, v *db.VM, wa
 	if v != nil && v.Status == db.StatusRunning {
 		_ = waitSSH
 		s.schedulePostBootSetup(ctx, v)
+		if strings.TrimSpace(v.StartupScript) != "" {
+			s.schedulePostBootStartupScript(ctx, v, v.StartupScript, "")
+		}
 	}
 	s.broadcastClusterUpdate()
 	return v, nil

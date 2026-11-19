@@ -248,6 +248,20 @@ export function InspectVMDialog({
 
               <SandboxAccessCard vm={vm} portForwards={vmPortForwards} className="mt-4" />
 
+              {vm.startup_script && (
+                <div className="mt-4 rounded-md border p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+                      Startup Script (bash)
+                    </span>
+                    <CopyButton value={vm.startup_script} label="Copy script" className="h-5 w-5" />
+                  </div>
+                  <pre className="max-h-48 overflow-y-auto rounded bg-secondary/50 p-2.5 font-mono text-xs text-foreground whitespace-pre-wrap">
+                    {vm.startup_script}
+                  </pre>
+                </div>
+              )}
+
               {isAdmin && (
                 <div className="mt-4 rounded-md border p-3.5 bg-secondary/15 space-y-3">
                   <div className="flex items-center justify-between gap-2">

@@ -175,6 +175,7 @@ func (s *Server) dispatchRemoteVMCreate(ctx context.Context, req vm.CreateReques
 		AuthorizedSSHKeys: globalKeys,
 		SSHPassword:       req.SSHPassword,
 		Protected:         req.Protected,
+		StartupScript:     req.StartupScript,
 		Command:           req.Command,
 		BuildCommand:      req.BuildCommand,
 		ExecUser:          req.ExecUser,
@@ -1523,6 +1524,9 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					s.mountAttachedVolumes(bgCtx, refreshed)
 					s.applyEnvironment(bgCtx, refreshed)
 					s.applyPortForwardsForVM(bgCtx, refreshed)
+					if strings.TrimSpace(refreshed.StartupScript) != "" {
+						s.schedulePostBootStartupScript(bgCtx, refreshed, refreshed.StartupScript, "")
+					}
 				}
 			}
 			return opErr
@@ -1544,6 +1548,9 @@ func (s *Server) handleBulkActionVMs(w http.ResponseWriter, r *http.Request) {
 					s.mountAttachedVolumes(bgCtx, refreshed)
 					s.applyEnvironment(bgCtx, refreshed)
 					s.applyPortForwardsForVM(bgCtx, refreshed)
+					if strings.TrimSpace(refreshed.StartupScript) != "" {
+						s.schedulePostBootStartupScript(bgCtx, refreshed, refreshed.StartupScript, "")
+					}
 				}
 			}
 			return opErr

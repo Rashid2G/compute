@@ -761,6 +761,10 @@ type CreateRequest struct {
 
 	Protected *bool `json:"protected,omitempty"`
 
+	// StartupScript specifies an optional bash script to execute inside the
+	// sandbox upon startup.
+	StartupScript string `json:"startup_script,omitempty"`
+
 	// Command specifies an optional build-time command/script to execute inside
 	// the sandbox after it boots.
 	Command      string `json:"command,omitempty"`
@@ -1858,6 +1862,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		Status:             db.StatusCreated,
 		Protected:          protected,
 		Description:        strings.TrimSpace(req.Description),
+		StartupScript:      req.StartupScript,
 		PoolID:             poolID,
 		WorkerID:           workerID,
 		VCPUs:              vcpus,
@@ -1925,6 +1930,9 @@ func (m *Manager) CloneVM(ctx context.Context, srcVMID string, req CreateRequest
 		}
 		if req.Protected == nil {
 			req.Protected = &srcVM.Protected
+		}
+		if req.StartupScript == "" && srcVM.StartupScript != "" {
+			req.StartupScript = srcVM.StartupScript
 		}
 	}
 	return m.CreateVM(ctx, req)

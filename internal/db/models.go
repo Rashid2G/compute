@@ -96,6 +96,7 @@ type VM struct {
 	SocketPath         string     `json:"socket_path,omitempty"`
 	Protected          bool       `json:"protected"`
 	Description        string     `json:"description,omitempty"`
+	StartupScript      string     `json:"startup_script,omitempty"`
 	PoolID             string     `json:"pool_id,omitempty"`
 	WorkerID           string     `json:"worker_id,omitempty"`
 	LastActivityAt     *time.Time `json:"last_activity_at,omitempty"`

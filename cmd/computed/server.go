@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -1305,6 +1306,71 @@ func (s *Server) schedulePostBootBuildCommand(ctx context.Context, v *db.VM, cmd
 	}()
 }
 
+// schedulePostBootStartupScript executes a startup bash script inside a sandbox
+// after it boots and logs the execution output to audit events.
+func (s *Server) schedulePostBootStartupScript(ctx context.Context, v *db.VM, script string, user string) {
+	if v == nil || strings.TrimSpace(script) == "" {
+		return
+	}
+	vmCopy := *v
+	if user == "" {
+		user = "root"
+	}
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+		defer cancel()
+		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
+		start := time.Now()
+
+		b64Script := base64.StdEncoding.EncodeToString([]byte(script))
+		execCmd := fmt.Sprintf("mkdir -p /var/lib/compute && printf '%%s' '%s' | base64 -d > /var/lib/compute/startup-script.sh && chmod +x /var/lib/compute/startup-script.sh && /bin/bash /var/lib/compute/startup-script.sh 2>&1 | tee /var/log/startup-script.log", b64Script)
+
+		var res *vm.ExecResponse
+		var err error
+		if vm.IsRemoteVM(&vmCopy) {
+			var remoteRes vm.ExecResponse
+			err = s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
+				VMID:           s.remoteVMTargetID(&vmCopy),
+				Command:        execCmd,
+				User:           user,
+				TimeoutSeconds: 240,
+			}, &remoteRes)
+			res = &remoteRes
+		} else {
+			res, err = s.vmMgr.ExecVM(bgCtx, vmCopy.ID, vm.ExecRequest{
+				Command: execCmd,
+				User:    user,
+				Timeout: 240,
+			})
+		}
+		durationMs := int(time.Since(start).Milliseconds())
+		status := "succeeded"
+		exitCode := 0
+		var stdout, stderr string
+		if res != nil {
+			exitCode = res.ExitCode
+			stdout = res.Stdout
+			stderr = res.Stderr
+			if exitCode != 0 {
+				status = "failed"
+			}
+		}
+		if err != nil {
+			status = "failed"
+			stderr = err.Error()
+			exitCode = 1
+		}
+		s.recordEvent("sandbox.startup_script_executed", "system", vmCopy.ID, status, durationMs, map[string]interface{}{
+			"script_size": len(script),
+			"user":        user,
+			"exit_code":   exitCode,
+			"stdout":      stdout,
+			"stderr":      stderr,
+		})
+		s.broadcastClusterUpdate()
+	}()
+}
+
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1683,6 +1749,9 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 				out, _ = s.vmMgr.GetVM(bgCtx, vmID)
 				if out != nil && out.Status == db.StatusRunning {
 					s.schedulePostBootSetup(bgCtx, out)
+					if strings.TrimSpace(out.StartupScript) != "" {
+						s.schedulePostBootStartupScript(bgCtx, out, out.StartupScript, "")
+					}
 				}
 			}
 			s.recordEvent("sandbox.started", actor, vmID, "delivered", 35, nil)
