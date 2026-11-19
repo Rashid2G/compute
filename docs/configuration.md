@@ -60,22 +60,6 @@ Docker Compose healthcheck probes the bound interface.
 REST and WebSocket (`/api/v1/ws`) APIs; the `compute-gui` container (`:8080`,
 `gui` profile) is strictly optional and disabled by default.
 
-### Default Quickstart Credentials and Accounts
-
-After running `./scripts/install.sh` and `docker compose up -d`, the following default accounts and credentials are initialized:
-
-- **Web UI & Control Plane**:
-  - **URL**: `http://127.0.0.1:18080/` (or `http://localhost:18080/`)
-  - **Default Username**: `admin` (`COMPUTE_ADMIN_USERNAME`)
-  - **Default Password**: `admin` (`COMPUTE_ADMIN_PASSWORD`)
-  - **Default Email**: `admin@compute.local` (`COMPUTE_ADMIN_EMAIL`)
-  - **CLI Login**: `compute auth login --username admin --password admin`
-- **MicroVM / Sandbox Guest**:
-  - **Default User**: `compute` (UID `1000`) with passwordless `sudo` privileges
-  - **Root User**: `root` (UID `0`, shadow password locked, accessible via `sudo su -`)
-  - **Guest SSH Key**: Default Ed25519 key at `./data/images/ssh/id_ed25519` installed in guest authorized_keys
-  - **Guest SSH Password Auth**: Disabled (`PasswordAuthentication no`) by default; opt-in per sandbox via `--ssh-password <password>` on create
-
 ## Network and sandboxes
 
 | Variable | Default | Description |
