@@ -362,6 +362,72 @@ func TestCompletionScripts(t *testing.T) {
 	if !strings.Contains(string(out), "my-web-app") || !strings.Contains(string(out), "ins_12345") {
 		t.Fatalf("expected VM name and internal ID in completions, got: %s", string(out))
 	}
+
+	mux.HandleFunc("/api/v1/images", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `[{"id":"img-1","name":"ubuntu-custom"}]`)
+	})
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "__complete images")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "ubuntu-custom") {
+		t.Fatalf("__complete images failed: %v, out: %s", err, string(out))
+	}
+
+	mux.HandleFunc("/api/v1/templates", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `[{"id":"tmpl-1","name":"node-starter"}]`)
+	})
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "__complete templates")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "node-starter") {
+		t.Fatalf("__complete templates failed: %v, out: %s", err, string(out))
+	}
+
+	mux.HandleFunc("/api/v1/pools", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `[{"id":"pool-1","name":"gpu-pool"}]`)
+	})
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "__complete pools")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "gpu-pool") {
+		t.Fatalf("__complete pools failed: %v, out: %s", err, string(out))
+	}
+
+	mux.HandleFunc("/api/v1/workers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `[{"id":"worker-1","name":"worker-alpha"}]`)
+	})
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "__complete workers")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "worker-alpha") {
+		t.Fatalf("__complete workers failed: %v, out: %s", err, string(out))
+	}
+
+	mux.HandleFunc("/api/v1/jobs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `[{"id":"job-xyz"}]`)
+	})
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "__complete jobs")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "job-xyz") {
+		t.Fatalf("__complete jobs failed: %v, out: %s", err, string(out))
+	}
+
+	mux.HandleFunc("/api/v1/keys", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `[{"id":"key-1","name":"my-laptop-key"}]`)
+	})
+	cmd = exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "__complete keys")
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "my-laptop-key") {
+		t.Fatalf("__complete keys failed: %v, out: %s", err, string(out))
+	}
 }
 
 func TestImageAndTemplateCLI(t *testing.T) {
