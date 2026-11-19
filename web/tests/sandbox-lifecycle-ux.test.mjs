@@ -497,17 +497,23 @@ function createMockServer() {
         const spec = body.spec || body;
         const targetTemplate = spec.target_template || body.target_template;
         const isImageBuild = body.type === 'image-build' || Boolean(targetTemplate);
+        const shouldFail = targetTemplate?.includes('fail') || spec.packages?.includes('badpkg');
+        const state = shouldFail ? 'failed' : 'succeeded';
         const job = {
           id: `job-${jobs.length + 1}`,
           owner_id: 'usr_admin',
           pool_id: 'default',
           type: isImageBuild ? 'image-build' : 'command',
-          state: 'succeeded',
+          state,
           priority: 10,
           source: 'manual',
           vm_id: isImageBuild ? `imgbuild-${targetTemplate}` : 'job-runner-1',
           spec_json: JSON.stringify(spec),
-          result_json: isImageBuild ? JSON.stringify({ exit_code: 0, template_name: targetTemplate }) : '{"exit_code":0}',
+          result_json: isImageBuild
+            ? (shouldFail
+                ? JSON.stringify({ exit_code: 100, error: 'E: Unable to locate package badpkg' })
+                : JSON.stringify({ exit_code: 0, template_name: targetTemplate }))
+            : '{"exit_code":0}',
           queued_at: new Date().toISOString(),
           started_at: new Date().toISOString(),
           finished_at: new Date().toISOString(),
@@ -515,7 +521,7 @@ function createMockServer() {
           updated_at: new Date().toISOString(),
         };
         jobs = [job, ...jobs];
-        if (isImageBuild && targetTemplate) {
+        if (isImageBuild && targetTemplate && !shouldFail) {
           templates = [...templates, {
             id: `tpl-${templates.length + 1}`,
             name: targetTemplate,
@@ -1531,7 +1537,7 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       // Close the build log modal if open
       await cdp.evalJS(`
         (() => {
-          const closeBtn = document.querySelector('[aria-labelledby="build-log-title"] button');
+          const closeBtn = document.querySelector('button[aria-label="Close build logs"]');
           if (closeBtn) closeBtn.click();
         })()
       `);
@@ -1585,14 +1591,129 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
         'terminal logs viewer displayed',
       );
 
-      // Test alias #/images
-      await cdp.evalJS(`window.location.hash = '#/images'`);
+      // Close terminal logs modal if still open
+      await cdp.evalJS(`
+        (() => {
+          const closeBtn = document.querySelector('button[aria-label="Close build logs"]');
+          if (closeBtn) closeBtn.click();
+        })()
+      `);
+
+      // Test Draft Saving: Click Prepare Image, enter details, and click "Save as Draft"
+      await cdp.evalJS(`
+        Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()
+      `);
       await waitFor(
         cdp,
-        `document.body.innerText.includes('Built Image Templates')`,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
         3000,
-        '#/images alias routes to image page',
+        'prepare image dialog open for draft test',
       );
+
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'draft-python-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Python draft environment');
+          window.__setReactInput(document.getElementById('build-script'), 'pip install fastapi uvicorn');
+          const saveDraftBtn = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Save as Draft'));
+          if (saveDraftBtn) saveDraftBtn.click();
+        })()
+      `);
+
+      // Wait for modal to close
+      await waitFor(
+        cdp,
+        `document.getElementById('target-template') === null`,
+        3000,
+        'prepare image dialog closed after save draft',
+      );
+
+      // Switch to Configurations & Drafts tab and verify the draft is saved
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Configurations & Drafts'));
+          if (tab) tab.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('draft-python-box') && document.body.innerText.includes('Draft (Not Built)')`,
+        3000,
+        'saved draft visible in Configurations & Drafts tab',
+      );
+
+      // Test Failed Build Re-attempt: start a failing build and verify Re-attempt loads with preserved configs
+      await cdp.evalJS(`
+        Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()
+      `);
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open for failing build test',
+      );
+
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'failing-test-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Failing package configuration');
+          window.__setReactInput(document.getElementById('build-script'), 'apt-get install -y badpkg');
+          document.getElementById('target-template').closest('form').requestSubmit();
+        })()
+      `);
+
+      // Wait for build logs modal with failure diagnostics
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('Image build failed') && document.body.innerText.includes('Exit code 100')`,
+        4000,
+        'build failure diagnostics displayed in logs modal',
+      );
+
+      // Click "Re-attempt / Fix Config" in the logs modal
+      await cdp.evalJS(`
+        (() => {
+          const btn = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Re-attempt') || b.innerText.includes('Fix Config'));
+          if (btn) btn.click();
+        })()
+      `);
+
+      // Verify the Prepare Image Dialog opens with PRE-POPULATED values (NOT a blank/fresh page!)
+      await waitFor(
+        cdp,
+        `document.getElementById('target-template') !== null && document.getElementById('target-template').value === 'failing-test-box'`,
+        3000,
+        're-attempt dialog open with pre-filled target-template',
+      );
+
+      const reattemptValues = await cdp.evalJS(`
+        (() => {
+          const nameInput = document.getElementById('target-template');
+          const descInput = document.getElementById('target-description');
+          const scriptInput = document.getElementById('build-script');
+          const hasFailureBanner = document.body.innerText.includes('Re-attempting failed build') && document.body.innerText.includes('Exit code 100');
+          return {
+            name: nameInput ? nameInput.value : '',
+            desc: descInput ? descInput.value : '',
+            script: scriptInput ? scriptInput.value : '',
+            hasFailureBanner,
+          };
+        })()
+      `);
+
+      assert.equal(reattemptValues.name, 'failing-test-box', 'Re-attempt must preserve the image name');
+      assert.equal(reattemptValues.desc, 'Failing package configuration', 'Re-attempt must preserve the description');
+      assert.equal(reattemptValues.script, 'apt-get install -y badpkg', 'Re-attempt must preserve the build script commands');
+      assert.equal(reattemptValues.hasFailureBanner, true, 'Re-attempt dialog must display failure diagnostics banner');
+
+      // Close the re-attempt dialog
+      await cdp.evalJS(`
+        (() => {
+          const cancelBtn = Array.from(document.querySelectorAll('button')).find((b) => b.innerText === 'Cancel');
+          if (cancelBtn) cancelBtn.click();
+        })()
+      `);
     });
   } finally {
     try { cdp.close(); } catch {}

@@ -5069,14 +5069,6 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			if existingTpl, _ := s.vmMgr.GetStore().GetTemplateByOwner(ctx, ownerID, targetTpl); existingTpl != nil {
-				httpError(w, fmt.Sprintf("template with name '%s' already exists", targetTpl), http.StatusBadRequest)
-				return
-			}
-			if existingImg, _ := s.vmMgr.GetStore().GetImageByOwner(ctx, ownerID, targetTpl); existingImg != nil {
-				httpError(w, fmt.Sprintf("image with name '%s' already exists", targetTpl), http.StatusBadRequest)
-				return
-			}
 			if queuedJobs, err := s.vmMgr.GetStore().ListQueuedJobs(ctx); err == nil {
 				for _, qj := range queuedJobs {
 					if qj.OwnerID == ownerID && (qj.Type == "image-build" || qj.Type == "image.build") {

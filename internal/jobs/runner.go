@@ -339,6 +339,13 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 
 	if state == "succeeded" && isImageBuild && targetTemplate != "" {
 		logs.append("stdout", fmt.Sprintf("[compute] image configuration complete. Creating template %q...", targetTemplate))
+		// If template or custom image already exists for this owner (e.g. on rebuild), clean them up first so CreateTemplate replaces it cleanly
+		if oldTpl, _ := r.mgr.GetStore().GetTemplateByOwner(ctx, job.OwnerID, targetTemplate); oldTpl != nil {
+			_ = r.mgr.DeleteTemplate(ctx, oldTpl.ID)
+		}
+		if oldImg, _ := r.mgr.GetStore().GetImageByOwner(ctx, job.OwnerID, targetTemplate); oldImg != nil {
+			_ = r.mgr.DeleteImage(ctx, oldImg.ID)
+		}
 		tpl, tplErr := r.mgr.CreateTemplate(ctx, vm.CreateTemplateRequest{
 			VMID:        vmID,
 			Name:        targetTemplate,
