@@ -92,6 +92,7 @@ function createMockServer() {
     },
   ];
   let templates = [];
+  let customImages = [];
   let volumes = [
     {
       id: 'vol-data-1',
@@ -492,8 +493,65 @@ function createMockServer() {
         return json(201, job);
       }
       if (p === '/api/v1/jobs' && req.method === 'GET') return json(200, jobs);
+      if (p === '/api/v1/jobs' && req.method === 'POST') {
+        const spec = body.spec || body;
+        const targetTemplate = spec.target_template || body.target_template;
+        const isImageBuild = body.type === 'image-build' || Boolean(targetTemplate);
+        const shouldFail = targetTemplate?.includes('fail') || spec.packages?.includes('badpkg');
+        const state = shouldFail ? 'failed' : 'succeeded';
+        const job = {
+          id: `job-${jobs.length + 1}`,
+          owner_id: 'usr_admin',
+          pool_id: 'default',
+          type: isImageBuild ? 'image-build' : 'command',
+          state,
+          priority: 10,
+          source: 'manual',
+          vm_id: isImageBuild ? `imgbuild-${targetTemplate}` : 'job-runner-1',
+          spec_json: JSON.stringify(spec),
+          result_json: isImageBuild
+            ? (shouldFail
+                ? JSON.stringify({ exit_code: 100, error: 'E: Unable to locate package badpkg' })
+                : JSON.stringify({ exit_code: 0, template_name: targetTemplate }))
+            : '{"exit_code":0}',
+          queued_at: new Date().toISOString(),
+          started_at: new Date().toISOString(),
+          finished_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        jobs = [job, ...jobs];
+        if (isImageBuild && targetTemplate && !shouldFail) {
+          templates = [...templates, {
+            id: `tpl-${templates.length + 1}`,
+            name: targetTemplate,
+            description: spec.target_description || 'Custom image template',
+            source_vm_id: job.vm_id,
+            disk_path: `/var/lib/compute/templates/${targetTemplate}.ext4`,
+            vcpus: spec.vcpus || 2,
+            memory_mb: spec.memory_mb || 2048,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }];
+          customImages = [...customImages, {
+            id: `img-${customImages.length + 1}`,
+            name: targetTemplate,
+            description: spec.target_description || 'Custom image template',
+            format: 'raw',
+            size_bytes: 10737418240,
+            status: 'ready',
+            created_at: new Date().toISOString(),
+          }];
+        }
+        return json(201, job);
+      }
+      if (p === '/api/v1/custom-images' && req.method === 'GET') return json(200, customImages);
       if (p.match(/^\/api\/v1\/jobs\/[^/]+\/logs$/) && req.method === 'GET') {
-        return json(200, [{ id: 'log-1', job_id: 'job-1', attempt_id: 'att-1', stream: 'stdout', seq: 1, data: 'All CI tests passed', created_at: new Date().toISOString() }]);
+        const jId = p.match(/^\/api\/v1\/jobs\/([^/]+)\/logs$/)[1];
+        return json(200, [
+          { id: 'log-1', job_id: jId, attempt_id: 'att-1', stream: 'stdout', seq: 1, data: '[IMAGE BUILD] Starting setup\n', created_at: new Date().toISOString() },
+          { id: 'log-2', job_id: jId, attempt_id: 'att-1', stream: 'stdout', seq: 2, data: 'All CI tests passed\n', created_at: new Date().toISOString() },
+        ]);
       }
 
       if (p === '/api/v1/vms' && req.method === 'GET') return json(200, vms);
@@ -1407,6 +1465,427 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
         'non-admin guard hides Create User and shows notice',
       );
       setUserRole('admin');
+    });
+
+    await t.test('Image section: renders custom image templates, build history, opens Prepare Image dialog, and supports launch', async () => {
+      await cdp.evalJS(`
+        localStorage.setItem('compute_auth_user', JSON.stringify({
+          id: 'usr_admin',
+          username: 'admin',
+          email: 'admin@compute.local',
+          role: 'admin',
+          status: 'active'
+        }));
+        window.location.hash = '#/image';
+      `);
+      await waitFor(
+        cdp,
+        `window.location.hash === '#/image' && document.body.innerText.includes('Built Image Templates')`,
+        4000,
+        'image section loaded',
+      );
+
+      // Verify header button
+      const hasPrepareBtn = await cdp.evalJS(
+        `Array.from(document.querySelectorAll('button')).some((b) => b.innerText.includes('Prepare Image'))`,
+      );
+      assert.equal(hasPrepareBtn, true, 'Prepare Image button should be present in page header');
+
+      // Click Prepare Image button
+      await cdp.evalJS(
+        `Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()`,
+      );
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open',
+      );
+
+      // Set target template name
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'ci-node-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Node build environment');
+          window.__setReactInput(document.getElementById('build-script'), 'npm -v');
+        })()
+      `);
+
+      // Click quick-package chip (+ nodejs)
+      await cdp.evalJS(`
+        (() => {
+          const chip = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('nodejs'));
+          if (chip) chip.click();
+        })()
+      `);
+
+      // Submit form
+      await cdp.evalJS(`
+        (() => {
+          document.getElementById('target-template').closest('form').requestSubmit();
+        })()
+      `);
+
+      // Wait for build logs modal or job entry
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('ci-node-box')`,
+        4000,
+        'build job created and rendered',
+      );
+
+      // Close the build log modal if open
+      await cdp.evalJS(`
+        (() => {
+          const closeBtn = document.querySelector('button[aria-label="Close build logs"]');
+          if (closeBtn) closeBtn.click();
+        })()
+      `);
+
+      // Switch to Built Image Templates tab
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Built Image Templates'));
+          if (tab) tab.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('ci-node-box') && document.body.innerText.includes('Launch Sandbox')`,
+        4000,
+        'built image template appears in table',
+      );
+
+      // Verify the built template card has Launch Sandbox and Run Job buttons
+      const hasLaunch = await cdp.evalJS(
+        `document.body.innerText.includes('Launch Sandbox') && document.body.innerText.includes('Run Job')`,
+      );
+      assert.equal(hasLaunch, true, 'Template card must show Launch Sandbox and Run Job buttons');
+
+      // Switch to Build History & Logs tab
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Build History'));
+          if (tab) tab.click();
+        })()
+      `);
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('ci-node-box') && document.body.innerText.includes('View Logs')`,
+        3000,
+        'build history tab loaded',
+      );
+
+      // Open terminal build logs
+      await cdp.evalJS(`
+        (() => {
+          const btn = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('View Logs'));
+          if (btn) btn.click();
+        })()
+      `);
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('Build Logs') && document.body.innerText.includes('[IMAGE BUILD]')`,
+        3000,
+        'terminal logs viewer displayed',
+      );
+
+      // Close terminal logs modal if still open
+      await cdp.evalJS(`
+        (() => {
+          const closeBtn = document.querySelector('button[aria-label="Close build logs"]');
+          if (closeBtn) closeBtn.click();
+        })()
+      `);
+
+      // Test Draft Saving: Click Prepare Image, enter details, and click "Save as Draft"
+      await cdp.evalJS(`
+        Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()
+      `);
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open for draft test',
+      );
+
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'draft-python-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Python draft environment');
+          window.__setReactInput(document.getElementById('build-script'), 'pip install fastapi uvicorn');
+          const saveDraftBtn = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Save as Draft'));
+          if (saveDraftBtn) saveDraftBtn.click();
+        })()
+      `);
+
+      // Wait for modal to close
+      await waitFor(
+        cdp,
+        `document.getElementById('target-template') === null`,
+        3000,
+        'prepare image dialog closed after save draft',
+      );
+
+      // Switch to Configurations & Drafts tab and verify the draft is saved
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Configurations & Drafts'));
+          if (tab) tab.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('draft-python-box') && document.body.innerText.includes('Draft (Not Built)')`,
+        3000,
+        'saved draft visible in Configurations & Drafts tab',
+      );
+
+      // Test Failed Build Re-attempt: start a failing build and verify Re-attempt loads with preserved configs
+      await cdp.evalJS(`
+        Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()
+      `);
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open for failing build test',
+      );
+
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'failing-test-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Failing package configuration');
+          window.__setReactInput(document.getElementById('build-script'), 'apt-get install -y badpkg');
+          document.getElementById('target-template').closest('form').requestSubmit();
+        })()
+      `);
+
+      // Wait for build logs modal with failure diagnostics
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('Image build failed') && document.body.innerText.includes('Exit code 100')`,
+        4000,
+        'build failure diagnostics displayed in logs modal',
+      );
+
+      // Click "Re-attempt / Fix Config" in the logs modal
+      await cdp.evalJS(`
+        (() => {
+          const btn = Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Re-attempt') || b.innerText.includes('Fix Config'));
+          if (btn) btn.click();
+        })()
+      `);
+
+      // Verify the Prepare Image Dialog opens with PRE-POPULATED values (NOT a blank/fresh page!)
+      await waitFor(
+        cdp,
+        `document.getElementById('target-template') !== null && document.getElementById('target-template').value === 'failing-test-box'`,
+        3000,
+        're-attempt dialog open with pre-filled target-template',
+      );
+
+      const reattemptValues = await cdp.evalJS(`
+        (() => {
+          const nameInput = document.getElementById('target-template');
+          const descInput = document.getElementById('target-description');
+          const scriptInput = document.getElementById('build-script');
+          const hasFailureBanner = document.body.innerText.includes('Re-attempting failed build') && document.body.innerText.includes('Exit code 100');
+          return {
+            name: nameInput ? nameInput.value : '',
+            desc: descInput ? descInput.value : '',
+            script: scriptInput ? scriptInput.value : '',
+            hasFailureBanner,
+          };
+        })()
+      `);
+
+      assert.equal(reattemptValues.name, 'failing-test-box', 'Re-attempt must preserve the image name');
+      assert.equal(reattemptValues.desc, 'Failing package configuration', 'Re-attempt must preserve the description');
+      assert.equal(reattemptValues.script, 'apt-get install -y badpkg', 'Re-attempt must preserve the build script commands');
+      assert.equal(reattemptValues.hasFailureBanner, true, 'Re-attempt dialog must display failure diagnostics banner');
+
+      // Close the re-attempt dialog
+      await cdp.evalJS(`
+        (() => {
+          const cancelBtn = Array.from(document.querySelectorAll('button')).find((b) => b.innerText === 'Cancel');
+          if (cancelBtn) cancelBtn.click();
+        })()
+      `);
+    });
+
+    await t.test('Image section: random scenario testing for custom packages, hardware specs, search/filter, and draft deletion', async () => {
+      // 1. Open Prepare Image dialog
+      await cdp.evalJS(`
+        Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()
+      `);
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open for random scenario test',
+      );
+
+      // 2. Set random/diverse configuration: custom packages via input and hardware specs
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'random-custom-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Custom specs and packages');
+          window.__setReactInput(document.getElementById('build-script'), 'echo "ready"');
+
+          // Enter custom packages in the text field (comma & space separated)
+          const customPkgInput = Array.from(document.querySelectorAll('input')).find((el) =>
+            el.placeholder && el.placeholder.includes('Add other apt packages')
+          );
+          if (customPkgInput) {
+            window.__setReactInput(customPkgInput, 'htop, tmux zsh');
+            const addBtn = customPkgInput.parentElement.querySelector('button');
+            if (addBtn) addBtn.click();
+          }
+
+          // Expand Hardware Specs
+          const hwBtn = Array.from(document.querySelectorAll('button')).find((b) =>
+            (b.innerText || '').includes('Hardware Specs')
+          );
+          if (hwBtn) hwBtn.click();
+        })()
+      `);
+
+      // Set hardware specs (4 vCPUs, 4096 MB RAM, 20480 MB Disk)
+      await cdp.evalJS(`
+        (() => {
+          const selects = Array.from(document.querySelectorAll('select'));
+          for (const s of selects) {
+            if (s.innerHTML.includes('4 vCPUs')) {
+              s.value = '4';
+              s.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (s.innerHTML.includes('4096 MB')) {
+              s.value = '4096';
+              s.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (s.innerHTML.includes('20480 MB')) {
+              s.value = '20480';
+              s.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        })()
+      `);
+
+      // Click Save as Draft
+      await cdp.evalJS(`
+        (() => {
+          const saveDraftBtn = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Save as Draft'));
+          if (saveDraftBtn) saveDraftBtn.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.getElementById('target-template') === null`,
+        3000,
+        'prepare image dialog closed after save draft',
+      );
+
+      // Switch to Configurations & Drafts tab
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Configurations & Drafts'));
+          if (tab) tab.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('random-custom-box') && document.body.innerText.includes('4 vCPU')`,
+        3000,
+        'custom draft visible with 4 vCPU and custom specs',
+      );
+
+      // Verify custom packages htop, tmux, zsh are present in draft card
+      const draftContent = await cdp.evalJS(`
+        (() => {
+          const text = document.body.innerText;
+          return {
+            hasHtop: text.includes('htop'),
+            hasTmux: text.includes('tmux'),
+            hasZsh: text.includes('zsh'),
+            has4vCPU: text.includes('4 vCPU'),
+            has4GB: text.includes('4.0 GB') || text.includes('4 GB') || text.includes('4096 MB'),
+          };
+        })()
+      `);
+      assert.equal(draftContent.hasHtop, true, 'Draft must include htop package');
+      assert.equal(draftContent.hasTmux, true, 'Draft must include tmux package');
+      assert.equal(draftContent.hasZsh, true, 'Draft must include zsh package');
+      assert.equal(draftContent.has4vCPU, true, 'Draft must show 4 vCPU');
+
+      // Test Search / Filter functionality
+      await cdp.evalJS(`
+        (() => {
+          const searchInput = Array.from(document.querySelectorAll('input')).find((el) =>
+            el.placeholder && el.placeholder.includes('Search')
+          );
+          if (searchInput) {
+            window.__setReactInput(searchInput, 'random-custom');
+          }
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `(() => {
+          const names = Array.from(document.querySelectorAll('span.font-mono.font-semibold')).map((el) => el.innerText.trim());
+          return names.includes('random-custom-box') && !names.includes('draft-python-box');
+        })()`,
+        3000,
+        'search filtered drafts correctly',
+      );
+
+      // Clear search
+      await cdp.evalJS(`
+        (() => {
+          const searchInput = Array.from(document.querySelectorAll('input')).find((el) =>
+            el.placeholder && el.placeholder.includes('Search')
+          );
+          if (searchInput) {
+            window.__setReactInput(searchInput, '');
+          }
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `(() => {
+          const names = Array.from(document.querySelectorAll('span.font-mono.font-semibold')).map((el) => el.innerText.trim());
+          return names.includes('random-custom-box') && names.includes('draft-python-box');
+        })()`,
+        3000,
+        'search cleared and all drafts visible',
+      );
+
+      // Test Draft Deletion: find the delete button on random-custom-box card
+      await cdp.evalJS(`
+        (() => {
+          const card = Array.from(document.querySelectorAll('div.border.bg-card')).find((el) =>
+            el.innerText && el.innerText.includes('random-custom-box')
+          );
+          if (card) {
+            const delBtn = card.querySelector('button[title="Delete draft"]');
+            if (delBtn) delBtn.click();
+          }
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `(() => {
+          const names = Array.from(document.querySelectorAll('span.font-mono.font-semibold')).map((el) => el.innerText.trim());
+          return !names.includes('random-custom-box');
+        })()`,
+        3000,
+        'draft successfully deleted and removed from view',
+      );
     });
   } finally {
     try { cdp.close(); } catch {}

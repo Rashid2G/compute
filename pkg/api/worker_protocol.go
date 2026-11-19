@@ -70,6 +70,15 @@ type JobSpec struct {
 	CommitSHA      string            `json:"commit_sha,omitempty"`
 	Source         string            `json:"source,omitempty"`
 
+	// TargetTemplate is the template name to produce upon successful image build.
+	TargetTemplate string            `json:"target_template,omitempty"`
+	// TargetDescription is an optional description for the produced template.
+	TargetDescription string         `json:"target_description,omitempty"`
+	// Packages lists packages requested for pre-installation.
+	Packages       []string          `json:"packages,omitempty"`
+	// Script contains custom build/configuration script commands.
+	Script         string            `json:"script,omitempty"`
+
 	// AuthorizedOwnerIDs and AllowCrossOwner are populated by the control plane
 	// after authenticating the job submission. They are never trusted directly
 	// from client input and let the worker consume org-owned images.
