@@ -444,6 +444,18 @@ COMPUTE_ADMIN_PASSWORD=replace-with-openssl-rand-base64-32
             </tbody>
           </table>
         </div>
+
+        <div class="note-box">
+          <div class="note-label">Key Paths for Debugging &amp; Investigation</div>
+          When diagnosing sandbox boot failures, SSH connection refusals, or state issues, inspect these host paths:
+          <ul style="margin: 0.5rem 0 0 1.25rem; padding: 0;">
+            <li><code>/var/lib/compute/vms/&lt;sandbox_id&gt;/firecracker.log</code> &mdash; Hypervisor serial console and kernel boot messages (check first if SSH dial fails).</li>
+            <li><code>/var/lib/compute/vms/&lt;sandbox_id&gt;/rootfs.ext4</code> &mdash; Dedicated sparse root disk image (inspectable offline via loop mount).</li>
+            <li><code>/var/lib/compute/vms/&lt;sandbox_id&gt;/snapshot.state</code> &mdash; MicroVM CPU/device snapshot state (for paused, snapshotted, or auto-hibernated sandboxes).</li>
+            <li><code>/var/lib/compute/data/compute.db</code> &mdash; Primary SQLite database storing sandbox metadata and IPAM allocations.</li>
+            <li><code>/var/lib/compute/images/ssh/id_ed25519</code> &mdash; Internal daemon SSH private key (mode <code>0600</code>).</li>
+          </ul>
+        </div>
       </section>
 
       <!-- 04. Sandboxes -->

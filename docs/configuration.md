@@ -190,6 +190,65 @@ Configured dynamically via `GET /api/v1/scheduler/policy` and `PUT /api/v1/sched
 | `host_reserved_vcpus` / `memory_mb` / `disk_mb` | `1` / `512` / `2048` | Host safety reserve subtracted from physical capacity. |
 | `disk_hard_enforcement` | `true` | Hard-limit-only disk accounting; rejections return HTTP `429` `ResourceLimitError`. |
 
+## Key Paths for Debugging and Investigation
+
+Compute persists its operational state, microVM disks, hypervisor logs, credentials, and templates across a set of well-defined filesystem paths rooted by default at `COMPUTE_DATA_DIR` (`/var/lib/compute` in containers, `./data` on the host in standard Compose installs). When diagnosing startup failures, VM crashes, SSH connection errors, or state discrepancies, inspect the following locations:
+
+### 1. MicroVM Workspaces (`/var/lib/compute/vms/<sandbox_id>/`)
+
+Each microVM sandbox has a dedicated directory indexed by its sandbox ID (`ins_...`):
+
+| File | Purpose | Investigation Guidance |
+| --- | --- | --- |
+| `firecracker.log` | Firecracker serial console and hypervisor log. | **Primary diagnostic file.** Contains kernel boot messages, driver init logs, and serial console output. Inspect this immediately if an instance fails to boot or if SSH dial fails with `connection refused`. |
+| `firecracker.sock` | API control socket for the Firecracker instance. | Verifies the hypervisor process is running. If absent or unresponsive while `desired_running=true`, the Firecracker process crashed or was terminated. |
+| `rootfs.ext4` | Copy-on-Write (COW) or sparse root disk for the sandbox. | Can be checked offline for filesystem corruption using `e2fsck -f rootfs.ext4` or inspected via read-only loop mount (`mount -o loop,ro rootfs.ext4 /mnt`). |
+| `snapshot.state` | Serialized hypervisor CPU and device architecture state. | Inspected when debugging sandbox pause, resume, or idle auto-hibernation failures. |
+| `snapshot.mem` | Guest RAM memory dump accompanying `snapshot.state`. | Full memory image corresponding to the saved execution state. |
+
+### 2. Databases & Control-Plane State (`/var/lib/compute/data/` and `master/`)
+
+| Path | Purpose | Investigation Guidance |
+| --- | --- | --- |
+| `/var/lib/compute/data/compute.db` | Primary SQLite database (`COMPUTE_DB_PATH`). | Stores sandbox metadata, status, IPAM assignments, user accounts, and API keys. Query with `sqlite3 compute.db "SELECT id, name, status, ip_address, error FROM vms;"` to inspect state. |
+| `/var/lib/compute/master/state.db` | Cluster control-plane state database. | Worker node registry, pool topology, and distributed job records in multi-node setups. |
+| `/var/lib/compute/master/auth.db` | Dedicated authentication database (`COMPUTE_AUTH_DB_PATH`). | User credentials, password hashes, and RBAC permissions. |
+| `/var/lib/compute/master/audit.db` | Immutable cryptographic audit log. | Contains tamper-evident operation records. |
+| `/var/lib/compute/master/master.key` | Root cryptographic key. | Permissions must remain `0600`. Required to decrypt stored secrets and sign tokens. |
+| `/var/lib/compute/master/ca.crt` & `ca.key` | Internal mTLS Root CA. | Used for mutual TLS worker-control plane communication. |
+
+### 3. Base Images & SSH Keys (`/var/lib/compute/images/`)
+
+| Path | Purpose | Investigation Guidance |
+| --- | --- | --- |
+| `/var/lib/compute/images/vmlinux` | Bootable Linux kernel (`COMPUTE_DEFAULT_KERNEL`). | Must be an uncompressed ELF binary compatible with Firecracker. |
+| `/var/lib/compute/images/ubuntu-24.04.ext4` | Golden rootfs template (`COMPUTE_DEFAULT_ROOTFS`). | Base filesystem cloned into new VM root disks. |
+| `/var/lib/compute/images/ssh/id_ed25519` | Internal Ed25519 private key (`0600`). | Used by the daemon to establish terminal sessions, exec commands, and forward ports. Must have `0600` permissions. |
+| `/var/lib/compute/images/ssh/id_ed25519.pub` | Internal SSH public key (`0644`). | Injected into `/home/compute/.ssh/authorized_keys` and `/root/.ssh/authorized_keys` inside the rootfs. |
+
+### 4. Templates, Volumes & Scratch Staging
+
+| Path | Purpose | Investigation Guidance |
+| --- | --- | --- |
+| `/var/lib/compute/templates/` | Sandbox template disks (`<template_id>.ext4`). | Base disks for instant template instantiation. |
+| `/var/lib/compute/volumes/` | Persistent secondary block devices (`<volume_id>.ext4` / `.xfs`). | Attach/detach volume storage and snapshots (`<volume_id>.ext4.snap-<N>`). |
+| `/var/lib/compute/sandboxes/` | Build staging and scratch workspace. | Temporary disk operations during custom image creation. |
+
+### 5. Cgroups, Jailer & Host-Level Isolation
+
+| Path | Purpose | Investigation Guidance |
+| --- | --- | --- |
+| `/sys/fs/cgroup/compute/<sandbox_id>/` | Cgroup v2 resource limits per microVM. | Check `memory.current` vs `memory.max` to detect guest OOM events; check `cpu.stat` for CPU throttling. |
+| `/srv/jailer/firecracker/<sandbox_id>/root/` | Jailer chroot jail directory (`COMPUTE_JAILER_DIR`). | When `COMPUTE_JAILER_ENABLED=true`, Firecracker executes inside this restricted chroot. |
+
+### 6. Client CLI & Multi-Node Workers
+
+| Path | Purpose | Investigation Guidance |
+| --- | --- | --- |
+| `~/.compute/config.json` | Local user CLI credentials and tokens. | Stores API token from `compute auth login`. Clear or inspect if CLI returns unauthorized errors. |
+| `/var/lib/compute-worker/` | Worker node state (`COMPUTE_WORKER_STATE_DIR`). | Contains `worker.db` and worker-managed sandbox disks under `vms/`. |
+| `/tmp/compute-sandboxes/<job-id>/` | Ephemeral CI/distributed job checkouts. | Working directory where worker supervisor runs build tasks. |
+
 ## JSON config file
 
 `config/daemon.json` contains neutral defaults; `config/daemon.example.json`
