@@ -30,7 +30,7 @@ Usage:
 
 Commands:
   list, ls                 List sandboxes with their URL or SSH name.
-  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --command <cmd>, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
+  create                   Create a sandbox (--name, --tier, --vcpus, --memory, --disk, --image, --template, --ssh-key <name|path>, --ssh-password, --startup-script <script|file|->, --startup-script-file <path>, --command <cmd>, --network-isolation <account|isolated>, --isolated, --protected, --start/--boot).
   start, run               Start one or more sandboxes.
   stop                     Stop one or more sandboxes.
   save-state, snapshot     Save a running sandbox snapshot.

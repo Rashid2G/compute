@@ -523,3 +523,63 @@ func TestNoDeadlock_SetResourceLimits_ReconcileAndPrune_WithRunQueue(t *testing.
 		t.Fatal("FATAL: ReconcileAndPrune entered self-deadlock while processing runQueue!")
 	}
 }
+
+func TestExecCancelAndNonBlockingLock(t *testing.T) {
+	m, store := testConcurrentManager(t)
+	ctx := context.Background()
+
+	vmID := "vm-exec-cancel-test"
+	v := &db.VM{
+		ID:         vmID,
+		Name:       "exec-cancel-test",
+		Status:     db.StatusRunning,
+		IPAddress:  "192.168.127.100",
+		OwnerID:    "owner-1",
+		TAPDevice:  "tap-exec-1",
+		SSHKeyPath: "/tmp/fake-key",
+	}
+	if err := store.SaveVM(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.vms[vmID] = v
+	m.mu.Unlock()
+
+	// 1. Verify registerExecCancel & CancelVMExecs
+	cancelCalled := false
+	cancelFn := func() {
+		cancelCalled = true
+	}
+	unreg := m.registerExecCancel(vmID, cancelFn)
+	m.CancelVMExecs(vmID)
+	if !cancelCalled {
+		t.Fatal("expected CancelVMExecs to trigger registered cancel function")
+	}
+	unreg()
+
+	// 2. Verify StopVM invokes CancelVMExecs without blocking
+	cancelCalled2 := false
+	_ = m.registerExecCancel(vmID, func() {
+		cancelCalled2 = true
+	})
+	_ = m.StopVM(ctx, vmID)
+	if !cancelCalled2 {
+		t.Fatal("expected StopVM to trigger active exec cancellation")
+	}
+
+	// 3. Verify DeleteVM invokes CancelVMExecs
+	_ = store.SaveVM(ctx, v)
+	m.mu.Lock()
+	m.vms[vmID] = v
+	m.mu.Unlock()
+
+	cancelCalled3 := false
+	_ = m.registerExecCancel(vmID, func() {
+		cancelCalled3 = true
+	})
+	_ = m.DeleteVM(ctx, vmID)
+	if !cancelCalled3 {
+		t.Fatal("expected DeleteVM to trigger active exec cancellation")
+	}
+}
+

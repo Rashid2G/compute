@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/Rashid2G/compute/internal/config"
@@ -186,3 +188,111 @@ func TestSandboxAPI_ServeProxy(t *testing.T) {
 		t.Fatalf("expected body %q, got %q", expectedBody, rr.Body.String())
 	}
 }
+
+func TestSandboxAPI_CreateWithStartupScript(t *testing.T) {
+	s, store := setupTestServerForSandboxAPI(t)
+	ctx := context.Background()
+
+	script := "#!/bin/bash\nset -e\necho 'hello from startup script' > /tmp/init.log\n"
+	body := fmt.Sprintf(`{"name":"sbx-script-test","vcpus":1,"memory_mb":512,"startup_script":%q}`, script)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var created db.VM
+	if err := json.NewDecoder(rr.Body).Decode(&created); err != nil {
+		t.Fatalf("failed to decode created VM response: %v", err)
+	}
+	if created.StartupScript != script {
+		t.Fatalf("created VM startup_script mismatch: got %q, want %q", created.StartupScript, script)
+	}
+
+	// Verify persistence in store
+	fromStore, err := store.GetVM(ctx, created.ID)
+	if err != nil || fromStore == nil {
+		t.Fatalf("GetVM from store failed: %v", err)
+	}
+	if fromStore.StartupScript != script {
+		t.Fatalf("store VM startup_script mismatch: got %q, want %q", fromStore.StartupScript, script)
+	}
+
+	// Verify GET /api/v1/sandboxes/:id returns startup_script
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes/"+created.ID, nil)
+	getRR := httptest.NewRecorder()
+	s.ServeHTTP(getRR, getReq)
+	if getRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from GET, got %d: %s", getRR.Code, getRR.Body.String())
+	}
+	var inspected db.VM
+	if err := json.NewDecoder(getRR.Body).Decode(&inspected); err != nil {
+		t.Fatalf("failed to decode GET response: %v", err)
+	}
+	if inspected.StartupScript != script {
+		t.Fatalf("inspected VM startup_script mismatch: got %q, want %q", inspected.StartupScript, script)
+	}
+}
+
+func TestSandboxAPI_FeedbackStreamingAndStatuses(t *testing.T) {
+	s, store := setupTestServerForSandboxAPI(t)
+	ctx := context.Background()
+
+	// Verify status helpers
+	if !db.StatusRunningStartupScript.IsActiveRunning() {
+		t.Fatal("expected StatusRunningStartupScript to be active running")
+	}
+	if !db.StatusRunningBuildScript.IsActiveRunning() {
+		t.Fatal("expected StatusRunningBuildScript to be active running")
+	}
+	if !db.StatusRunning.IsActiveRunning() {
+		t.Fatal("expected StatusRunning to be active running")
+	}
+	if db.StatusStopped.IsActiveRunning() {
+		t.Fatal("expected StatusStopped not to be active running")
+	}
+
+	// Create test VM in running_startup_script state
+	vm := &db.VM{
+		ID:        "sbx-feedback-test",
+		Name:      "sbx-feedback-test",
+		Status:    db.StatusRunningStartupScript,
+		IPAddress: "10.0.0.99",
+	}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatalf("failed to save VM: %v", err)
+	}
+
+	// Verify feedback tracker
+	tracker := s.getOrCreateFeedbackTracker(vm.ID)
+	if tracker == nil {
+		t.Fatal("expected feedback tracker to be created")
+	}
+
+	chunk1 := []byte("Installing packages...\n")
+	chunk2 := []byte("Startup finished.\n")
+	tracker.emit(chunk1)
+	tracker.emit(chunk2)
+
+	tracker.mu.Lock()
+	buf := string(tracker.buffer)
+	tracker.mu.Unlock()
+
+	if !strings.Contains(buf, "Installing packages") || !strings.Contains(buf, "Startup finished") {
+		t.Fatalf("buffer missing expected chunks: %q", buf)
+	}
+
+	tracker.finish()
+
+	// Ensure done channel is closed
+	select {
+	case <-tracker.done:
+	default:
+		t.Fatal("expected tracker.done to be closed")
+	}
+}
+

@@ -13,6 +13,7 @@ export interface SandboxCreateOptions {
   sshPassword?: string;
   networkIsolation?: NetworkIsolationMode;
   isolated?: boolean;
+  startupScript?: string;
 }
 
 export interface ExecutionResult {

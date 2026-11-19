@@ -399,6 +399,8 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		networkIsolation := createCmd.String("network-isolation", "", "Sandbox network isolation mode: 'account' (communicate with account sandboxes) or 'isolated' (own sandbox only)")
 		isolated := createCmd.Bool("isolated", false, "Isolate this sandbox on its own network (shorthand for --network-isolation isolated)")
 		protected := createCmd.Bool("protected", false, "Enable deletion protection")
+		startupScript := createCmd.String("startup-script", "", "Bash startup script string, '-' to read from stdin, or path to script file")
+		startupScriptFile := createCmd.String("startup-script-file", "", "Path to bash startup script file")
 		buildCommand := createCmd.String("command", "", "Command to execute inside the sandbox on build/start")
 		createCmd.StringVar(buildCommand, "build-command", "", "Alias for --command")
 		execUser := createCmd.String("user", "compute", "User to run the build command as (default: compute)")
@@ -416,6 +418,36 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		if isolatedSet {
 			val := *isolated
 			isolatedPtr = &val
+		}
+
+		scriptContent := ""
+		if strings.TrimSpace(*startupScriptFile) != "" {
+			filePath := expandHome(strings.TrimSpace(*startupScriptFile))
+			data, err := os.ReadFile(filePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading startup script file %s: %v\n", *startupScriptFile, err)
+				os.Exit(1)
+			}
+			scriptContent = string(data)
+		} else if strings.TrimSpace(*startupScript) != "" {
+			candidate := strings.TrimSpace(*startupScript)
+			if candidate == "-" {
+				data, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading startup script from stdin: %v\n", err)
+					os.Exit(1)
+				}
+				scriptContent = string(data)
+			} else if info, err := os.Stat(expandHome(candidate)); err == nil && !info.IsDir() {
+				data, err := os.ReadFile(expandHome(candidate))
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error reading startup script file %s: %v\n", candidate, err)
+					os.Exit(1)
+				}
+				scriptContent = string(data)
+			} else {
+				scriptContent = *startupScript
+			}
 		}
 
 		password := *sshPassword
@@ -461,6 +493,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			SSHNoDefaultKey:  *noSSHKey,
 			SSHPassword:      password,
 			Protected:        protected,
+			StartupScript:    scriptContent,
 			Command:          *buildCommand,
 			ExecUser:         *execUser,
 			NetworkIsolation: *networkIsolation,
@@ -484,6 +517,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Println("SSH auth:        password enabled for compute and root (embedded public keys also accepted)")
 		} else {
 			fmt.Println("SSH auth:        public key only (no SSH password configured)")
+		}
+		if v.StartupScript != "" {
+			fmt.Printf("Startup script:  configured (%d bytes bash script)\n", len(v.StartupScript))
 		}
 
 		if *startNow || *bootNow {
@@ -746,6 +782,9 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			fmt.Printf("  Network:       account (can communicate with all account sandboxes)\n")
 		}
 		fmt.Printf("  Protected:     %t\n", v.Protected)
+		if v.StartupScript != "" {
+			fmt.Printf("  Startup Script: configured (%d bytes bash script)\n", len(v.StartupScript))
+		}
 		fmt.Printf("  Created:       %s\n", v.CreatedAt.Format(time.RFC3339))
 		if v.Status == db.StatusQueued {
 			printQueuedHint(ctx, client, v)

@@ -476,8 +476,13 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 			created = started
 			if created.Status == db.StatusRunning {
 				s.schedulePostBootSetup(ctx, created)
-				if strings.TrimSpace(req.Command) != "" {
-					s.schedulePostBootBuildCommand(ctx, created, req.Command, req.ExecUser)
+				startupScript := strings.TrimSpace(created.StartupScript)
+				buildCommand := strings.TrimSpace(req.Command)
+				if startupScript != "" || buildCommand != "" {
+					s.runPostBootScripts(ctx, created, startupScript, buildCommand, req.ExecUser)
+					if refreshed, gErr := s.vmMgr.GetVM(ctx, created.ID); gErr == nil && refreshed != nil {
+						created = refreshed
+					}
 				}
 			}
 		}
@@ -625,6 +630,9 @@ func (s *Server) restartSingleVM(ctx context.Context, isAdmin bool, v *db.VM, wa
 	if v != nil && v.Status == db.StatusRunning {
 		_ = waitSSH
 		s.schedulePostBootSetup(ctx, v)
+		if strings.TrimSpace(v.StartupScript) != "" {
+			s.schedulePostBootStartupScript(ctx, v, v.StartupScript, "")
+		}
 	}
 	s.broadcastClusterUpdate()
 	return v, nil

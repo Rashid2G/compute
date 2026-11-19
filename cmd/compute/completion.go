@@ -127,7 +127,7 @@ _compute_completion() {
             if [[ $cword -ge 3 ]]; then
                 case "${words[2]}" in
                     create)
-                        COMPREPLY=( $(compgen -W "--name --tier --vcpus --memory --disk --image --template --ssh-key --ssh-password --command --build-command --user --network-isolation --isolated --protected --start --boot --help" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--name --tier --vcpus --memory --disk --image --template --ssh-key --ssh-password --startup-script --startup-script-file --command --build-command --user --network-isolation --isolated --protected --start --boot --help" -- "$cur") )
                         ;;
                     start|run|stop|save-state|snapshot|resume|delete|rm|info|inspect|show|protect|unprotect)
                         local vms=$("$completion_command" __complete vms 2>/dev/null)

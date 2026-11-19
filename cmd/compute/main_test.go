@@ -178,12 +178,30 @@ func TestCLIHelperProcess(t *testing.T) {
 	if os.Getenv("COMPUTE_TEST_HELPER") != "1" {
 		return
 	}
-	raw := os.Args[len(os.Args)-1]
-	os.Args = []string{"compute"}
-	if raw != "" {
-		args := strings.Split(raw, " ")
-		os.Args = append(os.Args, args...)
+	dashIdx := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			dashIdx = i
+			break
+		}
 	}
+	var targetArgs []string
+	if dashIdx != -1 && dashIdx+1 < len(os.Args) {
+		trailing := os.Args[dashIdx+1:]
+		if len(trailing) == 1 {
+			if trailing[0] != "" {
+				targetArgs = strings.Split(trailing[0], " ")
+			}
+		} else {
+			targetArgs = trailing
+		}
+	} else if len(os.Args) > 1 {
+		raw := os.Args[len(os.Args)-1]
+		if raw != "" {
+			targetArgs = strings.Split(raw, " ")
+		}
+	}
+	os.Args = append([]string{"compute"}, targetArgs...)
 	main()
 	os.Exit(0)
 }
@@ -909,9 +927,68 @@ func TestSandboxHelpListsDiscoveryAndStartFlags(t *testing.T) {
 		"images",
 		"templates",
 		"--start/--boot",
+		"--startup-script",
 	} {
 		if !strings.Contains(outStr, expected) {
 			t.Errorf("sandbox help missing expected term %q:\n%s", expected, outStr)
 		}
+	}
+}
+
+func TestSandboxCreateStartupScriptCLI(t *testing.T) {
+	var receivedScript string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/vms", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			var req map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			if s, ok := req["startup_script"].(string); ok {
+				receivedScript = s
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintln(w, `{"id":"sbx-test","name":"sbx-test","status":"created","vcpus":1,"memory_mb":512,"ip_address":"172.16.0.5","startup_script":"`+strings.ReplaceAll(receivedScript, "\n", "\\n")+`"}`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// 1. Inline startup script
+	inlineScript := "#!/bin/bash\necho inline-ok\n"
+	cmd := exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "sandbox", "create", "--name", "sbx-test", "--startup-script", inlineScript)
+	cmd.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create failed: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "Startup script:  configured") {
+		t.Fatalf("expected startup script configured in output, got: %s", out)
+	}
+	if receivedScript != inlineScript {
+		t.Fatalf("daemon did not receive inline script: got %q, want %q", receivedScript, inlineScript)
+	}
+
+	// 2. Startup script from file
+	tmpFile, err := os.CreateTemp("", "startup-*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+	fileScript := "#!/bin/bash\napt-get update\n"
+	_ = os.WriteFile(tmpFile.Name(), []byte(fileScript), 0644)
+
+	cmd2 := exec.Command(os.Args[0], "-test.run=TestCLIHelperProcess", "--", "sandbox", "create", "--name", "sbx-test", "--startup-script-file", tmpFile.Name())
+	cmd2.Env = append(os.Environ(), "COMPUTE_TEST_HELPER=1", "COMPUTE_DAEMON="+srv.URL)
+	out2, err := cmd2.CombinedOutput()
+	if err != nil {
+		t.Fatalf("create from file failed: %v: %s", err, out2)
+	}
+	if receivedScript != fileScript {
+		t.Fatalf("daemon did not receive file script: got %q, want %q", receivedScript, fileScript)
 	}
 }

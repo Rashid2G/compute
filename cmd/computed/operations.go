@@ -248,6 +248,9 @@ func summarizeCreateRequest(req vm.CreateRequest) map[string]interface{} {
 	if req.NetworkIsolation != "" {
 		summary["network_isolation"] = req.NetworkIsolation
 	}
+	if req.StartupScript != "" {
+		summary["startup_script"] = req.StartupScript
+	}
 	return summary
 }
 

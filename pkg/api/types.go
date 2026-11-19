@@ -125,6 +125,7 @@ type InstanceCreate struct {
 	Restart            string            `json:"restart,omitempty"`
 	Start              *bool             `json:"start,omitempty"`
 	RegistryCredential string            `json:"registry_credential,omitempty"`
+	StartupScript      string            `json:"startup_script,omitempty"`
 	PoolID             string            `json:"pool_id,omitempty"`
 	WorkerID           string            `json:"worker_id,omitempty"`
 }

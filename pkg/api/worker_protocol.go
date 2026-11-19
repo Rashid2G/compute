@@ -222,6 +222,7 @@ type WorkerVMCreateRequest struct {
 	AuthorizedSSHKeys []string `json:"authorized_ssh_keys,omitempty"`
 	SSHPassword       string   `json:"ssh_password,omitempty"`
 	Protected         *bool    `json:"protected,omitempty"`
+	StartupScript     string   `json:"startup_script,omitempty"`
 	Command           string   `json:"command,omitempty"`
 	BuildCommand      string   `json:"build_command,omitempty"`
 	ExecUser          string   `json:"exec_user,omitempty"`

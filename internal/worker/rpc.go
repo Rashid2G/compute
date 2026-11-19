@@ -301,6 +301,7 @@ func (c *Client) dispatchRPC(ctx context.Context, req api.WorkerRPCRequest) (int
 			AuthorizedSSHKeys: payload.AuthorizedSSHKeys,
 			SSHPassword:       payload.SSHPassword,
 			Protected:         payload.Protected,
+			StartupScript:     payload.StartupScript,
 			Command:           payload.Command,
 			BuildCommand:      payload.BuildCommand,
 			ExecUser:          payload.ExecUser,

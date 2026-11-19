@@ -140,6 +140,7 @@ class Sandbox:
         ssh_password: Optional[str] = None,
         network_isolation: Optional[str] = None,
         isolated: Optional[bool] = None,
+        startup_script: Optional[str] = None,
     ) -> "Sandbox":
         """Provision and launch a new isolated compute sandbox in milliseconds."""
         resolved_host = host or os.getenv("COMPUTE_HOST") or os.getenv("COMPUTE_DAEMON") or "http://127.0.0.1:18080"
@@ -167,6 +168,8 @@ class Sandbox:
             payload["network_isolation"] = network_isolation
         if isolated is not None:
             payload["isolated"] = isolated
+        if startup_script:
+            payload["startup_script"] = startup_script
 
         headers = {"Content-Type": "application/json"}
         if resolved_key:

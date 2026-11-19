@@ -1282,3 +1282,75 @@ func TestStore_MigratesPoolWorkerAndHibernateColumns(t *testing.T) {
 		t.Fatalf("GetWorkerNode after migration: %+v err=%v", wnGot, err)
 	}
 }
+
+func TestStore_StartupScript(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "compute-db-startup-script-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	expectedScript := "#!/bin/bash\nset -euo pipefail\necho 'Provisioning sandbox' > /var/log/bootstrap.log\n"
+
+	vm := &VM{
+		ID:            "vm-script-1",
+		Name:          "sandbox-script-1",
+		Status:        StatusCreated,
+		VCPUs:         2,
+		MemoryMB:      1024,
+		IPAddress:     "172.16.0.10",
+		MACAddress:    "06:00:ac:10:00:0a",
+		TAPDevice:     "mftap-sc1",
+		RootfsPath:    "/tmp/rootfs.ext4",
+		KernelPath:    "/tmp/vmlinux",
+		DiskPath:      "/tmp/disk.ext4",
+		StartupScript: expectedScript,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatalf("SaveVM failed: %v", err)
+	}
+
+	got, err := store.GetVM(ctx, "vm-script-1")
+	if err != nil {
+		t.Fatalf("GetVM failed: %v", err)
+	}
+	if got.StartupScript != expectedScript {
+		t.Fatalf("StartupScript mismatch:\ngot:  %q\nwant: %q", got.StartupScript, expectedScript)
+	}
+
+	vms, err := store.ListVMs(ctx)
+	if err != nil {
+		t.Fatalf("ListVMs failed: %v", err)
+	}
+	if len(vms) != 1 || vms[0].StartupScript != expectedScript {
+		t.Fatalf("ListVMs did not populate StartupScript properly: %+v", vms)
+	}
+
+	// Update StartupScript
+	updatedScript := "#!/bin/bash\napt-get update && apt-get install -y nginx\n"
+	got.StartupScript = updatedScript
+	if err := store.SaveVM(ctx, got); err != nil {
+		t.Fatalf("SaveVM update failed: %v", err)
+	}
+
+	gotUpdated, err := store.GetVM(ctx, "vm-script-1")
+	if err != nil {
+		t.Fatalf("GetVM after update failed: %v", err)
+	}
+	if gotUpdated.StartupScript != updatedScript {
+		t.Fatalf("StartupScript mismatch after update:\ngot:  %q\nwant: %q", gotUpdated.StartupScript, updatedScript)
+	}
+}
+

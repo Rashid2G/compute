@@ -82,6 +82,7 @@ export function CreateVMDialog({
     useState<NetworkIsolationMode>('account');
   const [protectedVM, setProtectedVM] = useState(false);
   const [buildCommand, setBuildCommand] = useState('');
+  const [startupScript, setStartupScript] = useState('');
 
   const [fetchedTemplates, setFetchedTemplates] = useState<Template[]>([]);
   const [fetchedWorkers, setFetchedWorkers] = useState<WorkerNodeRecord[]>([]);
@@ -278,6 +279,7 @@ export function CreateVMDialog({
         ssh_password: sshPassword || undefined,
         command: buildCommand.trim() || undefined,
         build_command: buildCommand.trim() || undefined,
+        startup_script: startupScript.trim() || undefined,
       };
 
       if (placementMode === 'pool' && selectedPoolId) {
@@ -304,6 +306,7 @@ export function CreateVMDialog({
     memoryTouchedRef.current = false;
     setSandboxName('');
     setBuildCommand('');
+    setStartupScript('');
     setSshPassword('');
     setNetworkIsolation('account');
     setProtectedVM(false);
@@ -733,6 +736,50 @@ export function CreateVMDialog({
                 </span>
               </button>
             </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="block text-[12px] text-muted-foreground">
+                Startup script (bash, optional)
+              </label>
+              <label
+                htmlFor="startup-script-upload"
+                className="cursor-pointer text-[10.5px] font-mono text-primary hover:underline"
+              >
+                Upload .sh file
+                <input
+                  id="startup-script-upload"
+                  type="file"
+                  accept=".sh,text/x-sh,text/plain"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onload = (evt) => {
+                        const content = evt.target?.result;
+                        if (typeof content === 'string') {
+                          setStartupScript(content);
+                        }
+                      };
+                      reader.readAsText(file);
+                    }
+                  }}
+                />
+              </label>
+            </div>
+            <textarea
+              aria-label="Startup script (bash)"
+              value={startupScript}
+              onChange={(e) => setStartupScript(e.target.value)}
+              placeholder={`#!/bin/bash\n# Per-sandbox startup script executed in bash on boot\necho "Booted at $(date)" > /var/log/startup.log`}
+              rows={4}
+              className="w-full border border-border bg-background p-2.5 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
+            />
+            <p className="text-[10.5px] text-muted-foreground">
+              Per-sandbox bash script executed inside the sandbox upon startup (saved at /var/lib/compute/startup-script.sh).
+            </p>
           </div>
 
           <div className="space-y-1.5">
