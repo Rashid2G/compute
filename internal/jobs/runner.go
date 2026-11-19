@@ -35,9 +35,8 @@ type Runner struct {
 	maxConcurrent int
 	bootTimeout   time.Duration
 
-	mu       sync.Mutex
-	active   map[string]context.CancelFunc
-	onUpdate func()
+	mu     sync.Mutex
+	active map[string]context.CancelFunc
 }
 
 // NewRunner creates a local job runner. maxConcurrent <= 0 defaults to 2 and
@@ -58,16 +57,6 @@ func NewRunner(mgr *vm.Manager, maxConcurrent int, bootTimeout time.Duration) *R
 	}
 }
 
-// SetOnUpdate registers a callback invoked when a job finishes or state changes.
-func (r *Runner) SetOnUpdate(fn func()) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.onUpdate = fn
-}
-
 // TryStart claims a queued job and runs it in the background. It reports false
 // when the runner is at capacity so the scheduler retries on the next tick.
 func (r *Runner) TryStart(ctx context.Context, job *db.Job, spec api.JobSpec) bool {
@@ -75,13 +64,9 @@ func (r *Runner) TryStart(ctx context.Context, job *db.Job, spec api.JobSpec) bo
 		return false
 	}
 	if len(spec.Command) == 0 {
-		if job.Type == "image-build" || job.Type == "image.build" || spec.TargetTemplate != "" {
-			spec.Command = buildImageConfigCommand(spec.Packages, spec.Script)
-		} else {
-			result, _ := json.Marshal(map[string]interface{}{"error": "job has no command"})
-			_ = r.store.UpdateJobState(ctx, job.ID, "failed", string(result))
-			return true
-		}
+		result, _ := json.Marshal(map[string]interface{}{"error": "job has no command"})
+		_ = r.store.UpdateJobState(ctx, job.ID, "failed", string(result))
+		return true
 	}
 
 	r.mu.Lock()
@@ -139,27 +124,6 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 			log.Printf("[jobs] failed to clean up sandbox %s for %s: %v", vmID, job.ID, err)
 		}
 	}()
-
-	isImageBuild := job.Type == "image-build" || job.Type == "image.build" || spec.TargetTemplate != ""
-	targetTemplate := strings.TrimSpace(spec.TargetTemplate)
-	if targetTemplate == "" && isImageBuild {
-		targetTemplate = strings.TrimSpace(job.RepoName)
-	}
-
-	if isImageBuild {
-		if spec.VCPUs <= 0 {
-			spec.VCPUs = 2
-		}
-		if spec.MemoryMB <= 0 {
-			spec.MemoryMB = 2048
-		}
-		if spec.DiskMB <= 0 {
-			spec.DiskMB = 10240
-		}
-		if len(spec.Command) == 0 {
-			spec.Command = buildImageConfigCommand(spec.Packages, spec.Script)
-		}
-	}
 
 	spec.ImageID = normalizeRunnerImageID(spec.ImageID)
 	logs.append("stdout", fmt.Sprintf("[compute] creating sandbox from image %q", spec.ImageID))
@@ -334,52 +298,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		result["error"] = err.Error()
 	} else if exitCode != 0 {
 		state = "failed"
-		result["error"] = fmt.Sprintf("configuration command failed with exit code %d", exitCode)
 	}
-
-	if state == "succeeded" && isImageBuild && targetTemplate != "" {
-		logs.append("stdout", fmt.Sprintf("[compute] image configuration complete. Creating template %q...", targetTemplate))
-		// If template or custom image already exists for this owner (e.g. on rebuild), clean them up first so CreateTemplate replaces it cleanly
-		if oldTpl, _ := r.mgr.GetStore().GetTemplateByOwner(ctx, job.OwnerID, targetTemplate); oldTpl != nil {
-			_ = r.mgr.DeleteTemplate(ctx, oldTpl.ID)
-		}
-		if oldImg, _ := r.mgr.GetStore().GetImageByOwner(ctx, job.OwnerID, targetTemplate); oldImg != nil {
-			_ = r.mgr.DeleteImage(ctx, oldImg.ID)
-		}
-		tpl, tplErr := r.mgr.CreateTemplate(ctx, vm.CreateTemplateRequest{
-			VMID:        vmID,
-			Name:        targetTemplate,
-			Description: spec.TargetDescription,
-			OwnerID:     job.OwnerID,
-		})
-		if tplErr != nil {
-			state = "failed"
-			result["error"] = "failed to create template from built image: " + tplErr.Error()
-			logs.append("stderr", "[compute] "+result["error"].(string))
-		} else {
-			result["template_id"] = tpl.ID
-			result["template_name"] = tpl.Name
-			logs.append("stdout", fmt.Sprintf("[compute] template %s (%s) created successfully and ready to use!", tpl.Name, tpl.ID))
-
-			// Also register custom image record so it is tracked across image endpoints
-			customImg := &db.CustomImage{
-				ID:          fmt.Sprintf("img-%s", tpl.ID),
-				OwnerID:     job.OwnerID,
-				Name:        tpl.Name,
-				Description: tpl.Description,
-				BaseImage:   spec.ImageID,
-				Packages:    spec.Packages,
-				RootfsPath:  tpl.DiskPath,
-				KernelPath:  tpl.KernelPath,
-				SizeMB:      tpl.DiskMB,
-				Status:      db.ImageStatusReady,
-				CreatedAt:   time.Now().UTC(),
-				UpdatedAt:   time.Now().UTC(),
-			}
-			_ = r.store.SaveImage(ctx, customImg)
-		}
-	}
-
 	logs.append("stdout", fmt.Sprintf("[compute] job finished with exit code %d", exitCode))
 	r.finish(job.ID, state, result)
 }
@@ -394,12 +313,6 @@ func (r *Runner) finish(jobID, state string, result map[string]interface{}) {
 	}
 	payload, _ := json.Marshal(result)
 	_ = r.store.UpdateJobState(ctx, jobID, state, string(payload))
-	r.mu.Lock()
-	onUpdate := r.onUpdate
-	r.mu.Unlock()
-	if onUpdate != nil {
-		go onUpdate()
-	}
 }
 
 func (r *Runner) waitReady(ctx context.Context, vmID string) error {
@@ -521,56 +434,4 @@ func jobSandboxName(jobID string) string {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func buildImageConfigCommand(packages []string, script string) []string {
-	var sb strings.Builder
-	sb.WriteString("set -euo pipefail\n")
-	sb.WriteString("export DEBIAN_FRONTEND=noninteractive\n")
-
-	cleanPackages := make([]string, 0, len(packages))
-	for _, p := range packages {
-		for _, part := range strings.Split(p, ",") {
-			part = strings.TrimSpace(part)
-			if part != "" {
-				cleanPackages = append(cleanPackages, part)
-			}
-		}
-	}
-
-	trimmedScript := strings.TrimSpace(script)
-	totalSteps := 1
-	if len(cleanPackages) > 0 {
-		totalSteps++
-	}
-	if trimmedScript != "" {
-		totalSteps++
-	}
-
-	step := 1
-	sb.WriteString(fmt.Sprintf("echo \"==> [%d/%d] Updating package repositories...\"\n", step, totalSteps))
-	sb.WriteString("sudo -E apt-get update -y\n")
-
-	if len(cleanPackages) > 0 {
-		step++
-		sb.WriteString(fmt.Sprintf("echo \"==> [%d/%d] Installing pre-configured packages: %s...\"\n", step, totalSteps, strings.Join(cleanPackages, " ")))
-		pkgArgs := make([]string, len(cleanPackages))
-		for i, p := range cleanPackages {
-			pkgArgs[i] = shellQuote(p)
-		}
-		sb.WriteString(fmt.Sprintf("sudo -E apt-get install -y --no-install-recommends %s\n", strings.Join(pkgArgs, " ")))
-	}
-
-	if trimmedScript != "" {
-		step++
-		sb.WriteString(fmt.Sprintf("echo \"==> [%d/%d] Running custom configuration script...\"\n", step, totalSteps))
-		sb.WriteString(trimmedScript)
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("echo \"==> Flushing filesystem buffers...\"\n")
-	sb.WriteString("sync\n")
-	sb.WriteString("echo \"==> Image configuration completed successfully.\"\n")
-
-	return []string{"bash", "-c", sb.String()}
 }

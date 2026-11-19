@@ -132,17 +132,10 @@ if [ "${START_STACK}" -eq 1 ]; then
     docker compose up -d
     echo "==> Compute daemon started. Verify readiness with:"
     echo "    curl -fsS http://127.0.0.1:${COMPUTE_API_PORT:-18080}/api/v1/ready | python3 -m json.tool"
-    echo ""
-    echo "Default Credentials & Access (Loopback):"
-    echo "  Web Dashboard: http://127.0.0.1:${COMPUTE_API_PORT:-18080}/"
-    echo "  Default Login: admin / admin"
-    echo "  Default Guest: compute (passwordless sudo; SSH key: ${IMAGES_DIR}/ssh/id_ed25519)"
 else
     echo ""
     echo "Next steps:"
     echo "  1. Start the daemon:     docker compose up -d   (or: make up)"
     echo "  2. Check readiness:      curl -fsS http://127.0.0.1:${COMPUTE_API_PORT:-18080}/api/v1/ready | python3 -m json.tool"
     echo "  3. Open Web Dashboard:   http://127.0.0.1:${COMPUTE_API_PORT:-18080}/"
-    echo "  4. Default Login:        admin / admin"
-    echo "  5. Default Guest VM:     user 'compute' (passwordless sudo; SSH key: ${IMAGES_DIR}/ssh/id_ed25519)"
 fi

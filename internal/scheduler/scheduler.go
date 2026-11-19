@@ -202,13 +202,6 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 			continue
 		}
 
-		if (job.Type == "image-build" || job.Type == "image.build" || spec.TargetTemplate != "") && s.local != nil {
-			if s.local.TryStart(ctx, job, spec) {
-				assigned++
-				continue
-			}
-		}
-
 		req := Requirements{
 			Architecture: spec.Architecture,
 			VCPUs:        spec.VCPUs,

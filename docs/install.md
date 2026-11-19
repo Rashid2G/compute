@@ -71,30 +71,6 @@ docker compose logs -f computed
 
 `compute-gui` (`:8080`, enabled via `docker compose --profile gui up -d`) is strictly optional and disabled by default — use it only if you want a separate frontend proxy listener on a different port.
 
-### Default Credentials & Post-Installation Access
-
-Right after quick installation (`./scripts/install.sh` and `docker compose up -d`), Compute initializes with the following default credentials, accounts, and endpoints:
-
-| Component | Default Value | Description / Usage |
-| --- | --- | --- |
-| **Web Dashboard URL** | `http://127.0.0.1:18080/` | Embedded directly in `computed` control plane |
-| **Admin Username** | `admin` | Seeded administrator username (`COMPUTE_ADMIN_USERNAME`) |
-| **Admin Password** | `admin` | Initial loopback password (`COMPUTE_ADMIN_PASSWORD`) |
-| **Admin Email** | `admin@compute.local` | Default administrator contact (`COMPUTE_ADMIN_EMAIL`) |
-| **CLI Login** | `compute auth login --username admin --password admin` | Authenticates against `http://127.0.0.1:18080` |
-| **Sandbox Guest User** | `compute` | Default guest user (UID 1000) with passwordless `sudo` rights |
-| **Sandbox Root User** | `root` | Root account (UID 0); switch via `sudo su -` or `sudo -i` |
-| **Sandbox SSH Key** | `./data/images/ssh/id_ed25519` | Key pair generated during install; used by `compute sandbox ssh` |
-| **Sandbox SSH Password** | *Disabled by default* | Opt-in per sandbox via `--ssh-password <secret>` on creation |
-| **Default Guest Image** | `ubuntu-24` | Ubuntu 24.04 LTS (`./data/images/ubuntu-24.04.ext4`) |
-| **Default Guest Kernel** | `vmlinux` | Firecracker CI kernel (`./data/images/vmlinux`) |
-| **Default Sandbox Specs**| 1 vCPU, 2048 MB RAM, 50 GB disk | Tier `1vcpu` micro (configurable on create) |
-| **Sandbox Network Bridge**| `mft3br0` | Subnet `172.16.0.0/16` (or `172.20.0.0/16`), gateway `172.16.0.1` |
-| **DNS Proxy** | `127.0.0.1:53` | Embedded DNS server resolving `<sandbox>.vm` domains |
-
-> **Security Guardrail**: The default credentials (`admin` / `admin`) are permitted **only on loopback addresses** (`127.0.0.1` / `localhost`). If you expose Compute over LAN, Tailscale, or the public internet (`COMPUTE_BIND_ADDRESS=0.0.0.0`), `computed` **refuses to start** until you set a secure `COMPUTE_ADMIN_PASSWORD` (or `COMPUTE_ADMIN_SECRET`) in `.env`.
-
-
 ## 2. Preflight & `.env` Configuration (Required for Non-Loopback)
 
 If you want to run individual setup steps manually before starting:
@@ -193,13 +169,11 @@ Point the CLI at the daemon and log in (if you deployed via Docker Compose witho
 
 ```bash
 export COMPUTE_DAEMON=127.0.0.1:18080
-./bin/compute auth login --username admin --password admin
+./bin/compute auth login --username admin
 ./bin/compute sandbox create --name demo --image ubuntu-24 --start
 ./bin/compute sandbox ssh demo -- uname -a
 ./bin/compute sandbox delete demo
 ```
-
-When connected via SSH (`compute sandbox ssh demo`), you are logged in as the default guest user `compute` (UID 1000) with passwordless `sudo` privileges (`sudo apt update`, `sudo su -`).
 
 If the host has less than ~2.5 GB of available memory, the default 2 GB
 sandbox is placed in the admission queue instead of booting. `compute sandbox

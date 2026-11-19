@@ -3,7 +3,6 @@ import {
   Database,
   Gauge,
   HardDrive,
-  Layers,
   List,
   Settings,
   Zap,
@@ -12,8 +11,7 @@ import {
 
 export type PageId =
   | 'instances'
-  | 'image'
-  | 'snapshots'
+  | 'images'
   | 'storage'
   | 'jobs'
   | 'workers'
@@ -58,15 +56,7 @@ export const PAGES: PageMeta[] = [
     section: 'core',
   },
   {
-    id: 'image',
-    label: 'Images',
-    shortLabel: 'Images',
-    description: 'Prepare custom OS images with pre-configured software and build reusable templates.',
-    icon: Layers,
-    section: 'core',
-  },
-  {
-    id: 'snapshots',
+    id: 'images',
     label: 'Snapshots',
     shortLabel: 'Snapshots',
     description: 'Instant memory/disk snapshots and reusable sandbox templates.',
@@ -121,11 +111,8 @@ export const ROUTE_ALIASES: Record<string, PageId> = {
   dashboard: 'instances',
   overview: 'instances',
   console: 'instances',
-  snapshots: 'snapshots',
-  templates: 'snapshots',
-  image: 'image',
-  images: 'image',
-  build: 'image',
+  snapshots: 'images',
+  templates: 'images',
   volumes: 'storage',
   queue: 'jobs',
   ci: 'jobs',

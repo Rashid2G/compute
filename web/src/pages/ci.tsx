@@ -25,7 +25,6 @@ import type {
   JobLogRecord,
   JobRecord,
   QueueResult,
-  Template,
 } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
@@ -99,8 +98,6 @@ export function CIPage({
   const [jobCommand, setJobCommand] = useState(
     'uname -a && lscpu | head -n 12 && free -m',
   );
-  const [jobImage, setJobImage] = useState('ubuntu-24');
-  const [templates, setTemplates] = useState<Template[]>([]);
   const [jobVcpus, setJobVcpus] = useState(2);
   const [jobMemoryMb, setJobMemoryMb] = useState(2048);
   const [jobTimeoutSec, setJobTimeoutSec] = useState(300);
@@ -115,16 +112,14 @@ export function CIPage({
   const webhookUrl = `${window.location.origin}/api/v1/ci/webhooks/github`;
 
   const loadAll = useCallback(async () => {
-    const [jobsRes, queueRes, reposRes, templatesRes] = await Promise.allSettled([
+    const [jobsRes, queueRes, reposRes] = await Promise.allSettled([
       api.listJobs(),
       api.queue(),
       api.listCIRepos(),
-      api.listTemplates(),
     ]);
     if (jobsRes.status === 'fulfilled') setJobs(jobsRes.value || []);
     if (queueRes.status === 'fulfilled') setQueue(queueRes.value);
     if (reposRes.status === 'fulfilled') setRepos(reposRes.value || []);
-    if (templatesRes.status === 'fulfilled') setTemplates(templatesRes.value || []);
     setLoadingRepos(false);
   }, []);
 
@@ -319,7 +314,7 @@ export function CIPage({
         priority: jobPriority,
         source: 'manual',
         spec: {
-          image_id: jobImage || 'ubuntu-24',
+          image_id: 'ubuntu-24',
           command: ['bash', '-lc', command],
           vcpus: jobVcpus,
           memory_mb: jobMemoryMb,
@@ -1118,23 +1113,9 @@ export function CIPage({
               </button>
             </div>
 
-            <div>
-              <label className="block text-[11px] text-muted-foreground mb-1">
-                Base Environment / Template
-              </label>
-              <select
-                aria-label="Base Environment / Template"
-                value={jobImage}
-                onChange={(e) => setJobImage(e.target.value)}
-                className="h-8 w-full border border-border bg-background px-2 font-mono text-[12px] cursor-pointer"
-              >
-                <option value="ubuntu-24">Ubuntu 24.04 LTS (Default MicroVM Base)</option>
-                {templates.map((tpl) => (
-                  <option key={tpl.id} value={tpl.name}>
-                    Template: {tpl.name} {tpl.description ? `(${tpl.description})` : ''}
-                  </option>
-                ))}
-              </select>
+            <div className="flex items-center justify-between border border-border bg-muted/20 px-3 py-2 font-mono text-[11px]">
+              <span className="text-muted-foreground">Base Environment</span>
+              <span className="text-foreground">Ubuntu 24.04 LTS (ubuntu-24)</span>
             </div>
 
             <div className="space-y-3">
