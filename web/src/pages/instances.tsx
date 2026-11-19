@@ -560,7 +560,7 @@ export function InstancesPage({
   function requestBatchStop() {
     const toStop = selectedIds
       .map((id) => vms.find((v) => v.id === id))
-      .filter((vm): vm is VM => !!vm && vm.status === 'running');
+      .filter((vm): vm is VM => !!vm && (vm.status.startsWith('running') || vm.status === 'running'));
     if (toStop.length === 0) {
       toast.info('None of the selected sandboxes are running.');
       return;
@@ -1285,7 +1285,7 @@ export function InstancesPage({
                         onClick={(e) => e.stopPropagation()}
                       >
                         <div className="inline-flex items-center gap-1">
-                          {vm.status === 'running' ? (
+                          {vm.status.startsWith('running') ? (
                             <>
                               <button
                                 type="button"
@@ -1296,16 +1296,18 @@ export function InstancesPage({
                                 <Square className="h-2.5 w-2.5" />
                                 <span>Stop</span>
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => onSnapshot(vm)}
-                                title="Pause Sandbox (Save State)"
-                                aria-label={`Pause ${vm.name}`}
-                                className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-warning hover:text-warning transition-colors"
-                              >
-                                <Pause className="h-2.5 w-2.5" />
-                                <span>Pause</span>
-                              </button>
+                              {vm.status === 'running' && (
+                                <button
+                                  type="button"
+                                  onClick={() => onSnapshot(vm)}
+                                  title="Pause Sandbox (Save State)"
+                                  aria-label={`Pause ${vm.name}`}
+                                  className="flex h-6 items-center gap-1 border border-border bg-background px-1.5 text-[10px] text-muted-foreground hover:border-warning hover:text-warning transition-colors"
+                                >
+                                  <Pause className="h-2.5 w-2.5" />
+                                  <span>Pause</span>
+                                </button>
+                              )}
                             </>
                           ) : vm.status === 'paused' ? (
                             <button
@@ -1547,6 +1549,19 @@ export function InstancesPage({
                 </>
               )}
 
+              {/* Stop Button directly accessible when running or executing scripts */}
+              {selectedVM.status.startsWith('running') && (
+                <button
+                  type="button"
+                  onClick={() => setStopConfirmTargets([selectedVM])}
+                  className="inline-flex h-7 items-center gap-1 border border-warning/40 bg-warning/10 px-2.5 font-mono text-[11px] font-medium text-warning hover:bg-warning hover:text-[#1c1400] transition-colors"
+                  title="Stop sandbox"
+                >
+                  <Square className="h-3 w-3" />
+                  <span>Stop</span>
+                </button>
+              )}
+
               {/* Dedicated All-in-One Options & Settings Popup Trigger */}
               <button
                 type="button"
@@ -1575,7 +1590,7 @@ export function InstancesPage({
                     All Options &amp; Settings
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
-                  {selectedVM.status === 'running' ? (
+                  {selectedVM.status.startsWith('running') ? (
                     <>
                       <DropdownMenuItem onSelect={() => void handleRestartVM(selectedVM)}>
                         <RotateCcw className="h-3.5 w-3.5" />
@@ -1585,10 +1600,12 @@ export function InstancesPage({
                         <Square className="h-3.5 w-3.5 text-warning" />
                         Stop Sandbox
                       </DropdownMenuItem>
-                      <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
-                        <Pause className="h-3.5 w-3.5" />
-                        Pause &amp; Save State
-                      </DropdownMenuItem>
+                      {selectedVM.status === 'running' && (
+                        <DropdownMenuItem onSelect={() => onSnapshot(selectedVM)}>
+                          <Pause className="h-3.5 w-3.5" />
+                          Pause &amp; Save State
+                        </DropdownMenuItem>
+                      )}
                     </>
                   ) : selectedVM.status === 'paused' ? (
                     <>
@@ -1669,7 +1686,7 @@ export function InstancesPage({
                 {(selectedVM.status === 'running_startup_script' ||
                   selectedVM.status === 'running_build_script' ||
                   selectedVM.status === 'running_build_command') && (
-                  <div className="flex items-center justify-between px-3 py-1.5 bg-cyan-950/40 border-b border-cyan-800/30 text-[11px] text-cyan-300 shrink-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-cyan-950/40 border-b border-cyan-800/30 text-[11px] text-cyan-300 shrink-0">
                     <span className="flex items-center gap-1.5 font-medium">
                       <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
                       {selectedVM.status === 'running_startup_script'
@@ -1677,9 +1694,30 @@ export function InstancesPage({
                         : 'Executing Build Script'}{' '}
                       — Live Feedback Session
                     </span>
-                    <span className="text-[10.5px] text-muted-foreground">
-                      Interactive SSH bash session will open automatically when finished
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10.5px] text-muted-foreground hidden sm:inline">
+                        Interactive SSH session will open automatically when finished
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setStopConfirmTargets([selectedVM])}
+                        className="inline-flex items-center gap-1 border border-warning/50 bg-warning/10 px-2 py-0.5 text-[10.5px] font-mono text-warning hover:bg-warning hover:text-[#1c1400] transition-colors"
+                        title="Stop this sandbox now if stuck"
+                      >
+                        <Square className="h-2.5 w-2.5" />
+                        <span>Stop Sandbox</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={selectedVM.protected}
+                        onClick={() => onDelete(selectedVM)}
+                        className="inline-flex items-center gap-1 border border-destructive/50 bg-destructive/10 px-2 py-0.5 text-[10.5px] font-mono text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-50"
+                        title={selectedVM.protected ? 'Sandbox is protected' : 'Delete this sandbox now'}
+                      >
+                        <Trash2 className="h-2.5 w-2.5" />
+                        <span>Delete Sandbox</span>
+                      </button>
+                    </div>
                   </div>
                 )}
                 <div className="relative flex-1 w-full overflow-hidden">

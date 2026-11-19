@@ -1309,24 +1309,65 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 	tracker := s.getOrCreateFeedbackTracker(vmCopy.ID)
 
 	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
 		defer tracker.finish()
+
+		checkVMActive := func() (*db.VM, bool) {
+			if s.vmMgr == nil {
+				return nil, true
+			}
+			cur, err := s.vmMgr.GetVM(bgCtx, vmCopy.ID)
+			if err != nil || cur == nil {
+				tracker.emit([]byte("\r\n\x1b[33m[Compute Notice]\x1b[0m Sandbox was deleted; terminating post-boot script execution.\r\n"))
+				return nil, false
+			}
+			if cur.Status == db.StatusStopped {
+				tracker.emit([]byte("\r\n\x1b[33m[Compute Notice]\x1b[0m Sandbox was stopped; terminating post-boot script execution.\r\n"))
+				return cur, false
+			}
+			return cur, true
+		}
 
 		// Wait for guest SSH daemon to be reachable
 		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
 
+		if _, ok := checkVMActive(); !ok {
+			return
+		}
+
 		// 1. Startup Script (if configured)
 		if startupScript != "" {
-			vmCopy.Status = db.StatusRunningStartupScript
+			cur, ok := checkVMActive()
+			if !ok {
+				return
+			}
+			cur.Status = db.StatusRunningStartupScript
 			if s.vmMgr != nil {
-				_ = s.vmMgr.SaveVMRecord(bgCtx, &vmCopy)
+				_ = s.vmMgr.SaveVMRecord(bgCtx, cur)
 			}
 			s.broadcastClusterUpdate()
 
 			tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[36;1m[Compute Startup]\x1b[0m Executing startup script (%d bytes) in /bin/bash...\r\n", len(startupScript))))
 
 			start := time.Now()
+			stopNotify := make(chan struct{})
+			go func(start time.Time) {
+				ticker := time.NewTicker(60 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopNotify:
+						return
+					case <-bgCtx.Done():
+						return
+					case t := <-ticker.C:
+						elapsed := t.Sub(start).Round(time.Second)
+						tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[33;1m[Compute Notice]\x1b[0m Startup script is still in progress (%s elapsed). Real long-running operations will continue uninterrupted. If this script is hanging or stuck, you can stop or delete this sandbox at any time.\r\n", elapsed.String())))
+					}
+				}
+			}(start)
+
 			b64Script := base64.StdEncoding.EncodeToString([]byte(startupScript))
 			execCmd := fmt.Sprintf("mkdir -p /var/lib/compute && printf '%%s' '%s' | base64 -d > /var/lib/compute/startup-script.sh && chmod +x /var/lib/compute/startup-script.sh && /bin/bash /var/lib/compute/startup-script.sh 2>&1 | tee /var/log/startup-script.log", b64Script)
 
@@ -1338,7 +1379,7 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 					VMID:           s.remoteVMTargetID(&vmCopy),
 					Command:        execCmd,
 					User:           "root",
-					TimeoutSeconds: 300,
+					TimeoutSeconds: 0,
 				}, &remoteRes)
 				if err != nil {
 					exitCode = 1
@@ -1354,7 +1395,7 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 				err := s.vmMgr.ExecVMStream(bgCtx, vmCopy.ID, vm.ExecRequest{
 					Command: execCmd,
 					User:    "root",
-					Timeout: 300,
+					Timeout: 0,
 				}, func(ev vm.ExecStreamEvent) error {
 					tracker.emit([]byte(ev.Data))
 					if ev.Stream == "stderr" {
@@ -1372,6 +1413,7 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 					tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m %v\r\n", err)))
 				}
 			}
+			close(stopNotify)
 
 			durMs := int(time.Since(start).Milliseconds())
 			status := "succeeded"
@@ -1389,19 +1431,44 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 				"stdout":      scriptStdout,
 				"stderr":      scriptStderr,
 			})
+
+			if _, ok := checkVMActive(); !ok {
+				return
+			}
 		}
 
 		// 2. Build Command / Script (if configured)
 		if buildCommand != "" {
-			vmCopy.Status = db.StatusRunningBuildScript
+			cur, ok := checkVMActive()
+			if !ok {
+				return
+			}
+			cur.Status = db.StatusRunningBuildScript
 			if s.vmMgr != nil {
-				_ = s.vmMgr.SaveVMRecord(bgCtx, &vmCopy)
+				_ = s.vmMgr.SaveVMRecord(bgCtx, cur)
 			}
 			s.broadcastClusterUpdate()
 
 			tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[36;1m[Compute Build]\x1b[0m Executing build script: %s\r\n", buildCommand)))
 
 			start := time.Now()
+			stopNotify := make(chan struct{})
+			go func(start time.Time) {
+				ticker := time.NewTicker(60 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopNotify:
+						return
+					case <-bgCtx.Done():
+						return
+					case t := <-ticker.C:
+						elapsed := t.Sub(start).Round(time.Second)
+						tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[33;1m[Compute Notice]\x1b[0m Build command is still in progress (%s elapsed). Real long-running operations will continue uninterrupted. If this script is hanging or stuck, you can stop or delete this sandbox at any time.\r\n", elapsed.String())))
+					}
+				}
+			}(start)
+
 			var exitCode int
 			var buildStdout, buildStderr string
 			if vm.IsRemoteVM(&vmCopy) {
@@ -1410,7 +1477,7 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 					VMID:           s.remoteVMTargetID(&vmCopy),
 					Command:        buildCommand,
 					User:           execUser,
-					TimeoutSeconds: 300,
+					TimeoutSeconds: 0,
 				}, &remoteRes)
 				if err != nil {
 					exitCode = 1
@@ -1426,7 +1493,7 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 				err := s.vmMgr.ExecVMStream(bgCtx, vmCopy.ID, vm.ExecRequest{
 					Command: buildCommand,
 					User:    execUser,
-					Timeout: 300,
+					Timeout: 0,
 				}, func(ev vm.ExecStreamEvent) error {
 					tracker.emit([]byte(ev.Data))
 					if ev.Stream == "stderr" {
@@ -1444,6 +1511,7 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 					tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m %v\r\n", err)))
 				}
 			}
+			close(stopNotify)
 
 			durMs := int(time.Since(start).Milliseconds())
 			status := "succeeded"
@@ -1461,12 +1529,20 @@ func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript
 				"stdout":    buildStdout,
 				"stderr":    buildStderr,
 			})
+
+			if _, ok := checkVMActive(); !ok {
+				return
+			}
 		}
 
 		// 3. Mark VM as fully running
-		vmCopy.Status = db.StatusRunning
+		cur, ok := checkVMActive()
+		if !ok {
+			return
+		}
+		cur.Status = db.StatusRunning
 		if s.vmMgr != nil {
-			_ = s.vmMgr.SaveVMRecord(bgCtx, &vmCopy)
+			_ = s.vmMgr.SaveVMRecord(bgCtx, cur)
 		}
 		tracker.emit([]byte("\r\n\x1b[32;1m[Compute Ready]\x1b[0m All scripts finished. Opening interactive SSH terminal...\r\n\r\n"))
 		s.broadcastClusterUpdate()

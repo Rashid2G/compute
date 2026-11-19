@@ -81,6 +81,9 @@ type Manager struct {
 	inFlightDiskMB        atomic.Int64
 	inFlightMemMB         atomic.Int64
 	inFlightNames         map[string]struct{}
+	execMu                sync.Mutex
+	execCancels           map[string]map[uint64]context.CancelFunc
+	execNextID            uint64
 }
 
 func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *storage.Manager) *Manager {
@@ -140,6 +143,7 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 		vms:            make(map[string]*db.VM),
 		templates:      make(map[string]*db.Template),
 		images:         make(map[string]*db.CustomImage),
+		execCancels:    make(map[string]map[uint64]context.CancelFunc),
 	}
 
 	if netMgr != nil && store != nil {
@@ -3082,10 +3086,12 @@ func (m *Manager) StopVMDeferred(ctx context.Context, vmID string) error {
 }
 
 func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile bool, forceKill bool) error {
+	m.CancelVMExecs(vmID)
 	vm, err := m.getVMUnsafe(ctx, vmID)
 	if err != nil || vm == nil {
 		return fmt.Errorf("vm %s not found: %w", vmID, err)
 	}
+	m.CancelVMExecs(vm.ID, vm.InternalID, vm.Name)
 
 	if vm.Status == db.StatusStopped && !m.isAlive(vm.PID) {
 		_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
@@ -3248,10 +3254,14 @@ func (m *Manager) DeleteVMDeferred(ctx context.Context, vmID string) error {
 }
 
 func (m *Manager) deleteVMInternal(ctx context.Context, vmID string, deferred bool) error {
+	m.CancelVMExecs(vmID)
 	vmLock := m.getVMLock(vmID)
 	vmLock.Lock()
 
 	vm, _ := m.getVMUnsafe(ctx, vmID)
+	if vm != nil {
+		m.CancelVMExecs(vm.ID, vm.InternalID, vm.Name)
+	}
 	if vm != nil && vm.Protected {
 		displayName := vm.Name
 		if displayName == "" {
@@ -3816,6 +3826,53 @@ func (m *Manager) UpdateVMConfig(ctx context.Context, vmID string, req UpdateVMC
 	return vm, nil
 }
 
+func (m *Manager) registerExecCancel(vmID string, cancel context.CancelFunc) func() {
+	m.execMu.Lock()
+	if m.execCancels == nil {
+		m.execCancels = make(map[string]map[uint64]context.CancelFunc)
+	}
+	m.execNextID++
+	id := m.execNextID
+	if m.execCancels[vmID] == nil {
+		m.execCancels[vmID] = make(map[uint64]context.CancelFunc)
+	}
+	m.execCancels[vmID][id] = cancel
+	m.execMu.Unlock()
+
+	return func() {
+		m.execMu.Lock()
+		if sub := m.execCancels[vmID]; sub != nil {
+			delete(sub, id)
+			if len(sub) == 0 {
+				delete(m.execCancels, vmID)
+			}
+		}
+		m.execMu.Unlock()
+	}
+}
+
+// CancelVMExecs terminates any active SSH command execution contexts for the VM.
+func (m *Manager) CancelVMExecs(vmIDs ...string) {
+	m.execMu.Lock()
+	var cancels []context.CancelFunc
+	for _, id := range vmIDs {
+		if id == "" {
+			continue
+		}
+		if sub, ok := m.execCancels[id]; ok {
+			for _, c := range sub {
+				cancels = append(cancels, c)
+			}
+			delete(m.execCancels, id)
+		}
+	}
+	m.execMu.Unlock()
+
+	for _, c := range cancels {
+		c()
+	}
+}
+
 // newSSHExec builds an SSH command for a running VM. A zero Timeout means no
 // deadline; callers that want a default apply it before calling.
 func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) (*exec.Cmd, context.Context, context.CancelFunc, error) {
@@ -3865,18 +3922,19 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 // ExecVM executes a remote command inside a running VM via SSH, buffering the
 // output until the command finishes.
 func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*ExecResponse, error) {
-	vmLock := m.getVMLock(vmID)
-	vmLock.RLock()
-	defer vmLock.RUnlock()
-
 	if req.Timeout <= 0 {
 		req.Timeout = 30
 	}
+	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
 	cmd, _, cancel, err := m.newSSHExec(ctx, vmID, req)
+	vmLock.RUnlock()
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
+	unreg := m.registerExecCancel(vmID, cancel)
+	defer unreg()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -3906,18 +3964,19 @@ func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*Ex
 // ExecVMInput executes a remote command inside a running VM while piping stdin
 // to it. Output is buffered until the command finishes.
 func (m *Manager) ExecVMInput(ctx context.Context, vmID string, req ExecRequest, stdin io.Reader) (*ExecResponse, error) {
-	vmLock := m.getVMLock(vmID)
-	vmLock.RLock()
-	defer vmLock.RUnlock()
-
 	if req.Timeout <= 0 {
 		req.Timeout = 60
 	}
+	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
 	cmd, _, cancel, err := m.newSSHExec(ctx, vmID, req)
+	vmLock.RUnlock()
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
+	unreg := m.registerExecCancel(vmID, cancel)
+	defer unreg()
 
 	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
@@ -3951,13 +4010,14 @@ func (m *Manager) ExecVMInput(ctx context.Context, vmID string, req ExecRequest,
 func (m *Manager) ExecVMStream(ctx context.Context, vmID string, req ExecRequest, emit func(ExecStreamEvent) error) error {
 	vmLock := m.getVMLock(vmID)
 	vmLock.RLock()
-	defer vmLock.RUnlock()
-
 	cmd, execCtx, cancel, err := m.newSSHExec(ctx, vmID, req)
+	vmLock.RUnlock()
 	if err != nil {
 		return err
 	}
 	defer cancel()
+	unreg := m.registerExecCancel(vmID, cancel)
+	defer unreg()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
