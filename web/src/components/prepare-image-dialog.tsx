@@ -199,10 +199,10 @@ export function PrepareImageDialog({
     try {
       const job = await api.prepareImage({
         name: cleanName,
-        description: description.trim(),
+        description: cleanDesc,
         base_image: baseImage,
         packages,
-        script: script.trim(),
+        script: cleanScript,
         vcpus,
         memory_mb: memoryMB,
         disk_mb: diskMB,
@@ -212,10 +212,10 @@ export function PrepareImageDialog({
       onSaveDraft?.({
         id: initialValues?.id || cleanName,
         name: cleanName,
-        description: description.trim(),
+        description: cleanDesc,
         base_image: baseImage,
         packages,
-        script: script.trim(),
+        script: cleanScript,
         vcpus,
         memory_mb: memoryMB,
         disk_mb: diskMB,
@@ -230,10 +230,10 @@ export function PrepareImageDialog({
       onSaveDraft?.({
         id: initialValues?.id || cleanName,
         name: cleanName,
-        description: description.trim(),
+        description: cleanDesc,
         base_image: baseImage,
         packages,
-        script: script.trim(),
+        script: cleanScript,
         vcpus,
         memory_mb: memoryMB,
         disk_mb: diskMB,

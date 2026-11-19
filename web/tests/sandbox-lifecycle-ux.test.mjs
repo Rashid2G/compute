@@ -1715,6 +1715,178 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
         })()
       `);
     });
+
+    await t.test('Image section: random scenario testing for custom packages, hardware specs, search/filter, and draft deletion', async () => {
+      // 1. Open Prepare Image dialog
+      await cdp.evalJS(`
+        Array.from(document.querySelectorAll('button')).find((b) => b.innerText.includes('Prepare Image')).click()
+      `);
+      await waitFor(
+        cdp,
+        `document.getElementById('prepare-image-title') !== null && document.getElementById('target-template') !== null`,
+        3000,
+        'prepare image dialog open for random scenario test',
+      );
+
+      // 2. Set random/diverse configuration: custom packages via input and hardware specs
+      await cdp.evalJS(`
+        (() => {
+          window.__setReactInput(document.getElementById('target-template'), 'random-custom-box');
+          window.__setReactInput(document.getElementById('target-description'), 'Custom specs and packages');
+          window.__setReactInput(document.getElementById('build-script'), 'echo "ready"');
+
+          // Enter custom packages in the text field (comma & space separated)
+          const customPkgInput = Array.from(document.querySelectorAll('input')).find((el) =>
+            el.placeholder && el.placeholder.includes('Add other apt packages')
+          );
+          if (customPkgInput) {
+            window.__setReactInput(customPkgInput, 'htop, tmux zsh');
+            const addBtn = customPkgInput.parentElement.querySelector('button');
+            if (addBtn) addBtn.click();
+          }
+
+          // Expand Hardware Specs
+          const hwBtn = Array.from(document.querySelectorAll('button')).find((b) =>
+            (b.innerText || '').includes('Hardware Specs')
+          );
+          if (hwBtn) hwBtn.click();
+        })()
+      `);
+
+      // Set hardware specs (4 vCPUs, 4096 MB RAM, 20480 MB Disk)
+      await cdp.evalJS(`
+        (() => {
+          const selects = Array.from(document.querySelectorAll('select'));
+          for (const s of selects) {
+            if (s.innerHTML.includes('4 vCPUs')) {
+              s.value = '4';
+              s.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (s.innerHTML.includes('4096 MB')) {
+              s.value = '4096';
+              s.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (s.innerHTML.includes('20480 MB')) {
+              s.value = '20480';
+              s.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        })()
+      `);
+
+      // Click Save as Draft
+      await cdp.evalJS(`
+        (() => {
+          const saveDraftBtn = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Save as Draft'));
+          if (saveDraftBtn) saveDraftBtn.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.getElementById('target-template') === null`,
+        3000,
+        'prepare image dialog closed after save draft',
+      );
+
+      // Switch to Configurations & Drafts tab
+      await cdp.evalJS(`
+        (() => {
+          const tab = Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('Configurations & Drafts'));
+          if (tab) tab.click();
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `document.body.innerText.includes('random-custom-box') && document.body.innerText.includes('4 vCPU')`,
+        3000,
+        'custom draft visible with 4 vCPU and custom specs',
+      );
+
+      // Verify custom packages htop, tmux, zsh are present in draft card
+      const draftContent = await cdp.evalJS(`
+        (() => {
+          const text = document.body.innerText;
+          return {
+            hasHtop: text.includes('htop'),
+            hasTmux: text.includes('tmux'),
+            hasZsh: text.includes('zsh'),
+            has4vCPU: text.includes('4 vCPU'),
+            has4GB: text.includes('4.0 GB') || text.includes('4 GB') || text.includes('4096 MB'),
+          };
+        })()
+      `);
+      assert.equal(draftContent.hasHtop, true, 'Draft must include htop package');
+      assert.equal(draftContent.hasTmux, true, 'Draft must include tmux package');
+      assert.equal(draftContent.hasZsh, true, 'Draft must include zsh package');
+      assert.equal(draftContent.has4vCPU, true, 'Draft must show 4 vCPU');
+
+      // Test Search / Filter functionality
+      await cdp.evalJS(`
+        (() => {
+          const searchInput = Array.from(document.querySelectorAll('input')).find((el) =>
+            el.placeholder && el.placeholder.includes('Search')
+          );
+          if (searchInput) {
+            window.__setReactInput(searchInput, 'random-custom');
+          }
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `(() => {
+          const names = Array.from(document.querySelectorAll('span.font-mono.font-semibold')).map((el) => el.innerText.trim());
+          return names.includes('random-custom-box') && !names.includes('draft-python-box');
+        })()`,
+        3000,
+        'search filtered drafts correctly',
+      );
+
+      // Clear search
+      await cdp.evalJS(`
+        (() => {
+          const searchInput = Array.from(document.querySelectorAll('input')).find((el) =>
+            el.placeholder && el.placeholder.includes('Search')
+          );
+          if (searchInput) {
+            window.__setReactInput(searchInput, '');
+          }
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `(() => {
+          const names = Array.from(document.querySelectorAll('span.font-mono.font-semibold')).map((el) => el.innerText.trim());
+          return names.includes('random-custom-box') && names.includes('draft-python-box');
+        })()`,
+        3000,
+        'search cleared and all drafts visible',
+      );
+
+      // Test Draft Deletion: find the delete button on random-custom-box card
+      await cdp.evalJS(`
+        (() => {
+          const card = Array.from(document.querySelectorAll('div.border.bg-card')).find((el) =>
+            el.innerText && el.innerText.includes('random-custom-box')
+          );
+          if (card) {
+            const delBtn = card.querySelector('button[title="Delete draft"]');
+            if (delBtn) delBtn.click();
+          }
+        })()
+      `);
+
+      await waitFor(
+        cdp,
+        `(() => {
+          const names = Array.from(document.querySelectorAll('span.font-mono.font-semibold')).map((el) => el.innerText.trim());
+          return !names.includes('random-custom-box');
+        })()`,
+        3000,
+        'draft successfully deleted and removed from view',
+      );
+    });
   } finally {
     try { cdp.close(); } catch {}
     chrome.kill('SIGKILL');

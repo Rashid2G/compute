@@ -538,23 +538,32 @@ func buildImageConfigCommand(packages []string, script string) []string {
 		}
 	}
 
+	trimmedScript := strings.TrimSpace(script)
+	totalSteps := 1
 	if len(cleanPackages) > 0 {
-		sb.WriteString("echo \"==> [1/3] Updating package repositories...\"\n")
-		sb.WriteString("sudo -E apt-get update -y\n")
-		sb.WriteString(fmt.Sprintf("echo \"==> [2/3] Installing pre-configured packages: %s...\"\n", strings.Join(cleanPackages, " ")))
+		totalSteps++
+	}
+	if trimmedScript != "" {
+		totalSteps++
+	}
+
+	step := 1
+	sb.WriteString(fmt.Sprintf("echo \"==> [%d/%d] Updating package repositories...\"\n", step, totalSteps))
+	sb.WriteString("sudo -E apt-get update -y\n")
+
+	if len(cleanPackages) > 0 {
+		step++
+		sb.WriteString(fmt.Sprintf("echo \"==> [%d/%d] Installing pre-configured packages: %s...\"\n", step, totalSteps, strings.Join(cleanPackages, " ")))
 		pkgArgs := make([]string, len(cleanPackages))
 		for i, p := range cleanPackages {
 			pkgArgs[i] = shellQuote(p)
 		}
 		sb.WriteString(fmt.Sprintf("sudo -E apt-get install -y --no-install-recommends %s\n", strings.Join(pkgArgs, " ")))
-	} else {
-		sb.WriteString("echo \"==> [1/2] Updating package repositories...\"\n")
-		sb.WriteString("sudo -E apt-get update -y\n")
 	}
 
-	trimmedScript := strings.TrimSpace(script)
 	if trimmedScript != "" {
-		sb.WriteString("echo \"==> [3/3] Running custom configuration commands...\"\n")
+		step++
+		sb.WriteString(fmt.Sprintf("echo \"==> [%d/%d] Running custom configuration script...\"\n", step, totalSteps))
 		sb.WriteString(trimmedScript)
 		sb.WriteString("\n")
 	}
