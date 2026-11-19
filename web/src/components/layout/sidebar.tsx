@@ -3,6 +3,7 @@ import {
   Database,
   Gauge,
   HardDrive,
+  Layers,
   List,
   Lock,
   LogOut,
@@ -77,7 +78,12 @@ export function Sidebar({
       count: totalVMs > 0 ? `${runningVMs}/${totalVMs}` : undefined,
     },
     {
-      id: 'images',
+      id: 'image',
+      label: 'Images',
+      icon: Layers,
+    },
+    {
+      id: 'snapshots',
       label: 'Snapshots',
       icon: Database,
       count:

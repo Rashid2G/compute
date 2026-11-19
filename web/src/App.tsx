@@ -26,6 +26,7 @@ import type { AuthUser, CreateVMRequest, VM } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { AuthPage } from '@/pages/auth';
 import { CIPage } from '@/pages/ci';
+import { ImagesPage } from '@/pages/images';
 import { ImagesTemplatesPage } from '@/pages/images-templates';
 import { InstancesPage } from '@/pages/instances';
 import { ResourcesPage } from '@/pages/resources';
@@ -552,7 +553,18 @@ export default function App() {
             onRefresh={() => void cluster.refresh(true)}
           />
         );
-      case 'images':
+      case 'image':
+        return (
+          <ImagesPage
+            vms={visibleVMs}
+            templates={cluster.templates}
+            images={cluster.images}
+            onLaunchVM={openNew}
+            onNavigate={navigate}
+            onRefreshCluster={() => void cluster.refresh(true)}
+          />
+        );
+      case 'snapshots':
         return (
           <ImagesTemplatesPage
             vms={visibleVMs}

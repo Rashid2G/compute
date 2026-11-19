@@ -795,6 +795,39 @@ export interface ImageListItem {
   created_at?: string;
 }
 
+export interface PrepareImageRequest {
+  name: string;
+  description?: string;
+  base_image?: string;
+  packages?: string[];
+  script?: string;
+  vcpus?: number;
+  memory_mb?: number;
+  disk_mb?: number;
+}
+
+export type ImageDraftStatus = 'draft' | 'building' | 'succeeded' | 'failed';
+
+export interface ImageDraft {
+  id: string;
+  name: string;
+  description: string;
+  base_image: string;
+  packages: string[];
+  script: string;
+  vcpus: number;
+  memory_mb: number;
+  disk_mb: number;
+  status: ImageDraftStatus;
+  last_job_id?: string;
+  last_error?: string;
+  last_exit_code?: number;
+  template_id?: string;
+  template_name?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export type SchedulingStrategy = 'least_loaded' | 'round_robin' | 'bin_pack' | 'spread';
 
 export interface ClusterSchedulingPolicy {
