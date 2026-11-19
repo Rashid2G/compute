@@ -238,3 +238,61 @@ func TestSandboxAPI_CreateWithStartupScript(t *testing.T) {
 	}
 }
 
+func TestSandboxAPI_FeedbackStreamingAndStatuses(t *testing.T) {
+	s, store := setupTestServerForSandboxAPI(t)
+	ctx := context.Background()
+
+	// Verify status helpers
+	if !db.StatusRunningStartupScript.IsActiveRunning() {
+		t.Fatal("expected StatusRunningStartupScript to be active running")
+	}
+	if !db.StatusRunningBuildScript.IsActiveRunning() {
+		t.Fatal("expected StatusRunningBuildScript to be active running")
+	}
+	if !db.StatusRunning.IsActiveRunning() {
+		t.Fatal("expected StatusRunning to be active running")
+	}
+	if db.StatusStopped.IsActiveRunning() {
+		t.Fatal("expected StatusStopped not to be active running")
+	}
+
+	// Create test VM in running_startup_script state
+	vm := &db.VM{
+		ID:        "sbx-feedback-test",
+		Name:      "sbx-feedback-test",
+		Status:    db.StatusRunningStartupScript,
+		IPAddress: "10.0.0.99",
+	}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatalf("failed to save VM: %v", err)
+	}
+
+	// Verify feedback tracker
+	tracker := s.getOrCreateFeedbackTracker(vm.ID)
+	if tracker == nil {
+		t.Fatal("expected feedback tracker to be created")
+	}
+
+	chunk1 := []byte("Installing packages...\n")
+	chunk2 := []byte("Startup finished.\n")
+	tracker.emit(chunk1)
+	tracker.emit(chunk2)
+
+	tracker.mu.Lock()
+	buf := string(tracker.buffer)
+	tracker.mu.Unlock()
+
+	if !strings.Contains(buf, "Installing packages") || !strings.Contains(buf, "Startup finished") {
+		t.Fatalf("buffer missing expected chunks: %q", buf)
+	}
+
+	tracker.finish()
+
+	// Ensure done channel is closed
+	select {
+	case <-tracker.done:
+	default:
+		t.Fatal("expected tracker.done to be closed")
+	}
+}
+

@@ -94,6 +94,49 @@ type Server struct {
 	taskMu            sync.Mutex
 	tasks             map[string]*taskRecord
 	taskOrder         []string
+	feedbackTrackers  sync.Map // vmID -> *vmFeedbackTracker
+}
+
+type vmFeedbackTracker struct {
+	mu          sync.Mutex
+	subscribers map[chan []byte]struct{}
+	buffer      []byte
+	done        chan struct{}
+}
+
+func (t *vmFeedbackTracker) emit(data []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buffer = append(t.buffer, data...)
+	for ch := range t.subscribers {
+		select {
+		case ch <- data:
+		default:
+		}
+	}
+}
+
+func (t *vmFeedbackTracker) finish() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	select {
+	case <-t.done:
+	default:
+		close(t.done)
+	}
+}
+
+func (s *Server) getOrCreateFeedbackTracker(vmID string) *vmFeedbackTracker {
+	val, ok := s.feedbackTrackers.Load(vmID)
+	if ok {
+		return val.(*vmFeedbackTracker)
+	}
+	t := &vmFeedbackTracker{
+		subscribers: make(map[chan []byte]struct{}),
+		done:        make(chan struct{}),
+	}
+	actual, _ := s.feedbackTrackers.LoadOrStore(vmID, t)
+	return actual.(*vmFeedbackTracker)
 }
 
 // detectFirecrackerVersion returns the installed Firecracker version (e.g. "v1.17.0").
@@ -1245,130 +1288,206 @@ func (s *Server) schedulePostBootSetup(ctx context.Context, v *db.VM) {
 	}()
 }
 
+// runPostBootScripts executes startup bash script and/or build command sequentially inside
+// a sandbox after it boots, streaming execution output to the sandbox's feedback tracker,
+// updating VM status dynamically (running_startup_script -> running_build_script -> running),
+// and logging execution results to audit events.
+func (s *Server) runPostBootScripts(ctx context.Context, v *db.VM, startupScript, buildCommand, execUser string) {
+	if v == nil {
+		return
+	}
+	startupScript = strings.TrimSpace(startupScript)
+	buildCommand = strings.TrimSpace(buildCommand)
+	if startupScript == "" && buildCommand == "" {
+		return
+	}
+
+	vmCopy := *v
+	if execUser == "" {
+		execUser = "compute"
+	}
+	tracker := s.getOrCreateFeedbackTracker(vmCopy.ID)
+
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		defer cancel()
+		defer tracker.finish()
+
+		// Wait for guest SSH daemon to be reachable
+		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
+
+		// 1. Startup Script (if configured)
+		if startupScript != "" {
+			vmCopy.Status = db.StatusRunningStartupScript
+			if s.vmMgr != nil {
+				_ = s.vmMgr.SaveVMRecord(bgCtx, &vmCopy)
+			}
+			s.broadcastClusterUpdate()
+
+			tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[36;1m[Compute Startup]\x1b[0m Executing startup script (%d bytes) in /bin/bash...\r\n", len(startupScript))))
+
+			start := time.Now()
+			b64Script := base64.StdEncoding.EncodeToString([]byte(startupScript))
+			execCmd := fmt.Sprintf("mkdir -p /var/lib/compute && printf '%%s' '%s' | base64 -d > /var/lib/compute/startup-script.sh && chmod +x /var/lib/compute/startup-script.sh && /bin/bash /var/lib/compute/startup-script.sh 2>&1 | tee /var/log/startup-script.log", b64Script)
+
+			var exitCode int
+			var scriptStdout, scriptStderr string
+			if vm.IsRemoteVM(&vmCopy) {
+				var remoteRes vm.ExecResponse
+				err := s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
+					VMID:           s.remoteVMTargetID(&vmCopy),
+					Command:        execCmd,
+					User:           "root",
+					TimeoutSeconds: 300,
+				}, &remoteRes)
+				if err != nil {
+					exitCode = 1
+					scriptStderr = err.Error()
+					tracker.emit([]byte(fmt.Sprintf("\x1b[31;1m[Compute Error]\x1b[0m %v\r\n", err)))
+				} else {
+					exitCode = remoteRes.ExitCode
+					scriptStdout = remoteRes.Stdout
+					scriptStderr = remoteRes.Stderr
+					tracker.emit([]byte(scriptStdout + scriptStderr))
+				}
+			} else {
+				err := s.vmMgr.ExecVMStream(bgCtx, vmCopy.ID, vm.ExecRequest{
+					Command: execCmd,
+					User:    "root",
+					Timeout: 300,
+				}, func(ev vm.ExecStreamEvent) error {
+					tracker.emit([]byte(ev.Data))
+					if ev.Stream == "stderr" {
+						scriptStderr += ev.Data
+					} else {
+						scriptStdout += ev.Data
+					}
+					return nil
+				})
+				if err != nil {
+					exitCode = 1
+					if scriptStderr == "" {
+						scriptStderr = err.Error()
+					}
+					tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m %v\r\n", err)))
+				}
+			}
+
+			durMs := int(time.Since(start).Milliseconds())
+			status := "succeeded"
+			if exitCode != 0 {
+				status = "failed"
+				tracker.emit([]byte(fmt.Sprintf("\x1b[31;1m[Compute Startup Failed]\x1b[0m Startup script exited with code %d\r\n", exitCode)))
+			} else {
+				tracker.emit([]byte("\x1b[32m[Compute Startup]\x1b[0m Startup script finished successfully.\r\n"))
+			}
+
+			s.recordEvent("sandbox.startup_script_executed", "system", vmCopy.ID, status, durMs, map[string]interface{}{
+				"script_size": len(startupScript),
+				"user":        "root",
+				"exit_code":   exitCode,
+				"stdout":      scriptStdout,
+				"stderr":      scriptStderr,
+			})
+		}
+
+		// 2. Build Command / Script (if configured)
+		if buildCommand != "" {
+			vmCopy.Status = db.StatusRunningBuildScript
+			if s.vmMgr != nil {
+				_ = s.vmMgr.SaveVMRecord(bgCtx, &vmCopy)
+			}
+			s.broadcastClusterUpdate()
+
+			tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[36;1m[Compute Build]\x1b[0m Executing build script: %s\r\n", buildCommand)))
+
+			start := time.Now()
+			var exitCode int
+			var buildStdout, buildStderr string
+			if vm.IsRemoteVM(&vmCopy) {
+				var remoteRes vm.ExecResponse
+				err := s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
+					VMID:           s.remoteVMTargetID(&vmCopy),
+					Command:        buildCommand,
+					User:           execUser,
+					TimeoutSeconds: 300,
+				}, &remoteRes)
+				if err != nil {
+					exitCode = 1
+					buildStderr = err.Error()
+					tracker.emit([]byte(fmt.Sprintf("\x1b[31;1m[Compute Error]\x1b[0m %v\r\n", err)))
+				} else {
+					exitCode = remoteRes.ExitCode
+					buildStdout = remoteRes.Stdout
+					buildStderr = remoteRes.Stderr
+					tracker.emit([]byte(buildStdout + buildStderr))
+				}
+			} else {
+				err := s.vmMgr.ExecVMStream(bgCtx, vmCopy.ID, vm.ExecRequest{
+					Command: buildCommand,
+					User:    execUser,
+					Timeout: 300,
+				}, func(ev vm.ExecStreamEvent) error {
+					tracker.emit([]byte(ev.Data))
+					if ev.Stream == "stderr" {
+						buildStderr += ev.Data
+					} else {
+						buildStdout += ev.Data
+					}
+					return nil
+				})
+				if err != nil {
+					exitCode = 1
+					if buildStderr == "" {
+						buildStderr = err.Error()
+					}
+					tracker.emit([]byte(fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m %v\r\n", err)))
+				}
+			}
+
+			durMs := int(time.Since(start).Milliseconds())
+			status := "succeeded"
+			if exitCode != 0 {
+				status = "failed"
+				tracker.emit([]byte(fmt.Sprintf("\x1b[31;1m[Compute Build Failed]\x1b[0m Build script exited with code %d\r\n", exitCode)))
+			} else {
+				tracker.emit([]byte("\x1b[32m[Compute Build]\x1b[0m Build script finished successfully.\r\n"))
+			}
+
+			s.recordEvent("sandbox.build_command_executed", "system", vmCopy.ID, status, durMs, map[string]interface{}{
+				"command":   buildCommand,
+				"user":      execUser,
+				"exit_code": exitCode,
+				"stdout":    buildStdout,
+				"stderr":    buildStderr,
+			})
+		}
+
+		// 3. Mark VM as fully running
+		vmCopy.Status = db.StatusRunning
+		if s.vmMgr != nil {
+			_ = s.vmMgr.SaveVMRecord(bgCtx, &vmCopy)
+		}
+		tracker.emit([]byte("\r\n\x1b[32;1m[Compute Ready]\x1b[0m All scripts finished. Opening interactive SSH terminal...\r\n\r\n"))
+		s.broadcastClusterUpdate()
+
+		// Clean up tracker after 5 minutes
+		time.AfterFunc(5*time.Minute, func() {
+			s.feedbackTrackers.Delete(vmCopy.ID)
+		})
+	}()
+}
+
 // schedulePostBootBuildCommand executes an initial build command/script inside
 // a sandbox after it boots and logs the execution output to audit events.
 func (s *Server) schedulePostBootBuildCommand(ctx context.Context, v *db.VM, cmd string, user string) {
-	if v == nil || strings.TrimSpace(cmd) == "" {
-		return
-	}
-	vmCopy := *v
-	if user == "" {
-		user = "compute"
-	}
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		defer cancel()
-		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
-		start := time.Now()
-		var res *vm.ExecResponse
-		var err error
-		if vm.IsRemoteVM(&vmCopy) {
-			var remoteRes vm.ExecResponse
-			err = s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
-				VMID:           s.remoteVMTargetID(&vmCopy),
-				Command:        cmd,
-				User:           user,
-				TimeoutSeconds: 90,
-			}, &remoteRes)
-			res = &remoteRes
-		} else {
-			res, err = s.vmMgr.ExecVM(bgCtx, vmCopy.ID, vm.ExecRequest{
-				Command: cmd,
-				User:    user,
-				Timeout: 90,
-			})
-		}
-		durationMs := int(time.Since(start).Milliseconds())
-		status := "succeeded"
-		exitCode := 0
-		var stdout, stderr string
-		if res != nil {
-			exitCode = res.ExitCode
-			stdout = res.Stdout
-			stderr = res.Stderr
-			if exitCode != 0 {
-				status = "failed"
-			}
-		}
-		if err != nil {
-			status = "failed"
-			stderr = err.Error()
-			exitCode = 1
-		}
-		s.recordEvent("sandbox.build_command_executed", "system", vmCopy.ID, status, durationMs, map[string]interface{}{
-			"command":   cmd,
-			"user":      user,
-			"exit_code": exitCode,
-			"stdout":    stdout,
-			"stderr":    stderr,
-		})
-		s.broadcastClusterUpdate()
-	}()
+	s.runPostBootScripts(ctx, v, "", cmd, user)
 }
 
 // schedulePostBootStartupScript executes a startup bash script inside a sandbox
 // after it boots and logs the execution output to audit events.
 func (s *Server) schedulePostBootStartupScript(ctx context.Context, v *db.VM, script string, user string) {
-	if v == nil || strings.TrimSpace(script) == "" {
-		return
-	}
-	vmCopy := *v
-	if user == "" {
-		user = "root"
-	}
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-		defer cancel()
-		s.waitGuestSSH(bgCtx, &vmCopy, 45*time.Second)
-		start := time.Now()
-
-		b64Script := base64.StdEncoding.EncodeToString([]byte(script))
-		execCmd := fmt.Sprintf("mkdir -p /var/lib/compute && printf '%%s' '%s' | base64 -d > /var/lib/compute/startup-script.sh && chmod +x /var/lib/compute/startup-script.sh && /bin/bash /var/lib/compute/startup-script.sh 2>&1 | tee /var/log/startup-script.log", b64Script)
-
-		var res *vm.ExecResponse
-		var err error
-		if vm.IsRemoteVM(&vmCopy) {
-			var remoteRes vm.ExecResponse
-			err = s.workers.CallRPC(bgCtx, vmCopy.WorkerID, "vm.exec", api.WorkerVMExecRequest{
-				VMID:           s.remoteVMTargetID(&vmCopy),
-				Command:        execCmd,
-				User:           user,
-				TimeoutSeconds: 240,
-			}, &remoteRes)
-			res = &remoteRes
-		} else {
-			res, err = s.vmMgr.ExecVM(bgCtx, vmCopy.ID, vm.ExecRequest{
-				Command: execCmd,
-				User:    user,
-				Timeout: 240,
-			})
-		}
-		durationMs := int(time.Since(start).Milliseconds())
-		status := "succeeded"
-		exitCode := 0
-		var stdout, stderr string
-		if res != nil {
-			exitCode = res.ExitCode
-			stdout = res.Stdout
-			stderr = res.Stderr
-			if exitCode != 0 {
-				status = "failed"
-			}
-		}
-		if err != nil {
-			status = "failed"
-			stderr = err.Error()
-			exitCode = 1
-		}
-		s.recordEvent("sandbox.startup_script_executed", "system", vmCopy.ID, status, durationMs, map[string]interface{}{
-			"script_size": len(script),
-			"user":        user,
-			"exit_code":   exitCode,
-			"stdout":      stdout,
-			"stderr":      stderr,
-		})
-		s.broadcastClusterUpdate()
-	}()
+	s.runPostBootScripts(ctx, v, script, "", user)
 }
 
 func (s *Server) handleNetworkPrune(w http.ResponseWriter, r *http.Request) {
@@ -4025,7 +4144,7 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 		return
 	}
 
-	if v.Status != "running" {
+	if !v.Status.IsActiveRunning() {
 		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 			msg := fmt.Sprintf("\r\n\x1b[33;1m[Compute Notice]\x1b[0m VM '%s' is currently %s.\r\nPlease start the instance to open an SSH terminal session.\r\n", v.Name, v.Status)
@@ -4033,18 +4152,6 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 			_ = conn.Close(websocket.StatusNormalClosure, "vm not running")
 		} else {
 			httpError(w, fmt.Sprintf("vm %s is not running (status: %s)", vmID, v.Status), http.StatusBadRequest)
-		}
-		return
-	}
-
-	if v.IPAddress == "" {
-		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
-		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
-			msg := fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM '%s' has no allocated IP address.\r\n", v.Name)
-			_ = conn.Write(r.Context(), websocket.MessageText, []byte(msg))
-			_ = conn.Close(websocket.StatusNormalClosure, "no ip address")
-		} else {
-			httpError(w, "vm has no allocated IP address", http.StatusBadRequest)
 		}
 		return
 	}
@@ -4069,6 +4176,91 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		return wsConn.Write(ctx, typ, data)
+	}
+
+	// If currently running startup script or build script, stream feedback logs first
+	if val, ok := s.feedbackTrackers.Load(v.ID); ok {
+		tracker := val.(*vmFeedbackTracker)
+		subCh := make(chan []byte, 100)
+		tracker.mu.Lock()
+		initialBuf := make([]byte, len(tracker.buffer))
+		copy(initialBuf, tracker.buffer)
+		doneCh := tracker.done
+		isDone := false
+		select {
+		case <-doneCh:
+			isDone = true
+		default:
+			tracker.subscribers[subCh] = struct{}{}
+		}
+		tracker.mu.Unlock()
+
+		if len(initialBuf) > 0 {
+			_ = safeWrite(websocket.MessageText, initialBuf)
+		}
+
+		if !isDone {
+			// Read and discard keyboard input from client while script is running,
+			// but detect client disconnects.
+			clientDone := make(chan struct{})
+			go func() {
+				for {
+					_, _, rErr := wsConn.Read(ctx)
+					if rErr != nil {
+						close(clientDone)
+						return
+					}
+				}
+			}()
+
+			streaming := true
+			for streaming {
+				select {
+				case <-ctx.Done():
+					streaming = false
+				case <-clientDone:
+					tracker.mu.Lock()
+					delete(tracker.subscribers, subCh)
+					tracker.mu.Unlock()
+					return
+				case chunk := <-subCh:
+					if err := safeWrite(websocket.MessageText, chunk); err != nil {
+						tracker.mu.Lock()
+						delete(tracker.subscribers, subCh)
+						tracker.mu.Unlock()
+						return
+					}
+				case <-doneCh:
+					for {
+						select {
+						case chunk := <-subCh:
+							_ = safeWrite(websocket.MessageText, chunk)
+						default:
+							goto finishedDrain
+						}
+					}
+				finishedDrain:
+					streaming = false
+				}
+			}
+
+			tracker.mu.Lock()
+			delete(tracker.subscribers, subCh)
+			tracker.mu.Unlock()
+		}
+
+		// Refresh VM state before proceeding to SSH
+		if s.vmMgr != nil {
+			if refreshed, gErr := s.vmMgr.GetVM(ctx, v.ID); gErr == nil && refreshed != nil {
+				v = refreshed
+			}
+		}
+	}
+
+	if v.IPAddress == "" {
+		errMsg := fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM '%s' has no allocated IP address.\r\n", v.Name)
+		_ = safeWrite(websocket.MessageText, []byte(errMsg))
+		return
 	}
 
 	user := r.URL.Query().Get("user")

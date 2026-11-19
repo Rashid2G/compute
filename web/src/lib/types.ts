@@ -1,10 +1,20 @@
 export type VMStatus =
   | 'created'
   | 'queued'
+  | 'provisioning'
+  | 'booting'
+  | 'running_startup_script'
+  | 'running_build_script'
+  | 'running_build_command'
   | 'running'
   | 'paused'
+  | 'snapshotting'
+  | 'restoring'
+  | 'migrating'
+  | 'stopping'
   | 'stopped'
-  | 'failed';
+  | 'failed'
+  | string;
 
 export type NetworkIsolationMode = 'account' | 'isolated';
 

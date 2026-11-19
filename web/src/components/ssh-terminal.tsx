@@ -99,6 +99,12 @@ export const SSHTerminal = forwardRef<SSHTerminalHandle, SSHTerminalProps>(
     );
 
     useEffect(() => {
+      if (autoFocus && termRef.current) {
+        termRef.current.focus();
+      }
+    }, [autoFocus]);
+
+    useEffect(() => {
       if (!containerRef.current) return;
 
       const isDark = theme === 'dark' || isRaw;

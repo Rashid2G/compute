@@ -3826,7 +3826,7 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	if vm == nil {
 		return nil, nil, nil, fmt.Errorf("vm not found: %s", vmID)
 	}
-	if vm.Status != db.StatusRunning {
+	if !vm.Status.IsActiveRunning() {
 		return nil, nil, nil, fmt.Errorf("vm %s is not running (status: %s)", vmID, vm.Status)
 	}
 	if vm.IPAddress == "" {
@@ -4368,7 +4368,7 @@ func (m *Manager) GetVM(ctx context.Context, vmID string) (*db.VM, error) {
 		m.mu.RUnlock()
 	}
 
-	if v != nil && !IsRemoteVM(v) && v.Status == db.StatusRunning && v.PID > 0 && !m.isAlive(v.PID) {
+	if v != nil && !IsRemoteVM(v) && v.Status.IsActiveRunning() && v.PID > 0 && !m.isAlive(v.PID) {
 		m.handleProcessExit(v.ID, v.PID)
 		// Reload updated state
 		if m.store != nil {
@@ -4386,7 +4386,7 @@ func (m *Manager) ListVMs(ctx context.Context) ([]*db.VM, error) {
 		return nil, err
 	}
 	for _, v := range vms {
-		if !IsRemoteVM(v) && v.Status == db.StatusRunning && v.PID > 0 && !m.isAlive(v.PID) {
+		if !IsRemoteVM(v) && v.Status.IsActiveRunning() && v.PID > 0 && !m.isAlive(v.PID) {
 			m.handleProcessExit(v.ID, v.PID)
 			v.Status = db.StatusStopped
 			v.PID = 0
@@ -4426,7 +4426,7 @@ func (m *Manager) handleProcessExit(vmID string, pid int) {
 		return
 	}
 
-	if vm.Status == db.StatusRunning && ((pid > 0 && vm.PID == pid) || (vm.PID > 0 && !m.isAlive(vm.PID))) {
+	if vm.Status.IsActiveRunning() && ((pid > 0 && vm.PID == pid) || (vm.PID > 0 && !m.isAlive(vm.PID))) {
 		log.Printf("[vm-manager] VM %s (pid %d) exited, marking stopped", vmID, vm.PID)
 		vm.Status = db.StatusStopped
 		vm.PID = 0

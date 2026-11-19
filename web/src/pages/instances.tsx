@@ -87,7 +87,6 @@ interface InstancesPageProps {
   onBulkDelete?: (ids: string[]) => Promise<void>;
   onInspect: (vm: VM) => void;
   onConsole?: (vm: VM) => void;
-  onExec?: (vm: VM, initialCommand?: string) => void;
   onRefresh?: () => void | Promise<void>;
 }
 
@@ -131,39 +130,15 @@ export function InstancesPage({
   onDelete,
   onBulkDelete,
   onInspect,
-  onExec,
   onRefresh,
 }: InstancesPageProps) {
   const vms = useMemo(() => rawVMs.filter(isVisibleSandbox), [rawVMs]);
 
-  // Surface accepted-but-unfinished work (queued creations, clones, deletes)
-  // directly above the table so a queued request is never invisible.
-  const [activeOperations, setActiveOperations] = useState<OperationRecord[]>(
-    [],
-  );
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const ops = await api.listOperations({
-          status: 'queued,running',
-          limit: 50,
-        });
-        if (!cancelled) {
-          setActiveOperations(
-            (ops || []).filter((op) => op.kind.startsWith('sandbox.')),
-          );
-        }
-      } catch {
-        // Visibility is best-effort; the table still renders from cluster state.
-      }
-    };
-    void load();
-    const timer = window.setInterval(load, 3000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
+  // Track persisted terminal session VM IDs across card clicks
+  const [persistedTerminalVMIds, setPersistedTerminalVMIds] = useState<string[]>([]);
+  const selectSandbox = useCallback((id: string) => {
+    setSelectedVMId(id);
+    setPersistedTerminalVMIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
   }, []);
 
   const workerNameById = useMemo(() => {
@@ -413,7 +388,7 @@ export function InstancesPage({
         auto_start: resizeAutoStart,
       });
       toast.success(`Created resized sandbox ${created.name}`, { id: toastID });
-      setSelectedVMId(created.id);
+      selectSandbox(created.id);
       await onRefresh?.();
     } catch (err) {
       toast.error(`Resize failed: ${errorMessage(err)}`, { id: toastID });
@@ -871,6 +846,9 @@ export function InstancesPage({
           >
             <option value="all">State</option>
             <option value="running">Running</option>
+            <option value="running_startup_script">Running Startup Script</option>
+            <option value="running_build_script">Running Build Script</option>
+            <option value="booting">Booting</option>
             <option value="paused">Paused (State Saved)</option>
             <option value="stopped">Stopped</option>
             <option value="queued">Queued</option>
@@ -987,43 +965,6 @@ export function InstancesPage({
           </div>
         )}
       </div>
-
-      {activeOperations.length > 0 && (
-        <div className="border border-warning/40 bg-warning/5 px-3 py-2.5">
-          <div className="flex items-center gap-2 text-[12px] font-medium text-warning">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>
-              {activeOperations.length} operation
-              {activeOperations.length === 1 ? '' : 's'} in progress
-            </span>
-            <span className="font-normal text-muted-foreground">
-              persisted before execution
-            </span>
-          </div>
-          <ul className="mt-2 space-y-1.5">
-            {activeOperations.slice(0, 8).map((op) => (
-              <li
-                key={op.id}
-                className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px]"
-              >
-                <span className="w-40 shrink-0 truncate text-foreground">
-                  {op.target_name || op.target_id || op.id}
-                </span>
-                <span className="text-muted-foreground">{op.kind}</span>
-                <span className="border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[10px] uppercase text-warning">
-                  {op.status}
-                </span>
-                <span className="text-muted-foreground">{op.progress}%</span>
-              </li>
-            ))}
-          </ul>
-          {activeOperations.length > 8 && (
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              +{activeOperations.length - 8} more — see Events → Operations
-            </p>
-          )}
-        </div>
-      )}
 
       {/* Sandboxes Table */}
       <div className="border border-border bg-background">
@@ -1159,7 +1100,7 @@ export function InstancesPage({
                   return (
                     <tr
                       key={vm.id}
-                      onClick={() => setSelectedVMId(vm.id)}
+                      onClick={() => selectSandbox(vm.id)}
                       className={cn(
                         'cursor-pointer transition-colors',
                         isSelected ? 'bg-selected/75' : 'hover:bg-muted/40',
@@ -1427,10 +1368,6 @@ export function InstancesPage({
                                 <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
                                 Options &amp; Settings
                               </DropdownMenuItem>
-                              <DropdownMenuItem onSelect={() => onExec?.(vm)}>
-                                <Play className="h-3.5 w-3.5" />
-                                Execute Command
-                              </DropdownMenuItem>
                               <DropdownMenuSeparator />
                               <DropdownMenuItem
                                 onSelect={() =>
@@ -1637,10 +1574,6 @@ export function InstancesPage({
                     <SlidersHorizontal className="h-3.5 w-3.5 text-primary" />
                     All Options &amp; Settings
                   </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => onExec?.(selectedVM)}>
-                    <Play className="h-3.5 w-3.5" />
-                    Execute Command
-                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   {selectedVM.status === 'running' ? (
                     <>
@@ -1728,16 +1661,47 @@ export function InstancesPage({
 
           {/* Pure Interactive SSH Terminal - No Bloat Below */}
           <div>
-            {selectedVM.status === 'running' ? (
-              <div className="h-[420px] w-full bg-[#0a0a0a]">
-                <SSHTerminal
-                  ref={terminalRef}
-                  vmId={selectedVM.id}
-                  user={terminalUser}
-                  raw
-                  autoFocus={false}
-                  className="h-full w-full"
-                />
+            {selectedVM.status === 'running' ||
+            selectedVM.status === 'running_startup_script' ||
+            selectedVM.status === 'running_build_script' ||
+            selectedVM.status === 'running_build_command' ? (
+              <div className="flex flex-col h-[420px] w-full bg-[#0a0a0a]">
+                {(selectedVM.status === 'running_startup_script' ||
+                  selectedVM.status === 'running_build_script' ||
+                  selectedVM.status === 'running_build_command') && (
+                  <div className="flex items-center justify-between px-3 py-1.5 bg-cyan-950/40 border-b border-cyan-800/30 text-[11px] text-cyan-300 shrink-0">
+                    <span className="flex items-center gap-1.5 font-medium">
+                      <span className="h-2 w-2 rounded-full bg-cyan-400 animate-pulse" />
+                      {selectedVM.status === 'running_startup_script'
+                        ? 'Executing Startup Script'
+                        : 'Executing Build Script'}{' '}
+                      — Live Feedback Session
+                    </span>
+                    <span className="text-[10.5px] text-muted-foreground">
+                      Interactive SSH bash session will open automatically when finished
+                    </span>
+                  </div>
+                )}
+                <div className="relative flex-1 w-full overflow-hidden">
+                  {persistedTerminalVMIds.map((id) => (
+                    <div
+                      key={id}
+                      className={cn(
+                        'h-full w-full',
+                        id === selectedVM.id ? 'block' : 'hidden',
+                      )}
+                    >
+                      <SSHTerminal
+                        ref={id === selectedVM.id ? terminalRef : undefined}
+                        vmId={id}
+                        user={terminalUser}
+                        raw
+                        autoFocus={id === selectedVM.id}
+                        className="h-full w-full"
+                      />
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : (
               <div className="flex flex-col items-center justify-center gap-3 bg-muted/10 px-4 py-14 text-center">

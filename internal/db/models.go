@@ -45,13 +45,21 @@ func IsNetworkIsolated(vm *VM) bool {
 type VMStatus string
 
 const (
-	StatusCreated VMStatus = "created"
-	StatusQueued  VMStatus = "queued"
-	StatusRunning VMStatus = "running"
-	StatusPaused  VMStatus = "paused"
-	StatusStopped VMStatus = "stopped"
-	StatusFailed  VMStatus = "failed"
+	StatusCreated              VMStatus = "created"
+	StatusQueued               VMStatus = "queued"
+	StatusBooting              VMStatus = "booting"
+	StatusRunningStartupScript VMStatus = "running_startup_script"
+	StatusRunningBuildScript   VMStatus = "running_build_script"
+	StatusRunning              VMStatus = "running"
+	StatusPaused               VMStatus = "paused"
+	StatusStopped              VMStatus = "stopped"
+	StatusFailed               VMStatus = "failed"
 )
+
+// IsActiveRunning reports whether the VM is in an active running or startup/build execution state.
+func (s VMStatus) IsActiveRunning() bool {
+	return s == StatusRunning || s == StatusRunningStartupScript || s == StatusRunningBuildScript
+}
 
 // ImageStatus represents the build status of a custom image
 type ImageStatus string
