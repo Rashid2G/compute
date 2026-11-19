@@ -1,0 +1,31 @@
+name: Branch Guard
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    branches:
+      - main
+
+jobs:
+  validate-branch-target:
+    name: Verify Base & Head Branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR Target
+        run: |
+          echo "Target branch (base): ${{ github.base_ref }}"
+          echo "Source branch (head): ${{ github.head_ref }}"
+          
+          if [ "${{ github.base_ref }}" = "main" ] && [ "${{ github.head_ref }}" != "dev" ]; then
+            echo "::error title=Invalid Target Branch::Pull requests to 'main' must come directly from 'dev' (release PRs only). Feature branch '${{ github.head_ref }}' must target 'dev'."
+            echo "### ⚠️ Invalid Pull Request Target Branch" >> $GITHUB_STEP_SUMMARY
+            echo "You are attempting to merge **${{ github.head_ref }}** directly into **main**." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- All feature branches must target **dev**." >> $GITHUB_STEP_SUMMARY
+            echo "- **main** is reserved for production releases and only accepts merges from **dev**." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Action required:** Edit this pull request on GitHub and change the base branch from \`main\` to \`dev\`." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "✅ Pull request branch target is valid."
