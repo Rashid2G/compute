@@ -1,4 +1,4 @@
-.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean preflight host-prepare setup-host build-images validate-compose benchmark bench install systemd release-tarballs
+.PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean clean-hard clean-hard-all preflight host-prepare setup-host build-images validate-compose benchmark bench install systemd release-tarballs
 
 VERSION ?= 1.1.0
 RELEASE_NAME ?= Compute
@@ -74,6 +74,12 @@ down: ## Stop Compute Docker Compose stack
 
 clean: ## Remove build artifacts and temporary coverage/benchmark outputs
 	rm -rf bin/ dist/ coverage.out benchmark-results.json
+
+clean-hard: ## Clean everything except rootfs and kernel base images
+	./scripts/clean.sh clean-hard
+
+clean-hard-all: ## Clean everything including rootfs, kernel images, and base state
+	./scripts/clean.sh clean-hard-all
 
 preflight: ## Run read-only host readiness checks for KVM, Docker, and cgroups
 	./scripts/preflight.sh
