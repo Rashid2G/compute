@@ -19,7 +19,18 @@
     "bridge_ip": "172.16.0.1/16",
     "subnet": "172.16.0.0/16",
     "gateway_ip": "172.16.0.1",
-    "physical_nic": ""
+    "physical_nic": "",
+    "egress_firewall_enabled": true,
+    "egress_deny_cidrs": [
+      "169.254.0.0/16",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "100.64.0.0/10",
+      "127.0.0.0/8"
+    ],
+    "egress_allow_cidrs": [],
+    "block_host_bridge_ports": true
   },
   "defaults": {
     "vcpus": 1,

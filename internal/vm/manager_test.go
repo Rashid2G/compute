@@ -1028,7 +1028,7 @@ func TestVMNetworkIsolationModesAndAccountReconciliation(t *testing.T) {
 		if strings.Contains(line, fmt.Sprintf("bridge link set dev %s isolated on", vmD.TAPDevice)) {
 			dIsolatedOn = true
 		}
-		if strings.Contains(line, fmt.Sprintf("-i %s", vmD.TAPDevice)) && strings.Contains(line, "-j ACCEPT") {
+		if strings.Contains(line, fmt.Sprintf("-i %s", vmD.TAPDevice)) && strings.Contains(line, "-j ACCEPT") && !strings.Contains(line, " -D ") {
 			dHasAccept = true
 		}
 	}

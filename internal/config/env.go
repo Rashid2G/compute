@@ -107,6 +107,14 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_NETWORK_BASE_DOMAIN", &cfg.Network.BaseDomain)
 	env.boolInto("COMPUTE_LINK_OTHER_BRIDGES", &cfg.Network.LinkAllBridges)
 	env.csvInto("COMPUTE_LINKED_BRIDGES", &cfg.Network.LinkedBridges)
+	if v := env.boolValue("COMPUTE_NETWORK_EGRESS_FIREWALL"); v != nil {
+		cfg.Network.EgressFirewallEnabled = v
+	}
+	if v := env.boolValue("COMPUTE_NETWORK_BLOCK_HOST_BRIDGE_PORTS"); v != nil {
+		cfg.Network.BlockHostBridgePorts = v
+	}
+	env.cidrListInto("COMPUTE_NETWORK_EGRESS_DENY_CIDRS", &cfg.Network.EgressDenyCIDRs)
+	env.cidrListInto("COMPUTE_NETWORK_EGRESS_ALLOW_CIDRS", &cfg.Network.EgressAllowCIDRs)
 
 	// Default VM specs.
 	env.intInto("COMPUTE_DEFAULT_VCPUS", &cfg.Defaults.VCPUs)
@@ -280,6 +288,29 @@ func (e *envReader) csvInto(name string, dst *[]string) {
 	var out []string
 	for _, item := range strings.Split(raw, ",") {
 		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	*dst = out
+}
+
+func (e *envReader) cidrListInto(name string, dst *[]string) {
+	raw, ok := os.LookupEnv(name)
+	if !ok {
+		return
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		*dst = nil
+		return
+	}
+	var out []string
+	for _, item := range strings.Split(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			if _, _, err := net.ParseCIDR(item); err != nil {
+				e.fail(name, "a comma-separated list of valid CIDRs", raw)
+				return
+			}
 			out = append(out, item)
 		}
 	}

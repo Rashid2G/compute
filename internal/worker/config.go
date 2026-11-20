@@ -22,19 +22,23 @@ type Config struct {
 
 	// Host runtime. A worker executes jobs inside its own Firecracker VMs, so
 	// it needs the same image, network and cgroup configuration as a daemon.
-	FirecrackerBin string `json:"firecracker_bin,omitempty"`
-	CgroupEnforce  bool   `json:"cgroup_enforce,omitempty"`
-	ImagesDir      string `json:"images_dir,omitempty"`
-	VMsDir         string `json:"vms_dir,omitempty"`
-	SSHKeyPath     string `json:"ssh_key_path,omitempty"`
-	DefaultKernel  string `json:"default_kernel,omitempty"`
-	DefaultRootfs  string `json:"default_rootfs,omitempty"`
-	NetworkMode    string `json:"network_mode,omitempty"`
-	BridgeName     string `json:"bridge_name,omitempty"`
-	BridgeIP       string `json:"bridge_ip,omitempty"`
-	SubnetCIDR     string `json:"subnet,omitempty"`
-	GatewayIP      string `json:"gateway_ip,omitempty"`
-	BootTimeout    int    `json:"boot_timeout_seconds,omitempty"`
+	FirecrackerBin        string   `json:"firecracker_bin,omitempty"`
+	CgroupEnforce         bool     `json:"cgroup_enforce,omitempty"`
+	ImagesDir             string   `json:"images_dir,omitempty"`
+	VMsDir                string   `json:"vms_dir,omitempty"`
+	SSHKeyPath            string   `json:"ssh_key_path,omitempty"`
+	DefaultKernel         string   `json:"default_kernel,omitempty"`
+	DefaultRootfs         string   `json:"default_rootfs,omitempty"`
+	NetworkMode           string   `json:"network_mode,omitempty"`
+	BridgeName            string   `json:"bridge_name,omitempty"`
+	BridgeIP              string   `json:"bridge_ip,omitempty"`
+	SubnetCIDR            string   `json:"subnet,omitempty"`
+	GatewayIP             string   `json:"gateway_ip,omitempty"`
+	EgressFirewallEnabled *bool    `json:"egress_firewall_enabled,omitempty"`
+	EgressDenyCIDRs       []string `json:"egress_deny_cidrs,omitempty"`
+	EgressAllowCIDRs      []string `json:"egress_allow_cidrs,omitempty"`
+	BlockHostBridgePorts  *bool    `json:"block_host_bridge_ports,omitempty"`
+	BootTimeout           int      `json:"boot_timeout_seconds,omitempty"`
 	// AllowLocalExec runs assignments with the host shell instead of a microVM.
 	// This is a development-only escape hatch and must never be used on a
 	// shared or production worker.
@@ -76,6 +80,44 @@ func LoadConfig(path string) (Config, error) {
 	env("COMPUTE_BRIDGE_IP", &c.BridgeIP)
 	env("COMPUTE_SUBNET", &c.SubnetCIDR)
 	env("COMPUTE_GATEWAY_IP", &c.GatewayIP)
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_NETWORK_EGRESS_FIREWALL")); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			val := true
+			c.EgressFirewallEnabled = &val
+		case "0", "false", "no", "off":
+			val := false
+			c.EgressFirewallEnabled = &val
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_NETWORK_BLOCK_HOST_BRIDGE_PORTS")); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			val := true
+			c.BlockHostBridgePorts = &val
+		case "0", "false", "no", "off":
+			val := false
+			c.BlockHostBridgePorts = &val
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_NETWORK_EGRESS_DENY_CIDRS")); v != "" {
+		var out []string
+		for _, item := range strings.Split(v, ",") {
+			if item = strings.TrimSpace(item); item != "" {
+				out = append(out, item)
+			}
+		}
+		c.EgressDenyCIDRs = out
+	}
+	if v := strings.TrimSpace(os.Getenv("COMPUTE_NETWORK_EGRESS_ALLOW_CIDRS")); v != "" {
+		var out []string
+		for _, item := range strings.Split(v, ",") {
+			if item = strings.TrimSpace(item); item != "" {
+				out = append(out, item)
+			}
+		}
+		c.EgressAllowCIDRs = out
+	}
 	if v := strings.TrimSpace(os.Getenv("COMPUTE_WORKER_BOOT_TIMEOUT_SECONDS")); v != "" {
 		var secs int
 		if _, err := fmt.Sscanf(v, "%d", &secs); err != nil {

@@ -127,6 +127,18 @@ func newMicroVMSupervisor(c worker.Config) (*worker.MicroVMSupervisor, func(), e
 	if c.GatewayIP != "" {
 		netCfg.GatewayIP = c.GatewayIP
 	}
+	if c.EgressFirewallEnabled != nil {
+		netCfg.EgressFirewallEnabled = c.EgressFirewallEnabled
+	}
+	if len(c.EgressDenyCIDRs) > 0 {
+		netCfg.EgressDenyCIDRs = c.EgressDenyCIDRs
+	}
+	if len(c.EgressAllowCIDRs) > 0 {
+		netCfg.EgressAllowCIDRs = c.EgressAllowCIDRs
+	}
+	if c.BlockHostBridgePorts != nil {
+		netCfg.BlockHostBridgePorts = c.BlockHostBridgePorts
+	}
 	netMgr, err := network.NewManager(netCfg, nil)
 	if err != nil {
 		cleanup()
