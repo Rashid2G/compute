@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -298,13 +299,17 @@ func main() {
 	var listener net.Listener
 	if strings.HasPrefix(globalCfg.Server.ListenAddr, "unix://") {
 		sockPath := strings.TrimPrefix(globalCfg.Server.ListenAddr, "unix://")
+		if dir := filepath.Dir(sockPath); dir != "" && dir != "." {
+			_ = os.MkdirAll(dir, 0750)
+			_ = os.Chmod(dir, 0750)
+		}
 		_ = os.Remove(sockPath)
 		listener, err = net.Listen("unix", sockPath)
 		if err != nil {
 			log.Fatalf("Failed to listen on unix socket %s: %v", sockPath, err)
 		}
 		defer os.Remove(sockPath)
-		_ = os.Chmod(sockPath, 0666)
+		_ = os.Chmod(sockPath, 0660)
 	} else {
 		listener, err = net.Listen("tcp", globalCfg.Server.ListenAddr)
 		if err != nil {
@@ -314,7 +319,10 @@ func main() {
 	defer listener.Close()
 
 	httpServer := &http.Server{
-		Handler: server,
+		Handler:           server,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {

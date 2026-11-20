@@ -93,6 +93,20 @@ compute-worker run --control-plane http://<host>:18080 --token <token> --name wo
 
 ---
 
+## Security Architecture & Hardening
+
+Compute is engineered with multi-tenant defense-in-depth from the hypervisor to the control plane:
+
+- **KVM Virtualization & Firecracker Jailer**: Dedicated kernel and unprivileged `chroot`/namespace isolation with deterministic per-VM UID/GIDs and detached process lifecycles.
+- **Isolated Image Builds**: Custom image builds run exclusively within ephemeral microVM sandboxes (host chroot and Docker daemon builds removed).
+- **Default Egress Firewall**: Outbound guest traffic filtering blocks Cloud IMDS (`169.254.0.0/16`), RFC1918 subnets, CGNAT, loopback, and daemon ports, alongside per-VM `no-internet` isolation.
+- **Encryption at Rest**: AES-256-GCM envelope encryption protects stored secrets (`master.key`) alongside SHA-256 hashed API/worker tokens.
+- **Hardened HTTP API & WebSockets**: Server header/idle timeouts, `0660` Unix control sockets, 4 MiB / 512 MiB request body limits (HTTP 413), session-bound CSRF validation (`X-CSRF-Token`), strict cross-origin WebSocket protection, trusted-proxy-aware per-IP rate limiting (HTTP 429), and dial-time webhook SSRF prevention.
+
+For comprehensive details and production checklists, see [SECURITY.md](SECURITY.md).
+
+---
+
 ## Documentation
 
 - **Operator Manual & API Site**: [docs/index.html](docs/index.html)

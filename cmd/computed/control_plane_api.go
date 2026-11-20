@@ -618,6 +618,10 @@ func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "url is required", http.StatusBadRequest)
 			return
 		}
+		if err := s.validateWebhookURL(req.URL); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		secret := req.Secret
 		if secret == "" {
 			secret = "whsec_" + strings.ReplaceAll(uuid.NewString()[:16], "-", "")
@@ -704,6 +708,10 @@ func (s *Server) handleWebhookActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if update.URL != nil {
+				if err := s.validateWebhookURL(*update.URL); err != nil {
+					httpError(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				hook.URL = *update.URL
 			}
 			if update.Description != nil {

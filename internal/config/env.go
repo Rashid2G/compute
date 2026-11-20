@@ -94,6 +94,11 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 	env.strInto("COMPUTE_SERVE_TLS_CERT_FILE", &cfg.Server.ServeTLSCertFile)
 	env.strInto("COMPUTE_SERVE_TLS_KEY_FILE", &cfg.Server.ServeTLSKeyFile)
 	env.strInto("COMPUTE_SERVE_TOKEN_KEY", &cfg.Server.ServeTokenKey)
+	env.strInto("COMPUTE_TRUSTED_PROXIES", &cfg.Server.TrustedProxies)
+	if v := env.str("COMPUTE_RATE_LIMIT_ENABLED"); v != "" {
+		b := strings.EqualFold(v, "true") || v == "1" || strings.EqualFold(v, "yes")
+		cfg.Server.RateLimitEnabled = &b
+	}
 
 	// Network.
 	if v := env.str("COMPUTE_NETWORK_MODE"); v != "" {

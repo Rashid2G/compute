@@ -580,7 +580,12 @@ func (r *servePortRegistry) listenLocked(pf *db.PortForward, bind string, port i
 		}
 		r.server.ingressProxy.ServeExposure(w, rq, id)
 	})
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	// WebSocket upgrades require HTTP/1.1 hijacking; disable HTTP/2 on
 	// serve listeners so browsers do not negotiate extended CONNECT.
 	srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))

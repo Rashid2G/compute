@@ -93,7 +93,9 @@ func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
 	cfg.Defaults.DiskSizeMB = 1024
 	withTestHostCapacity(&cfg)
 	vmMgr := vm.NewManager(vm.Config{Defaults: cfg.Defaults, Resources: cfg.Resources}, store, netMgr, storMgr)
-	server := httptest.NewServer(NewServer(vmMgr, cfg))
+	srv := NewServer(vmMgr, cfg)
+	srv.allowPrivateWebhooks = true
+	server := httptest.NewServer(srv)
 	t.Cleanup(server.Close)
 	return server, vmMgr
 }

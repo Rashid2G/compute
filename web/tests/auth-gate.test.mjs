@@ -276,8 +276,14 @@ async function withBrowser(t, fn) {
   try {
     await fn(cdp);
   } finally {
-    cdp.close();
-    chrome.kill('SIGTERM');
+    try { cdp.close(); } catch {}
+    chrome.kill('SIGKILL');
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      await Promise.race([
+        new Promise((resolve) => chrome.once('exit', resolve)),
+        sleep(1500),
+      ]).catch(() => {});
+    }
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -334,6 +340,7 @@ test('auth gate blocks unauthenticated dashboard access, respects signup_enabled
       await cdp.evalJS(`document.querySelector('button[title="Sign out"]').click()`);
       await waitFor(cdp, `document.body.innerText.includes('Sign in to Compute') && window.location.hash === '#/login'`, 5000, 'returned to login after logout');
     } finally {
+      mock.server.closeAllConnections?.();
       mock.server.close();
     }
   });
@@ -370,6 +377,7 @@ test('auth gate enables Create Account flow when signup_enabled=true', async (t)
       `);
       await waitFor(cdp, `document.body.innerText.includes('sbx-alpha')`, 5000, 'dashboard loaded after signup');
     } finally {
+      mock.server.closeAllConnections?.();
       mock.server.close();
     }
   });
