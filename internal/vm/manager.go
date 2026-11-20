@@ -1297,6 +1297,10 @@ func (m *Manager) listVMsForIsolation(ctx context.Context) []*db.VM {
 
 func (m *Manager) buildIsolationConfigForVM(targetVM *db.VM, allVMs []*db.VM) network.IsolationConfig {
 	isolated := db.IsNetworkIsolated(targetVM)
+	isoMode := ""
+	if db.IsNetworkNoInternet(targetVM) {
+		isoMode = "no-internet"
+	}
 	cfg := network.IsolationConfig{
 		TAPDevice:        targetVM.TAPDevice,
 		IPAddress:        targetVM.IPAddress,
@@ -1304,6 +1308,7 @@ func (m *Manager) buildIsolationConfigForVM(targetVM *db.VM, allVMs []*db.VM) ne
 		OwnerID:          targetVM.OwnerID,
 		Isolated:         isolated,
 		AllowSameAccount: !isolated,
+		IsolationMode:    isoMode,
 	}
 	if isolated {
 		return cfg

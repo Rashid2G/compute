@@ -39,6 +39,10 @@ func clearEnv(t *testing.T) {
 		"COMPUTE_TAILSCALE_SERVICE_GATEWAY_ENABLED",
 		"COMPUTE_TAILSCALE_SERVICE_GATEWAY_TARGET_ADDRESS",
 		"COMPUTE_DATA_DIR",
+		"COMPUTE_NETWORK_EGRESS_FIREWALL",
+		"COMPUTE_NETWORK_BLOCK_HOST_BRIDGE_PORTS",
+		"COMPUTE_NETWORK_EGRESS_DENY_CIDRS",
+		"COMPUTE_NETWORK_EGRESS_ALLOW_CIDRS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -183,5 +187,54 @@ func TestDataDirCompatibilityRoot(t *testing.T) {
 	}
 	if cfg.Images.ImagesDir != "/srv/images" {
 		t.Fatalf("explicit images dir lost: %q", cfg.Images.ImagesDir)
+	}
+}
+
+func TestEgressFirewallEnvOverridesAndValidation(t *testing.T) {
+	clearEnv(t)
+	cfg := DefaultConfig()
+
+	// Default values
+	if !cfg.Network.IsEgressFirewallEnabled() {
+		t.Fatalf("expected egress firewall enabled by default")
+	}
+	if !cfg.Network.IsBlockHostBridgePorts() {
+		t.Fatalf("expected block host bridge ports enabled by default")
+	}
+	if len(cfg.Network.EffectiveEgressDenyCIDRs()) == 0 {
+		t.Fatalf("expected default deny CIDRs populated")
+	}
+
+	// Disable via env
+	t.Setenv("COMPUTE_NETWORK_EGRESS_FIREWALL", "false")
+	t.Setenv("COMPUTE_NETWORK_BLOCK_HOST_BRIDGE_PORTS", "off")
+	t.Setenv("COMPUTE_NETWORK_EGRESS_DENY_CIDRS", "10.0.0.0/8, 172.16.0.0/12")
+	t.Setenv("COMPUTE_NETWORK_EGRESS_ALLOW_CIDRS", "1.1.1.1/32, 8.8.8.8/32")
+
+	if err := ApplyEnvOverrides(&cfg); err != nil {
+		t.Fatalf("ApplyEnvOverrides failed: %v", err)
+	}
+
+	if cfg.Network.IsEgressFirewallEnabled() {
+		t.Fatalf("expected egress firewall to be disabled by env")
+	}
+	if cfg.Network.IsBlockHostBridgePorts() {
+		t.Fatalf("expected block host bridge ports to be disabled by env")
+	}
+	if len(cfg.Network.EgressDenyCIDRs) != 2 || cfg.Network.EgressDenyCIDRs[0] != "10.0.0.0/8" || cfg.Network.EgressDenyCIDRs[1] != "172.16.0.0/12" {
+		t.Fatalf("unexpected deny CIDRs: %v", cfg.Network.EgressDenyCIDRs)
+	}
+	if len(cfg.Network.EgressAllowCIDRs) != 2 || cfg.Network.EgressAllowCIDRs[0] != "1.1.1.1/32" || cfg.Network.EgressAllowCIDRs[1] != "8.8.8.8/32" {
+		t.Fatalf("unexpected allow CIDRs: %v", cfg.Network.EgressAllowCIDRs)
+	}
+
+	// Invalid CIDR validation
+	t.Setenv("COMPUTE_NETWORK_EGRESS_DENY_CIDRS", "10.0.0.0/8, invalid-cidr")
+	err := ApplyEnvOverrides(&cfg)
+	if err == nil {
+		t.Fatalf("expected error on invalid CIDR in COMPUTE_NETWORK_EGRESS_DENY_CIDRS")
+	}
+	if !strings.Contains(err.Error(), "COMPUTE_NETWORK_EGRESS_DENY_CIDRS") {
+		t.Fatalf("expected error naming COMPUTE_NETWORK_EGRESS_DENY_CIDRS, got: %v", err)
 	}
 }

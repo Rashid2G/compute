@@ -633,3 +633,372 @@ func TestRemoveTAPClearsReciprocalPeerRules(t *testing.T) {
 		t.Errorf("expected mftap-b to be pruned from mftap-a AllowedPeerTAPs, got %v", mgr.isolationConfigs["mftap-a"].AllowedPeerTAPs)
 	}
 }
+
+func TestDefaultBridgeEgressFirewallAndHostIn(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	cfg := DefaultNATConfig()
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
+
+	if err := mgr.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	var (
+		hasEgressChainCreated bool
+		hasEgressFlushed      bool
+		hasEgressEstablished  bool
+		hasEgressDropIMDS     bool
+		hasEgressDrop10       bool
+		hasEgressDrop172      bool
+		hasEgressDrop192      bool
+		hasEgressDrop100      bool
+		hasEgressDrop127      bool
+		hasEgressInternetAcc  bool
+		hasForwardHookEgress  bool
+		hasForwardDropIMDS    bool
+
+		hasHostInChainCreated bool
+		hasHostInFlushed      bool
+		hasHostInEstablished  bool
+		hasHostInDHCP67       bool
+		hasHostInDHCP68       bool
+		hasHostInDNSUDP       bool
+		hasHostInDNSTCP       bool
+		hasHostInICMP         bool
+		hasHostInDropAll      bool
+		hasInputHookHostIn    bool
+	)
+
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "iptables -N COMPUTE_EGRESS") {
+			hasEgressChainCreated = true
+		}
+		if strings.Contains(line, "iptables -F COMPUTE_EGRESS") {
+			hasEgressFlushed = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT") {
+			hasEgressEstablished = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -d 169.254.0.0/16 -j DROP") {
+			hasEgressDropIMDS = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -d 10.0.0.0/8 -j DROP") {
+			hasEgressDrop10 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -d 172.16.0.0/12 -j DROP") {
+			hasEgressDrop172 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -d 192.168.0.0/16 -j DROP") {
+			hasEgressDrop192 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -d 100.64.0.0/10 -j DROP") {
+			hasEgressDrop100 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -d 127.0.0.0/8 -j DROP") {
+			hasEgressDrop127 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_EGRESS -j ACCEPT") {
+			hasEgressInternetAcc = true
+		}
+		if strings.Contains(line, "iptables -I FORWARD 1 -i mft3br0 ! -o mft3br0 -j COMPUTE_EGRESS") {
+			hasForwardHookEgress = true
+		}
+		if strings.Contains(line, "iptables -I FORWARD 1 -i mft3br0 -d 169.254.0.0/16 -j DROP") {
+			hasForwardDropIMDS = true
+		}
+
+		if strings.Contains(line, "iptables -N COMPUTE_HOST_IN") {
+			hasHostInChainCreated = true
+		}
+		if strings.Contains(line, "iptables -F COMPUTE_HOST_IN") {
+			hasHostInFlushed = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT") {
+			hasHostInEstablished = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -p udp --dport 67 -j ACCEPT") {
+			hasHostInDHCP67 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -p udp --dport 68 -j ACCEPT") {
+			hasHostInDHCP68 = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -p udp --dport 53 -j ACCEPT") {
+			hasHostInDNSUDP = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -p tcp --dport 53 -j ACCEPT") {
+			hasHostInDNSTCP = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -p icmp -j ACCEPT") {
+			hasHostInICMP = true
+		}
+		if strings.Contains(line, "iptables -A COMPUTE_HOST_IN -j DROP") {
+			hasHostInDropAll = true
+		}
+		if strings.Contains(line, "iptables -I INPUT 1 -i mft3br0 -j COMPUTE_HOST_IN") {
+			hasInputHookHostIn = true
+		}
+	}
+
+	if !hasEgressChainCreated || !hasEgressFlushed {
+		t.Errorf("expected COMPUTE_EGRESS chain creation and flush")
+	}
+	if !hasEgressEstablished {
+		t.Errorf("expected COMPUTE_EGRESS to permit RELATED,ESTABLISHED")
+	}
+	if !hasEgressDropIMDS {
+		t.Errorf("expected COMPUTE_EGRESS to block link-local IMDS 169.254.0.0/16")
+	}
+	if !hasEgressDrop10 || !hasEgressDrop172 || !hasEgressDrop192 {
+		t.Errorf("expected COMPUTE_EGRESS to block RFC1918 private subnets (10/8, 172.16/12, 192.168/16)")
+	}
+	if !hasEgressDrop100 || !hasEgressDrop127 {
+		t.Errorf("expected COMPUTE_EGRESS to block CGNAT/Tailscale and loopback")
+	}
+	if !hasEgressInternetAcc {
+		t.Errorf("expected COMPUTE_EGRESS to permit remaining public internet egress")
+	}
+	if !hasForwardHookEgress {
+		t.Errorf("expected FORWARD hook jumping -i mft3br0 ! -o mft3br0 to COMPUTE_EGRESS")
+	}
+	if !hasForwardDropIMDS {
+		t.Errorf("expected FORWARD hook dropping -i mft3br0 -d 169.254.0.0/16")
+	}
+
+	if !hasHostInChainCreated || !hasHostInFlushed {
+		t.Errorf("expected COMPUTE_HOST_IN chain creation and flush")
+	}
+	if !hasHostInEstablished {
+		t.Errorf("expected COMPUTE_HOST_IN to permit RELATED,ESTABLISHED")
+	}
+	if !hasHostInDHCP67 || !hasHostInDHCP68 {
+		t.Errorf("expected COMPUTE_HOST_IN to permit DHCP UDP 67/68")
+	}
+	if !hasHostInDNSUDP || !hasHostInDNSTCP {
+		t.Errorf("expected COMPUTE_HOST_IN to permit DNS UDP/TCP 53")
+	}
+	if !hasHostInICMP {
+		t.Errorf("expected COMPUTE_HOST_IN to permit ICMP to bridge gateway IP")
+	}
+	if !hasHostInDropAll {
+		t.Errorf("expected COMPUTE_HOST_IN to drop remaining host packets")
+	}
+	if !hasInputHookHostIn {
+		t.Errorf("expected INPUT hook jumping -i mft3br0 to COMPUTE_HOST_IN")
+	}
+}
+
+func TestEgressAllowCIDRsEvaluatedBeforeDeny(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	cfg := DefaultNATConfig()
+	cfg.EgressAllowCIDRs = []string{"10.50.1.0/24", "172.16.200.0/24"}
+
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	if err := mgr.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	var allowIdx10, denyIdx10 int = -1, -1
+	var allowIdx172, denyIdx172 int = -1, -1
+
+	for idx, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "-A COMPUTE_EGRESS -d 10.50.1.0/24 -j ACCEPT") {
+			allowIdx10 = idx
+		}
+		if strings.Contains(line, "-A COMPUTE_EGRESS -d 10.0.0.0/8 -j DROP") {
+			denyIdx10 = idx
+		}
+		if strings.Contains(line, "-A COMPUTE_EGRESS -d 172.16.200.0/24 -j ACCEPT") {
+			allowIdx172 = idx
+		}
+		if strings.Contains(line, "-A COMPUTE_EGRESS -d 172.16.0.0/12 -j DROP") {
+			denyIdx172 = idx
+		}
+	}
+
+	if allowIdx10 == -1 || denyIdx10 == -1 {
+		t.Fatalf("missing allow or deny rule for 10.0.0.0 network: allow=%d, deny=%d", allowIdx10, denyIdx10)
+	}
+	if allowIdx10 >= denyIdx10 {
+		t.Errorf("expected EgressAllowCIDR 10.50.1.0/24 (idx %d) to be evaluated before EgressDenyCIDR 10.0.0.0/8 (idx %d)", allowIdx10, denyIdx10)
+	}
+
+	if allowIdx172 == -1 || denyIdx172 == -1 {
+		t.Fatalf("missing allow or deny rule for 172.16.0.0 network: allow=%d, deny=%d", allowIdx172, denyIdx172)
+	}
+	if allowIdx172 >= denyIdx172 {
+		t.Errorf("expected EgressAllowCIDR 172.16.200.0/24 (idx %d) to be evaluated before EgressDenyCIDR 172.16.0.0/12 (idx %d)", allowIdx172, denyIdx172)
+	}
+}
+
+func TestIntraBridgeTrafficNotBrokenByRFC1918EgressDeny(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	cfg := DefaultNATConfig()
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	if err := mgr.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	// 1. Verify egress deny rules apply strictly to traffic leaving the bridge (! -o mft3br0)
+	var hasEgressOffBridgeHook bool
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "iptables -I FORWARD 1 -i mft3br0 ! -o mft3br0 -j COMPUTE_EGRESS") {
+			hasEgressOffBridgeHook = true
+		}
+		if strings.Contains(line, "iptables -I FORWARD 1 -i mft3br0 -j COMPUTE_EGRESS") {
+			t.Errorf("COMPUTE_EGRESS must not match on all -i mft3br0 indiscriminately without ! -o mft3br0: %s", line)
+		}
+	}
+	if !hasEgressOffBridgeHook {
+		t.Errorf("expected FORWARD hook with ! -o mft3br0 so intra-bridge traffic is not dropped by RFC1918 egress filter")
+	}
+
+	// 2. Apply intra-account isolation rules between two VMs on the bridge
+	iso1 := IsolationConfig{
+		TAPDevice:        "mftap-alpha",
+		IPAddress:        "172.16.0.10",
+		MACAddress:       "06:00:ac:10:00:0a",
+		AllowedPeerTAPs:  []string{"mftap-beta"},
+		AllowSameAccount: true,
+	}
+	if err := mgr.ApplyAntiSpoofAndIsolation(ctx, iso1); err != nil {
+		t.Fatalf("ApplyAntiSpoofAndIsolation failed: %v", err)
+	}
+
+	var hasIntraAccountAccept bool
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "-i mftap-alpha -o mftap-beta -j ACCEPT") {
+			hasIntraAccountAccept = true
+		}
+	}
+	if !hasIntraAccountAccept {
+		t.Errorf("expected intra-account accept rule to be installed in FORWARD")
+	}
+}
+
+func TestNoInternetIsolationMode_BridgeAndPerVM(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Bridge-level ModeNoInternet
+	runnerBridge := &mockRunner{}
+	cfgNoInternet := DefaultNoInternetConfig()
+	mgrBridge, err := NewManager(cfgNoInternet, runnerBridge)
+	if err != nil {
+		t.Fatalf("NewManager with ModeNoInternet failed: %v", err)
+	}
+	if err := mgrBridge.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	var hasTailDropInEgress bool
+	for _, cmd := range runnerBridge.commands {
+		line := strings.Join(cmd, " ")
+		if line == "iptables -A COMPUTE_EGRESS -j DROP" {
+			hasTailDropInEgress = true
+		}
+		if line == "iptables -A COMPUTE_EGRESS -j ACCEPT" {
+			t.Errorf("ModeNoInternet must not accept public internet in COMPUTE_EGRESS: %s", line)
+		}
+	}
+	if !hasTailDropInEgress {
+		t.Errorf("expected ModeNoInternet to terminate COMPUTE_EGRESS with -j DROP")
+	}
+
+	// 2. Per-VM no-internet isolation mode on standard NAT bridge
+	runnerVM := &mockRunner{}
+	mgrVM, err := NewManager(DefaultNATConfig(), runnerVM)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	isoAirgap := IsolationConfig{
+		TAPDevice:     "mftap-airgapped",
+		IPAddress:     "172.16.0.45",
+		MACAddress:    "06:00:ac:10:00:2d",
+		IsolationMode: "no-internet",
+	}
+
+	if err := mgrVM.SetupAntiSpoofAndIsolation(ctx, isoAirgap); err != nil {
+		t.Fatalf("SetupAntiSpoofAndIsolation failed: %v", err)
+	}
+
+	var hasAirgapDrop, hasAirgapReturnAccept bool
+	for _, cmd := range runnerVM.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "iptables -I FORWARD 1 -i mftap-airgapped ! -o mft3br0 -j DROP") {
+			hasAirgapDrop = true
+		}
+		if strings.Contains(line, "iptables -I FORWARD 1 -i mftap-airgapped ! -o mft3br0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT") {
+			hasAirgapReturnAccept = true
+		}
+	}
+	if !hasAirgapDrop {
+		t.Errorf("expected per-VM no-internet rule dropping outbound traffic off-bridge")
+	}
+	if !hasAirgapReturnAccept {
+		t.Errorf("expected per-VM no-internet rule permitting RELATED,ESTABLISHED host management return traffic")
+	}
+
+	// 3. Clean teardown of per-VM no-internet rules
+	runnerVM.commands = nil
+	if err := mgrVM.RemoveAntiSpoofAndIsolation(ctx, isoAirgap); err != nil {
+		t.Fatalf("RemoveAntiSpoofAndIsolation failed: %v", err)
+	}
+
+	var deletedAirgapDrop, deletedAirgapReturnAccept bool
+	for _, cmd := range runnerVM.commands {
+		line := strings.Join(cmd, " ")
+		if strings.Contains(line, "iptables -D FORWARD -i mftap-airgapped ! -o mft3br0 -j DROP") {
+			deletedAirgapDrop = true
+		}
+		if strings.Contains(line, "iptables -D FORWARD -i mftap-airgapped ! -o mft3br0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT") {
+			deletedAirgapReturnAccept = true
+		}
+	}
+	if !deletedAirgapDrop || !deletedAirgapReturnAccept {
+		t.Errorf("expected clean teardown of per-VM no-internet rules")
+	}
+}
+
+func TestCIDRValidationInNewManager(t *testing.T) {
+	runner := &mockRunner{}
+
+	// Valid CIDRs
+	validCfg := DefaultNATConfig()
+	validCfg.EgressDenyCIDRs = []string{"10.0.0.0/8", "192.168.1.0/24"}
+	validCfg.EgressAllowCIDRs = []string{"1.1.1.1/32"}
+	if _, err := NewManager(validCfg, runner); err != nil {
+		t.Fatalf("expected valid CIDRs to succeed, got: %v", err)
+	}
+
+	// Invalid deny CIDR
+	badDenyCfg := DefaultNATConfig()
+	badDenyCfg.EgressDenyCIDRs = []string{"not-a-cidr"}
+	if _, err := NewManager(badDenyCfg, runner); err == nil {
+		t.Fatalf("expected error on invalid deny CIDR")
+	}
+
+	// Invalid allow CIDR
+	badAllowCfg := DefaultNATConfig()
+	badAllowCfg.EgressAllowCIDRs = []string{"999.999.999.999/24"}
+	if _, err := NewManager(badAllowCfg, runner); err == nil {
+		t.Fatalf("expected error on invalid allow CIDR")
+	}
+}

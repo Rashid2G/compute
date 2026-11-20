@@ -577,6 +577,23 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		return cfg, err
 	}
 
+	for _, cidr := range cfg.Network.EgressDenyCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return cfg, fmt.Errorf("invalid network.egress_deny_cidrs %q in config %s: %w", cidr, path, err)
+			}
+		}
+	}
+	for _, cidr := range cfg.Network.EgressAllowCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return cfg, fmt.Errorf("invalid network.egress_allow_cidrs %q in config %s: %w", cidr, path, err)
+			}
+		}
+	}
+
 	// Auto-locate Firecracker and Jailer if configured path doesn't exist
 	if _, err := os.Stat(cfg.Server.FirecrackerBin); err != nil {
 		if path, err := exec.LookPath("firecracker"); err == nil {
