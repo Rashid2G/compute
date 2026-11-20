@@ -1002,3 +1002,138 @@ func TestCIDRValidationInNewManager(t *testing.T) {
 		t.Fatalf("expected error on invalid allow CIDR")
 	}
 }
+
+func TestIPv6EgressFirewallAndHostInRules(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	if err := mgr.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	required := []string{
+		"ip6tables -N COMPUTE_EGRESS",
+		"ip6tables -A COMPUTE_EGRESS -d fe80::/10 -j DROP",
+		"ip6tables -A COMPUTE_EGRESS -d fc00::/7 -j DROP",
+		"ip6tables -A COMPUTE_EGRESS -d ::1/128 -j DROP",
+		"ip6tables -I FORWARD 1 -i mft3br0 ! -o mft3br0 -j COMPUTE_EGRESS",
+		"ip6tables -A COMPUTE_HOST_IN -p udp --dport 546 -j ACCEPT",
+		"ip6tables -A COMPUTE_HOST_IN -p udp --dport 547 -j ACCEPT",
+		"ip6tables -A COMPUTE_HOST_IN -p udp --dport 53 -j ACCEPT",
+		"ip6tables -A COMPUTE_HOST_IN -p tcp --dport 53 -j ACCEPT",
+		"ip6tables -A COMPUTE_HOST_IN -p ipv6-icmp -j ACCEPT",
+		"ip6tables -A COMPUTE_HOST_IN -j DROP",
+		"ip6tables -I INPUT 1 -i mft3br0 -j COMPUTE_HOST_IN",
+	}
+	seen := make(map[string]bool)
+	for _, cmd := range runner.commands {
+		seen[strings.Join(cmd, " ")] = true
+	}
+	for _, want := range required {
+		if !seen[want] {
+			t.Errorf("expected IPv6 firewall rule %q to be executed", want)
+		}
+	}
+}
+
+func TestBlockHostBridgePortsFalseDetachesChain(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	cfg := DefaultNATConfig()
+	disabled := false
+	cfg.BlockHostBridgePorts = &disabled
+	mgr, err := NewManager(cfg, runner)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	if err := mgr.EnsureNetwork(ctx); err != nil {
+		t.Fatalf("EnsureNetwork failed: %v", err)
+	}
+
+	var detachedV4, detachedV6 bool
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if line == "iptables -D INPUT -i mft3br0 -j COMPUTE_HOST_IN" {
+			detachedV4 = true
+		}
+		if line == "ip6tables -D INPUT -i mft3br0 -j COMPUTE_HOST_IN" {
+			detachedV6 = true
+		}
+		if line == "iptables -I INPUT 1 -i mft3br0 -j COMPUTE_HOST_IN" ||
+			line == "ip6tables -I INPUT 1 -i mft3br0 -j COMPUTE_HOST_IN" {
+			t.Errorf("did not expect COMPUTE_HOST_IN hook when BlockHostBridgePorts=false: %s", line)
+		}
+	}
+	if !detachedV4 || !detachedV6 {
+		t.Errorf("expected COMPUTE_HOST_IN to be detached from INPUT for IPv4 (%v) and IPv6 (%v)", detachedV4, detachedV6)
+	}
+}
+
+func TestNoInternetModeTransitionAndPostRestartTeardown(t *testing.T) {
+	ctx := context.Background()
+	runner := &mockRunner{}
+	mgr, err := NewManager(DefaultNATConfig(), runner)
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+
+	// 1. Mode transition from no-internet -> account must tear down no-internet DROP rule
+	// even if in-memory isolationConfigs was cleared (e.g. after daemon restart).
+	runner.commands = nil
+	err = mgr.ApplyAntiSpoofAndIsolation(ctx, IsolationConfig{
+		TAPDevice:        "mftap-trans",
+		IPAddress:        "172.16.0.50",
+		MACAddress:       "06:00:ac:10:00:32",
+		IsolationMode:    "account",
+		AllowSameAccount: true,
+	})
+	if err != nil {
+		t.Fatalf("ApplyAntiSpoofAndIsolation failed: %v", err)
+	}
+
+	var toreDownV4Drop, toreDownV6Drop, insertedDrop bool
+	for _, cmd := range runner.commands {
+		line := strings.Join(cmd, " ")
+		if line == "iptables -D FORWARD -i mftap-trans ! -o mft3br0 -j DROP" {
+			toreDownV4Drop = true
+		}
+		if line == "ip6tables -D FORWARD -i mftap-trans ! -o mft3br0 -j DROP" {
+			toreDownV6Drop = true
+		}
+		if strings.Contains(line, "-I FORWARD 1 -i mftap-trans ! -o mft3br0 -j DROP") {
+			insertedDrop = true
+		}
+	}
+	if !toreDownV4Drop || !toreDownV6Drop {
+		t.Errorf("expected unconditional teardown of per-VM no-internet DROP rules on mode transition (v4=%v, v6=%v)", toreDownV4Drop, toreDownV6Drop)
+	}
+	if insertedDrop {
+		t.Errorf("did not expect no-internet DROP rule to be inserted for account mode")
+	}
+
+	// 2. Post-restart RemoveTAP (empty isolationConfigs & empty IsolationMode) must still tear down no-internet rules.
+	runner.commands = nil
+	mgr.isolationConfigs = make(map[string]IsolationConfig)
+	if err := mgr.RemoveTAP(ctx, "mftap-orphan"); err != nil {
+		t.Fatalf("RemoveTAP failed: %v", err)
+	}
+	var cleanedOrphanDrop bool
+	for _, cmd := range runner.commands {
+		if strings.Join(cmd, " ") == "iptables -D FORWARD -i mftap-orphan ! -o mft3br0 -j DROP" {
+			cleanedOrphanDrop = true
+		}
+	}
+	if !cleanedOrphanDrop {
+		t.Errorf("expected RemoveTAP after restart to unconditionally tear down per-VM no-internet rules")
+	}
+
+	// 3. isPortIsolated must match all isNoInternet aliases.
+	for _, mode := range []string{"no-internet", "no_internet", "airgapped", "air-gapped"} {
+		if !isPortIsolated(IsolationConfig{IsolationMode: mode, AllowSameAccount: true, AllowedPeerTAPs: []string{"mftap-peer"}}) {
+			t.Errorf("expected isPortIsolated to return true for mode %q", mode)
+		}
+	}
+}

@@ -609,6 +609,10 @@ func (m *Manager) setupEgressFirewall(ctx context.Context) {
 
 		m.runner.Run(ctx, "iptables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
 		m.runner.Run(ctx, "iptables", "-I", "INPUT", "1", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+	} else {
+		m.runner.Run(ctx, "iptables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "iptables", "-F", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "iptables", "-X", "COMPUTE_HOST_IN")
 	}
 
 	// 6. Setup IPv6 equivalents if ip6tables is available
@@ -671,6 +675,10 @@ func (m *Manager) setupIPv6EgressFirewall(ctx context.Context) {
 
 		m.runner.Run(ctx, "ip6tables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
 		m.runner.Run(ctx, "ip6tables", "-I", "INPUT", "1", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+	} else {
+		m.runner.Run(ctx, "ip6tables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "ip6tables", "-F", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "ip6tables", "-X", "COMPUTE_HOST_IN")
 	}
 }
 
@@ -821,8 +829,11 @@ type IsolationConfig struct {
 }
 
 func isPortIsolated(cfg IsolationConfig) bool {
+	if isNoInternet(cfg) {
+		return true
+	}
 	mode := strings.ToLower(strings.TrimSpace(cfg.IsolationMode))
-	if mode == "strict" || mode == "isolated" || mode == "no-internet" || mode == "airgapped" {
+	if mode == "strict" || mode == "isolated" {
 		return true
 	}
 	return cfg.Isolated || (!cfg.AllowSameAccount && len(cfg.AllowedPeerTAPs) == 0)
@@ -1025,10 +1036,14 @@ func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationC
 		}
 	}
 
-	// 5. Per-VM no-internet / airgapped mode: drop all outbound traffic off-bridge while permitting management return traffic
+	// 5. Per-VM no-internet / airgapped mode: drop all outbound traffic off-bridge while permitting management return traffic.
+	// Any previous per-VM no-internet rules were already torn down unconditionally by removeAntiSpoofAndIsolationLocked above.
 	if isNoInternet(cfg) {
 		runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
 		runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		// Best-effort IPv6 equivalent (hosts without ip6tables degrade cleanly).
+		_, _ = m.runner.Run(ctx, "ip6tables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+		_, _ = m.runner.Run(ctx, "ip6tables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 	}
 
 	return errors.Join(errs...)
@@ -1164,12 +1179,14 @@ func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg Iso
 		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "--source-ip", targetCfg.IPAddress, "-j", "DROP")
 	}
 
-	// Delete per-VM no-internet / airgapped rules
-	if isNoInternet(targetCfg) {
-		runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
-		runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
-		runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
-	}
+	// Delete per-VM no-internet / airgapped rules unconditionally so mode transitions
+	// (no-internet -> account/isolated) and post-restart deletions (when in-memory
+	// isolationConfigs is empty) never leak rules in FORWARD.
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+	runTeardown("ip6tables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	runTeardown("ip6tables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
 
 	// Reset bridge port isolation if link is still present
 	runTeardown("bridge", "link", "set", "dev", targetCfg.TAPDevice, "isolated", "off")
