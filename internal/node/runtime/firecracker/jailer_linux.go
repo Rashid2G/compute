@@ -22,7 +22,10 @@ func setNamespaces(attr *syscall.SysProcAttr, useNamespaces bool, netNS string) 
 }
 
 func bindMountFile(src, dst string) error {
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	// Proactively unmount any stale bind mount at dst before touching the target file,
+	// and never pass O_TRUNC so a lingering mount can never truncate src.
+	_ = unmountFile(dst)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create bind mount target %s: %w", dst, err)
 	}

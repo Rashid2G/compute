@@ -733,7 +733,11 @@ func (m *Manager) cleanupJailer(fcID string) {
 	jailerDir := filepath.Join(m.cfg.JailerBaseDir, "firecracker", cleanID)
 	chrootRoot := filepath.Join(jailerDir, "root")
 
-	if jProc := m.removeJailerProcess(cleanID); jProc != nil {
+	jProc := m.removeJailerProcess(fcID)
+	if jProc == nil && cleanID != fcID {
+		jProc = m.removeJailerProcess(cleanID)
+	}
+	if jProc != nil {
 		_ = jProc.Cleanup()
 		return
 	}
