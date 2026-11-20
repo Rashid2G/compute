@@ -119,6 +119,10 @@ func main() {
 		handleJobCommand(ctx, client, os.Args[2:])
 		return
 
+	case "ci":
+		handleCICommand(ctx, client, os.Args[2:])
+		return
+
 	case "network", "net":
 		handleNetworkCommand(ctx, client, os.Args[2:])
 		return
@@ -1349,6 +1353,10 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 	case "run":
 		runCmd := flag.NewFlagSet("job run", flag.ExitOnError)
 		image := runCmd.String("image", "", "Base image for job execution (default: daemon default image)")
+		baseImage := runCmd.String("base-image", "", "Base image for job execution (alias for --image)")
+		template := runCmd.String("template", "", "Disk template to use for instant pre-configured environment")
+		packages := runCmd.String("packages", "", "Comma-separated guest packages to pre-install during env_setup phase")
+		setupScript := runCmd.String("setup-script", "", "Pre-flight setup shell script to execute during env_setup phase")
 		pool := runCmd.String("pool", "default", "Target worker pool")
 		arch := runCmd.String("arch", runtime.GOARCH, "Target architecture (amd64 or arm64)")
 		vcpus := runCmd.Int("vcpus", 2, "vCPUs required")
@@ -1374,6 +1382,11 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 			printCommandError("no command specified for job.", "Usage: compute job run [flags] -- <command...>", "job")
 		}
 
+		selectedImage := strings.TrimSpace(*image)
+		if selectedImage == "" {
+			selectedImage = strings.TrimSpace(*baseImage)
+		}
+
 		var filesPayload string
 		if *files != "" {
 			var err error
@@ -1394,8 +1407,31 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 			targetArch = "arm64"
 		}
 
+		var pkgList []string
+		if *packages != "" {
+			for _, p := range strings.Split(*packages, ",") {
+				if trimmed := strings.TrimSpace(p); trimmed != "" {
+					pkgList = append(pkgList, trimmed)
+				}
+			}
+		}
+
+		var envSpec *api.JobEnvironmentSpec
+		if *template != "" || selectedImage != "" || len(pkgList) > 0 || *setupScript != "" {
+			envSpec = &api.JobEnvironmentSpec{
+				Template:    strings.TrimSpace(*template),
+				BaseImage:   selectedImage,
+				Packages:    pkgList,
+				SetupScript: strings.TrimSpace(*setupScript),
+				Hardware: api.HardwareSpec{
+					VCPUs:    *vcpus,
+					MemoryMB: *mem,
+				},
+			}
+		}
+
 		spec := api.JobSpec{
-			ImageID:        *image,
+			ImageID:        selectedImage,
 			Architecture:   targetArch,
 			VCPUs:          *vcpus,
 			MemoryMB:       *mem,
@@ -1403,6 +1439,7 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 			CWD:            *cwd,
 			Files:          filesPayload,
 			TimeoutSeconds: *timeout,
+			Environment:    envSpec,
 		}
 
 		job, err := client.CreateJob(ctx, api.JobCreateRequest{
@@ -1481,9 +1518,49 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 		if job.FinishedAt != nil {
 			fmt.Printf("  Finished: %s\n", job.FinishedAt.Format(time.RFC3339))
 		}
+		if job.TemplateID != "" {
+			fmt.Printf("  Template: %s\n", job.TemplateID)
+		}
+		if job.BaseImage != "" {
+			fmt.Printf("  Image:    %s\n", job.BaseImage)
+		}
+		if job.EnvSetupDurationMs > 0 {
+			fmt.Printf("  Env Setup: %dms\n", job.EnvSetupDurationMs)
+		}
+		if job.ExecutionDurationMs > 0 {
+			fmt.Printf("  Execution: %dms\n", job.ExecutionDurationMs)
+		}
+		if job.FailurePhase != "" {
+			fmt.Printf("  Failure Phase: %s\n", job.FailurePhase)
+		}
 		if job.ResultJSON != "" {
 			fmt.Printf("  Result:   %s\n", job.ResultJSON)
 		}
+
+	case "phases":
+		if len(args) < 2 {
+			printCommandError("missing required job ID.", "Usage: compute job phases <id>", "job")
+		}
+		phases, err := client.GetJobPhases(ctx, args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error getting job phases: %v\n", err)
+			os.Exit(1)
+		}
+		if len(phases) == 0 {
+			fmt.Println("No phases recorded for this job.")
+			return
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		fmt.Fprintln(w, "STEP\tPHASE\tSTATUS\tEXIT\tDURATION\tERROR")
+		for _, p := range phases {
+			errMsg := p.Error
+			if len(errMsg) > 50 {
+				errMsg = errMsg[:47] + "..."
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%dms\t%s\n",
+				p.StepIndex, p.Phase, p.Status, p.ExitCode, p.DurationMs, errMsg)
+		}
+		w.Flush()
 
 	case "logs":
 		if len(args) < 2 {
@@ -1515,6 +1592,18 @@ func handleJobCommand(ctx context.Context, client *DaemonClient, args []string) 
 	default:
 		printCommandError(fmt.Sprintf("unknown job command '%s'.", sub), "", "job")
 	}
+}
+
+// CI Command Implementation
+func handleCICommand(ctx context.Context, client *DaemonClient, args []string) {
+	if printHelpIfRequested("ci", args) {
+		return
+	}
+	if len(args) == 0 {
+		fmt.Printf("%s\n\n", commandHelp["ci"])
+		return
+	}
+	handleJobCommand(ctx, client, args)
 }
 
 // Worker Command Implementation

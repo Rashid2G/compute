@@ -48,16 +48,20 @@ type ciRepoUpdateRequest struct {
 }
 
 type ciTriggerRequest struct {
-	Branch     string            `json:"branch"`
-	CommitSHA  string            `json:"commit_sha"`
-	Command    string            `json:"command"`
-	Source     string            `json:"source"`
-	ImageID    string            `json:"image_id"`
-	PoolID     string            `json:"pool_id"`
-	VCPUs      int               `json:"vcpus"`
-	MemoryMB   int               `json:"memory_mb"`
-	TimeoutSec int               `json:"timeout_sec"`
-	Env        map[string]string `json:"env"`
+	Branch      string                  `json:"branch"`
+	CommitSHA   string                  `json:"commit_sha"`
+	Command     string                  `json:"command"`
+	Source      string                  `json:"source"`
+	ImageID     string                  `json:"image_id"`
+	Template    string                  `json:"template"`
+	Packages    []string                `json:"packages"`
+	SetupScript string                  `json:"setup_script"`
+	PoolID      string                  `json:"pool_id"`
+	VCPUs       int                     `json:"vcpus"`
+	MemoryMB    int                     `json:"memory_mb"`
+	TimeoutSec  int                     `json:"timeout_sec"`
+	Env         map[string]string       `json:"env"`
+	Environment *api.JobEnvironmentSpec `json:"environment,omitempty"`
 }
 
 func randomWebhookSecret() string {
@@ -473,6 +477,30 @@ fi
 		env["CI_COMMIT_SHA"] = commitSHA
 	}
 
+	envSpec := req.Environment
+	if envSpec == nil {
+		envSpec = &api.JobEnvironmentSpec{
+			Template:    req.Template,
+			BaseImage:   imageID,
+			Packages:    req.Packages,
+			SetupScript: req.SetupScript,
+			Hardware: api.HardwareSpec{
+				VCPUs:    vcpus,
+				MemoryMB: memMB,
+			},
+		}
+	} else {
+		if envSpec.BaseImage == "" {
+			envSpec.BaseImage = imageID
+		}
+		if envSpec.Hardware.VCPUs <= 0 {
+			envSpec.Hardware.VCPUs = vcpus
+		}
+		if envSpec.Hardware.MemoryMB <= 0 {
+			envSpec.Hardware.MemoryMB = memMB
+		}
+	}
+
 	spec := api.JobSpec{
 		ImageID:            imageID,
 		VCPUs:              vcpus,
@@ -480,6 +508,7 @@ fi
 		Command:            []string{"bash", "-lc", script},
 		CWD:                "/workspace",
 		Env:                env,
+		Environment:        envSpec,
 		TimeoutSeconds:     timeoutSec,
 		RepoURL:            conn.RepoURL,
 		RepoName:           conn.Name,
@@ -490,24 +519,32 @@ fi
 		AuthorizedOwnerIDs: authorizedOwners,
 	}
 	specJSON, _ := json.Marshal(spec)
+	var envJSON string
+	if envBytes, err := json.Marshal(envSpec); err == nil {
+		envJSON = string(envBytes)
+	}
+
 	now := time.Now().UTC()
 	job := &db.Job{
-		ID:        fmt.Sprintf("job_%s", uuid.NewString()[:8]),
-		OwnerID:   conn.OwnerID,
-		PoolID:    req.PoolID,
-		Type:      "ci",
-		State:     "queued",
-		Priority:  10,
-		SpecJSON:  string(specJSON),
-		RepoID:    conn.ID,
-		RepoURL:   conn.RepoURL,
-		RepoName:  conn.Name,
-		Branch:    branch,
-		CommitSHA: commitSHA,
-		Source:    source,
-		QueuedAt:  now,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                  fmt.Sprintf("job_%s", uuid.NewString()[:8]),
+		OwnerID:             conn.OwnerID,
+		PoolID:              req.PoolID,
+		Type:                "ci",
+		State:               "queued",
+		Priority:            10,
+		SpecJSON:            string(specJSON),
+		RepoID:              conn.ID,
+		RepoURL:             conn.RepoURL,
+		RepoName:            conn.Name,
+		Branch:              branch,
+		CommitSHA:           commitSHA,
+		Source:              source,
+		EnvironmentJSON:     envJSON,
+		BaseImage:           envSpec.BaseImage,
+		TemplateID:          envSpec.Template,
+		QueuedAt:            now,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	if err := st.SaveJob(ctx, job); err != nil {
 		return nil, err

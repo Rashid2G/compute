@@ -666,6 +666,15 @@ func (c *DaemonClient) GetJobLogs(ctx context.Context, id string) ([]*db.JobLog,
 	return logs, nil
 }
 
+func (c *DaemonClient) GetJobPhases(ctx context.Context, id string) ([]*db.JobPhase, error) {
+	var phases []*db.JobPhase
+	err := c.doRequest(ctx, http.MethodGet, "/api/v1/jobs/"+id+"/phases", nil, &phases)
+	if err != nil {
+		return nil, err
+	}
+	return phases, nil
+}
+
 // GetReadiness fetches the daemon readiness report. A 503 response is a valid
 // report, not a transport error, so `compute doctor` can print remediation.
 func (c *DaemonClient) GetReadiness(ctx context.Context) (*doctor.Report, error) {

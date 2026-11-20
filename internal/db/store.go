@@ -265,8 +265,9 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	_, e := s.db.ExecContext(ctx, `INSERT INTO jobs (
 		id,owner_id,pool_id,type,state,priority,spec_json,result_json,
 		repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,
+		environment_json,base_image,template_id,env_setup_duration_ms,execution_duration_ms,failure_phase,
 		queued_at,started_at,finished_at,deadline_at,created_at,updated_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
 		state=excluded.state,
 		result_json=excluded.result_json,
 		repo_id=excluded.repo_id,
@@ -277,16 +278,23 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 		source=excluded.source,
 		vm_id=excluded.vm_id,
 		worker_id=excluded.worker_id,
+		environment_json=excluded.environment_json,
+		base_image=excluded.base_image,
+		template_id=excluded.template_id,
+		env_setup_duration_ms=excluded.env_setup_duration_ms,
+		execution_duration_ms=excluded.execution_duration_ms,
+		failure_phase=excluded.failure_phase,
 		started_at=excluded.started_at,
 		finished_at=excluded.finished_at,
 		updated_at=excluded.updated_at`,
 		j.ID, j.OwnerID, j.PoolID, j.Type, j.State, j.Priority, j.SpecJSON, j.ResultJSON,
 		j.RepoID, j.RepoURL, j.RepoName, j.Branch, j.CommitSHA, j.Source, j.VMID, j.WorkerID,
+		j.EnvironmentJSON, j.BaseImage, j.TemplateID, j.EnvSetupDurationMs, j.ExecutionDurationMs, j.FailurePhase,
 		j.QueuedAt, j.StartedAt, j.FinishedAt, j.DeadlineAt, j.CreatedAt, j.UpdatedAt)
 	return e
 }
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]*Job, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
+	rows, e := s.db.QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,environment_json,base_image,template_id,env_setup_duration_ms,execution_duration_ms,failure_phase,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
 	if e != nil {
 		return nil, e
 	}
@@ -294,7 +302,7 @@ func (s *Store) ListQueuedJobs(ctx context.Context) ([]*Job, error) {
 	out := []*Job{}
 	for rows.Next() {
 		j := new(Job)
-		if e = rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); e != nil {
+		if e = rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.EnvironmentJSON, &j.BaseImage, &j.TemplateID, &j.EnvSetupDurationMs, &j.ExecutionDurationMs, &j.FailurePhase, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); e != nil {
 			return nil, e
 		}
 		out = append(out, j)
@@ -394,7 +402,20 @@ func (s *Store) initSchema() error {
 	CREATE TABLE IF NOT EXISTS worker_tokens(token TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL,labels_json TEXT NOT NULL DEFAULT '{}',expires_at TIMESTAMP NOT NULL,used_at TIMESTAMP,created_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS worker_nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,pool_id TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'worker',status TEXT NOT NULL,underlay_ip TEXT NOT NULL DEFAULT '',arch TEXT NOT NULL DEFAULT '',total_vcpus INTEGER NOT NULL DEFAULT 0,total_mem_mb INTEGER NOT NULL DEFAULT 0,total_disk_mb INTEGER NOT NULL DEFAULT 0,allocated_vcpus INTEGER NOT NULL DEFAULT 0,allocated_mem_mb INTEGER NOT NULL DEFAULT 0,allocated_disk_mb INTEGER NOT NULL DEFAULT 0,physical_vcpus INTEGER NOT NULL DEFAULT 0,physical_mem_mb INTEGER NOT NULL DEFAULT 0,physical_disk_mb INTEGER NOT NULL DEFAULT 0,labels_json TEXT NOT NULL DEFAULT '{}',capabilities_json TEXT NOT NULL DEFAULT '{}',agent_version TEXT NOT NULL DEFAULT '',fc_version TEXT NOT NULL DEFAULT '',last_heartbeat TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
 	CREATE TABLE IF NOT EXISTS cluster_settings(key TEXT PRIMARY KEY,value_json TEXT NOT NULL,updated_at TIMESTAMP NOT NULL);
-	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',repo_id TEXT NOT NULL DEFAULT '',repo_url TEXT NOT NULL DEFAULT '',repo_name TEXT NOT NULL DEFAULT '',branch TEXT NOT NULL DEFAULT '',commit_sha TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'cli',vm_id TEXT NOT NULL DEFAULT '',worker_id TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL DEFAULT '',pool_id TEXT NOT NULL DEFAULT '',type TEXT NOT NULL,state TEXT NOT NULL,priority INTEGER NOT NULL DEFAULT 0,spec_json TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',repo_id TEXT NOT NULL DEFAULT '',repo_url TEXT NOT NULL DEFAULT '',repo_name TEXT NOT NULL DEFAULT '',branch TEXT NOT NULL DEFAULT '',commit_sha TEXT NOT NULL DEFAULT '',source TEXT NOT NULL DEFAULT 'cli',vm_id TEXT NOT NULL DEFAULT '',worker_id TEXT NOT NULL DEFAULT '',environment_json TEXT NOT NULL DEFAULT '',base_image TEXT NOT NULL DEFAULT '',template_id TEXT NOT NULL DEFAULT '',env_setup_duration_ms INTEGER NOT NULL DEFAULT 0,execution_duration_ms INTEGER NOT NULL DEFAULT 0,failure_phase TEXT NOT NULL DEFAULT '',queued_at TIMESTAMP NOT NULL,started_at TIMESTAMP,finished_at TIMESTAMP,deadline_at TIMESTAMP,created_at TIMESTAMP NOT NULL,updated_at TIMESTAMP NOT NULL);
+	CREATE TABLE IF NOT EXISTS job_phases(
+		id TEXT PRIMARY KEY,
+		job_id TEXT NOT NULL,
+		phase TEXT NOT NULL,
+		step_index INTEGER NOT NULL DEFAULT 0,
+		status TEXT NOT NULL,
+		exit_code INTEGER NOT NULL DEFAULT 0,
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		error TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMP NOT NULL,
+		completed_at TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_phases_job_id ON job_phases(job_id, step_index);
 	CREATE TABLE IF NOT EXISTS github_connections (
 		id TEXT PRIMARY KEY,
 		owner_id TEXT NOT NULL DEFAULT 'default',
@@ -584,6 +605,12 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'cli'")
 	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN vm_id TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN environment_json TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN base_image TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN template_id TEXT NOT NULL DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN env_setup_duration_ms INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN execution_duration_ms INTEGER NOT NULL DEFAULT 0")
+	_, _ = s.db.Exec("ALTER TABLE jobs ADD COLUMN failure_phase TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN pool_id TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN worker_id TEXT NOT NULL DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE vms ADD COLUMN last_activity_at TIMESTAMP")
@@ -1737,8 +1764,8 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	j := new(Job)
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
-		&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt,
+	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, environment_json, base_image, template_id, env_setup_duration_ms, execution_duration_ms, failure_phase, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
+		&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.EnvironmentJSON, &j.BaseImage, &j.TemplateID, &j.EnvSetupDurationMs, &j.ExecutionDurationMs, &j.FailurePhase, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1753,7 +1780,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	const selectCols = `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs`
+	const selectCols = `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, environment_json, base_image, template_id, env_setup_duration_ms, execution_duration_ms, failure_phase, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs`
 	var (
 		rows *sql.Rows
 		err  error
@@ -1772,7 +1799,7 @@ func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
 	var out []*Job
 	for rows.Next() {
 		j := new(Job)
-		if err := rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.EnvironmentJSON, &j.BaseImage, &j.TemplateID, &j.EnvSetupDurationMs, &j.ExecutionDurationMs, &j.FailurePhase, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, j)
@@ -1805,6 +1832,63 @@ func (s *Store) UpdateJobState(ctx context.Context, id, state, resultJSON string
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ? WHERE id = ?`, state, now, id)
 	return err
+}
+
+// UpdateJobMetrics records granular phase breakdown durations and failure phase.
+func (s *Store) UpdateJobMetrics(ctx context.Context, id string, envSetupDurationMs, executionDurationMs int64, failurePhase string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET env_setup_duration_ms = ?, execution_duration_ms = ?, failure_phase = ?, updated_at = ? WHERE id = ?`,
+		envSetupDurationMs, executionDurationMs, failurePhase, now, id)
+	return err
+}
+
+// CreateJobPhase inserts a new job phase record.
+func (s *Store) CreateJobPhase(ctx context.Context, phase *JobPhase) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if phase.ID == "" {
+		phase.ID = "ph_" + uuid.NewString()[:8]
+	}
+	if phase.CreatedAt.IsZero() {
+		phase.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO job_phases (
+		id, job_id, phase, step_index, status, exit_code, duration_ms, error, created_at, completed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		phase.ID, phase.JobID, phase.Phase, phase.StepIndex, phase.Status, phase.ExitCode, phase.DurationMs, phase.Error, phase.CreatedAt, phase.CompletedAt)
+	return err
+}
+
+// UpdateJobPhase updates status, exit code, duration, and error message of a phase.
+func (s *Store) UpdateJobPhase(ctx context.Context, id, status string, exitCode int, durationMs int64, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `UPDATE job_phases SET status = ?, exit_code = ?, duration_ms = ?, error = ?, completed_at = ? WHERE id = ?`,
+		status, exitCode, durationMs, errMsg, now, id)
+	return err
+}
+
+// ListJobPhasesByJob retrieves all recorded phases for a specific job, ordered by step_index and created_at.
+func (s *Store) ListJobPhasesByJob(ctx context.Context, jobID string) ([]*JobPhase, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, phase, step_index, status, exit_code, duration_ms, error, created_at, completed_at FROM job_phases WHERE job_id = ? ORDER BY step_index ASC, created_at ASC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*JobPhase
+	for rows.Next() {
+		p := new(JobPhase)
+		if err := rows.Scan(&p.ID, &p.JobID, &p.Phase, &p.StepIndex, &p.Status, &p.ExitCode, &p.DurationMs, &p.Error, &p.CreatedAt, &p.CompletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // FailStaleJobs marks jobs left in a running state by a previous daemon

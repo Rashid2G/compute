@@ -79,11 +79,30 @@ type JobSpec struct {
 	// Script contains custom build/configuration script commands.
 	Script         string            `json:"script,omitempty"`
 
+	// Environment specifies the declarative host environment for the job.
+	Environment    *JobEnvironmentSpec `json:"environment,omitempty"`
+
 	// AuthorizedOwnerIDs and AllowCrossOwner are populated by the control plane
 	// after authenticating the job submission. They are never trusted directly
 	// from client input and let the worker consume org-owned images.
 	AuthorizedOwnerIDs []string `json:"authorized_owner_ids,omitempty"`
 	AllowCrossOwner    bool     `json:"allow_cross_owner,omitempty"`
+}
+
+// HardwareSpec defines compute hardware requirements for a job environment.
+type HardwareSpec struct {
+	VCPUs    int `json:"vcpus,omitempty"`
+	MemoryMB int `json:"memory_mb,omitempty"`
+	DiskMB   int `json:"disk_mb,omitempty"`
+}
+
+// JobEnvironmentSpec provides a clean declarative environment specification for hosting jobs.
+type JobEnvironmentSpec struct {
+	Template    string       `json:"template,omitempty"`
+	BaseImage   string       `json:"base_image,omitempty"`
+	Packages    []string     `json:"packages,omitempty"`
+	SetupScript string       `json:"setup_script,omitempty"`
+	Hardware    HardwareSpec `json:"hardware,omitempty"`
 }
 type WorkerAssignmentAck struct {
 	WorkerMessage
