@@ -418,6 +418,7 @@ type AccessAPIKey struct {
 
 // EnvironmentProfile represents reusable environment configurations
 type EnvironmentProfile struct {
+	OwnerID             string    `json:"owner_id"`
 	Name                string    `json:"name"`
 	IsDefault           bool      `json:"is_default"`
 	SafeForThirdParty   bool      `json:"safe_for_third_parties"`

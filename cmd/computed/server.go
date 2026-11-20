@@ -288,6 +288,7 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		// 4. Auto-seed "base" default environment profile if environments table is empty
 		if envs, err := st.ListEnvironments(initCtx); err == nil && len(envs) == 0 {
 			_ = st.SaveEnvironment(initCtx, &db.EnvironmentProfile{
+				OwnerID:             "default",
 				Name:                "base",
 				IsDefault:           true,
 				Version:             1,
@@ -1260,7 +1261,7 @@ func (s *Server) needsPostBootSSHSetup(ctx context.Context, v *db.VM) bool {
 		return false
 	}
 	st := s.vmMgr.GetStore()
-	if envs, err := st.ListEnvironments(ctx); err == nil && len(envs) > 0 {
+	if envs, err := st.ListEnvironmentsByOwner(ctx, v.OwnerID); err == nil && len(envs) > 0 {
 		for _, env := range envs {
 			if (env.SecretsEnabled && strings.TrimSpace(env.Secrets) != "") ||
 				(env.GitHubReposEnabled && len(env.GitHubRepos) > 0) {
