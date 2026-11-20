@@ -145,6 +145,9 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 		images:         make(map[string]*db.CustomImage),
 		execCancels:    make(map[string]map[uint64]context.CancelFunc),
 	}
+	if imgBuilder != nil {
+		imgBuilder.SetVMRunner(m.AsImageVMRunner())
+	}
 
 	if netMgr != nil && store != nil {
 		netMgr.SetStore(store)
@@ -703,6 +706,9 @@ func (m *Manager) SetImageBuilder(b *image.Builder) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.imgBuilder = b
+	if b != nil && b.GetVMRunner() == nil {
+		b.SetVMRunner(m.AsImageVMRunner())
+	}
 }
 
 // GetDefaults returns default specs
@@ -4103,6 +4109,59 @@ func (m *Manager) BuildImage(ctx context.Context, req image.BuildRequest) (*db.C
 		return nil, err
 	}
 	return m.imgBuilder.BuildImage(ctx, req)
+}
+
+type imageVMRunnerAdapter struct {
+	mgr *Manager
+}
+
+func (a *imageVMRunnerAdapter) CreateVM(ctx context.Context, req image.VMCreateRequest) (*db.VM, error) {
+	return a.mgr.CreateVM(ctx, CreateRequest{
+		Name:     req.Name,
+		OwnerID:  req.OwnerID,
+		Image:    req.Image,
+		VCPUs:    req.VCPUs,
+		MemoryMB: req.MemoryMB,
+		DiskMB:   req.DiskMB,
+	})
+}
+
+func (a *imageVMRunnerAdapter) RunVM(ctx context.Context, vmID string) error {
+	return a.mgr.RunVM(ctx, vmID)
+}
+
+func (a *imageVMRunnerAdapter) StopVM(ctx context.Context, vmID string) error {
+	return a.mgr.StopVM(ctx, vmID)
+}
+
+func (a *imageVMRunnerAdapter) DeleteVM(ctx context.Context, vmID string) error {
+	return a.mgr.DeleteVM(ctx, vmID)
+}
+
+func (a *imageVMRunnerAdapter) ExecVM(ctx context.Context, vmID string, req image.VMExecRequest) (*image.VMExecResponse, error) {
+	resp, err := a.mgr.ExecVM(ctx, vmID, ExecRequest{
+		Command: req.Command,
+		User:    req.User,
+		Timeout: req.Timeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &image.VMExecResponse{
+		Stdout:     resp.Stdout,
+		Stderr:     resp.Stderr,
+		ExitCode:   resp.ExitCode,
+		DurationMs: resp.DurationMs,
+	}, nil
+}
+
+func (a *imageVMRunnerAdapter) GetVM(ctx context.Context, vmID string) (*db.VM, error) {
+	return a.mgr.GetVM(ctx, vmID)
+}
+
+// AsImageVMRunner returns an image.VMRunner backed by this Manager.
+func (m *Manager) AsImageVMRunner() image.VMRunner {
+	return &imageVMRunnerAdapter{mgr: m}
 }
 
 // ListImages lists all custom images registered in the system. Images left in

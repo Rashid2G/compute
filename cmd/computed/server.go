@@ -28,6 +28,7 @@ import (
 	"github.com/Rashid2G/compute/internal/config"
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/doctor"
+	"github.com/Rashid2G/compute/internal/image"
 	"github.com/Rashid2G/compute/internal/jobs"
 	"github.com/Rashid2G/compute/internal/master/auth"
 	"github.com/Rashid2G/compute/internal/master/pki"
@@ -159,6 +160,11 @@ func detectFirecrackerVersion(bin string) string {
 }
 
 func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
+	if vmMgr != nil && vmMgr.GetImageBuilder() != nil {
+		if vmMgr.GetImageBuilder().GetVMRunner() == nil {
+			vmMgr.GetImageBuilder().SetVMRunner(vmMgr.AsImageVMRunner())
+		}
+	}
 	workers := scheduler.NewWorkerRegistry()
 	fcVersion := detectFirecrackerVersion(cfg.Server.FirecrackerBin)
 	var sched *scheduler.Scheduler
@@ -2498,6 +2504,10 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		var req vm.BuildImageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := image.ValidateBuildRequest(req); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		ownerID, isAdmin, ok := s.callerIdentity(r)
