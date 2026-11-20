@@ -20,6 +20,8 @@ export function RunJobDialog({
 }: RunJobDialogProps) {
   const [command, setCommand] = useState('echo "Hello from template!" && uname -a');
   const [cwd, setCwd] = useState('/workspace');
+  const [packages, setPackages] = useState('');
+  const [setupScript, setSetupScript] = useState('');
   const [timeout, setTimeoutSec] = useState(900);
   const [submitting, setSubmitting] = useState(false);
 
@@ -39,6 +41,10 @@ export function RunJobDialog({
     onOpenChange(false);
 
     try {
+      const parsedPkgs = packages.trim()
+        ? packages.split(',').map((p) => p.trim()).filter(Boolean)
+        : undefined;
+
       const job = await api.createJob({
         type: 'command',
         source: 'template-launch',
@@ -50,6 +56,16 @@ export function RunJobDialog({
           vcpus: template.vcpus || 2,
           memory_mb: template.memory_mb || 2048,
           disk_mb: template.disk_mb || 10240,
+          environment: {
+            template: template.name,
+            packages: parsedPkgs,
+            setup_script: setupScript.trim() || undefined,
+            hardware: {
+              vcpus: template.vcpus || 2,
+              memory_mb: template.memory_mb || 2048,
+              disk_mb: template.disk_mb || 10240,
+            },
+          },
         },
       });
       toast.success(`Job ${job.id} dispatched with template "${template.name}"`, { id: toastId });
@@ -108,6 +124,32 @@ export function RunJobDialog({
               onChange={(e) => setCommand(e.target.value)}
               placeholder="e.g. pytest tests/ or npm test"
               className="w-full border border-border bg-background p-2.5 font-mono text-[11.5px] text-foreground focus:border-primary focus:outline-none"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[11.5px] font-medium text-foreground">
+              Additional Packages (optional)
+            </label>
+            <input
+              type="text"
+              value={packages}
+              onChange={(e) => setPackages(e.target.value)}
+              placeholder="e.g. git, curl, build-essential"
+              className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[11.5px] text-foreground focus:border-primary focus:outline-none"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[11.5px] font-medium text-foreground">
+              Pre-flight Setup Script (optional)
+            </label>
+            <input
+              type="text"
+              value={setupScript}
+              onChange={(e) => setSetupScript(e.target.value)}
+              placeholder="e.g. export ENV=ci && npm install"
+              className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[11.5px] text-foreground focus:border-primary focus:outline-none"
             />
           </div>
 

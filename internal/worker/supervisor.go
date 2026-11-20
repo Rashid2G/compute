@@ -74,14 +74,53 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 		ownerID = "worker-job"
 	}
 
+	templateID := ""
+	baseImage := a.Spec.ImageID
+	var packages []string
+	setupScript := ""
+	vcpus := a.Spec.VCPUs
+	memoryMB := a.Spec.MemoryMB
+	diskMB := a.Spec.DiskMB
+
+	if a.Spec.Environment != nil {
+		if a.Spec.Environment.Template != "" {
+			templateID = strings.TrimSpace(a.Spec.Environment.Template)
+		}
+		if a.Spec.Environment.BaseImage != "" {
+			baseImage = strings.TrimSpace(a.Spec.Environment.BaseImage)
+		}
+		if len(a.Spec.Environment.Packages) > 0 {
+			packages = a.Spec.Environment.Packages
+		}
+		if a.Spec.Environment.SetupScript != "" {
+			setupScript = strings.TrimSpace(a.Spec.Environment.SetupScript)
+		}
+		if a.Spec.Environment.Hardware.VCPUs > 0 {
+			vcpus = a.Spec.Environment.Hardware.VCPUs
+		}
+		if a.Spec.Environment.Hardware.MemoryMB > 0 {
+			memoryMB = a.Spec.Environment.Hardware.MemoryMB
+		}
+		if a.Spec.Environment.Hardware.DiskMB > 0 {
+			diskMB = a.Spec.Environment.Hardware.DiskMB
+		}
+	}
+	if len(packages) == 0 && len(a.Spec.Packages) > 0 {
+		packages = a.Spec.Packages
+	}
+	if setupScript == "" && a.Spec.Script != "" {
+		setupScript = strings.TrimSpace(a.Spec.Script)
+	}
+
 	// 1. Create VM
 	created, err := s.vmMgr.CreateVM(ctx, vm.CreateRequest{
 		Name:               vmName,
 		OwnerID:            ownerID,
-		Image:              a.Spec.ImageID,
-		VCPUs:              a.Spec.VCPUs,
-		MemoryMB:           a.Spec.MemoryMB,
-		DiskMB:             a.Spec.DiskMB,
+		Image:              baseImage,
+		Template:           templateID,
+		VCPUs:              vcpus,
+		MemoryMB:           memoryMB,
+		DiskMB:             diskMB,
 		AuthorizedOwnerIDs: a.Spec.AuthorizedOwnerIDs,
 		AllowCrossOwner:    a.Spec.AllowCrossOwner,
 	})
@@ -134,7 +173,23 @@ func (s *MicroVMSupervisor) Execute(ctx context.Context, a api.WorkerAssignment,
 		return 1, fmt.Errorf("failed to initialize workspace: %w", err)
 	}
 
-	// 5. Sync input files if provided
+	// 5. Environment Provisioning: Packages and Setup Script
+	if len(packages) > 0 {
+		streamLog("stdout", fmt.Sprintf("[compute-worker] installing %d environment packages: %s", len(packages), strings.Join(packages, ", ")))
+		pkgCmd := fmt.Sprintf("sudo DEBIAN_FRONTEND=noninteractive apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y %s", strings.Join(packages, " "))
+		if res, err := s.vmMgr.ExecVM(ctx, created.ID, vm.ExecRequest{Command: pkgCmd, User: "compute", Timeout: 300}); err != nil || res.ExitCode != 0 {
+			return 1, fmt.Errorf("failed to install packages: %v", err)
+		}
+	}
+	if setupScript != "" {
+		streamLog("stdout", "[compute-worker] executing environment setup script")
+		scriptCmd := fmt.Sprintf("cd %s && %s", shellQuoteSupervisor(cwd), setupScript)
+		if res, err := s.vmMgr.ExecVM(ctx, created.ID, vm.ExecRequest{Command: scriptCmd, User: "compute", Timeout: 300}); err != nil || res.ExitCode != 0 {
+			return 1, fmt.Errorf("failed to execute setup script: %v", err)
+		}
+	}
+
+	// 6. Sync input files if provided
 	if a.Spec.Files != "" {
 		archive, err := base64.StdEncoding.DecodeString(a.Spec.Files)
 		if err != nil {
@@ -262,6 +317,18 @@ func (s *LocalSandboxSupervisor) Execute(ctx context.Context, a api.WorkerAssign
 	if a.Spec.Files != "" {
 		if err := extractFiles(a.Spec.Files, cwd); err != nil {
 			return 1, fmt.Errorf("failed to extract files: %w", err)
+		}
+	}
+
+	if a.Spec.Environment != nil && strings.TrimSpace(a.Spec.Environment.SetupScript) != "" {
+		setupCmd := exec.CommandContext(ctx, "bash", "-c", a.Spec.Environment.SetupScript)
+		setupCmd.Dir = cwd
+		for k, v := range a.Spec.Env {
+			setupCmd.Env = append(setupCmd.Env, k+"="+v)
+		}
+		if out, err := setupCmd.CombinedOutput(); err != nil {
+			streamLog("stderr", string(out))
+			return 1, fmt.Errorf("environment setup failed: %w", err)
 		}
 	}
 

@@ -245,28 +245,48 @@ func DefaultSchedulingPolicy() ClusterSchedulingPolicy {
 }
 
 type Job struct {
-	ID         string     `json:"id"`
-	OwnerID    string     `json:"owner_id"`
-	PoolID     string     `json:"pool_id"`
-	Type       string     `json:"type"`
-	State      string     `json:"state"`
-	Priority   int        `json:"priority"`
-	SpecJSON   string     `json:"spec_json"`
-	ResultJSON string     `json:"result_json"`
-	RepoID     string     `json:"repo_id,omitempty"`
-	RepoURL    string     `json:"repo_url,omitempty"`
-	RepoName   string     `json:"repo_name,omitempty"`
-	Branch     string     `json:"branch,omitempty"`
-	CommitSHA  string     `json:"commit_sha,omitempty"`
-	Source     string     `json:"source,omitempty"`
-	VMID       string     `json:"vm_id,omitempty"`
-	WorkerID   string     `json:"worker_id,omitempty"`
-	QueuedAt   time.Time  `json:"queued_at"`
-	StartedAt  *time.Time `json:"started_at,omitempty"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	DeadlineAt *time.Time `json:"deadline_at,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	ID                  string     `json:"id"`
+	OwnerID             string     `json:"owner_id"`
+	PoolID              string     `json:"pool_id"`
+	Type                string     `json:"type"`
+	State               string     `json:"state"`
+	Priority            int        `json:"priority"`
+	SpecJSON            string     `json:"spec_json"`
+	ResultJSON          string     `json:"result_json"`
+	RepoID              string     `json:"repo_id,omitempty"`
+	RepoURL             string     `json:"repo_url,omitempty"`
+	RepoName            string     `json:"repo_name,omitempty"`
+	Branch              string     `json:"branch,omitempty"`
+	CommitSHA           string     `json:"commit_sha,omitempty"`
+	Source              string     `json:"source,omitempty"`
+	VMID                string     `json:"vm_id,omitempty"`
+	WorkerID            string     `json:"worker_id,omitempty"`
+	EnvironmentJSON     string     `json:"environment_json,omitempty"`
+	BaseImage           string     `json:"base_image,omitempty"`
+	TemplateID          string     `json:"template_id,omitempty"`
+	EnvSetupDurationMs  int64      `json:"env_setup_duration_ms,omitempty"`
+	ExecutionDurationMs int64      `json:"execution_duration_ms,omitempty"`
+	FailurePhase        string     `json:"failure_phase,omitempty"`
+	QueuedAt            time.Time  `json:"queued_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+	DeadlineAt          *time.Time `json:"deadline_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// JobPhase tracks granular lifecycle phases for a CI job: boot, env_setup, workload.
+type JobPhase struct {
+	ID          string     `json:"id"`
+	JobID       string     `json:"job_id"`
+	Phase       string     `json:"phase"` // "boot" | "env_setup" | "workload"
+	StepIndex   int        `json:"step_index"`
+	Status      string     `json:"status"` // "running" | "succeeded" | "failed" | "skipped"
+	ExitCode    int        `json:"exit_code"`
+	DurationMs  int64      `json:"duration_ms"`
+	Error       string     `json:"error,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 // GitHubConnection represents a connected GitHub account/repository persisted

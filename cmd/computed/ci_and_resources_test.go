@@ -663,3 +663,106 @@ func TestImageBuildRandomScenarios(t *testing.T) {
 	}
 }
 
+func TestJobPhasesEndpoints(t *testing.T) {
+	env := newMultiTenantServer(t)
+	ctx := context.Background()
+
+	mtSignup(t, env.ts, "phases-user@example.com", "phases-user", "Password123!")
+	userTok, userID := mtLogin(t, env.ts, "phases-user", "Password123!")
+
+	job := &db.Job{
+		ID:                  "job-phases-test-1",
+		OwnerID:             userID,
+		PoolID:              "default",
+		Type:                "command",
+		State:               "completed",
+		Priority:            10,
+		SpecJSON:            `{"command":["echo","hello"]}`,
+		ResultJSON:          `{"exit_code":0}`,
+		EnvironmentJSON:     `{"base_image":"ubuntu-24","packages":["curl"]}`,
+		BaseImage:           "ubuntu-24",
+		TemplateID:          "tpl-test",
+		EnvSetupDurationMs:  1250,
+		ExecutionDurationMs: 3400,
+		FailurePhase:        "",
+		CreatedAt:           time.Now().UTC(),
+		UpdatedAt:           time.Now().UTC(),
+	}
+	if err := env.vmStore.SaveJob(ctx, job); err != nil {
+		t.Fatalf("save job: %v", err)
+	}
+
+	phase1 := &db.JobPhase{
+		ID:         "phase-1",
+		JobID:      job.ID,
+		Phase:      "boot",
+		StepIndex:  1,
+		Status:     "succeeded",
+		ExitCode:   0,
+		DurationMs: 800,
+		CreatedAt:  time.Now().UTC(),
+	}
+	phase2 := &db.JobPhase{
+		ID:         "phase-2",
+		JobID:      job.ID,
+		Phase:      "env_setup",
+		StepIndex:  2,
+		Status:     "succeeded",
+		ExitCode:   0,
+		DurationMs: 450,
+		CreatedAt:  time.Now().UTC(),
+	}
+	if err := env.vmStore.CreateJobPhase(ctx, phase1); err != nil {
+		t.Fatalf("create phase 1: %v", err)
+	}
+	if err := env.vmStore.CreateJobPhase(ctx, phase2); err != nil {
+		t.Fatalf("create phase 2: %v", err)
+	}
+
+	// 1. Test /api/v1/jobs/:id/phases
+	resp, body := mtRequest(t, env.ts, http.MethodGet, "/api/v1/jobs/"+job.ID+"/phases", userTok, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/jobs/:id/phases, got %d: %s", resp.StatusCode, string(body))
+	}
+	var phases1 []*db.JobPhase
+	if err := json.Unmarshal(body, &phases1); err != nil {
+		t.Fatalf("unmarshal phases1: %v", err)
+	}
+	if len(phases1) != 2 {
+		t.Fatalf("expected 2 phases, got %d", len(phases1))
+	}
+	if phases1[0].Phase != "boot" || phases1[1].Phase != "env_setup" {
+		t.Fatalf("unexpected phases: %+v", phases1)
+	}
+
+	// 2. Test /api/v1/ci/jobs/:id/phases
+	resp, body = mtRequest(t, env.ts, http.MethodGet, "/api/v1/ci/jobs/"+job.ID+"/phases", userTok, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/ci/jobs/:id/phases, got %d: %s", resp.StatusCode, string(body))
+	}
+	var phases2 []*db.JobPhase
+	if err := json.Unmarshal(body, &phases2); err != nil {
+		t.Fatalf("unmarshal phases2: %v", err)
+	}
+	if len(phases2) != 2 {
+		t.Fatalf("expected 2 phases from ci endpoint, got %d", len(phases2))
+	}
+
+	// 3. Test /api/v1/jobs/:id metadata
+	resp, body = mtRequest(t, env.ts, http.MethodGet, "/api/v1/jobs/"+job.ID, userTok, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/jobs/:id, got %d: %s", resp.StatusCode, string(body))
+	}
+	var fetchedJob db.Job
+	if err := json.Unmarshal(body, &fetchedJob); err != nil {
+		t.Fatalf("unmarshal fetchedJob: %v", err)
+	}
+	if fetchedJob.BaseImage != "ubuntu-24" || fetchedJob.TemplateID != "tpl-test" {
+		t.Fatalf("expected base_image=ubuntu-24 and template_id=tpl-test, got %+v", fetchedJob)
+	}
+	if fetchedJob.EnvSetupDurationMs != 1250 || fetchedJob.ExecutionDurationMs != 3400 {
+		t.Fatalf("expected durations 1250 and 3400, got %d and %d", fetchedJob.EnvSetupDurationMs, fetchedJob.ExecutionDurationMs)
+	}
+}
+
+

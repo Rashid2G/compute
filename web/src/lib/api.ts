@@ -857,6 +857,10 @@ export const api = {
     return request<JobLogRecord[]>(`/jobs/${encodeURIComponent(id)}/logs`);
   },
 
+  getJobPhases(id: string): Promise<JobPhaseRecord[]> {
+    return request<JobPhaseRecord[]>(`/jobs/${encodeURIComponent(id)}/phases`);
+  },
+
   // CI Connected GitHub Repositories
   listCIRepos(): Promise<GitHubConnectionRecord[]> {
     return request<GitHubConnectionRecord[]>('/ci/repos');

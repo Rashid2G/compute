@@ -183,18 +183,23 @@ Usage:
   compute job run [flags] -- <command...>
   compute job list
   compute job info <id>
+  compute job phases <id>
   compute job logs <id>
   compute job cancel <id>
 
 Commands:
   run                      Submit and run a distributed compute job.
   list, ls                 List recent jobs.
-  info                     Display detailed job metadata and status.
+  info                     Display detailed job metadata, status, and environment.
+  phases                   Display granular lifecycle phases (boot, env_setup, workload).
   logs                     Display or stream job output logs.
   cancel                   Cancel an active or queued job.
 
 Run flags:
-  --image <name>           Base image for job execution (default: daemon default image)
+  --template <name>        Instant disk template for pre-configured environment
+  --image, --base-image    Base image for job environment (default: daemon default image)
+  --packages <list>        Comma-separated packages to pre-install during env_setup
+  --setup-script <script>  Pre-flight shell script to execute during env_setup
   --pool <pool>            Target worker pool (default: default)
   --arch <arch>            Target architecture: amd64 or arm64 (default: host arch)
   --vcpus <n>              Number of vCPUs required (default: 2)
@@ -357,6 +362,7 @@ Without --all, a key is only embedded when you select it at creation time with
 func init() {
 	commandHelp["vm"] = commandHelp["sandbox"]
 	commandHelp["jobs"] = commandHelp["job"]
+	commandHelp["ci"] = commandHelp["job"]
 	commandHelp["workers"] = commandHelp["worker"]
 	commandHelp["pools"] = commandHelp["pool"]
 	commandHelp["images"] = commandHelp["image"]
