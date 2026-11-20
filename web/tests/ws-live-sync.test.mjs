@@ -718,10 +718,12 @@ test('Persistent /api/v1/ws sync: single connection across routes & mutations, z
     mock.closeAllSockets();
     try { cdp?.close(); } catch {}
     chrome.kill('SIGKILL');
-    await Promise.race([
-      new Promise((resolve) => chrome.once('exit', resolve)),
-      sleep(1500),
-    ]).catch(() => {});
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      await Promise.race([
+        new Promise((resolve) => chrome.once('exit', resolve)),
+        sleep(1500),
+      ]).catch(() => {});
+    }
     mock.server.closeAllConnections?.();
     mock.server.close();
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});

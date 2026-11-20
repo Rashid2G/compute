@@ -23,18 +23,21 @@ type contextKey string
 const (
 	AuthContextKey    contextKey = "compute_auth_context"
 	SessionCookieName            = "compute_session"
+	CSRFCookieName               = "compute_csrf"
+	CSRFHeaderName               = "X-CSRF-Token"
 )
 
 // AuthContext contains the caller's verified identity, active organization, role, and scopes.
 type AuthContext struct {
-	User     *db.User    `json:"user"`
-	APIKey   *db.APIKey  `json:"api_key,omitempty"`
-	Session  *db.Session `json:"session,omitempty"`
-	OrgID    string      `json:"org_id"`
-	Role     string      `json:"role"`
-	Scopes   []string    `json:"scopes"`
-	AuthType string      `json:"auth_type"` // "api_key", "session", "admin_secret"
-	ClientIP string      `json:"client_ip"`
+	User      *db.User    `json:"user"`
+	APIKey    *db.APIKey  `json:"api_key,omitempty"`
+	Session   *db.Session `json:"session,omitempty"`
+	OrgID     string      `json:"org_id"`
+	Role      string      `json:"role"`
+	Scopes    []string    `json:"scopes"`
+	AuthType  string      `json:"auth_type"` // "api_key", "session", "admin_secret"
+	ViaCookie bool        `json:"via_cookie,omitempty"`
+	ClientIP  string      `json:"client_ip"`
 }
 
 // ExternalAuthenticator verifies tokens issued by an external/scoped key store
@@ -483,7 +486,9 @@ func (m *Manager) AuthenticateRequest(r *http.Request) (*AuthContext, error) {
 		if err != nil {
 			return nil, err
 		}
-		return m.authContextForUser(r, user, nil, session, "session", clientIP), nil
+		authCtx := m.authContextForUser(r, user, nil, session, "session", clientIP)
+		authCtx.ViaCookie = true
+		return authCtx, nil
 	}
 
 	return nil, errors.New("no valid authentication token or session provided")

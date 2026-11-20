@@ -108,13 +108,23 @@ func (s *Server) handleAuthSignup(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Server.SignupEnabled && !callerIsAdmin {
 		token, csrf, _, sessErr := s.authMgr.SessionManager().CreateSession(r.Context(), user.ID, r.RemoteAddr, r.UserAgent())
 		if sessErr == nil && token != "" {
+			secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 			http.SetCookie(w, &http.Cookie{
 				Name:     auth.SessionCookieName,
 				Value:    token,
 				Path:     "/",
 				HttpOnly: true,
 				SameSite: http.SameSiteLaxMode,
-				Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+				Secure:   secure,
+				MaxAge:   7 * 24 * 3600,
+			})
+			http.SetCookie(w, &http.Cookie{
+				Name:     auth.CSRFCookieName,
+				Value:    csrf,
+				Path:     "/",
+				HttpOnly: false,
+				SameSite: http.SameSiteLaxMode,
+				Secure:   secure,
 				MaxAge:   7 * 24 * 3600,
 			})
 			resp["token"] = token
@@ -154,14 +164,25 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set HTTP-only cookie
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	// Set HTTP-only session cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		Secure:   secure,
+		MaxAge:   7 * 24 * 3600,
+	})
+	// Set non-HttpOnly CSRF cookie for client-side scripts
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.CSRFCookieName,
+		Value:    csrf,
+		Path:     "/",
+		HttpOnly: false,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
 		MaxAge:   7 * 24 * 3600,
 	})
 
@@ -189,8 +210,10 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	// Revoke the backing session so the token cannot be replayed.
 	if s.authMgr != nil {
 		sessionID := ""
-		if authCtx, err := s.authMgr.AuthenticateRequest(r); err == nil && authCtx != nil && authCtx.Session != nil {
-			sessionID = authCtx.Session.ID
+		if authCtx, err := s.authMgr.AuthenticateRequest(r); err == nil && authCtx != nil {
+			if authCtx.Session != nil {
+				sessionID = authCtx.Session.ID
+			}
 		}
 		if cookie, err := r.Cookie(auth.SessionCookieName); err == nil && cookie.Value != "" {
 			_ = s.authMgr.SessionManager().RevokeSession(r.Context(), cookie.Value)
@@ -205,6 +228,13 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		MaxAge:   -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     auth.CSRFCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: false,
 		MaxAge:   -1,
 	})
 

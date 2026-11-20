@@ -78,6 +78,8 @@ func startEdge(s *Server, cfg config.GlobalConfig) {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	go func() {
 		log.Printf("[computed] edge listener on %s routing base domain %v (apex + reserved 'api' to the daemon, wildcard subdomains to sandboxes)", addr, edgeZones)

@@ -1028,7 +1028,13 @@ test('operation dialogs and drawers close immediately while loading toasts persi
   } finally {
     try { cdp.close(); } catch {}
     chrome.kill('SIGKILL');
-    await new Promise((resolve) => chrome.once('exit', resolve)).catch(() => {});
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      await Promise.race([
+        new Promise((resolve) => chrome.once('exit', resolve)),
+        sleep(1500),
+      ]).catch(() => {});
+    }
+    server.closeAllConnections?.();
     server.close();
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
