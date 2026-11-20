@@ -410,11 +410,18 @@ export const api = {
     if (token) {
       authHeaders['Authorization'] = `Bearer ${token}`;
     }
+    const csrfHeaders: Record<string, string> = {};
+    const csrf = getCsrfToken();
+    if (csrf) {
+      csrfHeaders['X-CSRF-Token'] = csrf;
+    }
     const response = await fetch(`${BASE_PATH}/vms/${encodeURIComponent(id)}/exec-stream`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         ...authHeaders,
+        ...csrfHeaders,
       },
       body: JSON.stringify(req),
       signal,
