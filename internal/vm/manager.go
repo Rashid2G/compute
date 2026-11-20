@@ -2057,9 +2057,9 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 			if jailerProc != nil {
 				_ = jailerProc.Stop(2 * time.Second)
 				_ = jailerProc.Cleanup()
-			}
-			if cmd != nil && cmd.Process != nil {
+			} else if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
+				go func(c *exec.Cmd) { _ = c.Wait() }(cmd)
 			}
 			if m.cgroupMgr != nil {
 				_ = m.cgroupMgr.Teardown(vm.ID)
@@ -2809,7 +2809,7 @@ func (m *Manager) saveStateInternal(ctx context.Context, vmID string, autoHibern
 
 	// 3. Stop process
 	if vm.PID > 0 && vm.PID != os.Getpid() {
-		syscall.Kill(vm.PID, syscall.SIGKILL)
+		_ = killProcess(vm.PID, syscall.SIGKILL)
 	}
 	if vm.SocketPath != "" {
 		os.Remove(vm.SocketPath)
@@ -2936,11 +2936,12 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 
 	defer func() {
 		if !success {
-			if cmd != nil && cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
 			if jailerProc != nil {
+				_ = jailerProc.Stop(2 * time.Second)
 				_ = jailerProc.Cleanup()
+			} else if cmd != nil && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				go func(c *exec.Cmd) { _ = c.Wait() }(cmd)
 			}
 			if m.cgroupMgr != nil {
 				_ = m.cgroupMgr.Teardown(vm.ID)
@@ -3151,7 +3152,7 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 
 		// 3. SIGTERM then SIGKILL
 		if m.isAlive(vm.PID) {
-			_ = syscall.Kill(vm.PID, syscall.SIGTERM)
+			_ = killProcess(vm.PID, syscall.SIGTERM)
 			waitStep := 200 * time.Millisecond
 			if forceKill {
 				waitStep = 40 * time.Millisecond
@@ -3163,7 +3164,7 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 				time.Sleep(10 * time.Millisecond)
 			}
 			if m.isAlive(vm.PID) {
-				_ = syscall.Kill(vm.PID, syscall.SIGKILL)
+				_ = killProcess(vm.PID, syscall.SIGKILL)
 			}
 		}
 	}
@@ -4575,8 +4576,7 @@ func FileAllocatedMB(path string) int64 {
 	if err != nil {
 		return 0
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st != nil {
-		bytes := st.Blocks * 512
+	if bytes, ok := fileAllocatedBlocksBytes(fi); ok {
 		if bytes <= 0 {
 			return 0
 		}

@@ -243,20 +243,22 @@ func (s *Server) resolveServeTarget(ctx context.Context, pf *db.PortForward) (*n
 	if v == nil {
 		return nil, nil, fmt.Errorf("sandbox for exposure %q not found", pf.ID)
 	}
-	return &network.TargetInfo{
+	target := &network.TargetInfo{
 		ID:        v.ID,
 		Name:      v.Name,
 		OwnerID:   v.OwnerID,
 		Status:    string(v.Status),
 		IPAddress: v.IPAddress,
 		WorkerID:  v.WorkerID,
-	}, &network.Exposure{
+	}
+	exposure := &network.Exposure{
 		ID:        pf.ID,
 		OwnerID:   pf.OwnerID,
 		Slug:      pf.Subdomain,
 		GuestPort: pf.GuestPort,
 		Public:    pf.Public,
-	}, nil
+	}
+	return target, exposure, nil
 }
 
 // ===== Private-serve authentication =====

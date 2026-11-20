@@ -66,6 +66,12 @@ func testManager(t *testing.T) (*Manager, *db.Store, *storage.Manager, *testRunn
 	if err != nil {
 		t.Fatal(err)
 	}
+	if avail, err := stor.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+		t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", dir, avail)
+	}
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	_ = store.SaveSchedulingPolicy(context.Background(), policy)
 	runner := &testRunner{}
 	net, err := network.NewManager(network.Config{SubnetCIDR: "10.20.0.0/24"}, runner)
 	if err != nil {

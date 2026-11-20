@@ -31,6 +31,12 @@ func newMilestone1Server(t *testing.T, limits config.ResourceLimits) (*httptest.
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	if err := store.SaveSchedulingPolicy(context.Background(), policy); err != nil {
+		t.Fatal(err)
+	}
+
 	imagesDir := filepath.Join(root, "images")
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -46,6 +52,9 @@ func newMilestone1Server(t *testing.T, limits config.ResourceLimits) (*httptest.
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if avail, err := storMgr.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+		t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", root, avail)
 	}
 	netMgr, err := network.NewManager(network.Config{SubnetCIDR: "192.168.55.0/24"}, testRunner{})
 	if err != nil {

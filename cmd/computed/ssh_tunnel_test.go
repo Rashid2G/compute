@@ -87,6 +87,13 @@ func TestSSH_ProxyCommand_RawStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if avail, err := storMgr.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+		t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", root, avail)
+	}
+
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	_ = store.SaveSchedulingPolicy(context.Background(), policy)
 
 	netMgr, err := network.NewManager(network.Config{SubnetCIDR: "192.168.50.0/24"}, testRunner{})
 	if err != nil {
@@ -96,6 +103,7 @@ func TestSSH_ProxyCommand_RawStream(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ConfigPath = "config/daemon.json"
 	cfg.Jobs.LocalExecution = false
+	withTestHostCapacity(&cfg)
 
 	serverObj := NewServer(vm.NewManager(vm.Config{}, store, netMgr, storMgr), cfg)
 	ts := httptest.NewServer(serverObj)

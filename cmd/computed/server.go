@@ -5053,10 +5053,11 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 			}
 		} else if s.workers != nil {
 			if rw, ok := s.workers.Get(n.ID); ok && rw != nil {
-				if v := capabilityInt(rw.Metrics, "memory_available_mb"); v > 0 {
+				_, _, _, _, metrics := rw.SnapshotState()
+				if v := capabilityInt(metrics, "memory_available_mb"); v > 0 {
 					n.AvailableMemMB = v
 				}
-				if v := capabilityInt(rw.Metrics, "disk_available_mb"); v > 0 {
+				if v := capabilityInt(metrics, "disk_available_mb"); v > 0 {
 					n.AvailableDiskMB = v
 				}
 			}

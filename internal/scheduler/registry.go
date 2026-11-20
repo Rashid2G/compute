@@ -114,6 +114,7 @@ type Worker struct {
 	ID             string
 	PoolID         string
 	OrganizationID string
+	stateMu        sync.RWMutex
 	Labels         map[string]string
 	Capabilities   map[string]interface{}
 	Metrics        map[string]interface{}
@@ -129,6 +130,45 @@ type Worker struct {
 
 	tunMu   sync.Mutex
 	tunnels map[string]*workerTunnel
+}
+
+// SnapshotState returns a concurrency-safe snapshot of the worker's mutable state.
+func (w *Worker) SnapshotState() (poolID, status string, labels map[string]string, caps map[string]interface{}, metrics map[string]interface{}) {
+	w.stateMu.RLock()
+	defer w.stateMu.RUnlock()
+	return w.PoolID, w.Status, w.Labels, w.Capabilities, w.Metrics
+}
+
+// UpdateHeartbeatState updates the worker's capabilities, metrics, and optional status under stateMu.
+func (w *Worker) UpdateHeartbeatState(caps, metrics map[string]interface{}, status string) {
+	w.stateMu.Lock()
+	defer w.stateMu.Unlock()
+	w.Capabilities = caps
+	w.Metrics = metrics
+	if status != "" {
+		w.Status = status
+	}
+}
+
+// SetPoolID updates the worker's pool ID under stateMu.
+func (w *Worker) SetPoolID(poolID string) {
+	w.stateMu.Lock()
+	w.PoolID = poolID
+	w.stateMu.Unlock()
+}
+
+// SetLabels updates the worker's label map under stateMu.
+func (w *Worker) SetLabels(labels map[string]string) {
+	w.stateMu.Lock()
+	w.Labels = labels
+	w.stateMu.Unlock()
+}
+
+// SetStatus updates the worker's status under stateMu.
+func (w *Worker) SetStatus(status string) {
+	w.stateMu.Lock()
+	w.Status = status
+	w.stateMu.Unlock()
 }
 
 func (w *Worker) closeAll(err error) {

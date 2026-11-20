@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // ImageProfile describes an available OS base image
@@ -305,19 +304,7 @@ func (m *Manager) CheckHostDiskSpace(requiredMB int64) error {
 
 // GetAvailableDiskSpaceMB queries the filesystem for free available space in MB
 func (m *Manager) GetAvailableDiskSpaceMB() (int64, error) {
-	checkPath := m.cfg.VMsDir
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(checkPath, &stat); err != nil {
-		// If VMsDir doesn't exist yet, check its parent
-		parent := filepath.Dir(checkPath)
-		if err2 := syscall.Statfs(parent, &stat); err2 != nil {
-			return 0, err2
-		}
-	}
-
-	freeBytes := stat.Bavail * uint64(stat.Bsize)
-	freeMB := int64(freeBytes / (1024 * 1024))
-	return freeMB, nil
+	return getFSFreeMB(m.cfg.VMsDir)
 }
 
 // GetTotalVMsDiskUsageMB calculates the total disk space currently occupied by VM disks in VMsDir

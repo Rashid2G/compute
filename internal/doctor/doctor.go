@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"github.com/Rashid2G/compute/internal/config"
 	"golang.org/x/crypto/ssh"
@@ -261,11 +260,10 @@ func checkDiskSpace(path string, minMB int64) Check {
 	if minMB <= 0 {
 		minMB = 512
 	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
+	availMB, err := statfsMB(path)
+	if err != nil {
 		return fail("disk_space", Warning, fmt.Sprintf("statfs %s: %v", path, err), "Ensure the data directory is on a mounted filesystem.")
 	}
-	availMB := int64(stat.Bavail) * int64(stat.Bsize) / (1024 * 1024)
 	if availMB < minMB {
 		return fail("disk_space", Warning, fmt.Sprintf("only %d MB free (minimum %d MB)", availMB, minMB),
 			"Free disk space or lower COMPUTE_MIN_FREE_DISK_MB; base images and VM disks need room.")

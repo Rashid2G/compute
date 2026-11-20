@@ -44,6 +44,7 @@ func withTestHostCapacity(cfg *config.GlobalConfig) {
 	cfg.Resources.MaxTotalVCPUs = 256
 	cfg.Resources.MaxTotalMemoryMB = 1 << 20
 	cfg.Resources.MaxTotalDiskMB = 1 << 20
+	cfg.Resources.MinFreeDiskSpaceMB = 0
 }
 
 func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
@@ -54,6 +55,12 @@ func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	if err := store.SaveSchedulingPolicy(context.Background(), policy); err != nil {
+		t.Fatal(err)
+	}
 
 	imagesDir := filepath.Join(root, "images")
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
@@ -69,6 +76,9 @@ func newTestServerWithVMManager(t *testing.T) (*httptest.Server, *vm.Manager) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if avail, err := storMgr.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+		t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", root, avail)
 	}
 	netMgr, err := network.NewManager(network.Config{SubnetCIDR: "192.168.50.0/24"}, testRunner{})
 	if err != nil {
@@ -531,6 +541,14 @@ func TestImageAndTemplateEndpoints(t *testing.T) {
 		DefaultKernel: "vmlinux",
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if avail, err := storMgr.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+		t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", root, avail)
+	}
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	if err := store.SaveSchedulingPolicy(context.Background(), policy); err != nil {
 		t.Fatal(err)
 	}
 	netMgr, err := network.NewManager(network.Config{SubnetCIDR: "192.168.60.0/24"}, testRunner{})

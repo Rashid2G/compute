@@ -15,11 +15,11 @@ import (
 
 // Linux namespace clone flags for isolation hardening
 const (
-	CloneNewPID    = syscall.CLONE_NEWPID
-	CloneNewNet    = syscall.CLONE_NEWNET
-	CloneNewNS     = syscall.CLONE_NEWNS
-	CloneNewIPC    = syscall.CLONE_NEWIPC
-	CloneNewUTS    = syscall.CLONE_NEWUTS
+	CloneNewPID    = 0x20000000 // syscall.CLONE_NEWPID
+	CloneNewNet    = 0x40000000 // syscall.CLONE_NEWNET
+	CloneNewNS     = 0x00020000 // syscall.CLONE_NEWNS
+	CloneNewIPC    = 0x08000000 // syscall.CLONE_NEWIPC
+	CloneNewUTS    = 0x04000000 // syscall.CLONE_NEWUTS
 	CloneNewCgroup = 0x02000000 // syscall.CLONE_NEWCGROUP / unix.CLONE_NEWCGROUP
 )
 
@@ -214,16 +214,7 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		args = append(args, "--", "--api-sock", "/run/fc.sock")
 
 		cmd := exec.CommandContext(ctx, opts.Jailer, args...)
-		sysProcAttr := &syscall.SysProcAttr{
-			Setpgid: true,
-		}
-		if opts.UseNamespaces {
-			sysProcAttr.Cloneflags = CloneNewPID | CloneNewNS | CloneNewIPC | CloneNewUTS | CloneNewCgroup | CloneNewNet
-			if opts.NetNS == "" {
-				sysProcAttr.Cloneflags &^= CloneNewNet
-			}
-		}
-		cmd.SysProcAttr = sysProcAttr
+		cmd.SysProcAttr = newSysProcAttr(opts.UseNamespaces, opts.NetNS)
 
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("failed to spawn jailer for resume: %w", err)
@@ -337,16 +328,7 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 	args = append(args, "--", "--config-file", "/config.json", "--api-sock", "/run/fc.sock")
 
 	cmd := exec.CommandContext(ctx, opts.Jailer, args...)
-	sysProcAttr := &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-	if opts.UseNamespaces {
-		sysProcAttr.Cloneflags = CloneNewPID | CloneNewNS | CloneNewIPC | CloneNewUTS | CloneNewCgroup | CloneNewNet
-		if opts.NetNS == "" {
-			sysProcAttr.Cloneflags &^= CloneNewNet
-		}
-	}
-	cmd.SysProcAttr = sysProcAttr
+	cmd.SysProcAttr = newSysProcAttr(opts.UseNamespaces, opts.NetNS)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to spawn jailer: %w", err)
