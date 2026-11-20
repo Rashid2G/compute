@@ -9,3 +9,21 @@ func newSysProcAttr(useNamespaces bool, netNS string) *syscall.SysProcAttr {
 	setNamespaces(attr, useNamespaces, netNS)
 	return attr
 }
+
+func signalProcess(ip *InstanceProcess, sig syscall.Signal) error {
+	if ip == nil {
+		return nil
+	}
+	if ip.PID > 0 {
+		if err := syscall.Kill(-ip.PID, sig); err == nil {
+			return nil
+		}
+		if err := syscall.Kill(ip.PID, sig); err == nil {
+			return nil
+		}
+	}
+	if ip.Cmd != nil && ip.Cmd.Process != nil {
+		return ip.Cmd.Process.Signal(sig)
+	}
+	return nil
+}
