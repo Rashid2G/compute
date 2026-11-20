@@ -84,6 +84,8 @@ type Manager struct {
 	execMu                sync.Mutex
 	execCancels           map[string]map[uint64]context.CancelFunc
 	execNextID            uint64
+	jailerMu              sync.Mutex
+	jailerProcs           map[string]*jailer.InstanceProcess
 }
 
 func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *storage.Manager) *Manager {
@@ -96,10 +98,7 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 	if cfg.JailerBaseDir == "" {
 		cfg.JailerBaseDir = "/srv/jailer"
 	}
-	if cfg.JailerUID <= 0 {
-		cfg.JailerUID = 1000
-	}
-	if cfg.JailerGID <= 0 {
+	if cfg.JailerUID > 0 && cfg.JailerGID <= 0 {
 		cfg.JailerGID = cfg.JailerUID
 	}
 	if cfg.CgroupParent == "" {
@@ -144,6 +143,7 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 		templates:      make(map[string]*db.Template),
 		images:         make(map[string]*db.CustomImage),
 		execCancels:    make(map[string]map[uint64]context.CancelFunc),
+		jailerProcs:    make(map[string]*jailer.InstanceProcess),
 	}
 	if imgBuilder != nil {
 		imgBuilder.SetVMRunner(m.AsImageVMRunner())
@@ -709,6 +709,81 @@ func (m *Manager) SetImageBuilder(b *image.Builder) {
 	if b != nil && b.GetVMRunner() == nil {
 		b.SetVMRunner(m.AsImageVMRunner())
 	}
+}
+
+func (m *Manager) setJailerProcess(vmID string, ip *jailer.InstanceProcess) {
+	m.jailerMu.Lock()
+	defer m.jailerMu.Unlock()
+	m.jailerProcs[vmID] = ip
+}
+
+func (m *Manager) getJailerProcess(vmID string) *jailer.InstanceProcess {
+	m.jailerMu.Lock()
+	defer m.jailerMu.Unlock()
+	return m.jailerProcs[vmID]
+}
+
+func (m *Manager) removeJailerProcess(vmID string) *jailer.InstanceProcess {
+	m.jailerMu.Lock()
+	defer m.jailerMu.Unlock()
+	ip := m.jailerProcs[vmID]
+	delete(m.jailerProcs, vmID)
+	return ip
+}
+
+func (m *Manager) cleanupJailer(fcID string) {
+	if m.cfg.JailerBaseDir == "" || fcID == "" {
+		return
+	}
+	cleanID := sanitizeFirecrackerID(fcID)
+	jailerDir := filepath.Join(m.cfg.JailerBaseDir, "firecracker", cleanID)
+	chrootRoot := filepath.Join(jailerDir, "root")
+
+	jProc := m.removeJailerProcess(fcID)
+	if jProc == nil && cleanID != fcID {
+		jProc = m.removeJailerProcess(cleanID)
+	}
+	if jProc != nil {
+		_ = jProc.Cleanup()
+		return
+	}
+
+	// Defensive unmount before removing directory
+	_ = jailer.UnmountFile(filepath.Join(chrootRoot, "rootfs.ext4"))
+	if entries, err := os.ReadDir(chrootRoot); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".ext4") {
+				_ = jailer.UnmountFile(filepath.Join(chrootRoot, e.Name()))
+			}
+		}
+	}
+	_ = os.RemoveAll(jailerDir)
+}
+
+// DetachVolume reconciles volume ownership and detaches it from any VM.
+func (m *Manager) DetachVolume(ctx context.Context, vol *db.Volume) error {
+	if vol == nil {
+		return nil
+	}
+	if vol.Path != "" {
+		_ = jailer.SafeChown(vol.Path, os.Getuid(), os.Getgid())
+	}
+	vol.Status = "available"
+	vol.AttachedVM = ""
+	vol.MountPoint = ""
+	vol.DevicePath = ""
+	if m.store != nil {
+		return m.store.SaveVolume(ctx, vol)
+	}
+	return nil
+}
+
+// ReconcileVolumeOwnership reconciles volume ownership back to the host user/group.
+func (m *Manager) ReconcileVolumeOwnership(ctx context.Context, vol *db.Volume) error {
+	if vol == nil || vol.Path == "" {
+		return nil
+	}
+	return jailer.SafeChown(vol.Path, os.Getuid(), os.Getgid())
 }
 
 // GetDefaults returns default specs
@@ -2061,6 +2136,7 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 	defer func() {
 		if !success {
 			if jailerProc != nil {
+				m.removeJailerProcess(vm.ID)
 				_ = jailerProc.Stop(2 * time.Second)
 				_ = jailerProc.Cleanup()
 			} else if cmd != nil && cmd.Process != nil {
@@ -2123,13 +2199,19 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 				}
 			}
 
+			uid := m.cfg.JailerUID
+			gid := m.cfg.JailerGID
+			if uid <= 0 {
+				uid, gid = jailer.AllocateJailerUIDGID(vm.ID)
+			}
+
 			jOpts := jailer.JailerOptions{
 				ID:            sanitizeFirecrackerID(vm.ID),
 				Firecracker:   m.cfg.FirecrackerBinary,
 				Jailer:        m.cfg.JailerBinary,
 				ChrootBaseDir: m.cfg.JailerBaseDir,
-				UID:           m.cfg.JailerUID,
-				GID:           m.cfg.JailerGID,
+				UID:           uid,
+				GID:           gid,
 				VCPUs:         vm.VCPUs,
 				MemoryMB:      vm.MemoryMB,
 				KernelSrcPath: vm.KernelPath,
@@ -2145,6 +2227,7 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 			ip, jErr := jailer.LaunchJailer(ctx, jOpts)
 			if jErr == nil {
 				jailerProc = ip
+				m.setJailerProcess(vm.ID, ip)
 				cmd = ip.Cmd
 				sockPath = ip.APISock
 
@@ -2170,7 +2253,7 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 				if vm.IPAddress == "dhcp" || vm.IPAddress == "" {
 					go m.pollDHCPLease(vm.ID, vm.MACAddress, vm.PublicIPEnabled)
 				}
-				go m.watchProcessExit(vm.ID, vm.PID, cmd)
+				go m.watchProcessExit(vm.ID, vm.PID, nil, ip.Exited())
 				return nil
 			}
 
@@ -2943,6 +3026,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	defer func() {
 		if !success {
 			if jailerProc != nil {
+				m.removeJailerProcess(vm.ID)
 				_ = jailerProc.Stop(2 * time.Second)
 				_ = jailerProc.Cleanup()
 			} else if cmd != nil && cmd.Process != nil {
@@ -2984,13 +3068,19 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 				}
 			}
 
+			uid := m.cfg.JailerUID
+			gid := m.cfg.JailerGID
+			if uid <= 0 {
+				uid, gid = jailer.AllocateJailerUIDGID(fcID)
+			}
+
 			jOpts := jailer.JailerOptions{
 				ID:              sanitizeFirecrackerID(fcID),
 				Firecracker:     m.cfg.FirecrackerBinary,
 				Jailer:          m.cfg.JailerBinary,
 				ChrootBaseDir:   m.cfg.JailerBaseDir,
-				UID:             m.cfg.JailerUID,
-				GID:             m.cfg.JailerGID,
+				UID:             uid,
+				GID:             gid,
 				VCPUs:           vm.VCPUs,
 				MemoryMB:        vm.MemoryMB,
 				RootfsSrcPath:   vm.DiskPath,
@@ -3007,6 +3097,7 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 			ip, jErr := jailer.LaunchJailer(ctx, jOpts)
 			if jErr == nil {
 				jailerProc = ip
+				m.setJailerProcess(vm.ID, ip)
 				cmd = ip.Cmd
 				sockPath = ip.APISock
 				snapPathToLoad = ip.SnapshotInChroot
@@ -3059,7 +3150,11 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	vm.AutoHibernated = false
 	vm.HibernateReason = ""
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, vm.PublicIPEnabled)
-	go m.watchProcessExit(vm.ID, vm.PID, cmd)
+	if jailerProc != nil {
+		go m.watchProcessExit(vm.ID, vm.PID, nil, jailerProc.Exited())
+	} else {
+		go m.watchProcessExit(vm.ID, vm.PID, cmd)
+	}
 	if err := m.saveVMRecord(ctx, vm); err != nil {
 		return err
 	}
@@ -3171,6 +3266,36 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 			}
 			if m.isAlive(vm.PID) {
 				_ = killProcess(vm.PID, syscall.SIGKILL)
+			}
+		}
+	}
+
+	// Clean up Jailer process and chroot if jailer was used
+	if jProc := m.removeJailerProcess(vmID); jProc != nil {
+		_ = jProc.Stop(2 * time.Second)
+		_ = jProc.Cleanup()
+	} else if vm != nil && vm.InternalID != "" {
+		if jProc := m.removeJailerProcess(vm.InternalID); jProc != nil {
+			_ = jProc.Stop(2 * time.Second)
+			_ = jProc.Cleanup()
+		}
+	} else if m.cfg.JailerEnabled {
+		m.cleanupJailer(vmID)
+		if vm != nil && vm.InternalID != "" {
+			m.cleanupJailer(vm.InternalID)
+		}
+	}
+
+	// Reconcile ownership of disk and volumes back to host UID/GID
+	if vm != nil {
+		if vm.DiskPath != "" {
+			_ = jailer.SafeChown(vm.DiskPath, os.Getuid(), os.Getgid())
+		}
+		if vols, err := m.volumesForVM(ctx, vm); err == nil {
+			for _, vol := range vols {
+				if vol.Path != "" {
+					_ = jailer.SafeChown(vol.Path, os.Getuid(), os.Getgid())
+				}
 			}
 		}
 	}
@@ -3318,10 +3443,12 @@ func (m *Manager) deleteVMInternal(ctx context.Context, vmID string, deferred bo
 
 	// Clean up chroot jail directory if jailer was used
 	if vm != nil {
-		_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.ID)))
+		m.cleanupJailer(vm.ID)
 		if vm.InternalID != "" {
-			_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.InternalID)))
+			m.cleanupJailer(vm.InternalID)
 		}
+	} else {
+		m.cleanupJailer(vmID)
 	}
 
 	var deleteErr error
@@ -3382,9 +3509,9 @@ func (m *Manager) CleanupLocalVMFiles(ctx context.Context, vmID string) error {
 				_ = m.cgroupMgr.Teardown(vm.InternalID)
 			}
 		}
-		_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.ID)))
+		m.cleanupJailer(vm.ID)
 		if vm.InternalID != "" {
-			_ = os.RemoveAll(filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vm.InternalID)))
+			m.cleanupJailer(vm.InternalID)
 			_ = m.storMgr.CleanupVM(vm.InternalID)
 		} else {
 			_ = m.storMgr.CleanupVM(vm.ID)
@@ -4516,9 +4643,11 @@ func (m *Manager) ListVMs(ctx context.Context) ([]*db.VM, error) {
 }
 
 // watchProcessExit waits for a microVM process to terminate and reconciles state immediately
-func (m *Manager) watchProcessExit(vmID string, pid int, cmd *exec.Cmd) {
+func (m *Manager) watchProcessExit(vmID string, pid int, cmd *exec.Cmd, exitCh ...<-chan struct{}) {
 	go func() {
-		if cmd != nil {
+		if len(exitCh) > 0 && exitCh[0] != nil {
+			<-exitCh[0]
+		} else if cmd != nil {
 			_ = cmd.Wait()
 		} else if pid > 0 {
 			ticker := time.NewTicker(500 * time.Millisecond)
@@ -4557,6 +4686,21 @@ func (m *Manager) handleProcessExit(vmID string, pid int) {
 		}
 		if vm.PublicIPEnabled && vm.IPAddress != "" {
 			_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
+		}
+		if jProc := m.removeJailerProcess(vmID); jProc != nil {
+			_ = jProc.Cleanup()
+		} else if m.cfg.JailerEnabled {
+			m.cleanupJailer(vmID)
+		}
+		if vm.DiskPath != "" {
+			_ = jailer.SafeChown(vm.DiskPath, os.Getuid(), os.Getgid())
+		}
+		if vols, err := m.volumesForVM(ctx, vm); err == nil {
+			for _, vol := range vols {
+				if vol.Path != "" {
+					_ = jailer.SafeChown(vol.Path, os.Getuid(), os.Getgid())
+				}
+			}
 		}
 		m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 		go m.processQueue(context.Background())
