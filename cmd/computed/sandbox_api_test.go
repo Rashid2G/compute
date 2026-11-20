@@ -29,6 +29,10 @@ func setupTestServerForSandboxAPI(t *testing.T) (*Server, *db.Store) {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	_ = store.SaveSchedulingPolicy(context.Background(), policy)
+
 	imagesDir := filepath.Join(tmpDir, "images")
 	_ = os.MkdirAll(imagesDir, 0o755)
 	_ = os.WriteFile(filepath.Join(imagesDir, "rootfs.ext4"), []byte("test rootfs"), 0o600)
@@ -46,6 +50,13 @@ func setupTestServerForSandboxAPI(t *testing.T) (*Server, *db.Store) {
 	if err != nil {
 		t.Fatalf("failed to create storMgr: %v", err)
 	}
+	if avail, err := storMgr.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+		t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", tmpDir, avail)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Server.AuthEnabled = false
+	withTestHostCapacity(&cfg)
 
 	vmMgr := vm.NewManager(vm.Config{
 		Defaults: config.DefaultsConfig{
@@ -53,10 +64,9 @@ func setupTestServerForSandboxAPI(t *testing.T) (*Server, *db.Store) {
 			MemoryMB:   512,
 			DiskSizeMB: 1024,
 		},
+		Resources: cfg.Resources,
 	}, store, netMgr, storMgr)
 
-	cfg := config.DefaultConfig()
-	cfg.Server.AuthEnabled = false
 	s := NewServer(vmMgr, cfg)
 	return s, store
 }
@@ -295,4 +305,3 @@ func TestSandboxAPI_FeedbackStreamingAndStatuses(t *testing.T) {
 		t.Fatal("expected tracker.done to be closed")
 	}
 }
-

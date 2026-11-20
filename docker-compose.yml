@@ -13,14 +13,14 @@ x-logging: &default-logging
     max-file: "3"
 
 x-daemon-image: &daemon-image
-  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-1.0.0}
+  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-1.1.0}
   pull_policy: ${COMPUTE_PULL_POLICY:-build}
   build:
     context: .
     dockerfile: Dockerfile.daemon
 
 x-worker-image: &worker-image
-  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-1.0.0}
+  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-1.1.0}
   pull_policy: ${COMPUTE_PULL_POLICY:-build}
   build:
     context: .
@@ -116,7 +116,7 @@ services:
     devices:
       - /dev/kvm:/dev/kvm
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://${COMPUTE_HEALTHCHECK_HOST:-127.0.0.1}:${COMPUTE_API_PORT:-18080}/api/v1/ready"]
+      test: ["CMD-SHELL", "if [ -n \"$${COMPUTE_TLS_CERT_FILE}\" ] || [ -n \"${COMPUTE_TLS_CERT_FILE:-}\" ]; then curl -fsSk \"https://${COMPUTE_HEALTHCHECK_HOST:-127.0.0.1}:${COMPUTE_API_PORT:-18080}/api/v1/ready\"; else curl -fsS \"http://${COMPUTE_HEALTHCHECK_HOST:-127.0.0.1}:${COMPUTE_API_PORT:-18080}/api/v1/ready\"; fi"]
       interval: 10s
       timeout: 5s
       retries: 6

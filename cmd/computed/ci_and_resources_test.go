@@ -662,4 +662,3 @@ func TestImageBuildRandomScenarios(t *testing.T) {
 		t.Fatalf("expected 201 for rebuilding existing template, got %d: %s", resp.StatusCode, string(body))
 	}
 }
-

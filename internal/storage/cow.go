@@ -7,9 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 var (
@@ -67,10 +64,7 @@ func CloneFileCOW(srcPath, dstPath string) error {
 		if os.SameFile(srcStat, dstStat) {
 			// Decouple hardlink / alias only if paths point to distinct directory entries
 			// and link count > 1
-			var nlink uint64 = 1
-			if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
-				nlink = uint64(stat.Nlink)
-			}
+			nlink := fileNlink(dstStat)
 			if nlink > 1 {
 				if err := os.Remove(dstPath); err != nil {
 					return fmt.Errorf("failed to remove hardlink alias %s: %w", dstPath, err)
@@ -88,7 +82,7 @@ func CloneFileCOW(srcPath, dstPath string) error {
 	}
 
 	// 1. Attempt kernel reflink via ioctl(FICLONE)
-	cloneErr := unix.IoctlFileClone(int(dstFile.Fd()), int(srcFile.Fd()))
+	cloneErr := ioctlFileClone(int(dstFile.Fd()), int(srcFile.Fd()))
 	_ = dstFile.Close()
 
 	if cloneErr == nil {
@@ -129,10 +123,7 @@ func ReflinkStrict(srcPath, dstPath string) error {
 			return nil
 		}
 		if os.SameFile(srcStat, dstStat) {
-			var nlink uint64 = 1
-			if stat, ok := dstStat.Sys().(*syscall.Stat_t); ok {
-				nlink = uint64(stat.Nlink)
-			}
+			nlink := fileNlink(dstStat)
 			if nlink > 1 {
 				if err := os.Remove(dstPath); err != nil {
 					return fmt.Errorf("failed to remove hardlink alias %s: %w", dstPath, err)
@@ -149,7 +140,7 @@ func ReflinkStrict(srcPath, dstPath string) error {
 	}
 	defer dstFile.Close()
 
-	err = unix.IoctlFileClone(int(dstFile.Fd()), int(srcFile.Fd()))
+	err = ioctlFileClone(int(dstFile.Fd()), int(srcFile.Fd()))
 	if err != nil {
 		_ = os.Remove(dstPath)
 		return fmt.Errorf("%w: %v", ErrReflinkNotSupported, err)
@@ -179,39 +170,7 @@ func copySparseFileFast(srcPath, dstPath string, size int64) error {
 		return fmt.Errorf("failed to truncate destination to sparse size: %w", err)
 	}
 
-	var offset int64
-	for offset < size {
-		dataOffset, err := unix.Seek(int(src.Fd()), offset, unix.SEEK_DATA)
-		if err != nil {
-			if err == unix.ENXIO {
-				// No more data blocks exist
-				break
-			}
-			// SEEK_DATA unsupported on this filesystem, fall back to chunk-based zero detection
-			return fallbackChunkCopy(src, dst, size)
-		}
-
-		holeOffset, err := unix.Seek(int(src.Fd()), dataOffset, unix.SEEK_HOLE)
-		if err != nil {
-			holeOffset = size
-		}
-
-		dataLen := holeOffset - dataOffset
-		if _, err := src.Seek(dataOffset, io.SeekStart); err != nil {
-			return err
-		}
-		if _, err := dst.Seek(dataOffset, io.SeekStart); err != nil {
-			return err
-		}
-
-		copied, err := io.CopyN(dst, src, dataLen)
-		if err != nil && err != io.EOF {
-			return fmt.Errorf("failed to copy sparse data chunk: %w", err)
-		}
-		offset = dataOffset + copied
-	}
-
-	return nil
+	return copySparseDataHole(src, dst, size)
 }
 
 func fallbackChunkCopy(src, dst *os.File, size int64) error {

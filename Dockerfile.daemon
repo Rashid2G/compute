@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile for Compute Central Daemon & Web UI
-FROM golang:alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src
 ENV GOTOOLCHAIN=auto
@@ -17,15 +17,15 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute ./cmd/compute
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /bin/compute-worker ./cmd/compute-worker
 
 # Final minimal runtime image with Firecracker & network tooling
-FROM alpine:3.20
+FROM alpine:3.21
 
 # e2fsprogs provides mkfs.ext4/e2fsck/resize2fs, e2fsprogs-extra provides
-# debugfs, and mount/losetup provide the loop mount fallback; together they
-# bootstrap the Ubuntu rootfs and configure SSH keys, passwords, and sshd policy
-# inside guest disk images.
-RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables openssh-client bash socat tar gzip e2fsprogs e2fsprogs-extra mount losetup
+# debugfs, mount/losetup provide the loop mount fallback, xfsprogs provides
+# mkfs.xfs for XFS volumes, and arptables provides ARP anti-spoofing rules;
+# together they bootstrap rootfs, format disks, and secure VM networking.
+RUN apk add --no-cache ca-certificates curl iproute2 iptables ebtables arptables xfsprogs openssh-client bash socat tar gzip e2fsprogs e2fsprogs-extra mount losetup
 
-# Install Firecracker & Jailer static binaries
+# Install Firecracker & Jailer static binaries with SHA-256 verification
 ARG FIRECRACKER_VERSION=v1.17.0
 RUN set -eux; \
     ARCH="$(uname -m)"; \
@@ -36,11 +36,14 @@ RUN set -eux; \
     else \
         FC_ARCH="x86_64"; \
     fi; \
-    curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" | tar -xz; \
+    curl -fsSL -O "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz"; \
+    curl -fsSL -O "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz.sha256.txt"; \
+    sha256sum -c "firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz.sha256.txt"; \
+    tar -xzf "firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz"; \
     mv "release-${FIRECRACKER_VERSION}-${FC_ARCH}/firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}" /usr/local/bin/firecracker; \
     mv "release-${FIRECRACKER_VERSION}-${FC_ARCH}/jailer-${FIRECRACKER_VERSION}-${FC_ARCH}" /usr/local/bin/jailer; \
     chmod +x /usr/local/bin/firecracker /usr/local/bin/jailer; \
-    rm -rf "release-${FIRECRACKER_VERSION}-${FC_ARCH}"
+    rm -rf "release-${FIRECRACKER_VERSION}-${FC_ARCH}" "firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz" "firecracker-${FIRECRACKER_VERSION}-${FC_ARCH}.tgz.sha256.txt"
 
 WORKDIR /var/lib/compute
 

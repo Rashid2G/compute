@@ -2809,7 +2809,7 @@ func (m *Manager) saveStateInternal(ctx context.Context, vmID string, autoHibern
 
 	// 3. Stop process
 	if vm.PID > 0 && vm.PID != os.Getpid() {
-		syscall.Kill(vm.PID, syscall.SIGKILL)
+		_ = killProcess(vm.PID, syscall.SIGKILL)
 	}
 	if vm.SocketPath != "" {
 		os.Remove(vm.SocketPath)
@@ -3151,7 +3151,7 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 
 		// 3. SIGTERM then SIGKILL
 		if m.isAlive(vm.PID) {
-			_ = syscall.Kill(vm.PID, syscall.SIGTERM)
+			_ = killProcess(vm.PID, syscall.SIGTERM)
 			waitStep := 200 * time.Millisecond
 			if forceKill {
 				waitStep = 40 * time.Millisecond
@@ -3163,7 +3163,7 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 				time.Sleep(10 * time.Millisecond)
 			}
 			if m.isAlive(vm.PID) {
-				_ = syscall.Kill(vm.PID, syscall.SIGKILL)
+				_ = killProcess(vm.PID, syscall.SIGKILL)
 			}
 		}
 	}
@@ -4575,8 +4575,7 @@ func FileAllocatedMB(path string) int64 {
 	if err != nil {
 		return 0
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && st != nil {
-		bytes := st.Blocks * 512
+	if bytes, ok := fileAllocatedBlocksBytes(fi); ok {
 		if bytes <= 0 {
 			return 0
 		}

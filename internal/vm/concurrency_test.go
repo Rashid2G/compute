@@ -582,4 +582,3 @@ func TestExecCancelAndNonBlockingLock(t *testing.T) {
 		t.Fatal("expected DeleteVM to trigger active exec cancellation")
 	}
 }
-
