@@ -38,23 +38,27 @@ type Requirements struct {
 
 // Matches reports whether a ready worker can satisfy a job's placement and resource requirements.
 func Matches(w *Worker, req Requirements) bool {
-	if w == nil || w.Status != "ready" {
+	if w == nil {
 		return false
 	}
-	if req.PoolID != "" && req.PoolID != w.PoolID {
+	poolID, status, labels, caps, _ := w.SnapshotState()
+	if status != "ready" {
 		return false
 	}
-	if req.Architecture != "" && stringCapability(w.Capabilities, "architecture") != req.Architecture {
+	if req.PoolID != "" && req.PoolID != poolID {
+		return false
+	}
+	if req.Architecture != "" && stringCapability(caps, "architecture") != req.Architecture {
 		return false
 	}
 	for k, v := range req.Labels {
-		if w.Labels[k] != v {
+		if labels[k] != v {
 			return false
 		}
 	}
 	for key, required := range map[string]int{"vcpus": req.VCPUs, "memory_mb": req.MemoryMB, "disk_mb": req.DiskMB} {
-		available := integerCapability(w.Capabilities, key)
-		used := integerCapability(w.Capabilities, "used_"+key)
+		available := integerCapability(caps, key)
+		used := integerCapability(caps, "used_"+key)
 		if required > 0 && available-used < required {
 			return false
 		}
@@ -232,12 +236,13 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 			if req.PoolID != "" && nv.PoolID != req.PoolID {
 				continue
 			}
-			if req.Architecture != "" && stringCapability(w.Capabilities, "architecture") != req.Architecture {
+			_, _, labels, caps, _ := w.SnapshotState()
+			if req.Architecture != "" && stringCapability(caps, "architecture") != req.Architecture {
 				continue
 			}
 			labelsMatch := true
 			for k, v := range req.Labels {
-				if w.Labels[k] != v {
+				if labels[k] != v {
 					labelsMatch = false
 					break
 				}
@@ -392,64 +397,65 @@ func (s *Scheduler) ScheduleNext(ctx context.Context) (int, error) {
 }
 
 func buildWorkerNodeView(w *Worker, dbNode *db.WorkerNode) *db.WorkerNode {
+	poolID, status, labels, caps, metrics := w.SnapshotState()
 	nv := &db.WorkerNode{
 		ID:     w.ID,
 		Name:   w.ID,
-		PoolID: w.PoolID,
-		Status: w.Status,
+		PoolID: poolID,
+		Status: status,
 	}
 	if dbNode != nil {
 		*nv = *dbNode
 	}
-	if w.Status != "ready" {
-		nv.Status = w.Status
+	if status != "ready" {
+		nv.Status = status
 	} else if dbNode != nil && (dbNode.Status == "cordoned" || dbNode.Status == "draining" || dbNode.Status == "offline") {
 		nv.Status = dbNode.Status
 	} else if nv.Status == "" {
 		nv.Status = "ready"
 	}
 	if nv.PoolID == "" {
-		nv.PoolID = w.PoolID
+		nv.PoolID = poolID
 	}
-	if len(w.Labels) > 0 && nv.LabelsJSON == "" {
-		if b, err := json.Marshal(w.Labels); err == nil {
+	if len(labels) > 0 && nv.LabelsJSON == "" {
+		if b, err := json.Marshal(labels); err == nil {
 			nv.LabelsJSON = string(b)
 		}
 	}
-	if v := integerCapability(w.Capabilities, "vcpus"); v > 0 && nv.PhysicalVCPUs == 0 {
+	if v := integerCapability(caps, "vcpus"); v > 0 && nv.PhysicalVCPUs == 0 {
 		nv.PhysicalVCPUs = v
 	}
-	if v := integerCapability(w.Capabilities, "memory_mb"); v > 0 && nv.PhysicalMemMB == 0 {
+	if v := integerCapability(caps, "memory_mb"); v > 0 && nv.PhysicalMemMB == 0 {
 		nv.PhysicalMemMB = v
 	}
-	if v := integerCapability(w.Capabilities, "disk_mb"); v > 0 && nv.PhysicalDiskMB == 0 {
+	if v := integerCapability(caps, "disk_mb"); v > 0 && nv.PhysicalDiskMB == 0 {
 		nv.PhysicalDiskMB = v
 	}
-	if v := integerCapability(w.Capabilities, "max_vcpus"); v > 0 && nv.AllocatedVCPUs == 0 {
+	if v := integerCapability(caps, "max_vcpus"); v > 0 && nv.AllocatedVCPUs == 0 {
 		nv.AllocatedVCPUs = v
 	}
-	if v := integerCapability(w.Capabilities, "max_memory_mb"); v > 0 && nv.AllocatedMemMB == 0 {
+	if v := integerCapability(caps, "max_memory_mb"); v > 0 && nv.AllocatedMemMB == 0 {
 		nv.AllocatedMemMB = v
 	}
-	if v := integerCapability(w.Capabilities, "max_disk_mb"); v > 0 && nv.AllocatedDiskMB == 0 {
+	if v := integerCapability(caps, "max_disk_mb"); v > 0 && nv.AllocatedDiskMB == 0 {
 		nv.AllocatedDiskMB = v
 	}
-	if v, ok := metricInt(w.Metrics, w.Capabilities, "used_vcpus"); ok {
+	if v, ok := metricInt(metrics, caps, "used_vcpus"); ok {
 		nv.UsedVCPUs = v
 	}
-	if v, ok := metricInt(w.Metrics, w.Capabilities, "used_mem_mb", "used_memory_mb"); ok {
+	if v, ok := metricInt(metrics, caps, "used_mem_mb", "used_memory_mb"); ok {
 		nv.UsedMemMB = v
 	}
-	if v, ok := metricInt(w.Metrics, w.Capabilities, "used_disk_mb"); ok {
+	if v, ok := metricInt(metrics, caps, "used_disk_mb"); ok {
 		nv.UsedDiskMB = v
 	}
-	if v, ok := metricInt(w.Metrics, w.Capabilities, "running_vms"); ok {
+	if v, ok := metricInt(metrics, caps, "running_vms"); ok {
 		nv.RunningVMs = v
 	}
-	if v, ok := metricInt(w.Metrics, w.Capabilities, "memory_available_mb"); ok {
+	if v, ok := metricInt(metrics, caps, "memory_available_mb"); ok {
 		nv.AvailableMemMB = v
 	}
-	if v, ok := metricInt(w.Metrics, w.Capabilities, "disk_available_mb"); ok {
+	if v, ok := metricInt(metrics, caps, "disk_available_mb"); ok {
 		nv.AvailableDiskMB = v
 	}
 	return nv
@@ -476,8 +482,8 @@ func (s *Scheduler) HandleWorkerMessage(ctx context.Context, w *Worker, envelope
 		var hb api.WorkerHeartbeat
 		_ = json.Unmarshal(raw, &hb)
 		now := time.Now().UTC()
-		w.Capabilities = hb.Capabilities
-		w.Metrics = hb.Metrics
+		w.UpdateHeartbeatState(hb.Capabilities, hb.Metrics, "")
+		workerPoolID, _, _, _, _ := w.SnapshotState()
 		capJSON, _ := json.Marshal(hb.Capabilities)
 
 		node, err := s.store.GetWorkerNode(ctx, w.ID)
@@ -486,7 +492,7 @@ func (s *Scheduler) HandleWorkerMessage(ctx context.Context, w *Worker, envelope
 			node = &db.WorkerNode{
 				ID:        w.ID,
 				Name:      w.ID,
-				PoolID:    w.PoolID,
+				PoolID:    workerPoolID,
 				Role:      "worker",
 				Status:    "ready",
 				CreatedAt: now,
@@ -495,7 +501,7 @@ func (s *Scheduler) HandleWorkerMessage(ctx context.Context, w *Worker, envelope
 			prevStatus = node.Status
 		}
 		if node.PoolID == "" {
-			node.PoolID = w.PoolID
+			node.PoolID = workerPoolID
 		}
 		if node.Role == "" {
 			node.Role = "worker"
@@ -508,7 +514,7 @@ func (s *Scheduler) HandleWorkerMessage(ctx context.Context, w *Worker, envelope
 			}
 		}
 		if node.Status != "" {
-			w.Status = node.Status
+			w.UpdateHeartbeatState(hb.Capabilities, hb.Metrics, node.Status)
 		}
 		if v := integerCapability(hb.Capabilities, "vcpus"); v > 0 {
 			node.PhysicalVCPUs = v

@@ -2057,9 +2057,9 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 			if jailerProc != nil {
 				_ = jailerProc.Stop(2 * time.Second)
 				_ = jailerProc.Cleanup()
-			}
-			if cmd != nil && cmd.Process != nil {
+			} else if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
+				go func(c *exec.Cmd) { _ = c.Wait() }(cmd)
 			}
 			if m.cgroupMgr != nil {
 				_ = m.cgroupMgr.Teardown(vm.ID)
@@ -2936,11 +2936,12 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 
 	defer func() {
 		if !success {
-			if cmd != nil && cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
 			if jailerProc != nil {
+				_ = jailerProc.Stop(2 * time.Second)
 				_ = jailerProc.Cleanup()
+			} else if cmd != nil && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+				go func(c *exec.Cmd) { _ = c.Wait() }(cmd)
 			}
 			if m.cgroupMgr != nil {
 				_ = m.cgroupMgr.Teardown(vm.ID)

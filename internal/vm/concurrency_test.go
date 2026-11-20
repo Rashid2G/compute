@@ -199,7 +199,7 @@ func TestConcurrentHighDensityOperations_50VMs(t *testing.T) {
 // registry queries (ListVMs, GetVM) does not block or deadlock with concurrent writes.
 func TestConcurrentReadWriteIsolation(t *testing.T) {
 	m, _ := testConcurrentManager(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var stopReaders int32

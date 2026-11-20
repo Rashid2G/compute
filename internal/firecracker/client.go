@@ -166,9 +166,7 @@ func LaunchProcess(binaryPath, socketPath, vmID, logPath string) (*exec.Cmd, err
 		return nil, fmt.Errorf("failed to start firecracker: %w", err)
 	}
 
-	// Reap the child when it exits so stopped microVMs do not accumulate as
-	// zombie processes under the daemon.
-	go func() { _ = cmd.Wait() }()
-
+	// Callers own reaping cmd via cmd.Wait() (e.g. vm.Manager.watchProcessExit
+	// or failure rollback cleanup) to avoid concurrent cmd.Wait() races.
 	return cmd, nil
 }
