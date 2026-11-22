@@ -11,8 +11,11 @@ import (
 // Network isolation modes control whether a sandbox can reach other non-isolated
 // sandboxes in the same user account or is completely isolated on its own.
 const (
-	NetworkIsolationAccount  = "account"
-	NetworkIsolationIsolated = "isolated"
+	NetworkIsolationAccount    = "account"
+	NetworkIsolationIsolated   = "isolated"
+	NetworkIsolationStrict     = "strict"
+	NetworkIsolationNone       = "none"
+	NetworkIsolationNoInternet = "no-internet"
 )
 
 // NormalizeNetworkIsolation canonicalizes a sandbox network isolation mode.
@@ -22,8 +25,12 @@ func NormalizeNetworkIsolation(mode string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", NetworkIsolationAccount, "shared", "all", "same-account", "same_account", "peers":
 		return NetworkIsolationAccount, true
-	case NetworkIsolationIsolated, "self", "private", "none", "standalone":
+	case NetworkIsolationIsolated, "self", "private", "standalone", NetworkIsolationStrict:
 		return NetworkIsolationIsolated, true
+	case NetworkIsolationNoInternet, "no_internet", "airgapped", "air-gapped":
+		return NetworkIsolationNoInternet, true
+	case NetworkIsolationNone:
+		return NetworkIsolationNone, true
 	default:
 		return "", false
 	}
@@ -38,7 +45,19 @@ func IsNetworkIsolated(vm *VM) bool {
 	if !ok {
 		return false
 	}
-	return mode == NetworkIsolationIsolated
+	return mode == NetworkIsolationIsolated || mode == NetworkIsolationNoInternet
+}
+
+// IsNetworkNoInternet reports whether the VM is configured in no-internet/airgapped isolation mode.
+func IsNetworkNoInternet(vm *VM) bool {
+	if vm == nil {
+		return false
+	}
+	mode, ok := NormalizeNetworkIsolation(vm.NetworkIsolation)
+	if !ok {
+		return false
+	}
+	return mode == NetworkIsolationNoInternet
 }
 
 // VMStatus represents the state of a VM
@@ -438,6 +457,7 @@ type AccessAPIKey struct {
 
 // EnvironmentProfile represents reusable environment configurations
 type EnvironmentProfile struct {
+	OwnerID             string    `json:"owner_id"`
 	Name                string    `json:"name"`
 	IsDefault           bool      `json:"is_default"`
 	SafeForThirdParty   bool      `json:"safe_for_third_parties"`

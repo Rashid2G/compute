@@ -618,6 +618,10 @@ func (s *Server) handleWebhooks(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "url is required", http.StatusBadRequest)
 			return
 		}
+		if err := s.validateWebhookURL(req.URL); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		secret := req.Secret
 		if secret == "" {
 			secret = "whsec_" + strings.ReplaceAll(uuid.NewString()[:16], "-", "")
@@ -704,6 +708,10 @@ func (s *Server) handleWebhookActions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if update.URL != nil {
+				if err := s.validateWebhookURL(*update.URL); err != nil {
+					httpError(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				hook.URL = *update.URL
 			}
 			if update.Description != nil {
@@ -1155,11 +1163,13 @@ func (s *Server) handleAccessAPIKeyActions(w http.ResponseWriter, r *http.Reques
 // ===== Environments API =====
 
 func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminAccess(w, r) {
-		return
-	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
+		return
+	}
+	ownerID, isAdmin, ok := s.callerIdentity(r)
+	if !ok {
+		httpError(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	ctx := r.Context()
@@ -1167,13 +1177,28 @@ func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		envs, err := st.ListEnvironments(ctx)
+		var envs []*db.EnvironmentProfile
+		var err error
+		if isAdmin {
+			filterOwner := strings.TrimSpace(r.URL.Query().Get("owner_id"))
+			if filterOwner != "" {
+				envs, err = st.ListEnvironmentsByOwner(ctx, filterOwner)
+			} else {
+				envs, err = st.ListEnvironments(ctx)
+			}
+		} else {
+			envs, err = st.ListEnvironmentsByOwner(ctx, ownerID)
+		}
 		if err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if len(envs) == 0 {
+		if envs == nil {
+			envs = []*db.EnvironmentProfile{}
+		}
+		if len(envs) == 0 && isAdmin && ownerID == "default" {
 			base := &db.EnvironmentProfile{
+				OwnerID:             "default",
 				Name:                "base",
 				IsDefault:           true,
 				Version:             1,
@@ -1202,6 +1227,9 @@ func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 			httpError(w, "name is required", http.StatusBadRequest)
 			return
 		}
+		if !isAdmin || env.OwnerID == "" {
+			env.OwnerID = ownerID
+		}
 		if env.Version == 0 {
 			env.Version = 1
 		}
@@ -1218,11 +1246,13 @@ func (s *Server) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleEnvironmentActions(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdminAccess(w, r) {
-		return
-	}
 	if s.vmMgr == nil || s.vmMgr.GetStore() == nil {
 		httpError(w, "store not available", http.StatusInternalServerError)
+		return
+	}
+	ownerID, isAdmin, ok := s.callerIdentity(r)
+	if !ok {
+		httpError(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	ctx := r.Context()
@@ -1237,7 +1267,21 @@ func (s *Server) handleEnvironmentActions(w http.ResponseWriter, r *http.Request
 
 	switch r.Method {
 	case http.MethodGet:
-		env, err := st.GetEnvironment(ctx, name)
+		var env *db.EnvironmentProfile
+		var err error
+		if isAdmin {
+			filterOwner := strings.TrimSpace(r.URL.Query().Get("owner_id"))
+			if filterOwner != "" {
+				env, err = st.GetEnvironmentByOwner(ctx, filterOwner, name)
+			} else {
+				env, err = st.GetEnvironmentByOwner(ctx, ownerID, name)
+				if err != nil || env == nil {
+					env, err = st.GetEnvironment(ctx, name)
+				}
+			}
+		} else {
+			env, err = st.GetEnvironmentByOwner(ctx, ownerID, name)
+		}
 		if err != nil || env == nil {
 			httpError(w, "environment not found", http.StatusNotFound)
 			return
@@ -1251,6 +1295,9 @@ func (s *Server) handleEnvironmentActions(w http.ResponseWriter, r *http.Request
 			return
 		}
 		env.Name = name
+		if !isAdmin || env.OwnerID == "" {
+			env.OwnerID = ownerID
+		}
 		if env.Version == 0 {
 			env.Version = 1
 		}
@@ -1262,7 +1309,28 @@ func (s *Server) handleEnvironmentActions(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(env)
 
 	case http.MethodDelete:
-		if err := st.DeleteEnvironment(ctx, name); err != nil {
+		targetOwner := ownerID
+		if isAdmin {
+			filterOwner := strings.TrimSpace(r.URL.Query().Get("owner_id"))
+			if filterOwner != "" {
+				targetOwner = filterOwner
+			} else {
+				existing, _ := st.GetEnvironmentByOwner(ctx, ownerID, name)
+				if existing == nil {
+					anyEnv, _ := st.GetEnvironment(ctx, name)
+					if anyEnv != nil {
+						targetOwner = anyEnv.OwnerID
+					}
+				}
+			}
+		} else {
+			existing, err := st.GetEnvironmentByOwner(ctx, ownerID, name)
+			if err != nil || existing == nil {
+				httpError(w, "environment not found", http.StatusNotFound)
+				return
+			}
+		}
+		if err := st.DeleteEnvironmentByOwner(ctx, targetOwner, name); err != nil {
 			httpError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

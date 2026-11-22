@@ -109,11 +109,23 @@ func newM2VMManager(t *testing.T, root string, limits config.ResourceLimits, sub
 func newM2Harness(t *testing.T, limits config.ResourceLimits) *m2Harness {
 	t.Helper()
 	root := t.TempDir()
+	limits.MinFreeDiskSpaceMB = 0
 	vmMgr, store := newM2VMManager(t, root, limits, "192.168.60.0/24")
+	if stor := vmMgr.GetStorageManager(); stor != nil {
+		if avail, err := stor.GetAvailableDiskSpaceMB(); err == nil && avail < 256 {
+			t.Skipf("skipping test: insufficient free disk space on %s (%d MB < 256 MB)", root, avail)
+		}
+	}
 	cfg := config.DefaultConfig()
 	cfg.ConfigPath = filepath.Join(root, "daemon.json")
 	cfg.Jobs.LocalExecution = false
 	cfg.Resources = limits
+
+	policy := db.DefaultSchedulingPolicy()
+	policy.HostReservedDiskMB = 0
+	if err := store.SaveSchedulingPolicy(context.Background(), policy); err != nil {
+		t.Fatal(err)
+	}
 
 	srv := NewServer(vmMgr, cfg)
 	ts := httptest.NewServer(srv)

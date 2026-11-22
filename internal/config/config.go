@@ -199,6 +199,23 @@ type ServerConfig struct {
 	// listener. Leave empty to terminate TLS in a reverse proxy or Tailscale.
 	TLSCertFile string `json:"tls_cert_file,omitempty"`
 	TLSKeyFile  string `json:"tls_key_file,omitempty"`
+	// TrustedProxies is a comma-separated list of CIDRs from which proxy headers
+	// (X-Forwarded-For, X-Real-IP, X-Forwarded-Host) are trusted.
+	TrustedProxies string `json:"trusted_proxies,omitempty"`
+	// Rate limiting configuration.
+	RateLimitEnabled   *bool   `json:"rate_limit_enabled,omitempty"`
+	RateLimitAuthRate  float64 `json:"rate_limit_auth_rate,omitempty"`
+	RateLimitAuthBurst int     `json:"rate_limit_auth_burst,omitempty"`
+	RateLimitAPIRate   float64 `json:"rate_limit_api_rate,omitempty"`
+	RateLimitAPIBurst  int     `json:"rate_limit_api_burst,omitempty"`
+}
+
+// IsRateLimitEnabled reports whether token-bucket rate limiting is active.
+func (c ServerConfig) IsRateLimitEnabled() bool {
+	if c.RateLimitEnabled != nil {
+		return *c.RateLimitEnabled
+	}
+	return true
 }
 
 // NormalizedPublicURL returns the configured externally reachable base URL
@@ -575,6 +592,23 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 	// entirely from .env variables.
 	if err := ApplyEnvOverrides(&cfg); err != nil {
 		return cfg, err
+	}
+
+	for _, cidr := range cfg.Network.EgressDenyCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return cfg, fmt.Errorf("invalid network.egress_deny_cidrs %q in config %s: %w", cidr, path, err)
+			}
+		}
+	}
+	for _, cidr := range cfg.Network.EgressAllowCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr != "" {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				return cfg, fmt.Errorf("invalid network.egress_allow_cidrs %q in config %s: %w", cidr, path, err)
+			}
+		}
 	}
 
 	// Auto-locate Firecracker and Jailer if configured path doesn't exist

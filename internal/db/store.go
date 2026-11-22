@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Rashid2G/compute/internal/master/pki"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -24,15 +25,21 @@ func boolInt(v bool) int {
 
 // Store handles persistence of VM metadata
 type Store struct {
-	db *sql.DB
-	mu sync.RWMutex
+	db        *sql.DB
+	dbPath    string
+	masterKey *pki.MasterKey
+	mu        sync.RWMutex
 }
 
 // NewStore opens or creates the SQLite database at dbPath
 func NewStore(dbPath string) (*Store, error) {
-	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create db directory: %w", err)
+	isMem := isMemoryDB(dbPath)
+	if !isMem {
+		dir := filepath.Dir(dbPath)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to create db directory: %w", err)
+		}
+		_ = os.Chmod(dir, 0700)
 	}
 
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", dbPath)
@@ -41,10 +48,30 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
-	store := &Store{db: db}
+	mk, err := resolveMasterKey(dbPath)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to resolve master key: %w", err)
+	}
+
+	store := &Store{db: db, dbPath: dbPath, masterKey: mk}
 	if err := store.initSchema(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	if err := store.migrateSecretsAndTokens(context.Background()); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate secrets and tokens: %w", err)
+	}
+
+	if !isMem {
+		_ = os.Chmod(dbPath, 0600)
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, err := os.Stat(dbPath + suffix); err == nil {
+				_ = os.Chmod(dbPath+suffix, 0600)
+			}
+		}
 	}
 
 	return store, nil
@@ -92,7 +119,8 @@ func (s *Store) SaveWorkerToken(ctx context.Context, t *WorkerToken) error {
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now().UTC()
 	}
-	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_tokens(token,name,pool_id,labels_json,expires_at,used_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(token) DO UPDATE SET name=excluded.name,pool_id=excluded.pool_id,labels_json=excluded.labels_json,expires_at=excluded.expires_at,used_at=excluded.used_at`, t.Token, t.Name, t.PoolID, t.LabelsJSON, t.ExpiresAt, t.UsedAt, t.CreatedAt)
+	tokenToStore := HashToken(t.Token)
+	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_tokens(token,name,pool_id,labels_json,expires_at,used_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(token) DO UPDATE SET name=excluded.name,pool_id=excluded.pool_id,labels_json=excluded.labels_json,expires_at=excluded.expires_at,used_at=excluded.used_at`, tokenToStore, t.Name, t.PoolID, t.LabelsJSON, t.ExpiresAt, t.UsedAt, t.CreatedAt)
 	return e
 }
 func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerToken, error) {
@@ -103,16 +131,20 @@ func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerTo
 		return nil, e
 	}
 	defer tx.Rollback()
+	hashed := HashToken(token)
 	t := new(WorkerToken)
-	e = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	e = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=? OR token=?`, hashed, token).Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if e != nil {
 		return nil, e
+	}
+	if !CompareTokenConstantTime(t.Token, token) {
+		return nil, fmt.Errorf("token invalid or expired")
 	}
 	if t.UsedAt != nil || time.Now().After(t.ExpiresAt) {
 		return nil, fmt.Errorf("token invalid or expired")
 	}
 	now := time.Now().UTC()
-	if _, e = tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=? WHERE token=? AND used_at IS NULL`, now, token); e != nil {
+	if _, e = tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=? WHERE token=? AND used_at IS NULL`, now, t.Token); e != nil {
 		return nil, e
 	}
 	return t, tx.Commit()
@@ -122,7 +154,8 @@ func (s *Store) ConsumeWorkerToken(ctx context.Context, token string) (*WorkerTo
 func (s *Store) ConsumeWorkerTokenAtomic(ctx context.Context, token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.ExecContext(ctx, `UPDATE worker_tokens SET used_at = CURRENT_TIMESTAMP WHERE token = ? AND used_at IS NULL AND (expires_at > CURRENT_TIMESTAMP OR datetime(expires_at) > datetime('now'))`, token)
+	hashed := HashToken(token)
+	res, err := s.db.ExecContext(ctx, `UPDATE worker_tokens SET used_at = CURRENT_TIMESTAMP WHERE (token = ? OR token = ?) AND used_at IS NULL AND (expires_at > CURRENT_TIMESTAMP OR datetime(expires_at) > datetime('now'))`, hashed, token)
 	if err != nil {
 		return err
 	}
@@ -157,10 +190,14 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 	}
 	defer tx.Rollback()
 
+	hashed := HashToken(token)
 	t := new(WorkerToken)
-	err = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).
+	err = tx.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=? OR token=?`, hashed, token).
 		Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err != nil {
+		return fmt.Errorf("invalid worker token")
+	}
+	if !CompareTokenConstantTime(t.Token, token) {
 		return fmt.Errorf("invalid worker token")
 	}
 	boundName := strings.TrimSpace(t.Name)
@@ -178,7 +215,7 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 			if workerName == "" {
 				return fmt.Errorf("worker token already consumed; worker name required to reconnect")
 			}
-			if _, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET name=? WHERE token=?`, workerName, token); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET name=? WHERE token=?`, workerName, t.Token); err != nil {
 				return err
 			}
 			return tx.Commit()
@@ -196,7 +233,7 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 		bindName = workerName
 	}
 	now := time.Now().UTC()
-	res, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=?, name=? WHERE token=? AND used_at IS NULL`, now, bindName, token)
+	res, err := tx.ExecContext(ctx, `UPDATE worker_tokens SET used_at=?, name=? WHERE token=? AND used_at IS NULL`, now, bindName, t.Token)
 	if err != nil {
 		return err
 	}
@@ -210,14 +247,18 @@ func (s *Store) AuthorizeWorkerToken(ctx context.Context, token, workerName stri
 func (s *Store) GetWorkerToken(ctx context.Context, token string) (*WorkerToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	hashed := HashToken(token)
 	t := new(WorkerToken)
-	err := s.db.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=?`, token).
+	err := s.db.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=? OR token=?`, hashed, token).
 		Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !CompareTokenConstantTime(t.Token, token) {
+		return nil, nil
 	}
 	return t, nil
 }
@@ -244,7 +285,8 @@ func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
 func (s *Store) DeleteWorkerToken(ctx context.Context, token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, e := s.db.ExecContext(ctx, `DELETE FROM worker_tokens WHERE token=?`, token)
+	hashed := HashToken(token)
+	_, e := s.db.ExecContext(ctx, `DELETE FROM worker_tokens WHERE token=? OR token=?`, hashed, token)
 	return e
 }
 func (s *Store) SaveJob(ctx context.Context, j *Job) error {
@@ -556,7 +598,8 @@ func (s *Store) initSchema() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS environments (
-		name TEXT PRIMARY KEY,
+		owner_id TEXT NOT NULL DEFAULT '',
+		name TEXT NOT NULL,
 		is_default INTEGER NOT NULL DEFAULT 0,
 		safe_for_third_party INTEGER NOT NULL DEFAULT 0,
 		github_repos_enabled INTEGER NOT NULL DEFAULT 0,
@@ -567,7 +610,8 @@ func (s *Store) initSchema() error {
 		agent_creds_enabled INTEGER NOT NULL DEFAULT 0,
 		credential_profile TEXT NOT NULL DEFAULT '',
 		version INTEGER NOT NULL DEFAULT 1,
-		updated_at TIMESTAMP NOT NULL
+		updated_at TIMESTAMP NOT NULL,
+		PRIMARY KEY (owner_id, name)
 	);
 
 	CREATE TABLE IF NOT EXISTS port_forwards (
@@ -628,6 +672,46 @@ func (s *Store) initSchema() error {
 	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN used_disk_mb INTEGER NOT NULL DEFAULT 0")
 	_, _ = s.db.Exec("ALTER TABLE worker_nodes ADD COLUMN running_vms INTEGER NOT NULL DEFAULT 0")
 
+	// Migrate environments to ensure owner_id exists and composite primary key (owner_id, name)
+	_, _ = s.db.Exec("ALTER TABLE environments ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+	var envPKCount int
+	if rows, err := s.db.Query("PRAGMA table_info(environments);"); err == nil {
+		for rows.Next() {
+			var cid int
+			var name, ctype string
+			var notnull, pk int
+			var dfltValue interface{}
+			if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil && pk > 0 {
+				envPKCount++
+			}
+		}
+		rows.Close()
+	}
+	if envPKCount == 1 {
+		_, _ = s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS environments_v2 (
+				owner_id TEXT NOT NULL DEFAULT '',
+				name TEXT NOT NULL,
+				is_default INTEGER NOT NULL DEFAULT 0,
+				safe_for_third_party INTEGER NOT NULL DEFAULT 0,
+				github_repos_enabled INTEGER NOT NULL DEFAULT 0,
+				github_repos TEXT NOT NULL DEFAULT '[]',
+				secrets_enabled INTEGER NOT NULL DEFAULT 0,
+				secrets TEXT NOT NULL DEFAULT '',
+				boat_creds_enabled INTEGER NOT NULL DEFAULT 0,
+				agent_creds_enabled INTEGER NOT NULL DEFAULT 0,
+				credential_profile TEXT NOT NULL DEFAULT '',
+				version INTEGER NOT NULL DEFAULT 1,
+				updated_at TIMESTAMP NOT NULL,
+				PRIMARY KEY (owner_id, name)
+			);
+			INSERT OR IGNORE INTO environments_v2 (owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at)
+			SELECT COALESCE(owner_id, ''), name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments;
+			DROP TABLE environments;
+			ALTER TABLE environments_v2 RENAME TO environments;
+		`)
+	}
+
 	// Migrate existing tables to ensure internal_id, owner_id, public_ip, public_ip_enabled, network_isolation, and protected columns exist
 	_ = s.migrateTableColumns("vms", []string{"internal_id", "owner_id", "public_ip", "public_ip_enabled", "network_isolation", "protected", "tailscale_enabled", "tailnet_ip", "tailnet_dns", "tailscale_device_id", "ssh_password_enabled", "startup_script"})
 	_ = s.migrateTableColumns("images", []string{"internal_id", "owner_id"})
@@ -687,6 +771,8 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_vm ON port_forwards(vm_id);
 	CREATE INDEX IF NOT EXISTS idx_port_forwards_owner ON port_forwards(owner_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_port_forwards_host_port ON port_forwards(host_port) WHERE host_port > 0;
+	CREATE INDEX IF NOT EXISTS idx_environments_owner ON environments(owner_id);
+	CREATE INDEX IF NOT EXISTS idx_environments_owner_name ON environments(owner_id, name);
 	`
 	_, err := s.db.Exec(indexes)
 	return err
@@ -2109,6 +2195,10 @@ func (s *Store) SaveWebhook(ctx context.Context, w *WebhookEndpoint) error {
 		w.Events = []string{}
 	}
 	eventsJSON, _ := json.Marshal(w.Events)
+	encSecret, err := s.encryptSecret(w.Secret)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt webhook secret: %w", err)
+	}
 	query := `INSERT INTO webhooks (
 		id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2126,8 +2216,8 @@ func (s *Store) SaveWebhook(ctx context.Context, w *WebhookEndpoint) error {
 	if w.Active {
 		activeInt = 1
 	}
-	_, err := s.db.ExecContext(ctx, query,
-		w.ID, w.URL, w.Description, w.Secret, string(eventsJSON), activeInt, w.LastDelivery, w.SuccessRate, w.DeliveriesCount, w.CreatedAt, w.UpdatedAt,
+	_, err = s.db.ExecContext(ctx, query,
+		w.ID, w.URL, w.Description, encSecret, string(eventsJSON), activeInt, w.LastDelivery, w.SuccessRate, w.DeliveriesCount, w.CreatedAt, w.UpdatedAt,
 	)
 	return err
 }
@@ -2152,6 +2242,10 @@ func (s *Store) GetWebhook(ctx context.Context, id string) (*WebhookEndpoint, er
 	_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
 	if w.Events == nil {
 		w.Events = []string{}
+	}
+	dec, err := s.decryptSecret(w.Secret)
+	if err == nil {
+		w.Secret = dec
 	}
 	return w, nil
 }
@@ -2179,6 +2273,10 @@ func (s *Store) ListWebhooks(ctx context.Context) ([]*WebhookEndpoint, error) {
 		_ = json.Unmarshal([]byte(eventsJSON), &w.Events)
 		if w.Events == nil {
 			w.Events = []string{}
+		}
+		dec, err := s.decryptSecret(w.Secret)
+		if err == nil {
+			w.Secret = dec
 		}
 		out = append(out, w)
 	}
@@ -2328,6 +2426,7 @@ func (s *Store) SaveAccessAPIKey(ctx context.Context, k *AccessAPIKey) error {
 	if k.CreatedBy == "" {
 		k.CreatedBy = "admin"
 	}
+	tokenToStore := HashToken(k.Token)
 	query := `INSERT INTO access_api_keys (
 		id, name, prefix, token, scope, last_used, expires_at, created_by, created_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2340,7 +2439,7 @@ func (s *Store) SaveAccessAPIKey(ctx context.Context, k *AccessAPIKey) error {
 		expires_at = excluded.expires_at,
 		created_by = excluded.created_by`
 	_, err := s.db.ExecContext(ctx, query,
-		k.ID, k.Name, k.Prefix, k.Token, k.Scope, k.LastUsed, k.ExpiresAt, k.CreatedBy, k.CreatedAt,
+		k.ID, k.Name, k.Prefix, tokenToStore, k.Scope, k.LastUsed, k.ExpiresAt, k.CreatedBy, k.CreatedAt,
 	)
 	return err
 }
@@ -2366,8 +2465,9 @@ func (s *Store) GetAccessAPIKey(ctx context.Context, id string) (*AccessAPIKey, 
 func (s *Store) GetAccessAPIKeyByToken(ctx context.Context, token string) (*AccessAPIKey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	hashed := HashToken(token)
 	k := new(AccessAPIKey)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE token = ? LIMIT 1`, token).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE token = ? OR token = ? LIMIT 1`, hashed, token).Scan(
 		&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2375,6 +2475,9 @@ func (s *Store) GetAccessAPIKeyByToken(ctx context.Context, token string) (*Acce
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !CompareTokenConstantTime(k.Token, token) {
+		return nil, nil
 	}
 	return k, nil
 }
@@ -2427,7 +2530,7 @@ func (s *Store) DeleteAccessAPIKey(ctx context.Context, id string) error {
 	return err
 }
 
-// SaveEnvironment persists an environment profile
+// SaveEnvironment persists an environment profile scoped to its owner.
 func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2438,9 +2541,10 @@ func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) erro
 	if e.GitHubRepos == nil {
 		e.GitHubRepos = []string{}
 	}
+	e.OwnerID = strings.TrimSpace(e.OwnerID)
 	reposJSON, _ := json.Marshal(e.GitHubRepos)
 	if e.IsDefault {
-		_, _ = s.db.ExecContext(ctx, `UPDATE environments SET is_default = 0 WHERE name != ?`, e.Name)
+		_, _ = s.db.ExecContext(ctx, `UPDATE environments SET is_default = 0 WHERE owner_id = ? AND name != ?`, e.OwnerID, e.Name)
 	}
 	isDefInt, safeInt, ghInt, secInt, boatInt, agInt := 0, 0, 0, 0, 0, 0
 	if e.IsDefault {
@@ -2462,11 +2566,16 @@ func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) erro
 		agInt = 1
 	}
 
+	encSecrets, err := s.encryptSecret(e.Secrets)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt environment secrets: %w", err)
+	}
+
 	query := `INSERT INTO environments (
-		name, is_default, safe_for_third_party, github_repos_enabled, github_repos,
+		owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos,
 		secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(name) DO UPDATE SET
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(owner_id, name) DO UPDATE SET
 		is_default = excluded.is_default,
 		safe_for_third_party = excluded.safe_for_third_party,
 		github_repos_enabled = excluded.github_repos_enabled,
@@ -2478,22 +2587,25 @@ func (s *Store) SaveEnvironment(ctx context.Context, e *EnvironmentProfile) erro
 		credential_profile = excluded.credential_profile,
 		version = excluded.version,
 		updated_at = excluded.updated_at`
-	_, err := s.db.ExecContext(ctx, query,
-		e.Name, isDefInt, safeInt, ghInt, string(reposJSON),
-		secInt, e.Secrets, boatInt, agInt, e.CredentialProfile, e.Version, e.UpdatedAt,
+	_, err = s.db.ExecContext(ctx, query,
+		e.OwnerID, e.Name, isDefInt, safeInt, ghInt, string(reposJSON),
+		secInt, encSecrets, boatInt, agInt, e.CredentialProfile, e.Version, e.UpdatedAt,
 	)
 	return err
 }
 
-// GetEnvironment retrieves an environment profile by name
-func (s *Store) GetEnvironment(ctx context.Context, name string) (*EnvironmentProfile, error) {
+// GetEnvironmentByOwner retrieves an environment profile by ownerID and name.
+func (s *Store) GetEnvironmentByOwner(ctx context.Context, ownerID, name string) (*EnvironmentProfile, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	ownerID = strings.TrimSpace(ownerID)
+	name = strings.TrimSpace(name)
 	e := new(EnvironmentProfile)
 	var reposJSON string
 	var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
-	err := s.db.QueryRowContext(ctx, `SELECT name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments WHERE name = ? LIMIT 1`, name).Scan(
-		&e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
+	query := `SELECT owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments WHERE owner_id = ? AND name = ? LIMIT 1`
+	err := s.db.QueryRowContext(ctx, query, ownerID, name).Scan(
+		&e.OwnerID, &e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -2512,14 +2624,62 @@ func (s *Store) GetEnvironment(ctx context.Context, name string) (*EnvironmentPr
 	if e.GitHubRepos == nil {
 		e.GitHubRepos = []string{}
 	}
+	dec, err := s.decryptSecret(e.Secrets)
+	if err == nil {
+		e.Secrets = dec
+	}
 	return e, nil
 }
 
-// ListEnvironments returns all environment profiles
-func (s *Store) ListEnvironments(ctx context.Context) ([]*EnvironmentProfile, error) {
+// GetEnvironment retrieves an environment profile by name (for backward compatibility).
+func (s *Store) GetEnvironment(ctx context.Context, name string) (*EnvironmentProfile, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments ORDER BY is_default DESC, name ASC`)
+	name = strings.TrimSpace(name)
+	e := new(EnvironmentProfile)
+	var reposJSON string
+	var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
+	query := `SELECT owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments WHERE name = ? ORDER BY CASE WHEN owner_id = '' OR owner_id = 'default' THEN 0 ELSE 1 END LIMIT 1`
+	err := s.db.QueryRowContext(ctx, query, name).Scan(
+		&e.OwnerID, &e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	e.IsDefault = isDefInt == 1
+	e.SafeForThirdParty = safeInt == 1
+	e.GitHubReposEnabled = ghInt == 1
+	e.SecretsEnabled = secInt == 1
+	e.ComputeCredsEnabled = boatInt == 1
+	e.BoatCredsEnabled = boatInt == 1
+	e.AgentCredsEnabled = agInt == 1
+	_ = json.Unmarshal([]byte(reposJSON), &e.GitHubRepos)
+	if e.GitHubRepos == nil {
+		e.GitHubRepos = []string{}
+	}
+	dec, err := s.decryptSecret(e.Secrets)
+	if err == nil {
+		e.Secrets = dec
+	}
+	return e, nil
+}
+
+// ListEnvironmentsByOwner returns environment profiles for a given owner. If ownerID is empty, it returns all profiles.
+func (s *Store) ListEnvironmentsByOwner(ctx context.Context, ownerID string) ([]*EnvironmentProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ownerID = strings.TrimSpace(ownerID)
+	var rows *sql.Rows
+	var err error
+	const selectCols = `SELECT owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments`
+	if ownerID == "" {
+		rows, err = s.db.QueryContext(ctx, selectCols+` ORDER BY is_default DESC, name ASC`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY is_default DESC, name ASC`, ownerID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2530,7 +2690,7 @@ func (s *Store) ListEnvironments(ctx context.Context) ([]*EnvironmentProfile, er
 		var reposJSON string
 		var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
 		if err := rows.Scan(
-			&e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
+			&e.OwnerID, &e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -2545,17 +2705,37 @@ func (s *Store) ListEnvironments(ctx context.Context) ([]*EnvironmentProfile, er
 		if e.GitHubRepos == nil {
 			e.GitHubRepos = []string{}
 		}
+		dec, err := s.decryptSecret(e.Secrets)
+		if err == nil {
+			e.Secrets = dec
+		}
 		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-// DeleteEnvironment deletes an environment profile by name
-func (s *Store) DeleteEnvironment(ctx context.Context, name string) error {
+// ListEnvironments returns all environment profiles across all owners.
+func (s *Store) ListEnvironments(ctx context.Context) ([]*EnvironmentProfile, error) {
+	return s.ListEnvironmentsByOwner(ctx, "")
+}
+
+// DeleteEnvironmentByOwner deletes an environment profile by owner and name.
+func (s *Store) DeleteEnvironmentByOwner(ctx context.Context, ownerID, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE name = ?`, name)
+	ownerID = strings.TrimSpace(ownerID)
+	name = strings.TrimSpace(name)
+	if ownerID == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE name = ?`, name)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE owner_id = ? AND name = ?`, ownerID, name)
 	return err
+}
+
+// DeleteEnvironment deletes an environment profile by name.
+func (s *Store) DeleteEnvironment(ctx context.Context, name string) error {
+	return s.DeleteEnvironmentByOwner(ctx, "", name)
 }
 
 // SavePortForward persists a port forwarding record
@@ -2750,6 +2930,14 @@ func (s *Store) SaveGitHubConnection(ctx context.Context, c *GitHubConnection) e
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = time.Now().UTC()
 	}
+	encToken, err := s.encryptSecret(c.GitHubToken)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt github token: %w", err)
+	}
+	encSecret, err := s.encryptSecret(c.WebhookSecret)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt webhook secret: %w", err)
+	}
 	query := `INSERT INTO github_connections (
 		id, owner_id, name, repo_url, default_branch, github_token, webhook_secret,
 		default_command, vcpus, memory_mb, timeout_sec, status, last_triggered_at, created_at
@@ -2766,8 +2954,8 @@ func (s *Store) SaveGitHubConnection(ctx context.Context, c *GitHubConnection) e
 		timeout_sec = excluded.timeout_sec,
 		status = excluded.status,
 		last_triggered_at = COALESCE(excluded.last_triggered_at, github_connections.last_triggered_at)`
-	_, err := s.db.ExecContext(ctx, query,
-		c.ID, c.OwnerID, c.Name, c.RepoURL, c.DefaultBranch, c.GitHubToken, c.WebhookSecret,
+	_, err = s.db.ExecContext(ctx, query,
+		c.ID, c.OwnerID, c.Name, c.RepoURL, c.DefaultBranch, encToken, encSecret,
 		c.DefaultCommand, c.VCPUs, c.MemoryMB, c.TimeoutSec, c.Status, c.LastTriggeredAt, c.CreatedAt,
 	)
 	if err == nil {
@@ -2790,6 +2978,12 @@ func (s *Store) GetGitHubConnection(ctx context.Context, id string) (*GitHubConn
 	}
 	if err != nil {
 		return nil, err
+	}
+	if dec, err := s.decryptSecret(c.GitHubToken); err == nil {
+		c.GitHubToken = dec
+	}
+	if dec, err := s.decryptSecret(c.WebhookSecret); err == nil {
+		c.WebhookSecret = dec
 	}
 	c.PopulateMask()
 	return c, nil
@@ -2821,6 +3015,12 @@ func (s *Store) ListGitHubConnections(ctx context.Context, ownerID string) ([]*G
 			&c.DefaultCommand, &c.VCPUs, &c.MemoryMB, &c.TimeoutSec, &c.Status, &c.LastTriggeredAt, &c.CreatedAt,
 		); err != nil {
 			return nil, err
+		}
+		if dec, err := s.decryptSecret(c.GitHubToken); err == nil {
+			c.GitHubToken = dec
+		}
+		if dec, err := s.decryptSecret(c.WebhookSecret); err == nil {
+			c.WebhookSecret = dec
 		}
 		c.PopulateMask()
 		out = append(out, c)

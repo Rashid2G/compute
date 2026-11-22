@@ -39,10 +39,12 @@ func (r *RealRunner) Run(ctx context.Context, name string, args ...string) ([]by
 type Mode string
 
 const (
-	ModeNAT    Mode = "nat"    // Virtual bridge behind virtual NAT (for Wi-Fi or isolated host)
-	ModeBridge Mode = "bridge" // Virtual bridge (L2 only, direct to host NIC and router)
-	ModeNIC    Mode = "nic"    // Assigned to a real physical NIC via bridge (dedicated IPs on host LAN)
-	ModeWired  Mode = "wired"  // Alias for 'nic' mode: wired physical connection with dedicated IPs
+	ModeNAT        Mode = "nat"         // Virtual bridge behind virtual NAT (for Wi-Fi or isolated host)
+	ModeBridge     Mode = "bridge"      // Virtual bridge (L2 only, direct to host NIC and router)
+	ModeNIC        Mode = "nic"         // Assigned to a real physical NIC via bridge (dedicated IPs on host LAN)
+	ModeWired      Mode = "wired"       // Alias for 'nic' mode: wired physical connection with dedicated IPs
+	ModeNoInternet Mode = "no-internet" // Air-gapped sandbox network: drops all forwarded egress traffic off-bridge
+	ModeAirgapped  Mode = "airgapped"   // Alias for 'no-internet' mode
 )
 
 // Config defines network parameters
@@ -62,27 +64,107 @@ type Config struct {
 	// daemon/worker, libvirt). Auto-linking those creates L2 loops and MAC
 	// flaps that make unrelated sandboxes unreachable.
 	LinkAllBridges bool `json:"link_all_bridges,omitempty"`
+
+	// Egress firewall settings (ADR-002: Zero-Trust Sandbox Posture)
+	EgressFirewallEnabled *bool    `json:"egress_firewall_enabled,omitempty"`
+	EgressDenyCIDRs       []string `json:"egress_deny_cidrs,omitempty"`
+	EgressAllowCIDRs      []string `json:"egress_allow_cidrs,omitempty"`
+	BlockHostBridgePorts  *bool    `json:"block_host_bridge_ports,omitempty"`
+}
+
+var (
+	// DefaultEgressDenyCIDRs defines destination IP ranges blocked by default for untrusted guests.
+	// Includes Link-local/Cloud IMDS (169.254.0.0/16), RFC 1918 private subnets, CGNAT/Tailscale, and loopback.
+	DefaultEgressDenyCIDRs = []string{
+		"169.254.0.0/16",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+	}
+
+	// DefaultIPv6EgressDenyCIDRs defines IPv6 equivalents blocked by default if ip6tables is available.
+	DefaultIPv6EgressDenyCIDRs = []string{
+		"fe80::/10", // Link-local
+		"fc00::/7",  // Unique Local Address (ULA)
+		"::1/128",   // Loopback
+	}
+)
+
+// IsEgressFirewallEnabled returns true unless explicitly disabled.
+func (c Config) IsEgressFirewallEnabled() bool {
+	if c.EgressFirewallEnabled != nil {
+		return *c.EgressFirewallEnabled
+	}
+	return true
+}
+
+// IsBlockHostBridgePorts returns true unless explicitly disabled.
+func (c Config) IsBlockHostBridgePorts() bool {
+	if c.BlockHostBridgePorts != nil {
+		return *c.BlockHostBridgePorts
+	}
+	return true
+}
+
+// EffectiveEgressDenyCIDRs returns the configured deny CIDRs, falling back to DefaultEgressDenyCIDRs.
+func (c Config) EffectiveEgressDenyCIDRs() []string {
+	if len(c.EgressDenyCIDRs) > 0 {
+		return c.EgressDenyCIDRs
+	}
+	return append([]string{}, DefaultEgressDenyCIDRs...)
+}
+
+func defaultEgressSettings() (*bool, *bool, []string) {
+	ef := true
+	bp := true
+	deny := append([]string{}, DefaultEgressDenyCIDRs...)
+	return &ef, &bp, deny
 }
 
 // DefaultNATConfig returns standard NAT network configuration
 func DefaultNATConfig() Config {
+	ef, bp, deny := defaultEgressSettings()
 	return Config{
-		Mode:       ModeNAT,
-		BridgeName: "mft3br0",
-		BridgeIP:   "172.16.0.1/16",
-		SubnetCIDR: "172.16.0.0/16",
-		GatewayIP:  "172.16.0.1",
+		Mode:                  ModeNAT,
+		BridgeName:            "mft3br0",
+		BridgeIP:              "172.16.0.1/16",
+		SubnetCIDR:            "172.16.0.0/16",
+		GatewayIP:             "172.16.0.1",
+		EgressFirewallEnabled: ef,
+		BlockHostBridgePorts:  bp,
+		EgressDenyCIDRs:       deny,
+	}
+}
+
+// DefaultNoInternetConfig returns standard airgapped bridge network configuration
+func DefaultNoInternetConfig() Config {
+	ef, bp, deny := defaultEgressSettings()
+	return Config{
+		Mode:                  ModeNoInternet,
+		BridgeName:            "mft3br0",
+		BridgeIP:              "172.16.0.1/16",
+		SubnetCIDR:            "172.16.0.0/16",
+		GatewayIP:             "172.16.0.1",
+		EgressFirewallEnabled: ef,
+		BlockHostBridgePorts:  bp,
+		EgressDenyCIDRs:       deny,
 	}
 }
 
 // DefaultBridgeConfig returns standalone virtual bridge configuration (L2 bridged, no NAT)
 func DefaultBridgeConfig() Config {
+	ef, bp, deny := defaultEgressSettings()
 	return Config{
-		Mode:       ModeBridge,
-		BridgeName: "mft3br0",
-		BridgeIP:   "172.16.0.1/16",
-		SubnetCIDR: "172.16.0.0/16",
-		GatewayIP:  "172.16.0.1",
+		Mode:                  ModeBridge,
+		BridgeName:            "mft3br0",
+		BridgeIP:              "172.16.0.1/16",
+		SubnetCIDR:            "172.16.0.0/16",
+		GatewayIP:             "172.16.0.1",
+		EgressFirewallEnabled: ef,
+		BlockHostBridgePorts:  bp,
+		EgressDenyCIDRs:       deny,
 	}
 }
 
@@ -91,13 +173,17 @@ func DefaultNICConfig(physicalNIC string) Config {
 	if physicalNIC == "" {
 		physicalNIC = "eth0"
 	}
+	ef, bp, deny := defaultEgressSettings()
 	return Config{
-		Mode:        ModeNIC,
-		BridgeName:  "mft3br0",
-		BridgeIP:    "192.168.1.2/24",
-		SubnetCIDR:  "192.168.1.0/24",
-		GatewayIP:   "192.168.1.1",
-		PhysicalNIC: physicalNIC,
+		Mode:                  ModeNIC,
+		BridgeName:            "mft3br0",
+		BridgeIP:              "192.168.1.2/24",
+		SubnetCIDR:            "192.168.1.0/24",
+		GatewayIP:             "192.168.1.1",
+		PhysicalNIC:           physicalNIC,
+		EgressFirewallEnabled: ef,
+		BlockHostBridgePorts:  bp,
+		EgressDenyCIDRs:       deny,
 	}
 }
 
@@ -112,13 +198,17 @@ func DefaultWiredConfig(physicalNIC, subnet, gateway string) Config {
 	if gateway == "" {
 		gateway = "192.168.1.1"
 	}
+	ef, bp, deny := defaultEgressSettings()
 	return Config{
-		Mode:        ModeWired,
-		BridgeName:  "mft3br0",
-		BridgeIP:    "192.168.1.2/24",
-		SubnetCIDR:  subnet,
-		PhysicalNIC: physicalNIC,
-		GatewayIP:   gateway,
+		Mode:                  ModeWired,
+		BridgeName:            "mft3br0",
+		BridgeIP:              "192.168.1.2/24",
+		SubnetCIDR:            subnet,
+		PhysicalNIC:           physicalNIC,
+		GatewayIP:             gateway,
+		EgressFirewallEnabled: ef,
+		BlockHostBridgePorts:  bp,
+		EgressDenyCIDRs:       deny,
 	}
 }
 
@@ -183,6 +273,37 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 	}
 	if cfg.GatewayIP == "" {
 		cfg.GatewayIP = "192.168.1.1"
+	}
+
+	if cfg.EgressFirewallEnabled == nil {
+		t := true
+		cfg.EgressFirewallEnabled = &t
+	}
+	if cfg.BlockHostBridgePorts == nil {
+		t := true
+		cfg.BlockHostBridgePorts = &t
+	}
+	if cfg.EgressDenyCIDRs == nil && *cfg.EgressFirewallEnabled {
+		cfg.EgressDenyCIDRs = append([]string{}, DefaultEgressDenyCIDRs...)
+	}
+
+	for _, cidr := range cfg.EgressDenyCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return nil, fmt.Errorf("invalid egress deny cidr %q: %w", cidr, err)
+		}
+	}
+	for _, cidr := range cfg.EgressAllowCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(cidr); err != nil {
+			return nil, fmt.Errorf("invalid egress allow cidr %q: %w", cidr, err)
+		}
 	}
 
 	ipam, err := NewIPAM(cfg.SubnetCIDR)
@@ -270,6 +391,11 @@ func (m *Manager) EnsureNetwork(ctx context.Context) error {
 	m.setupBridgeForward(ctx)
 	if m.cfg.Mode == ModeNAT {
 		m.setupNAT(ctx)
+	}
+	if m.cfg.IsEgressFirewallEnabled() {
+		m.setupEgressFirewall(ctx)
+	} else {
+		m.teardownEgressFirewall(ctx)
 	}
 
 	return nil
@@ -385,6 +511,9 @@ func (m *Manager) LinkOtherBridges(ctx context.Context) ([]string, error) {
 }
 
 func (m *Manager) setupNAT(ctx context.Context) {
+	if m.cfg.Mode == ModeNoInternet || m.cfg.Mode == ModeAirgapped {
+		return
+	}
 	// Add MASQUERADE rule if not present
 	out, _ := m.runner.Run(ctx, "iptables", "-t", "nat", "-C", "POSTROUTING", "-s", m.cfg.SubnetCIDR, "!", "-o", m.cfg.BridgeName, "-j", "MASQUERADE")
 	if len(out) != 0 || out == nil {
@@ -392,20 +521,183 @@ func (m *Manager) setupNAT(ctx context.Context) {
 	}
 
 	// Add FORWARD rules
-	m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+	if !m.cfg.IsEgressFirewallEnabled() {
+		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+	}
 	m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-o", m.cfg.BridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 }
 
 func (m *Manager) setupBridgeForward(ctx context.Context) {
 	// Add FORWARD rule for internal bridge forwarding and DHCP
-	out, _ := m.runner.Run(ctx, "iptables", "-C", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
-	if len(out) != 0 || out == nil {
-		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+	if !m.cfg.IsEgressFirewallEnabled() {
+		out, _ := m.runner.Run(ctx, "iptables", "-C", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+		if len(out) != 0 || out == nil {
+			m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+		}
 	}
 	out2, _ := m.runner.Run(ctx, "iptables", "-C", "FORWARD", "-o", m.cfg.BridgeName, "-j", "ACCEPT")
 	if len(out2) != 0 || out2 == nil {
 		m.runner.Run(ctx, "iptables", "-I", "FORWARD", "-o", m.cfg.BridgeName, "-j", "ACCEPT")
 	}
+}
+
+func (m *Manager) setupEgressFirewall(ctx context.Context) {
+	// 1. Ensure custom chains exist in filter table
+	_ = m.ensureChain(ctx, "iptables", "COMPUTE_EGRESS")
+	_ = m.ensureChain(ctx, "iptables", "COMPUTE_HOST_IN")
+
+	// 2. Remove any legacy broad accept rule from FORWARD
+	m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+
+	// 3. Flush and populate COMPUTE_EGRESS rules (evaluated for -i <BridgeName> ! -o <BridgeName>)
+	m.runner.Run(ctx, "iptables", "-F", "COMPUTE_EGRESS")
+
+	// Rule 1: Always allow RELATED,ESTABLISHED responses
+	m.runner.Run(ctx, "iptables", "-A", "COMPUTE_EGRESS", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+
+	// Rule 2: Allow explicitly configured EgressAllowCIDRs before deny rules
+	for _, cidr := range m.cfg.EgressAllowCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(cidr)
+		if err == nil && ip.To4() != nil {
+			m.runner.Run(ctx, "iptables", "-A", "COMPUTE_EGRESS", "-d", cidr, "-j", "ACCEPT")
+		}
+	}
+
+	// Rule 3: Block link-local / Cloud IMDS (169.254.0.0/16) and all EgressDenyCIDRs
+	m.runner.Run(ctx, "iptables", "-A", "COMPUTE_EGRESS", "-d", "169.254.0.0/16", "-j", "DROP")
+
+	denyCIDRs := m.cfg.EffectiveEgressDenyCIDRs()
+	for _, cidr := range denyCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" || cidr == "169.254.0.0/16" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(cidr)
+		if err == nil && ip.To4() != nil {
+			m.runner.Run(ctx, "iptables", "-A", "COMPUTE_EGRESS", "-d", cidr, "-j", "DROP")
+		}
+	}
+
+	// Rule 4: Allow remaining public internet egress unless no-internet mode is active
+	if m.cfg.Mode == ModeNoInternet || m.cfg.Mode == ModeAirgapped {
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_EGRESS", "-j", "DROP")
+	} else {
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_EGRESS", "-j", "ACCEPT")
+	}
+
+	// 4. Hook COMPUTE_EGRESS into FORWARD for packets leaving the bridge
+	m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "-d", "169.254.0.0/16", "-j", "DROP")
+	m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", m.cfg.BridgeName, "-d", "169.254.0.0/16", "-j", "DROP")
+
+	m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "!", "-o", m.cfg.BridgeName, "-j", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "iptables", "-I", "FORWARD", "1", "-i", m.cfg.BridgeName, "!", "-o", m.cfg.BridgeName, "-j", "COMPUTE_EGRESS")
+
+	// 5. Host port protection: COMPUTE_HOST_IN hooked into INPUT for -i <BridgeName>
+	if m.cfg.IsBlockHostBridgePorts() {
+		m.runner.Run(ctx, "iptables", "-F", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-p", "udp", "--dport", "67", "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-p", "udp", "--dport", "68", "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-p", "icmp", "-j", "ACCEPT")
+		m.runner.Run(ctx, "iptables", "-A", "COMPUTE_HOST_IN", "-j", "DROP")
+
+		m.runner.Run(ctx, "iptables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "iptables", "-I", "INPUT", "1", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+	} else {
+		m.runner.Run(ctx, "iptables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "iptables", "-F", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "iptables", "-X", "COMPUTE_HOST_IN")
+	}
+
+	// 6. Setup IPv6 equivalents if ip6tables is available
+	m.setupIPv6EgressFirewall(ctx)
+}
+
+func (m *Manager) setupIPv6EgressFirewall(ctx context.Context) {
+	if m.ensureChain(ctx, "ip6tables", "COMPUTE_EGRESS") != nil ||
+		m.ensureChain(ctx, "ip6tables", "COMPUTE_HOST_IN") != nil {
+		return
+	}
+
+	m.runner.Run(ctx, "ip6tables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "-j", "ACCEPT")
+	m.runner.Run(ctx, "ip6tables", "-F", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_EGRESS", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+
+	for _, cidr := range m.cfg.EgressAllowCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(cidr)
+		if err == nil && ip.To4() == nil {
+			m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_EGRESS", "-d", cidr, "-j", "ACCEPT")
+		}
+	}
+
+	for _, cidr := range DefaultIPv6EgressDenyCIDRs {
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_EGRESS", "-d", cidr, "-j", "DROP")
+	}
+	for _, cidr := range m.cfg.EgressDenyCIDRs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(cidr)
+		if err == nil && ip.To4() == nil {
+			m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_EGRESS", "-d", cidr, "-j", "DROP")
+		}
+	}
+
+	if m.cfg.Mode == ModeNoInternet || m.cfg.Mode == ModeAirgapped {
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_EGRESS", "-j", "DROP")
+	} else {
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_EGRESS", "-j", "ACCEPT")
+	}
+
+	m.runner.Run(ctx, "ip6tables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "!", "-o", m.cfg.BridgeName, "-j", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "ip6tables", "-I", "FORWARD", "1", "-i", m.cfg.BridgeName, "!", "-o", m.cfg.BridgeName, "-j", "COMPUTE_EGRESS")
+
+	if m.cfg.IsBlockHostBridgePorts() {
+		m.runner.Run(ctx, "ip6tables", "-F", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-p", "udp", "--dport", "546", "-j", "ACCEPT")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-p", "udp", "--dport", "547", "-j", "ACCEPT")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-p", "udp", "--dport", "53", "-j", "ACCEPT")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-p", "tcp", "--dport", "53", "-j", "ACCEPT")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-p", "ipv6-icmp", "-j", "ACCEPT")
+		m.runner.Run(ctx, "ip6tables", "-A", "COMPUTE_HOST_IN", "-j", "DROP")
+
+		m.runner.Run(ctx, "ip6tables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "ip6tables", "-I", "INPUT", "1", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+	} else {
+		m.runner.Run(ctx, "ip6tables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "ip6tables", "-F", "COMPUTE_HOST_IN")
+		m.runner.Run(ctx, "ip6tables", "-X", "COMPUTE_HOST_IN")
+	}
+}
+
+func (m *Manager) teardownEgressFirewall(ctx context.Context) {
+	m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "!", "-o", m.cfg.BridgeName, "-j", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "iptables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "-d", "169.254.0.0/16", "-j", "DROP")
+	m.runner.Run(ctx, "iptables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+
+	m.runner.Run(ctx, "iptables", "-F", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "iptables", "-X", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "iptables", "-F", "COMPUTE_HOST_IN")
+	m.runner.Run(ctx, "iptables", "-X", "COMPUTE_HOST_IN")
+
+	m.runner.Run(ctx, "ip6tables", "-D", "FORWARD", "-i", m.cfg.BridgeName, "!", "-o", m.cfg.BridgeName, "-j", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "ip6tables", "-D", "INPUT", "-i", m.cfg.BridgeName, "-j", "COMPUTE_HOST_IN")
+	m.runner.Run(ctx, "ip6tables", "-F", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "ip6tables", "-X", "COMPUTE_EGRESS")
+	m.runner.Run(ctx, "ip6tables", "-F", "COMPUTE_HOST_IN")
+	m.runner.Run(ctx, "ip6tables", "-X", "COMPUTE_HOST_IN")
 }
 
 // AddPortForward installs host DNAT rules that expose a guest port on the host.
@@ -533,10 +825,23 @@ type IsolationConfig struct {
 	AllowSameAccount bool     `json:"allow_same_account,omitempty"`
 	AllowedPeerTAPs  []string `json:"allowed_peer_taps,omitempty"`
 	AllowedPeerIPs   []string `json:"allowed_peer_ips,omitempty"`
+	IsolationMode    string   `json:"isolation_mode,omitempty"`
 }
 
 func isPortIsolated(cfg IsolationConfig) bool {
+	if isNoInternet(cfg) {
+		return true
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.IsolationMode))
+	if mode == "strict" || mode == "isolated" {
+		return true
+	}
 	return cfg.Isolated || (!cfg.AllowSameAccount && len(cfg.AllowedPeerTAPs) == 0)
+}
+
+func isNoInternet(cfg IsolationConfig) bool {
+	mode := strings.ToLower(strings.TrimSpace(cfg.IsolationMode))
+	return mode == "no-internet" || mode == "no_internet" || mode == "airgapped" || mode == "air-gapped"
 }
 
 var (
@@ -731,7 +1036,22 @@ func (m *Manager) ApplyAntiSpoofAndIsolation(ctx context.Context, cfg IsolationC
 		}
 	}
 
+	// 5. Per-VM no-internet / airgapped mode: drop all outbound traffic off-bridge while permitting management return traffic.
+	// Any previous per-VM no-internet rules were already torn down unconditionally by removeAntiSpoofAndIsolationLocked above.
+	if isNoInternet(cfg) {
+		runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+		runSetup("iptables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		// Best-effort IPv6 equivalent (hosts without ip6tables degrade cleanly).
+		_, _ = m.runner.Run(ctx, "ip6tables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+		_, _ = m.runner.Run(ctx, "ip6tables", "-I", "FORWARD", "1", "-i", cfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	}
+
 	return errors.Join(errs...)
+}
+
+// SetupAntiSpoofAndIsolation is an alias for ApplyAntiSpoofAndIsolation
+func (m *Manager) SetupAntiSpoofAndIsolation(ctx context.Context, cfg IsolationConfig) error {
+	return m.ApplyAntiSpoofAndIsolation(ctx, cfg)
 }
 
 // ApplyIsolation is an alias for ApplyAntiSpoofAndIsolation
@@ -858,6 +1178,15 @@ func (m *Manager) removeAntiSpoofAndIsolationLocked(ctx context.Context, cfg Iso
 	if targetCfg.IPAddress != "" && targetCfg.IPAddress != "dhcp" {
 		runTeardown("arptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "--source-ip", targetCfg.IPAddress, "-j", "DROP")
 	}
+
+	// Delete per-VM no-internet / airgapped rules unconditionally so mode transitions
+	// (no-internet -> account/isolated) and post-restart deletions (when in-memory
+	// isolationConfigs is empty) never leak rules in FORWARD.
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	runTeardown("iptables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
+	runTeardown("ip6tables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	runTeardown("ip6tables", "-D", "FORWARD", "-i", targetCfg.TAPDevice, "!", "-o", m.cfg.BridgeName, "-j", "DROP")
 
 	// Reset bridge port isolation if link is still present
 	runTeardown("bridge", "link", "set", "dev", targetCfg.TAPDevice, "isolated", "off")

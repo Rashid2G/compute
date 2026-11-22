@@ -1353,4 +1353,3 @@ func TestStore_StartupScript(t *testing.T) {
 		t.Fatalf("StartupScript mismatch after update:\ngot:  %q\nwant: %q", gotUpdated.StartupScript, updatedScript)
 	}
 }
-

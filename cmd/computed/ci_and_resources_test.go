@@ -765,4 +765,3 @@ func TestJobPhasesEndpoints(t *testing.T) {
 	}
 }
 
-

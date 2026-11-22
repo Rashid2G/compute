@@ -1,12 +1,12 @@
 package image
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,6 +14,59 @@ import (
 	"github.com/Rashid2G/compute/internal/storage"
 	"github.com/google/uuid"
 )
+
+var validPackageNameRegex = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9.+_-]*$`)
+
+// ValidatePackageName ensures package name matches ^[a-zA-Z0-9][a-zA-Z0-9.+_-]*$
+// and does not contain shell metacharacters or flags starting with '-'.
+func ValidatePackageName(pkg string) error {
+	p := strings.TrimSpace(pkg)
+	if p == "" {
+		return fmt.Errorf("package name cannot be empty")
+	}
+	if strings.HasPrefix(p, "-") {
+		return fmt.Errorf("invalid package name %q: flags not allowed", pkg)
+	}
+	if !validPackageNameRegex.MatchString(p) {
+		return fmt.Errorf("invalid package name %q: must contain only letters, numbers, dashes, underscores, dots, or plus signs, and start with an alphanumeric character", pkg)
+	}
+	return nil
+}
+
+// ValidateBuildRequest performs security and sanity validation on image build parameters.
+func ValidateBuildRequest(req BuildRequest) error {
+	if strings.TrimSpace(req.Dockerfile) != "" {
+		return fmt.Errorf("raw Dockerfile builds are disabled for security isolation: custom images must use packages and commands")
+	}
+	cleanName := strings.TrimSpace(req.Name)
+	if cleanName == "" {
+		return fmt.Errorf("image name cannot be empty")
+	}
+	for _, r := range cleanName {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
+			return fmt.Errorf("invalid image name '%s': must contain only letters, numbers, dashes, underscores, and dots", cleanName)
+		}
+	}
+	if cleanName == "." || cleanName == ".." || strings.Contains(cleanName, "..") || strings.HasPrefix(cleanName, ".") || strings.HasPrefix(cleanName, "-") {
+		return fmt.Errorf("invalid image name '%s': path traversal not allowed", cleanName)
+	}
+	for _, p := range req.Packages {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return fmt.Errorf("package entry cannot be empty")
+		}
+		for _, sp := range strings.Split(p, ",") {
+			sp = strings.TrimSpace(sp)
+			if sp == "" {
+				return fmt.Errorf("package entry cannot be empty")
+			}
+			if err := ValidatePackageName(sp); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // BuildRequest defines parameters for building a new custom image with pre-installed packages
 type BuildRequest struct {
@@ -29,23 +82,63 @@ type BuildRequest struct {
 	SizeMB      int      `json:"size_mb,omitempty"` // defaults to 2048 MB
 }
 
+// VMCreateRequest defines parameters for creating an ephemeral builder microVM.
+type VMCreateRequest struct {
+	Name     string `json:"name"`
+	OwnerID  string `json:"owner_id,omitempty"`
+	Image    string `json:"image,omitempty"`
+	VCPUs    int    `json:"vcpus"`
+	MemoryMB int    `json:"memory_mb,omitempty"`
+	DiskMB   int    `json:"disk_mb,omitempty"`
+}
+
+// VMExecRequest defines parameters for executing a command inside an ephemeral microVM.
+type VMExecRequest struct {
+	Command string `json:"command"`
+	User    string `json:"user,omitempty"`
+	Timeout int    `json:"timeout_seconds,omitempty"`
+}
+
+// VMExecResponse represents execution output from a command inside a microVM.
+type VMExecResponse struct {
+	Stdout     string `json:"stdout"`
+	Stderr     string `json:"stderr"`
+	ExitCode   int    `json:"exit_code"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+// VMRunner provides VM lifecycle operations for building custom images inside isolated microVMs.
+type VMRunner interface {
+	CreateVM(ctx context.Context, req VMCreateRequest) (*db.VM, error)
+	RunVM(ctx context.Context, vmID string) error
+	StopVM(ctx context.Context, vmID string) error
+	DeleteVM(ctx context.Context, vmID string) error
+	ExecVM(ctx context.Context, vmID string, req VMExecRequest) (*VMExecResponse, error)
+	GetVM(ctx context.Context, vmID string) (*db.VM, error)
+}
+
 // BuildFunc defines the build runner function signature
 type BuildFunc func(ctx context.Context, req BuildRequest, outputPath string, sshPubKey string) error
 
 // Builder handles building and registering custom VM images
 type Builder struct {
-	store     *db.Store
-	storMgr   *storage.Manager
-	buildFunc BuildFunc
+	store        *db.Store
+	storMgr      *storage.Manager
+	buildFunc    BuildFunc
+	vmRunner     VMRunner
+	bootTimeout  time.Duration
+	buildTimeout time.Duration
 }
 
 // NewBuilder creates a new image builder
 func NewBuilder(store *db.Store, storMgr *storage.Manager) *Builder {
 	b := &Builder{
-		store:   store,
-		storMgr: storMgr,
+		store:        store,
+		storMgr:      storMgr,
+		bootTimeout:  90 * time.Second,
+		buildTimeout: 30 * time.Minute,
 	}
-	b.buildFunc = b.defaultDockerBuild
+	b.buildFunc = b.defaultMicroVMBuild
 	return b
 }
 
@@ -54,19 +147,37 @@ func (b *Builder) SetBuildFunc(fn BuildFunc) {
 	b.buildFunc = fn
 }
 
+// SetVMRunner configures the VM runner used for isolated microVM builds
+func (b *Builder) SetVMRunner(runner VMRunner) {
+	b.vmRunner = runner
+}
+
+// GetVMRunner returns the configured VM runner
+func (b *Builder) GetVMRunner() VMRunner {
+	return b.vmRunner
+}
+
+// SetBootTimeout sets the timeout for waiting for the ephemeral builder microVM to boot
+func (b *Builder) SetBootTimeout(d time.Duration) {
+	if d > 0 {
+		b.bootTimeout = d
+	}
+}
+
+// SetBuildTimeout sets the timeout for guest build script execution
+func (b *Builder) SetBuildTimeout(d time.Duration) {
+	if d > 0 {
+		b.buildTimeout = d
+	}
+}
+
 // BuildImage creates a database record, runs the build process, and stores the image
 func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomImage, error) {
-	cleanName := strings.TrimSpace(req.Name)
-	if cleanName == "" {
-		return nil, fmt.Errorf("image name cannot be empty")
+	if err := ValidateBuildRequest(req); err != nil {
+		return nil, err
 	}
 
-	// Validate name: only alphanumeric, dashes, dots, underscores
-	for _, r := range cleanName {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.') {
-			return nil, fmt.Errorf("invalid image name '%s': must contain only letters, numbers, dashes, underscores, and dots", cleanName)
-		}
-	}
+	cleanName := strings.TrimSpace(req.Name)
 
 	// Check if image or template with same name already exists for this owner.
 	// Names are tenant-scoped, so the same name may be reused by other owners.
@@ -97,9 +208,7 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 	for _, p := range req.Packages {
 		p = strings.TrimSpace(p)
 		if p != "" {
-			// In case user supplied comma-separated string inside element
-			subPkgs := strings.Split(p, ",")
-			for _, sp := range subPkgs {
+			for _, sp := range strings.Split(p, ",") {
 				sp = strings.TrimSpace(sp)
 				if sp != "" {
 					packages = append(packages, sp)
@@ -117,6 +226,9 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 	imgID := fmt.Sprintf("img-%s", shortID)
 
 	rootfsFilename := fmt.Sprintf("%s-%s.ext4", cleanName, shortID)
+	if filepath.Base(rootfsFilename) != rootfsFilename || strings.Contains(rootfsFilename, "..") || strings.Contains(rootfsFilename, "/") || strings.Contains(rootfsFilename, "\\") {
+		return nil, fmt.Errorf("invalid rootfs filename '%s': path traversal detected", rootfsFilename)
+	}
 	rootfsPath := filepath.Join(b.storMgr.GetConfig().BaseImagesDir, rootfsFilename)
 	kernelPath := b.storMgr.GetBaseKernelPath()
 
@@ -139,7 +251,7 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 		return nil, fmt.Errorf("failed to save image record: %w", err)
 	}
 
-	// Load SSH public key for injection
+	// Load SSH public key for injection if needed
 	var sshPubKey string
 	sshPrivKey := b.storMgr.GetSSHKeyPath()
 	pubKeyPath := sshPrivKey + ".pub"
@@ -168,334 +280,208 @@ func (b *Builder) BuildImage(ctx context.Context, req BuildRequest) (*db.CustomI
 	return img, nil
 }
 
-func lookSystemBin(name string) string {
-	if p, err := exec.LookPath(name); err == nil {
-		return p
+// defaultMicroVMBuild builds a custom image inside an ephemeral Firecracker microVM.
+func (b *Builder) defaultMicroVMBuild(ctx context.Context, req BuildRequest, outputPath string, sshPubKey string) error {
+	if b.vmRunner == nil {
+		return fmt.Errorf("no microVM runner configured: host chroot and host docker builds are disabled for security isolation")
 	}
-	for _, candidate := range []string{"/usr/sbin/" + name, "/sbin/" + name, "/usr/local/sbin/" + name} {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate
+	if strings.TrimSpace(req.Dockerfile) != "" {
+		return fmt.Errorf("Dockerfile builds are disabled for security isolation: custom images must use packages and script commands")
+	}
+
+	sizeMB := req.SizeMB
+	if sizeMB <= 0 {
+		sizeMB = 2048
+	}
+
+	uid := uuid.New().String()
+	shortID := strings.ReplaceAll(uid, "-", "")[:8]
+	ephemeralName := fmt.Sprintf("builder-%s-%s", req.Name, shortID)
+	ownerID := req.OwnerID
+	if ownerID == "" {
+		ownerID = "system"
+	}
+
+	// 1. Prepare/create ephemeral builder microVM
+	createdVM, err := b.vmRunner.CreateVM(ctx, VMCreateRequest{
+		Name:     ephemeralName,
+		OwnerID:  ownerID,
+		Image:    req.BaseImage,
+		VCPUs:    2,
+		MemoryMB: 2048,
+		DiskMB:   sizeMB,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create ephemeral builder microVM: %w", err)
+	}
+	vmID := createdVM.ID
+
+	// Guaranteed defer cleanup of the ephemeral VM on error or completion
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if delErr := b.vmRunner.DeleteVM(cleanupCtx, vmID); delErr != nil {
+			log.Printf("[image-builder] warning: failed to delete ephemeral builder VM %s: %v", vmID, delErr)
 		}
+	}()
+
+	// 2. Boot the ephemeral microVM
+	if err := b.vmRunner.RunVM(ctx, vmID); err != nil {
+		return fmt.Errorf("failed to start ephemeral builder microVM: %w", err)
 	}
-	return name
+
+	// Wait for builder microVM to become reachable
+	if err := b.waitVMReady(ctx, vmID); err != nil {
+		return fmt.Errorf("ephemeral builder microVM not ready: %w", err)
+	}
+
+	// Build and run the in-guest package install and custom scripts
+	buildScript := buildGuestBuildScript(req)
+	execResp, err := b.vmRunner.ExecVM(ctx, vmID, VMExecRequest{
+		Command: buildScript,
+		User:    "root",
+		Timeout: int(b.buildTimeout.Seconds()),
+	})
+	if err != nil {
+		return fmt.Errorf("build execution failed inside guest microVM: %w", err)
+	}
+	if execResp == nil || execResp.ExitCode != 0 {
+		exitCode := -1
+		errMsg := ""
+		if execResp != nil {
+			exitCode = execResp.ExitCode
+			errMsg = strings.TrimSpace(execResp.Stderr)
+			if errMsg == "" {
+				errMsg = strings.TrimSpace(execResp.Stdout)
+			}
+		}
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("exit code %d", exitCode)
+		}
+		return fmt.Errorf("build commands inside microVM failed: %s", errMsg)
+	}
+
+	// 3. Cleanly stop the builder microVM
+	if err := b.vmRunner.StopVM(ctx, vmID); err != nil {
+		return fmt.Errorf("failed to cleanly stop builder microVM: %w", err)
+	}
+
+	// Retrieve stopped VM to get final disk path
+	stoppedVM, err := b.vmRunner.GetVM(ctx, vmID)
+	if err != nil || stoppedVM == nil {
+		stoppedVM = createdVM
+	}
+	srcDiskPath := stoppedVM.DiskPath
+	if srcDiskPath == "" {
+		return fmt.Errorf("builder microVM has no recorded disk path")
+	}
+	if fi, err := os.Stat(srcDiskPath); err != nil || fi.Size() == 0 {
+		return fmt.Errorf("builder microVM disk missing or empty at %s: %v", srcDiskPath, err)
+	}
+
+	// Move/capture its clean stopped ext4 rootfs disk into BaseImagesDir/<rootfsFilename>
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+	_ = os.Remove(outputPath)
+
+	if err := os.Rename(srcDiskPath, outputPath); err != nil {
+		// If cross-device, copy with sparse CloneFileCOW
+		if cloneErr := storage.CloneFileCOW(srcDiskPath, outputPath); cloneErr != nil {
+			return fmt.Errorf("failed to capture builder disk to %s: %w", outputPath, cloneErr)
+		}
+		_ = os.Remove(srcDiskPath)
+	}
+
+	// Verify the output file exists and is not empty
+	outFi, err := os.Stat(outputPath)
+	if err != nil {
+		return fmt.Errorf("verified output rootfs does not exist at %s: %w", outputPath, err)
+	}
+	if outFi.Size() == 0 {
+		_ = os.Remove(outputPath)
+		return fmt.Errorf("verified output rootfs at %s is empty", outputPath)
+	}
+
+	return nil
 }
 
-func (b *Builder) findBaseRootfsPath() string {
-	var candidates []string
-	if b != nil && b.storMgr != nil {
-		if p := b.storMgr.GetBaseRootfsPath(); p != "" {
-			candidates = append(candidates, p)
+func (b *Builder) waitVMReady(ctx context.Context, vmID string) error {
+	deadline := time.Now().Add(b.bootTimeout)
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("build canceled while waiting for sandbox: %w", err)
 		}
-		if dir := b.storMgr.GetConfig().BaseImagesDir; dir != "" {
-			candidates = append(candidates,
-				filepath.Join(dir, "ubuntu-24.04.ext4"),
-				filepath.Join(dir, "ubuntu-24.ext4"),
-			)
-		}
-	}
-	candidates = append(candidates, "/var/lib/compute/images/ubuntu-24.04.ext4")
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && !info.IsDir() {
-			return c
-		}
-	}
-	return ""
-}
-
-// defaultDockerBuild builds an Ubuntu rootfs with specified packages using a
-// native base-rootfs clone + chroot fallback when running as root without Docker
-// (or when no custom Dockerfile is provided and a base rootfs exists), or via
-// Docker build/export + mkfs.ext4.
-func (b *Builder) defaultDockerBuild(ctx context.Context, req BuildRequest, outputPath string, sshPubKey string) error {
-	_, dockerLookErr := exec.LookPath("docker")
-	baseRootfs := b.findBaseRootfsPath()
-
-	if strings.TrimSpace(req.Dockerfile) == "" && baseRootfs != "" && os.Geteuid() == 0 {
-		chrootErr := b.chrootRootfsBuild(ctx, req, baseRootfs, outputPath, sshPubKey)
-		if chrootErr == nil {
+		resp, err := b.vmRunner.ExecVM(ctx, vmID, VMExecRequest{
+			Command: "true",
+			User:    "root",
+			Timeout: 5,
+		})
+		if err == nil && resp != nil && resp.ExitCode == 0 {
 			return nil
 		}
-		if dockerLookErr != nil {
-			return chrootErr
+		// Also try user compute if root SSH isn't ready yet
+		if resp == nil || resp.ExitCode != 0 {
+			resp2, err2 := b.vmRunner.ExecVM(ctx, vmID, VMExecRequest{
+				Command: "true",
+				User:    "compute",
+				Timeout: 5,
+			})
+			if err2 == nil && resp2 != nil && resp2.ExitCode == 0 {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("builder microVM did not become reachable within %s", b.bootTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("build canceled while waiting for sandbox: %w", ctx.Err())
+		case <-time.After(time.Second):
 		}
 	}
-
-	if dockerLookErr != nil {
-		if strings.TrimSpace(req.Dockerfile) != "" {
-			return fmt.Errorf("docker is required for Dockerfile image building but was not found in PATH")
-		}
-		if os.Geteuid() != 0 {
-			return fmt.Errorf("docker is required for default image building but was not found in PATH (native rootfs clone/chroot fallback requires root privileges)")
-		}
-		return fmt.Errorf("docker is required for default image building but was not found in PATH (and no base rootfs image was found to clone)")
-	}
-
-	buildDir, err := os.MkdirTemp("/tmp", "compute-build-*-pkg")
-	if err != nil {
-		return fmt.Errorf("failed to create temp build dir: %w", err)
-	}
-	defer os.RemoveAll(buildDir)
-
-	workDir, err := os.MkdirTemp("/tmp", "compute-rootfs-*-pkg")
-	if err != nil {
-		return fmt.Errorf("failed to create temp rootfs dir: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
-	// Build package list for apt-get
-	dockerfileContent := buildDockerfile(req)
-
-	if strings.TrimSpace(req.Dockerfile) != "" {
-		dockerfileContent = req.Dockerfile
-	}
-
-	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
-	if err := os.WriteFile(dockerfilePath, []byte(dockerfileContent), 0644); err != nil {
-		return fmt.Errorf("failed to write Dockerfile: %w", err)
-	}
-
-	tag := fmt.Sprintf("compute-custom:%s", req.Name)
-
-	buildCmd := exec.CommandContext(ctx, "docker", "build", "-t", tag, buildDir)
-	var buildErrBuf bytes.Buffer
-	buildCmd.Stderr = &buildErrBuf
-	if err := buildCmd.Run(); err != nil {
-		return fmt.Errorf("docker build failed: %w (%s)", err, buildErrBuf.String())
-	}
-	defer func() {
-		_ = exec.Command("docker", "rmi", "-f", tag).Run()
-	}()
-
-	// Export rootfs
-	createCmd := exec.CommandContext(ctx, "docker", "create", tag, "/bin/bash")
-	cidOut, err := createCmd.Output()
-	if err != nil {
-		return fmt.Errorf("docker create failed: %w", err)
-	}
-	cid := strings.TrimSpace(string(cidOut))
-	defer func() {
-		_ = exec.Command("docker", "rm", "-f", cid).Run()
-	}()
-
-	exportCmd := exec.CommandContext(ctx, "docker", "export", cid)
-	tarCmd := exec.CommandContext(ctx, "tar", "-x", "-C", workDir)
-
-	pipeR, pipeW, err := os.Pipe()
-	if err != nil {
-		return fmt.Errorf("pipe failed: %w", err)
-	}
-	exportCmd.Stdout = pipeW
-	tarCmd.Stdin = pipeR
-
-	if err := exportCmd.Start(); err != nil {
-		return fmt.Errorf("docker export start failed: %w", err)
-	}
-	if err := tarCmd.Start(); err != nil {
-		return fmt.Errorf("tar extract start failed: %w", err)
-	}
-
-	_ = exportCmd.Wait()
-	_ = pipeW.Close()
-	if err := tarCmd.Wait(); err != nil {
-		return fmt.Errorf("tar extract failed: %w", err)
-	}
-
-	injectSSHAndInit(workDir, sshPubKey)
-
-	// Format ext4 filesystem directly from directory using mkfs.ext4 -d
-	sizeMB := req.SizeMB
-	if sizeMB <= 0 {
-		sizeMB = 2048
-	}
-	sizeArg := fmt.Sprintf("%dM", sizeMB)
-
-	_ = os.Remove(outputPath)
-	mkfsCmd := exec.CommandContext(ctx, lookSystemBin("mkfs.ext4"), "-F", "-q", "-d", workDir, "-L", "rootfs", outputPath, sizeArg)
-	var mkfsErrBuf bytes.Buffer
-	mkfsCmd.Stderr = &mkfsErrBuf
-	if err := mkfsCmd.Run(); err != nil {
-		return fmt.Errorf("mkfs.ext4 failed: %w (%s)", err, mkfsErrBuf.String())
-	}
-
-	return nil
 }
 
-func injectSSHAndInit(rootDir, sshPubKey string) {
-	if sshPubKey != "" {
-		_ = os.MkdirAll(filepath.Join(rootDir, "root", ".ssh"), 0700)
-		_ = os.MkdirAll(filepath.Join(rootDir, "home", "compute", ".ssh"), 0700)
-		_ = os.WriteFile(filepath.Join(rootDir, "root", ".ssh", "authorized_keys"), []byte(sshPubKey+"\n"), 0600)
-		computeKey := filepath.Join(rootDir, "home", "compute", ".ssh", "authorized_keys")
-		_ = os.WriteFile(computeKey, []byte(sshPubKey+"\n"), 0600)
-		// The guest runs sshd as root but the target user must own its key file;
-		// otherwise OpenSSH rejects the key ("bad ownership or modes").
-		_ = os.Chown(filepath.Join(rootDir, "home", "compute"), 1000, 1000)
-		_ = os.Chown(filepath.Join(rootDir, "home", "compute", ".ssh"), 1000, 1000)
-		_ = os.Chown(computeKey, 1000, 1000)
-		_ = os.Chmod(filepath.Join(rootDir, "home", "compute", ".ssh"), 0700)
-		_ = os.Chmod(computeKey, 0600)
+func buildGuestBuildScript(req BuildRequest) string {
+	var sb strings.Builder
+	sb.WriteString("set -euo pipefail\n")
+	sb.WriteString("export DEBIAN_FRONTEND=noninteractive\n")
+	sb.WriteString("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
+
+	if len(req.Packages) > 0 {
+		sb.WriteString("apt-get update -y\n")
+		sb.WriteString("apt-get install -y --no-install-recommends")
+		for _, pkg := range req.Packages {
+			sb.WriteString(" " + shellQuote(pkg))
+		}
+		sb.WriteString("\n")
 	}
 
-	// Write Firecracker /sbin/init
-	initScript := defaultInitScript()
-	initPath := filepath.Join(rootDir, "sbin", "init")
-	_ = os.MkdirAll(filepath.Dir(initPath), 0755)
-	_ = os.WriteFile(initPath, []byte(initScript), 0755)
+	for _, cmd := range req.Commands {
+		cmd = strings.TrimSpace(cmd)
+		if cmd != "" {
+			sb.WriteString(fmt.Sprintf("/bin/bash -e -c %s\n", shellQuote(cmd)))
+		}
+	}
+
+	if cmd := strings.TrimSpace(req.Command); cmd != "" {
+		sb.WriteString(fmt.Sprintf("/bin/bash -e -c %s\n", shellQuote(cmd)))
+	}
+
+	if script := strings.TrimSpace(req.Script); script != "" {
+		sb.WriteString(fmt.Sprintf("/bin/bash -e -c %s\n", shellQuote(script)))
+	}
+
+	// Clean up builder-specific transient state inside the guest
+	sb.WriteString("apt-get clean\n")
+	sb.WriteString("rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*\n")
+	sb.WriteString("sync\n")
+
+	return sb.String()
 }
 
-func (b *Builder) chrootRootfsBuild(ctx context.Context, req BuildRequest, baseRootfs, outputPath, sshPubKey string) error {
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
-		return fmt.Errorf("create output dir: %w", err)
-	}
-	stagingPath := outputPath + ".staging"
-	_ = os.Remove(stagingPath)
-	defer func() {
-		_ = os.Remove(stagingPath)
-	}()
-
-	if err := storage.CloneFileCOW(baseRootfs, stagingPath); err != nil {
-		return fmt.Errorf("clone base rootfs %s: %w", baseRootfs, err)
-	}
-
-	sizeMB := req.SizeMB
-	if sizeMB <= 0 {
-		sizeMB = 2048
-	}
-	if fi, err := os.Stat(stagingPath); err == nil && int64(sizeMB)*1024*1024 > fi.Size() {
-		if err := os.Truncate(stagingPath, int64(sizeMB)*1024*1024); err == nil {
-			_ = exec.CommandContext(ctx, lookSystemBin("e2fsck"), "-pf", stagingPath).Run()
-			_ = exec.CommandContext(ctx, lookSystemBin("resize2fs"), "-f", stagingPath).Run()
-		}
-	}
-
-	mntDir, err := os.MkdirTemp("", "compute-build-mnt-*")
-	if err != nil {
-		return fmt.Errorf("create mount dir: %w", err)
-	}
-
-	mountBin := lookSystemBin("mount")
-	umountBin := lookSystemBin("umount")
-	if out, err := exec.CommandContext(ctx, mountBin, "-o", "loop", stagingPath, mntDir).CombinedOutput(); err != nil {
-		_ = exec.Command(umountBin, mntDir).Run()
-		_ = os.RemoveAll(mntDir)
-		return fmt.Errorf("loop mount %s: %w (%s)", stagingPath, err, strings.TrimSpace(string(out)))
-	}
-
-	var submounts []string
-	unmountAll := func() error {
-		for i := len(submounts) - 1; i >= 0; i-- {
-			if err := exec.Command(umountBin, submounts[i]).Run(); err != nil {
-				_ = exec.Command(umountBin, "-l", submounts[i]).Run()
-			}
-		}
-		submounts = nil
-		if err := exec.Command(umountBin, mntDir).Run(); err != nil {
-			if err2 := exec.Command(umountBin, "-l", mntDir).Run(); err2 != nil {
-				return fmt.Errorf("unmount %s: %w", mntDir, err)
-			}
-		}
-		_ = os.RemoveAll(mntDir)
-		return nil
-	}
-	defer func() {
-		if mntDir != "" {
-			_ = unmountAll()
-		}
-	}()
-
-	var packages []string
-	for _, p := range req.Packages {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			for _, sp := range strings.Split(p, ",") {
-				if sp = strings.TrimSpace(sp); sp != "" {
-					packages = append(packages, sp)
-				}
-			}
-		}
-	}
-
-	if len(packages) > 0 || strings.TrimSpace(req.Script) != "" {
-		procDir := filepath.Join(mntDir, "proc")
-		sysDir := filepath.Join(mntDir, "sys")
-		devDir := filepath.Join(mntDir, "dev")
-		_ = os.MkdirAll(procDir, 0755)
-		_ = os.MkdirAll(sysDir, 0755)
-		_ = os.MkdirAll(devDir, 0755)
-
-		if err := exec.CommandContext(ctx, mountBin, "-t", "proc", "proc", procDir).Run(); err == nil {
-			submounts = append(submounts, procDir)
-		}
-		if err := exec.CommandContext(ctx, mountBin, "-t", "sysfs", "sysfs", sysDir).Run(); err == nil {
-			submounts = append(submounts, sysDir)
-		}
-		if err := exec.CommandContext(ctx, mountBin, "--bind", "/dev", devDir).Run(); err == nil {
-			submounts = append(submounts, devDir)
-		}
-
-		// Ensure DNS works inside the chroot
-		resolvDst := filepath.Join(mntDir, "etc", "resolv.conf")
-		_ = os.MkdirAll(filepath.Dir(resolvDst), 0755)
-		_ = os.Remove(resolvDst)
-		resolvBytes, err := os.ReadFile("/etc/resolv.conf")
-		if err != nil || len(bytes.TrimSpace(resolvBytes)) == 0 {
-			resolvBytes = []byte("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-		}
-		_ = os.WriteFile(resolvDst, resolvBytes, 0644)
-
-		// Prevent apt postinst scripts from starting background daemons inside the chroot
-		policyRC := filepath.Join(mntDir, "usr", "sbin", "policy-rc.d")
-		_ = os.MkdirAll(filepath.Dir(policyRC), 0755)
-		_ = os.WriteFile(policyRC, []byte("#!/bin/sh\nexit 101\n"), 0755)
-		defer func() {
-			_ = os.Remove(policyRC)
-		}()
-
-		chrootBin := lookSystemBin("chroot")
-		chrootEnv := []string{
-			"DEBIAN_FRONTEND=noninteractive",
-			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-			"HOME=/root",
-			"LC_ALL=C.UTF-8",
-		}
-
-		if len(packages) > 0 {
-			args := append([]string{
-				mntDir,
-				"/bin/sh", "-e", "-c",
-				`apt-get update && apt-get install -y --no-install-recommends "$@" && rm -rf /var/lib/apt/lists/*`,
-				"--",
-			}, packages...)
-			cmd := exec.CommandContext(ctx, chrootBin, args...)
-			cmd.Env = chrootEnv
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("chroot apt-get install failed: %w (%s)", err, strings.TrimSpace(string(out)))
-			}
-		}
-
-		if script := strings.TrimSpace(req.Script); script != "" {
-			cmd := exec.CommandContext(ctx, chrootBin, mntDir, "/bin/bash", "-e", "-c", script)
-			cmd.Env = chrootEnv
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("chroot script failed: %w (%s)", err, strings.TrimSpace(string(out)))
-			}
-		}
-		_ = os.Remove(policyRC)
-	}
-
-	injectSSHAndInit(mntDir, sshPubKey)
-	_ = exec.Command("sync").Run()
-
-	if err := unmountAll(); err != nil {
-		return err
-	}
-	mntDir = ""
-
-	_ = os.Remove(outputPath)
-	if err := os.Rename(stagingPath, outputPath); err != nil {
-		return fmt.Errorf("move built rootfs into place: %w", err)
-	}
-	return nil
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // DefaultBasePackages returns the standard CLI, networking, and runtime packages

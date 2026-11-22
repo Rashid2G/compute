@@ -224,7 +224,10 @@ func StartServer(ctx context.Context, listenAddr, daemonURL string) error {
 	fmt.Println("==================================================")
 
 	srv := &http.Server{
-		Handler: handler,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	errChan := make(chan error, 1)

@@ -27,8 +27,21 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
           cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web UI Assets
+        run: |
+          cd web
+          npm ci
+          npm run build
 
       - name: Determine Version
         id: vars
@@ -57,6 +70,7 @@ jobs:
 
           LDFLAGS="-s -w -X '${PKG_VERSION}.Version=${VERSION}' -X '${PKG_VERSION}.ReleaseName=Compute' -X '${PKG_VERSION}.GitCommit=${GIT_COMMIT}' -X '${PKG_VERSION}.BuildDate=${BUILD_DATE}'"
 
+          # 1. Linux binaries (compute, computed, compute-worker, compute-bench, compute-suite)
           for arch in amd64 arm64; do
             echo "Building linux/${arch}..."
             mkdir -p "dist/linux-${arch}"
@@ -75,10 +89,26 @@ jobs:
             tar -czf "dist/compute-suite_${VERSION}_linux_${arch}.tar.gz" -C "dist/linux-${arch}" compute computed compute-worker compute-bench
           done
 
+          # 2. Darwin compute CLI (amd64, arm64)
+          for arch in amd64 arm64; do
+            echo "Building darwin/${arch}..."
+            mkdir -p "dist/darwin-${arch}"
+            GOOS=darwin GOARCH=${arch} CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/darwin-${arch}/compute" ./cmd/compute
+            tar -czf "dist/compute_${VERSION}_darwin_${arch}.tar.gz" -C "dist/darwin-${arch}" compute
+          done
+
+          # 3. Windows compute CLI (amd64, arm64)
+          for arch in amd64 arm64; do
+            echo "Building windows/${arch}..."
+            mkdir -p "dist/windows-${arch}"
+            GOOS=windows GOARCH=${arch} CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o "dist/windows-${arch}/compute.exe" ./cmd/compute
+            (cd "dist/windows-${arch}" && zip -9 "../../dist/compute_${VERSION}_windows_${arch}.zip" compute.exe)
+          done
+
       - name: Generate Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz > checksums.txt
+          sha256sum *.tar.gz *.zip > checksums.txt
           cat checksums.txt
 
       - name: Publish GitHub Release
@@ -90,5 +120,6 @@ jobs:
           prerelease: false
           files: |
             dist/*.tar.gz
+            dist/*.zip
             dist/checksums.txt
           generate_release_notes: true

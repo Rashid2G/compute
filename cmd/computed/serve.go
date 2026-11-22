@@ -243,20 +243,22 @@ func (s *Server) resolveServeTarget(ctx context.Context, pf *db.PortForward) (*n
 	if v == nil {
 		return nil, nil, fmt.Errorf("sandbox for exposure %q not found", pf.ID)
 	}
-	return &network.TargetInfo{
+	target := &network.TargetInfo{
 		ID:        v.ID,
 		Name:      v.Name,
 		OwnerID:   v.OwnerID,
 		Status:    string(v.Status),
 		IPAddress: v.IPAddress,
 		WorkerID:  v.WorkerID,
-	}, &network.Exposure{
+	}
+	exposure := &network.Exposure{
 		ID:        pf.ID,
 		OwnerID:   pf.OwnerID,
 		Slug:      pf.Subdomain,
 		GuestPort: pf.GuestPort,
 		Public:    pf.Public,
-	}, nil
+	}
+	return target, exposure, nil
 }
 
 // ===== Private-serve authentication =====
@@ -578,7 +580,12 @@ func (r *servePortRegistry) listenLocked(pf *db.PortForward, bind string, port i
 		}
 		r.server.ingressProxy.ServeExposure(w, rq, id)
 	})
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
 	// WebSocket upgrades require HTTP/1.1 hijacking; disable HTTP/2 on
 	// serve listeners so browsers do not negotiate extended CONNECT.
 	srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))

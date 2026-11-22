@@ -11,23 +11,24 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"net/http"
-	"strings"
-	"time"
-
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/Rashid2G/compute/internal/config"
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/doctor"
+	"github.com/Rashid2G/compute/internal/image"
 	"github.com/Rashid2G/compute/internal/jobs"
 	"github.com/Rashid2G/compute/internal/master/auth"
 	"github.com/Rashid2G/compute/internal/master/pki"
@@ -95,6 +96,10 @@ type Server struct {
 	tasks             map[string]*taskRecord
 	taskOrder         []string
 	feedbackTrackers  sync.Map // vmID -> *vmFeedbackTracker
+
+	rateLimiter          *RateLimiter
+	webhookStatsMu       sync.Mutex
+	allowPrivateWebhooks bool
 }
 
 type vmFeedbackTracker struct {
@@ -159,6 +164,11 @@ func detectFirecrackerVersion(bin string) string {
 }
 
 func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
+	if vmMgr != nil && vmMgr.GetImageBuilder() != nil {
+		if vmMgr.GetImageBuilder().GetVMRunner() == nil {
+			vmMgr.GetImageBuilder().SetVMRunner(vmMgr.AsImageVMRunner())
+		}
+	}
 	workers := scheduler.NewWorkerRegistry()
 	fcVersion := detectFirecrackerVersion(cfg.Server.FirecrackerBin)
 	var sched *scheduler.Scheduler
@@ -282,6 +292,7 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		// 4. Auto-seed "base" default environment profile if environments table is empty
 		if envs, err := st.ListEnvironments(initCtx); err == nil && len(envs) == 0 {
 			_ = st.SaveEnvironment(initCtx, &db.EnvironmentProfile{
+				OwnerID:             "default",
 				Name:                "base",
 				IsDefault:           true,
 				Version:             1,
@@ -404,6 +415,7 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		wsClients:   make(map[*wsClient]struct{}),
 		vmListCache: make(map[string]vmListEntry),
 		tasks:       make(map[string]*taskRecord),
+		rateLimiter: NewRateLimiter(cfg.Server),
 	}
 
 	// Create the backend operation queue up front so /queue and cluster
@@ -780,6 +792,9 @@ func (s *Server) wrapAuth(handler http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		s.authMgr.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
+			if !s.enforceCSRF(w, r) {
+				return
+			}
 			if !s.enforceScope(w, r) {
 				return
 			}
@@ -1004,6 +1019,38 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") && r.Header.Get("Upgrade") == "" {
 		w.Header().Set("Content-Type", "application/json")
 	}
+
+	// Rate limiting on API routes
+	if s.rateLimiter != nil {
+		if allowed, retryAfter := s.rateLimiter.Allow(r); !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter)))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+	}
+
+	// Request body size limits on API routes
+	if strings.HasPrefix(r.URL.Path, "/api/") && r.Body != nil && r.Header.Get("Upgrade") == "" {
+		limit := int64(4 << 20) // 4 MiB default
+		pathLower := strings.ToLower(r.URL.Path)
+		if strings.Contains(pathLower, "/files") ||
+			strings.Contains(pathLower, "/upload") ||
+			strings.Contains(pathLower, "/import") ||
+			strings.Contains(pathLower, "/restore") ||
+			strings.Contains(pathLower, "/snapshot") ||
+			strings.Contains(pathLower, "/save-state") ||
+			strings.Contains(pathLower, "/volumes") {
+			limit = 512 << 20 // 512 MiB bulk limit
+		}
+		if r.ContentLength > limit {
+			httpError(w, "request entity too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+	}
+
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -1255,7 +1302,7 @@ func (s *Server) needsPostBootSSHSetup(ctx context.Context, v *db.VM) bool {
 		return false
 	}
 	st := s.vmMgr.GetStore()
-	if envs, err := st.ListEnvironments(ctx); err == nil && len(envs) > 0 {
+	if envs, err := st.ListEnvironmentsByOwner(ctx, v.OwnerID); err == nil && len(envs) > 0 {
 		for _, env := range envs {
 			if (env.SecretsEnabled && strings.TrimSpace(env.Secrets) != "") ||
 				(env.GitHubReposEnabled && len(env.GitHubRepos) > 0) {
@@ -2409,8 +2456,29 @@ func (s *Server) handleVMActions(w http.ResponseWriter, r *http.Request) {
 }
 
 func httpError(w http.ResponseWriter, message string, code int) {
+	if code != http.StatusRequestEntityTooLarge {
+		lowered := strings.ToLower(message)
+		if strings.Contains(lowered, "request body too large") || strings.Contains(lowered, "request entity too large") {
+			code = http.StatusRequestEntityTooLarge
+			message = "request entity too large"
+		}
+	}
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, dst interface{}) error {
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(dst); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			httpError(w, "request entity too large", http.StatusRequestEntityTooLarge)
+			return err
+		}
+		httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+		return err
+	}
+	return nil
 }
 
 func writeResourceLimitError(w http.ResponseWriter, _ *http.Request, err error) bool {
@@ -2499,6 +2567,10 @@ func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
 		var req vm.BuildImageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httpError(w, "invalid request payload: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := image.ValidateBuildRequest(req); err != nil {
+			httpError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		ownerID, isAdmin, ok := s.callerIdentity(r)
@@ -3239,9 +3311,76 @@ func (s *Server) broadcastClusterUpdate() {
 	s.wsMu.RUnlock()
 }
 
+func (s *Server) isAllowedWSOrigin(u *url.URL) bool {
+	if u == nil || u.Host == "" {
+		return false
+	}
+	originHost := strings.ToLower(u.Host)
+	// Check configured PublicURL
+	if pub := s.cfg.Server.NormalizedPublicURL(); pub != "" {
+		if parsed, err := url.Parse(pub); err == nil && parsed.Host != "" {
+			if strings.EqualFold(originHost, parsed.Host) {
+				return true
+			}
+		}
+	}
+	// Check ServeDomain
+	if d := s.cfg.ServeDomainResolved(); d != "" {
+		if strings.EqualFold(originHost, d) || strings.HasSuffix(originHost, "."+strings.ToLower(d)) {
+			return true
+		}
+	}
+	// Check Network BaseDomain
+	if bd := s.cfg.Network.BaseDomain; bd != "" {
+		if strings.EqualFold(originHost, bd) || strings.HasSuffix(originHost, "."+strings.ToLower(bd)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) checkWebSocketOrigin(w http.ResponseWriter, r *http.Request) (*websocket.AcceptOptions, bool) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// Non-browser CLI, worker agent, SDK: allow.
+		return &websocket.AcceptOptions{}, true
+	}
+
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Host == "" {
+		httpError(w, "forbidden: invalid origin", http.StatusForbidden)
+		return nil, false
+	}
+
+	host := r.Host
+	if s.rateLimiter != nil && s.rateLimiter.IsTrustedProxy(r.RemoteAddr) {
+		if xfh := r.Header.Get("X-Forwarded-Host"); xfh != "" {
+			parts := strings.Split(xfh, ",")
+			host = strings.TrimSpace(parts[0])
+		}
+	}
+
+	allowed := false
+	if strings.EqualFold(originURL.Host, host) {
+		allowed = true
+	} else if s.isAllowedWSOrigin(originURL) {
+		allowed = true
+	}
+
+	if !allowed {
+		httpError(w, "forbidden: cross-origin websocket upgrade rejected", http.StatusForbidden)
+		return nil, false
+	}
+
+	return &websocket.AcceptOptions{
+		OriginPatterns: []string{strings.ToLower(originURL.Host)},
+	}, true
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	opts := &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+	opts, ok := s.checkWebSocketOrigin(w, r)
+	if !ok {
+		return
 	}
 	conn, err := websocket.Accept(w, r, opts)
 	if err != nil {
@@ -3834,7 +3973,10 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 			"reason": "vm_not_found",
 		})
 		if isWS {
-			opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+			opts, ok := s.checkWebSocketOrigin(w, r)
+			if !ok {
+				return
+			}
 			if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 				_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
 				_ = conn.Close(websocket.StatusNormalClosure, "vm not found")
@@ -3850,7 +3992,10 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 			"reason": "forbidden_cross_tenant",
 		})
 		if isWS {
-			opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+			opts, ok := s.checkWebSocketOrigin(w, r)
+			if !ok {
+				return
+			}
 			if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 				_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
 				_ = conn.Close(websocket.StatusNormalClosure, "vm not found")
@@ -3863,7 +4008,10 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 
 	if v.Status != "running" {
 		if isWS {
-			opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+			opts, ok := s.checkWebSocketOrigin(w, r)
+			if !ok {
+				return
+			}
 			if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 				msg := fmt.Sprintf("\r\n\x1b[33;1m[Compute Notice]\x1b[0m VM '%s' is currently %s.\r\nPlease start the instance to open an SSH session.\r\n", v.Name, v.Status)
 				_ = conn.Write(r.Context(), websocket.MessageText, []byte(msg))
@@ -3877,7 +4025,10 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 
 	if v.IPAddress == "" {
 		if isWS {
-			opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
+			opts, ok := s.checkWebSocketOrigin(w, r)
+			if !ok {
+				return
+			}
 			if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 				msg := fmt.Sprintf("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM '%s' has no allocated IP address.\r\n", v.Name)
 				_ = conn.Write(r.Context(), websocket.MessageText, []byte(msg))
@@ -3910,8 +4061,9 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 
 	// 2. Raw Stream / ProxyCommand Mode: Full-duplex WebSocket <-> TCP bridging
 	if isRawStream {
-		opts := &websocket.AcceptOptions{
-			InsecureSkipVerify: true,
+		opts, ok := s.checkWebSocketOrigin(w, r)
+		if !ok {
+			return
 		}
 		wsConn, err := websocket.Accept(w, r, opts)
 		if err != nil {
@@ -3990,8 +4142,9 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 	}
 
 	// 3. Interactive PTY mode
-	opts := &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+	opts, ok := s.checkWebSocketOrigin(w, r)
+	if !ok {
+		return
 	}
 	wsConn, err := websocket.Accept(w, r, opts)
 	if err != nil {
@@ -4203,9 +4356,13 @@ func (s *Server) handleVMSSH(w http.ResponseWriter, r *http.Request, vmID string
 }
 
 func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID string) {
+	opts, ok := s.checkWebSocketOrigin(w, r)
+	if !ok {
+		return
+	}
+
 	v, err := s.resolveAccessibleVM(r.Context(), r, vmID)
 	if err != nil || v == nil {
-		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
 			_ = conn.Close(websocket.StatusNormalClosure, "vm not found")
@@ -4216,7 +4373,6 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 	}
 
 	if !s.canAccessOwner(r, v.OwnerID) {
-		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte("\r\n\x1b[31;1m[Compute Error]\x1b[0m VM not found: "+vmID+"\r\n"))
 			_ = conn.Close(websocket.StatusNormalClosure, "vm not found")
@@ -4227,7 +4383,6 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 	}
 
 	if !v.Status.IsActiveRunning() {
-		opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 		if conn, wsErr := websocket.Accept(w, r, opts); wsErr == nil {
 			msg := fmt.Sprintf("\r\n\x1b[33;1m[Compute Notice]\x1b[0m VM '%s' is currently %s.\r\nPlease start the instance to open an SSH terminal session.\r\n", v.Name, v.Status)
 			_ = conn.Write(r.Context(), websocket.MessageText, []byte(msg))
@@ -4238,9 +4393,6 @@ func (s *Server) handleVMTerminal(w http.ResponseWriter, r *http.Request, vmID s
 		return
 	}
 
-	opts := &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
-	}
 	wsConn, err := websocket.Accept(w, r, opts)
 	if err != nil {
 		return
@@ -4531,8 +4683,9 @@ func (s *Server) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	opts := &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
+	opts, ok := s.checkWebSocketOrigin(w, r)
+	if !ok {
+		return
 	}
 	conn, err := websocket.Accept(w, r, opts)
 	if err != nil {
@@ -5054,10 +5207,11 @@ func (s *Server) enrichWorkerNodes(nodes []*db.WorkerNode) {
 			}
 		} else if s.workers != nil {
 			if rw, ok := s.workers.Get(n.ID); ok && rw != nil {
-				if v := capabilityInt(rw.Metrics, "memory_available_mb"); v > 0 {
+				_, _, _, _, metrics := rw.SnapshotState()
+				if v := capabilityInt(metrics, "memory_available_mb"); v > 0 {
 					n.AvailableMemMB = v
 				}
-				if v := capabilityInt(rw.Metrics, "disk_available_mb"); v > 0 {
+				if v := capabilityInt(metrics, "disk_available_mb"); v > 0 {
 					n.AvailableDiskMB = v
 				}
 			}

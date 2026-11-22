@@ -1119,7 +1119,7 @@ func handleSandboxSSH(ctx context.Context, client *DaemonClient, args []string) 
 
 	if isTerminal && usePTY {
 		winchCh := make(chan os.Signal, 1)
-		signal.Notify(winchCh, syscall.SIGWINCH)
+		notifyWinch(winchCh)
 		go func() {
 			for range winchCh {
 				if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 && h > 0 {

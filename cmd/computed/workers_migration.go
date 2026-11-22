@@ -355,7 +355,7 @@ func (s *Server) handleWorkerUpdate(w http.ResponseWriter, r *http.Request, id s
 		node.PoolID = pool
 		if s.workers != nil {
 			if live, ok := s.workers.Get(node.ID); ok {
-				live.PoolID = pool
+				live.SetPoolID(pool)
 			}
 		}
 	}
@@ -368,7 +368,7 @@ func (s *Server) handleWorkerUpdate(w http.ResponseWriter, r *http.Request, id s
 		node.LabelsJSON = string(b)
 		if s.workers != nil {
 			if live, ok := s.workers.Get(node.ID); ok {
-				live.Labels = *req.Labels
+				live.SetLabels(*req.Labels)
 			}
 		}
 	}
@@ -379,7 +379,7 @@ func (s *Server) handleWorkerUpdate(w http.ResponseWriter, r *http.Request, id s
 			node.Status = stVal
 			if s.workers != nil {
 				if live, ok := s.workers.Get(node.ID); ok {
-					live.Status = stVal
+					live.SetStatus(stVal)
 				}
 			}
 		default:
@@ -917,7 +917,7 @@ func (s *Server) handlePoolMigrate(w http.ResponseWriter, r *http.Request, poolI
 				}
 				if s.workers != nil {
 					if live, ok := s.workers.Get(n.ID); ok {
-						live.PoolID = req.TargetPoolID
+						live.SetPoolID(req.TargetPoolID)
 					}
 				}
 				movedWorkerSet[n.ID] = true

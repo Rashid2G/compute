@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -1169,4 +1172,49 @@ func (s *Server) enforceRunQuotaWithAdmin(ctx context.Context, isAdmin bool, v *
 		return fmt.Errorf("quota exceeded: running memory limit is %d MB", limits.MemoryMB)
 	}
 	return nil
+}
+
+func isMutatingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func isPreAuthRoute(path string) bool {
+	p := strings.ToLower(path)
+	return p == "/api/v1/auth/login" || p == "/api/v1/auth/signup" || p == "/api/v1/auth/setup"
+}
+
+func (s *Server) validateCSRF(r *http.Request, authCtx *auth.AuthContext) bool {
+	if authCtx == nil || !authCtx.ViaCookie {
+		return true
+	}
+	if !isMutatingMethod(r.Method) || isPreAuthRoute(r.URL.Path) {
+		return true
+	}
+	if authCtx.Session == nil || len(authCtx.Session.CSRFHash) == 0 {
+		return false
+	}
+	csrfToken := r.Header.Get("X-CSRF-Token")
+	if csrfToken == "" {
+		return false
+	}
+	tokenHash := sha256.Sum256([]byte(csrfToken))
+	return subtle.ConstantTimeCompare(tokenHash[:], authCtx.Session.CSRFHash) == 1
+}
+
+func (s *Server) enforceCSRF(w http.ResponseWriter, r *http.Request) bool {
+	authCtx := auth.GetAuth(r.Context())
+	if authCtx != nil && authCtx.ViaCookie && isMutatingMethod(r.Method) && !isPreAuthRoute(r.URL.Path) {
+		if !s.validateCSRF(r, authCtx) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid or missing CSRF token"})
+			return false
+		}
+	}
+	return true
 }

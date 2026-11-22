@@ -774,8 +774,8 @@ func TestControlPlane_WorkerActionsAndTokens(t *testing.T) {
 	defer respListTok.Body.Close()
 	var tokList []api.WorkerTokenResponse
 	_ = json.NewDecoder(respListTok.Body).Decode(&tokList)
-	if len(tokList) != 1 || tokList[0].Token != tokResp.Token {
-		t.Fatalf("expected 1 token in list, got %+v", tokList)
+	if len(tokList) != 1 || tokList[0].Token == tokResp.Token || tokList[0].Name != tokResp.Name {
+		t.Fatalf("expected 1 token with masked/hashed token in list, got %+v", tokList)
 	}
 
 	// 7. Delete worker token

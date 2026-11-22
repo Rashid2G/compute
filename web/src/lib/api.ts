@@ -144,9 +144,31 @@ export function setStoredUser(user: AuthUser | null) {
   }
 }
 
+let inMemoryCsrf: string | null = null;
+
+export function getCsrfToken(): string | null {
+  if (inMemoryCsrf) return inMemoryCsrf;
+  try {
+    if (typeof document !== 'undefined' && document.cookie) {
+      const match = document.cookie.match(/(?:^|;\s*)compute_csrf=([^;]+)/);
+      if (match) {
+        return decodeURIComponent(match[1]);
+      }
+    }
+  } catch {
+    // Ignore cookie read failures
+  }
+  return null;
+}
+
+export function setCsrfToken(csrf: string | null) {
+  inMemoryCsrf = csrf;
+}
+
 export function clearAuth() {
   setStoredToken(null);
   setStoredUser(null);
+  setCsrfToken(null);
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -157,6 +179,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   const method = (options.method || 'GET').toUpperCase();
+  const csrfHeaders: Record<string, string> = {};
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    const csrf = getCsrfToken();
+    if (csrf) {
+      csrfHeaders['X-CSRF-Token'] = csrf;
+    }
+  }
+
   const canKeepalive =
     method !== 'GET' &&
     method !== 'HEAD' &&
@@ -170,6 +200,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers: {
       'Content-Type': 'application/json',
       ...authHeaders,
+      ...csrfHeaders,
       ...options.headers,
     },
   });
@@ -379,11 +410,18 @@ export const api = {
     if (token) {
       authHeaders['Authorization'] = `Bearer ${token}`;
     }
+    const csrfHeaders: Record<string, string> = {};
+    const csrf = getCsrfToken();
+    if (csrf) {
+      csrfHeaders['X-CSRF-Token'] = csrf;
+    }
     const response = await fetch(`${BASE_PATH}/vms/${encodeURIComponent(id)}/exec-stream`, {
       method: 'POST',
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
         ...authHeaders,
+        ...csrfHeaders,
       },
       body: JSON.stringify(req),
       signal,
@@ -1064,6 +1102,9 @@ export const api = {
     if (res.user) {
       setStoredUser(res.user);
     }
+    if (res.csrf) {
+      setCsrfToken(res.csrf);
+    }
     return res;
   },
 
@@ -1077,6 +1118,9 @@ export const api = {
     }
     if (res.user) {
       setStoredUser(res.user);
+    }
+    if (res.csrf) {
+      setCsrfToken(res.csrf);
     }
     return res;
   },

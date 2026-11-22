@@ -350,3 +350,231 @@ func TestLaunchJailer_NonRootNamespacesFailClosed(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }
+
+func TestManager_JailerRootfsAndVolumePersistence(t *testing.T) {
+	m, store := testConcurrentManager(t)
+	ctx := context.Background()
+
+	tmpDir, err := os.MkdirTemp("/tmp", "j-persist-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	mockJailer := filepath.Join(tmpDir, "mock-jailer")
+	script := `#!/usr/bin/env python3
+import sys, os, time, socket
+
+chroot_dir = ""
+vm_id = ""
+args = sys.argv[1:]
+for i, arg in enumerate(args):
+    if arg == "--chroot-base-dir" and i + 1 < len(args):
+        chroot_dir = args[i+1]
+    elif arg == "--id" and i + 1 < len(args):
+        vm_id = args[i+1]
+
+if chroot_dir and vm_id:
+    run_dir = os.path.join(chroot_dir, "firecracker", vm_id, "root", "run")
+    os.makedirs(run_dir, exist_ok=True)
+    sock_path = os.path.join(run_dir, "fc.sock")
+    try:
+        os.remove(sock_path)
+    except OSError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(sock_path)
+    s.listen(10)
+    while True:
+        try:
+            conn, _ = s.accept()
+            data = conn.recv(2048)
+            if data:
+                conn.sendall(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            conn.close()
+        except Exception:
+            break
+`
+	if err := os.WriteFile(mockJailer, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	m.cfg.JailerEnabled = true
+	m.cfg.JailerBinary = mockJailer
+	m.cfg.JailerBaseDir = filepath.Join(tmpDir, "srv-jailer")
+
+	kernelPath := filepath.Join(tmpDir, "vmlinux")
+	hostRootfsPath := filepath.Join(tmpDir, "rootfs.ext4")
+	hostVolPath := filepath.Join(tmpDir, "data0.ext4")
+
+	_ = os.WriteFile(kernelPath, []byte("golden-kernel"), 0644)
+	_ = os.WriteFile(hostRootfsPath, []byte("initial-rootfs-data"), 0644)
+	_ = os.WriteFile(hostVolPath, []byte("initial-volume-data"), 0644)
+
+	vmID := "vm-test-persist-manager"
+	vm := &db.VM{
+		ID:         vmID,
+		Name:       "persist-manager",
+		OwnerID:    "tenant-persist",
+		Status:     db.StatusCreated,
+		VCPUs:      1,
+		MemoryMB:   256,
+		DiskPath:   hostRootfsPath,
+		KernelPath: kernelPath,
+		TAPDevice:  "tap-persist-1",
+	}
+	if err := store.SaveVM(ctx, vm); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.vms[vm.ID] = vm
+	m.mu.Unlock()
+
+	vol := &db.Volume{
+		ID:         "vol-persist-1",
+		OwnerID:    vm.OwnerID,
+		Name:       "vol-persist-1",
+		Path:       hostVolPath,
+		AttachedVM: vm.ID,
+		Status:     "attached",
+	}
+	if err := store.SaveVolume(ctx, vol); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Start VM inside Jailer
+	if err := m.RunVM(ctx, vmID); err != nil {
+		t.Fatalf("RunVM failed: %v", err)
+	}
+
+	chrootRoot := filepath.Join(m.cfg.JailerBaseDir, "firecracker", sanitizeFirecrackerID(vmID), "root")
+	chrootRootfs := filepath.Join(chrootRoot, "rootfs.ext4")
+	chrootData0 := filepath.Join(chrootRoot, "data0.ext4")
+
+	// 2. Write to chroot rootfs and data0
+	guestRootfsData := []byte("guest-wrote-rootfs-content")
+	guestVolData := []byte("guest-wrote-volume-content")
+	if err := os.WriteFile(chrootRootfs, guestRootfsData, 0644); err != nil {
+		t.Fatalf("failed to write to chroot rootfs: %v", err)
+	}
+	if err := os.WriteFile(chrootData0, guestVolData, 0644); err != nil {
+		t.Fatalf("failed to write to chroot data0: %v", err)
+	}
+
+	// Verify host files immediately reflect the writes (hardlink zero-copy)
+	hostRootfsRead, _ := os.ReadFile(hostRootfsPath)
+	if string(hostRootfsRead) != string(guestRootfsData) {
+		t.Fatalf("host rootfs did not reflect guest write: got %q, want %q", string(hostRootfsRead), string(guestRootfsData))
+	}
+	hostVolRead, _ := os.ReadFile(hostVolPath)
+	if string(hostVolRead) != string(guestVolData) {
+		t.Fatalf("host volume did not reflect guest write: got %q, want %q", string(hostVolRead), string(guestVolData))
+	}
+
+	// 3. Stop the VM
+	if err := m.StopVM(ctx, vmID); err != nil {
+		t.Fatalf("StopVM failed: %v", err)
+	}
+
+	// Verify chroot was cleaned up
+	if _, err := os.Stat(chrootRoot); !os.IsNotExist(err) {
+		t.Errorf("chrootRoot should be removed after StopVM, but still exists")
+	}
+
+	// Verify host files STILL intact with guest writes
+	hostRootfsAfterStop, err := os.ReadFile(hostRootfsPath)
+	if err != nil {
+		t.Fatalf("host rootfs missing after StopVM: %v", err)
+	}
+	if string(hostRootfsAfterStop) != string(guestRootfsData) {
+		t.Fatalf("host rootfs lost data after StopVM: got %q, want %q", string(hostRootfsAfterStop), string(guestRootfsData))
+	}
+
+	hostVolAfterStop, err := os.ReadFile(hostVolPath)
+	if err != nil {
+		t.Fatalf("host volume missing after StopVM: %v", err)
+	}
+	if string(hostVolAfterStop) != string(guestVolData) {
+		t.Fatalf("host volume lost data after StopVM: got %q, want %q", string(hostVolAfterStop), string(guestVolData))
+	}
+
+	// 4. Restart VM inside Jailer
+	if err := m.RunVM(ctx, vmID); err != nil {
+		t.Fatalf("RunVM restart failed: %v", err)
+	}
+	defer func() { _ = m.StopVM(ctx, vmID) }()
+
+	// Verify chroot files on restart contain the persisted writes
+	chrootRootfsRestart, _ := os.ReadFile(chrootRootfs)
+	if string(chrootRootfsRestart) != string(guestRootfsData) {
+		t.Fatalf("restarted chroot rootfs lost data: got %q, want %q", string(chrootRootfsRestart), string(guestRootfsData))
+	}
+	chrootVolRestart, _ := os.ReadFile(chrootData0)
+	if string(chrootVolRestart) != string(guestVolData) {
+		t.Fatalf("restarted chroot volume lost data: got %q, want %q", string(chrootVolRestart), string(guestVolData))
+	}
+}
+
+func TestManager_VolumeDetachAndOwnershipReconciliation(t *testing.T) {
+	m, store := testConcurrentManager(t)
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	volPath := filepath.Join(tmpDir, "reconcile-vol.ext4")
+	_ = os.WriteFile(volPath, []byte("volume-bytes"), 0644)
+
+	vol := &db.Volume{
+		ID:         "vol-reconcile-1",
+		OwnerID:    "tenant-1",
+		Name:       "reconcile-vol",
+		Path:       volPath,
+		AttachedVM: "vm-1",
+		Status:     "attached",
+	}
+	if err := store.SaveVolume(ctx, vol); err != nil {
+		t.Fatal(err)
+	}
+
+	// Test DetachVolume reconciles ownership and updates status
+	if err := m.DetachVolume(ctx, vol); err != nil {
+		t.Fatalf("DetachVolume failed: %v", err)
+	}
+
+	if vol.Status != "available" {
+		t.Errorf("expected vol.Status to be 'available', got %q", vol.Status)
+	}
+	if vol.AttachedVM != "" {
+		t.Errorf("expected vol.AttachedVM to be cleared, got %q", vol.AttachedVM)
+	}
+
+	// Verify ReconcileVolumeOwnership
+	if err := m.ReconcileVolumeOwnership(ctx, vol); err != nil {
+		t.Fatalf("ReconcileVolumeOwnership failed: %v", err)
+	}
+}
+
+func TestManager_DeterministicPerVMUIDAllocation(t *testing.T) {
+	m, _ := testConcurrentManager(t)
+
+	// Manager config should not default JailerUID to 1000
+	if m.cfg.JailerUID == 1000 {
+		t.Errorf("m.cfg.JailerUID should not be defaulted to 1000")
+	}
+
+	// Distinct VMs derive distinct deterministic UIDs in high range
+	uid1, gid1 := jailer.AllocateJailerUIDGID("vm-alpha")
+	uid2, gid2 := jailer.AllocateJailerUIDGID("vm-beta")
+
+	if uid1 < jailer.MinJailerUID || uid1 > jailer.MaxJailerUID {
+		t.Errorf("uid1 %d outside range [%d, %d]", uid1, jailer.MinJailerUID, jailer.MaxJailerUID)
+	}
+	if uid2 < jailer.MinJailerUID || uid2 > jailer.MaxJailerUID {
+		t.Errorf("uid2 %d outside range [%d, %d]", uid2, jailer.MinJailerUID, jailer.MaxJailerUID)
+	}
+	if uid1 == uid2 {
+		t.Errorf("expected distinct UIDs for distinct VMs, got %d for both", uid1)
+	}
+	if gid1 != uid1 || gid2 != uid2 {
+		t.Errorf("expected GID == UID")
+	}
+}

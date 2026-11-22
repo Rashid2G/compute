@@ -399,3 +399,22 @@ The host prep changes (`sysctl net.ipv4.ip_forward=1`, loaded modules, the
 | Healthcheck fails with specific `COMPUTE_BIND_ADDRESS` | Set `COMPUTE_HEALTHCHECK_HOST` in `.env` to match `COMPUTE_BIND_ADDRESS`. |
 | Port 18080/80/53 already in use | Change `COMPUTE_API_PORT` in `.env`, or stop the conflicting service (systemd-resolved for 53). |
 | Login fails right after install | Default loopback credentials are `admin` / `admin`; override `COMPUTE_ADMIN_PASSWORD` in `.env` and restart `computed` when needed. |
+| SSH connection refused / terminal dial failed | Inspect `./data/vms/<sandbox_id>/firecracker.log` to check whether the guest kernel booted and `sshd` started. Verify `./data/images/ssh/id_ed25519` exists with `0600` permissions. |
+
+### Key Filesystem Paths for Investigation & Debugging
+
+When troubleshooting a live deployment, inspecting the host data directory (`./data` by default in Compose, mapped to `/var/lib/compute`) provides immediate insight into hypervisor, guest, and control-plane state:
+
+| Path | Purpose & Diagnostic Use |
+| --- | --- |
+| `./data/vms/<sandbox_id>/firecracker.log` | **Hypervisor & guest console output:** Contains kernel boot messages, systemd startup logs, and guest console errors. Check this first if a sandbox fails to boot or refuses SSH connections. |
+| `./data/vms/<sandbox_id>/firecracker.sock` | **Firecracker API socket:** Exists while the microVM process is alive. If missing for a running sandbox, the process terminated unexpectedly. |
+| `./data/vms/<sandbox_id>/rootfs.ext4` | **Persistent VM root disk:** Check integrity with `e2fsck -f` or mount locally read-only (`mount -o loop,ro ...`) to inspect guest `/var/log` or SSH host keys. |
+| `./data/vms/<sandbox_id>/snapshot.state` | **MicroVM CPU/device snapshot state:** Present for paused, snapshotted, or auto-hibernated sandboxes. |
+| `./data/data/compute.db` | **Primary state database:** Inspect with `sqlite3 ./data/data/compute.db "SELECT id, name, status, ip_address, error FROM vms;"`. |
+| `./data/images/ssh/id_ed25519` | **Internal daemon SSH key:** Must have strict `0600` permissions. Used for web terminal proxying and `compute sandbox ssh`. |
+| `/sys/fs/cgroup/compute/<sandbox_id>/` | **Resource limits & OOM checks:** Inspect `memory.current` vs `memory.max` to determine if a guest was terminated due to host cgroup OOM. |
+| `~/.compute/config.json` | **CLI configuration:** Local credentials and active API token for the `compute` CLI. |
+
+For the complete storage reference across multi-node clusters and master mode, see [Key Paths for Debugging and Investigation in configuration.md](configuration.md#key-paths-for-debugging-and-investigation).
+

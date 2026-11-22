@@ -1194,6 +1194,7 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
       })()`);
       await waitFor(cdp, `document.getElementById('ci-repo-modal-title') === null`, 3000, 'connect repo modal closed');
       await waitFor(cdp, `document.body.innerText.includes('whsec_test_secret_123') && document.body.innerText.includes('acme/api-service')`, 4000, 'connected repo and secret banner');
+      await waitFor(cdp, `Array.from(document.querySelectorAll('button')).some((b) => (b.innerText || '').trim() === 'Trigger')`, 4000, 'trigger button rendered for connected repo');
 
       const clickedTrigger = await cdp.evalJS(`window.__clickButtonByText('Trigger')`);
       assert.equal(clickedTrigger, true, 'Trigger button must exist for connected repo');
@@ -1890,7 +1891,13 @@ test('Compute branding, self-hosted lifecycle UX, Milestone 3 Sandboxes, Raw Ter
   } finally {
     try { cdp.close(); } catch {}
     chrome.kill('SIGKILL');
-    await new Promise((resolve) => chrome.once('exit', resolve)).catch(() => {});
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      await Promise.race([
+        new Promise((resolve) => chrome.once('exit', resolve)),
+        sleep(1500),
+      ]).catch(() => {});
+    }
+    server.closeAllConnections?.();
     server.close();
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
