@@ -496,16 +496,16 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 	}
 
 	result := map[string]interface{}{
-		"exit_code":              exitCode,
-		"duration_ms":            time.Since(started).Milliseconds(),
-		"env_setup_duration_ms":  envDuration,
-		"execution_duration_ms":  workloadDuration,
-		"failure_phase":          failurePhase,
-		"sandbox_id":             vmID,
-		"vm_id":                  vmID,
-		"worker_id":              job.WorkerID,
-		"image":                  baseImage,
-		"template_id":            templateID,
+		"exit_code":             exitCode,
+		"duration_ms":           time.Since(started).Milliseconds(),
+		"env_setup_duration_ms": envDuration,
+		"execution_duration_ms": workloadDuration,
+		"failure_phase":         failurePhase,
+		"sandbox_id":            vmID,
+		"vm_id":                 vmID,
+		"worker_id":             job.WorkerID,
+		"image":                 baseImage,
+		"template_id":           templateID,
 	}
 	if job.Source != "" {
 		result["source"] = job.Source

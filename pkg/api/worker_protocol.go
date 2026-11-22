@@ -80,7 +80,7 @@ type JobSpec struct {
 	Script string `json:"script,omitempty"`
 
 	// Environment specifies the declarative host environment for the job.
-	Environment    *JobEnvironmentSpec `json:"environment,omitempty"`
+	Environment *JobEnvironmentSpec `json:"environment,omitempty"`
 
 	// AuthorizedOwnerIDs and AllowCrossOwner are populated by the control plane
 	// after authenticating the job submission. They are never trusted directly

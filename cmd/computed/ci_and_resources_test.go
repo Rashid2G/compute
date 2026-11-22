@@ -764,4 +764,3 @@ func TestJobPhasesEndpoints(t *testing.T) {
 		t.Fatalf("expected durations 1250 and 3400, got %d and %d", fetchedJob.EnvSetupDurationMs, fetchedJob.ExecutionDurationMs)
 	}
 }
-
