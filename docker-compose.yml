@@ -13,14 +13,14 @@ x-logging: &default-logging
     max-file: "3"
 
 x-daemon-image: &daemon-image
-  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-1.1.0}
+  image: ${COMPUTE_DAEMON_IMAGE:-ghcr.io/rashid2g/compute-daemon}:${COMPUTE_VERSION:-0.1.0}
   pull_policy: ${COMPUTE_PULL_POLICY:-build}
   build:
     context: .
     dockerfile: Dockerfile.daemon
 
 x-worker-image: &worker-image
-  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-1.1.0}
+  image: ${COMPUTE_WORKER_IMAGE:-ghcr.io/rashid2g/compute-worker}:${COMPUTE_VERSION:-0.1.0}
   pull_policy: ${COMPUTE_PULL_POLICY:-build}
   build:
     context: .

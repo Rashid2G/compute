@@ -17,8 +17,8 @@ func TestVersionGet(t *testing.T) {
 	if info.Project != "Compute" {
 		t.Errorf("expected Project 'Compute', got %q", info.Project)
 	}
-	if info.Version != "1.1.0" {
-		t.Errorf("expected Version '1.1.0', got %q", info.Version)
+	if info.Version != "0.1.0" {
+		t.Errorf("expected Version '0.1.0', got %q", info.Version)
 	}
 	if info.ReleaseName != "Compute" {
 		t.Errorf("expected ReleaseName 'Compute', got %q", info.ReleaseName)
@@ -28,12 +28,12 @@ func TestVersionGet(t *testing.T) {
 	}
 
 	str := info.String()
-	if !strings.Contains(str, "Compute CLI (compute) v1.1.0") {
+	if !strings.Contains(str, "Compute CLI (compute) v0.1.0") {
 		t.Errorf("unexpected String output: %s", str)
 	}
 
 	detailed := info.Detailed("  ")
-	if !strings.Contains(detailed, "Name:        Compute CLI (compute)") || !strings.Contains(detailed, "Version:     1.1.0") {
+	if !strings.Contains(detailed, "Name:        Compute CLI (compute)") || !strings.Contains(detailed, "Version:     0.1.0") {
 		t.Errorf("unexpected Detailed output: %s", detailed)
 	}
 

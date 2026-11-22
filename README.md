@@ -1,4 +1,4 @@
-# Compute v1.1.0 — Self-Hosted Firecracker MicroVM Platform
+# Compute v0.1.0 — Self-Hosted Firecracker MicroVM Platform
 
 Compute is an open-source, self-hosted platform for running hardware-isolated **Firecracker microVM sandboxes** and **distributed compute jobs** on Linux hosts with `/dev/kvm`.
 
@@ -68,7 +68,7 @@ After quick installation, the following defaults are active immediately on loopb
 **Pre-built `compute` CLI** (Linux `amd64` / `arm64`, see [GitHub Releases](https://github.com/Rashid2G/compute/releases)):
 
 ```bash
-curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_0.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
 compute --version
 ```
 

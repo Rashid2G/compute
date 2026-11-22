@@ -1,6 +1,6 @@
 .PHONY: help all build build-ui dev-ui dev run test test-web test-coverage test-features vet docker-build setup up down clean clean-hard clean-hard-all preflight host-prepare setup-host build-images validate-compose benchmark bench install systemd release-tarballs
 
-VERSION ?= 1.1.0
+VERSION ?= 0.1.0
 RELEASE_NAME ?= Compute
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")

@@ -301,16 +301,16 @@ Every release publishes static Linux binaries for both `x86_64` (`amd64`) and `a
 
 | Component | Linux `amd64` (`x86_64`) | Linux `arm64` (`aarch64`) |
 | :--- | :--- | :--- |
-| **`compute` CLI** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_arm64.tar.gz) |
-| **`computed` Daemon** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_1.1.0_linux_arm64.tar.gz) |
-| **`compute-worker`** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_1.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_1.1.0_linux_arm64.tar.gz) |
-| **Complete Suite** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.1.0_linux_arm64.tar.gz) |
+| **`compute` CLI** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_0.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute_0.1.0_linux_arm64.tar.gz) |
+| **`computed` Daemon** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_0.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/computed_0.1.0_linux_arm64.tar.gz) |
+| **`compute-worker`** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_0.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-worker_0.1.0_linux_arm64.tar.gz) |
+| **Complete Suite** | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_0.1.0_linux_amd64.tar.gz) | [Download](https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_0.1.0_linux_arm64.tar.gz) |
 
 ### Install the `compute` CLI
 
 ```bash
 # Download and unpack CLI to /usr/local/bin
-curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_0.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
 compute --version
 ```
 
@@ -318,7 +318,7 @@ compute --version
 
 ```bash
 curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
-curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute_0.1.0_linux_amd64.tar.gz
 sha256sum --check --ignore-missing checksums.txt
 ```
 

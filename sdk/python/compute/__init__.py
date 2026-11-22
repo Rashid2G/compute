@@ -6,5 +6,5 @@ Official client library for managing isolated microVM sandboxes and running AI c
 from .sandbox import Sandbox, ExecutionResult
 from .exceptions import ComputeError, SandboxNotFoundError, AuthenticationError
 
-__version__ = "1.0.0"
+__version__ = "0.1.0"
 __all__ = ["Sandbox", "ExecutionResult", "ComputeError", "SandboxNotFoundError", "AuthenticationError"]
