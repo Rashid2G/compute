@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Compute v1.0.0 — Operator Manual &amp; Reference</title>
-  <meta name="description" content="Operator manual and API reference for Compute v1.0.0: Firecracker microVM sandboxes, multi-node workers, load balancing, live migration, resource limits, CLI, REST/WS API, and SDKs." />
+  <title>Compute v0.1.0 — Operator Manual &amp; Reference</title>
+  <meta name="description" content="Operator manual and API reference for Compute v0.1.0: Firecracker microVM sandboxes, multi-node workers, load balancing, live migration, resource limits, CLI, REST/WS API, and SDKs." />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -17,7 +17,7 @@
         <span class="brand-mark">C</span>
         <span>Compute Manual</span>
       </a>
-      <span class="version-tag">v1.0.0</span>
+      <span class="version-tag">v0.1.0</span>
     </div>
     <div class="topbar-right">
       <div class="search-box">
@@ -253,13 +253,13 @@ make build-images          # builds vmlinux + ubuntu-24.04.ext4 into ./data/imag
           <div class="tab-panel" data-tab-panel="binaries">
             <div class="code-block">
               <div class="code-header"><span>1. download and install pre-built compute CLI (Linux x86_64 / arm64)</span><button class="copy-btn" type="button">Copy</button></div>
-              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_1.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
+              <pre><code>curl -fsSL https://github.com/Rashid2G/compute/releases/latest/download/compute_0.1.0_linux_amd64.tar.gz | sudo tar -xz -C /usr/local/bin
 compute --version</code></pre>
             </div>
             <div class="code-block">
               <div class="code-header"><span>2. download complete suite or verify SHA-256 checksums</span><button class="copy-btn" type="button">Copy</button></div>
               <pre><code># Download full suite (compute, computed, compute-worker, compute-bench)
-curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_1.1.0_linux_amd64.tar.gz
+curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/compute-suite_0.1.0_linux_amd64.tar.gz
 curl -fsSLO https://github.com/Rashid2G/compute/releases/latest/download/checksums.txt
 sha256sum --check --ignore-missing checksums.txt</code></pre>
             </div>
@@ -1083,7 +1083,7 @@ with Sandbox.create(
       </section>
 
       <footer class="doc-footer">
-        <span>Compute v1.1.0 &middot; MIT License</span>
+        <span>Compute v0.1.0 &middot; MIT License</span>
         <div class="doc-footer-links">
           <a href="install.md">install.md</a>
           <a href="configuration.md">configuration.md</a>

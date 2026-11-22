@@ -674,7 +674,7 @@ func TestVersionCLI(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"name":"Compute Daemon","service":"computed","project":"Compute","version":"1.1.0","release_name":"Compute","go_version":"go1.23","os":"linux","arch":"amd64"}`)
+		fmt.Fprintln(w, `{"name":"Compute Daemon","service":"computed","project":"Compute","version":"0.1.0","release_name":"Compute","go_version":"go1.23","os":"linux","arch":"amd64"}`)
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -688,7 +688,7 @@ func TestVersionCLI(t *testing.T) {
 			t.Fatalf("version --client failed: %v, out: %s", err, string(out))
 		}
 		outStr := string(out)
-		if !strings.Contains(outStr, "Compute CLI") || !strings.Contains(outStr, "1.1.0") || !strings.Contains(outStr, "Compute") {
+		if !strings.Contains(outStr, "Compute CLI") || !strings.Contains(outStr, "0.1.0") || !strings.Contains(outStr, "Compute") {
 			t.Fatalf("unexpected version output: %s", outStr)
 		}
 	})
@@ -701,8 +701,8 @@ func TestVersionCLI(t *testing.T) {
 		if err != nil {
 			t.Fatalf("version --short failed: %v, out: %s", err, string(out))
 		}
-		if strings.TrimSpace(string(out)) != "1.1.0" {
-			t.Fatalf("expected 1.1.0, got %q", string(out))
+		if strings.TrimSpace(string(out)) != "0.1.0" {
+			t.Fatalf("expected 0.1.0, got %q", string(out))
 		}
 	})
 

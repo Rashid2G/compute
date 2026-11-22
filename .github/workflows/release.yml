@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.1.0)'
+        description: 'Release tag (e.g. v0.1.0)'
         required: true
-        default: 'v1.1.0'
+        default: 'v0.1.0'
 
 permissions:
   contents: write
@@ -51,7 +51,7 @@ jobs:
           elif [ -n "${{ github.ref_name }}" ]; then
             TAG="${{ github.ref_name }}"
           else
-            TAG="v1.1.0"
+            TAG="v0.1.0"
           fi
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
@@ -117,7 +117,7 @@ jobs:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: Compute ${{ steps.vars.outputs.tag }}
           draft: false
-          prerelease: false
+          prerelease: ${{ startsWith(steps.vars.outputs.tag, 'v0.') }}
           files: |
             dist/*.tar.gz
             dist/*.zip
