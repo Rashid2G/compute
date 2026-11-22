@@ -8,14 +8,23 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 
+	storeDB "github.com/Rashid2G/compute/internal/store/db"
 	"github.com/Rashid2G/compute/internal/store/migrations"
 )
+
+var memDBCounter uint64
+
+func isMemoryDB(dbPath string) bool {
+	return dbPath == ":memory:" || strings.Contains(dbPath, "mode=memory") || strings.Contains(dbPath, ":memory:")
+}
 
 // Store provides access to SQLite with a dedicated single-writer pool and multi-connection reader pool.
 type Store struct {
@@ -40,15 +49,28 @@ func Open(dbPath string, opts ...OpenOptions) (*Store, error) {
 		opt = opts[0]
 	}
 
-	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, fmt.Errorf("failed to create directory for database: %w", err)
-	}
+	isMem := isMemoryDB(dbPath)
+	var resolvedMemoryURI string
 
-	// Ensure secure file permissions (0600)
-	if f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0600); err == nil {
-		_ = f.Chmod(0600)
-		_ = f.Close()
+	if !isMem {
+		dir := filepath.Dir(dbPath)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, fmt.Errorf("failed to create directory for database: %w", err)
+		}
+		_ = os.Chmod(dir, 0700)
+
+		// Ensure secure file permissions (0600)
+		if f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0600); err == nil {
+			_ = f.Chmod(0600)
+			_ = f.Close()
+		}
+	} else if dbPath == ":memory:" {
+		memID := atomic.AddUint64(&memDBCounter, 1)
+		resolvedMemoryURI = fmt.Sprintf("file:mem_%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), memID)
+	} else if strings.HasPrefix(dbPath, "file:") {
+		resolvedMemoryURI = dbPath
+	} else {
+		resolvedMemoryURI = fmt.Sprintf("file:%s?mode=memory&cache=shared", dbPath)
 	}
 
 	buildDSN := func(readOnly bool) string {
@@ -58,6 +80,16 @@ func Open(dbPath string, opts ...OpenOptions) (*Store, error) {
 		v.Add("_pragma", "temp_store(MEMORY)")
 		v.Add("_pragma", "cache_size(-65536)")
 		v.Add("_pragma", "mmap_size(268435456)")
+		if isMem {
+			if readOnly {
+				v.Add("_pragma", "query_only(ON)")
+			}
+			sep := "?"
+			if strings.Contains(resolvedMemoryURI, "?") {
+				sep = "&"
+			}
+			return fmt.Sprintf("%s%s%s", resolvedMemoryURI, sep, v.Encode())
+		}
 		if readOnly {
 			v.Add("_pragma", "query_only(ON)")
 			return fmt.Sprintf("file:%s?mode=ro&%s", dbPath, v.Encode())
@@ -141,6 +173,16 @@ func Open(dbPath string, opts ...OpenOptions) (*Store, error) {
 		}
 	}
 
+	// Enforce 0600 on DB and WAL/SHM files
+	if !isMem {
+		_ = os.Chmod(dbPath, 0600)
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, err := os.Stat(dbPath + suffix); err == nil {
+				_ = os.Chmod(dbPath+suffix, 0600)
+			}
+		}
+	}
+
 	s := &Store{
 		writerDB: writerDB,
 		readerDB: readerDB,
@@ -152,6 +194,21 @@ func Open(dbPath string, opts ...OpenOptions) (*Store, error) {
 	go s.maintenanceLoop()
 
 	return s, nil
+}
+
+// Path returns the configured database path.
+func (s *Store) Path() string {
+	return s.dbPath
+}
+
+// Queries returns a *db.Queries executing against the single-writer DB.
+func (s *Store) Queries() *storeDB.Queries {
+	return storeDB.New(s.writerDB)
+}
+
+// ReadQueries returns a *db.Queries executing against the reader pool.
+func (s *Store) ReadQueries() *storeDB.Queries {
+	return storeDB.New(s.readerDB)
 }
 
 // Writer returns the dedicated single-writer *sql.DB handle.

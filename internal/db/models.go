@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -58,6 +59,30 @@ func IsNetworkNoInternet(vm *VM) bool {
 		return false
 	}
 	return mode == NetworkIsolationNoInternet
+}
+
+// QuotaLimits defines resource limits for a tenant. Zero indicates unlimited.
+type QuotaLimits struct {
+	Instances int `json:"instances"`
+	VCPUs     int `json:"vcpus"`
+	MemoryMB  int `json:"memory_mb"`
+	DiskGB    int `json:"disk_gb"`
+}
+
+// ErrQuotaExceeded is returned when a VM creation exceeds tenant quota limits.
+type ErrQuotaExceeded struct {
+	Resource  string `json:"resource"`
+	Limit     int64  `json:"limit"`
+	Current   int64  `json:"current"`
+	Requested int64  `json:"requested"`
+	Message   string `json:"message"`
+}
+
+func (e *ErrQuotaExceeded) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return fmt.Sprintf("quota exceeded: %s limit is %d (currently %d, requested %d)", e.Resource, e.Limit, e.Current, e.Requested)
 }
 
 // VMStatus represents the state of a VM

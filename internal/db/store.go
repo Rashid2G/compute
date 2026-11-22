@@ -5,13 +5,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Rashid2G/compute/internal/master/pki"
+	"github.com/Rashid2G/compute/internal/store"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -23,65 +23,163 @@ func boolInt(v bool) int {
 	return 0
 }
 
-// Store handles persistence of VM metadata
-type Store struct {
-	db        *sql.DB
-	dbPath    string
-	masterKey *pki.MasterKey
-	mu        sync.RWMutex
+func parseDBTime(v any) time.Time {
+	switch t := v.(type) {
+	case time.Time:
+		return t
+	case *time.Time:
+		if t != nil {
+			return *t
+		}
+	case int64:
+		return time.Unix(t, 0).UTC()
+	case float64:
+		return time.Unix(int64(t), 0).UTC()
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02 15:04:05.999999999", "2006-01-02T15:04:05"} {
+			if pt, err := time.Parse(layout, t); err == nil {
+				return pt.UTC()
+			}
+		}
+	case []byte:
+		return parseDBTime(string(t))
+	}
+	return time.Time{}
 }
 
-// NewStore opens or creates the SQLite database at dbPath
-func NewStore(dbPath string) (*Store, error) {
-	isMem := isMemoryDB(dbPath)
-	if !isMem {
-		dir := filepath.Dir(dbPath)
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create db directory: %w", err)
+type execContext interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Store handles persistence of VM metadata
+type Store struct {
+	db          *sql.DB      // writerDB
+	readerDB    *sql.DB      // readerDB
+	unified     *store.Store // unified store
+	ownsUnified bool
+	dbPath      string
+	masterKey   *pki.MasterKey
+	mu          sync.RWMutex
+}
+
+func (s *Store) reader() *sql.DB {
+	if s.readerDB != nil {
+		return s.readerDB
+	}
+	return s.db
+}
+
+func (s *Store) writer() *sql.DB {
+	return s.db
+}
+
+// UnifiedStore returns the underlying unified store, if any.
+func (s *Store) UnifiedStore() *store.Store {
+	return s.unified
+}
+
+// DB returns the writer *sql.DB handle.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
+// ReaderDB returns the reader *sql.DB handle.
+func (s *Store) ReaderDB() *sql.DB {
+	return s.reader()
+}
+
+// NewStoreFromUnified creates a Store backed by an existing unified *store.Store.
+func NewStoreFromUnified(unifiedStore *store.Store, masterKeyDir string) (*Store, error) {
+	if unifiedStore == nil {
+		return nil, fmt.Errorf("unified store cannot be nil")
+	}
+
+	var mk *pki.MasterKey
+	var err error
+	if masterKeyDir != "" {
+		masterKeyPath := filepath.Join(masterKeyDir, "master.key")
+		mk, err = pki.LoadOrCreateMasterKey(masterKeyPath)
+		if err != nil {
+			mk, _ = resolveMasterKey(unifiedStore.Path())
 		}
-		_ = os.Chmod(dir, 0700)
+	} else {
+		mk, err = resolveMasterKey(unifiedStore.Path())
 	}
-
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", dbPath)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
-	}
-
-	mk, err := resolveMasterKey(dbPath)
-	if err != nil {
-		db.Close()
+	if err != nil && mk == nil {
 		return nil, fmt.Errorf("failed to resolve master key: %w", err)
 	}
 
-	store := &Store{db: db, dbPath: dbPath, masterKey: mk}
-	if err := store.initSchema(); err != nil {
-		db.Close()
+	s := &Store{
+		db:          unifiedStore.Writer(),
+		readerDB:    unifiedStore.Reader(),
+		unified:     unifiedStore,
+		ownsUnified: false,
+		dbPath:      unifiedStore.Path(),
+		masterKey:   mk,
+	}
+
+	if err := s.initSchema(); err != nil {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
-	if err := store.migrateSecretsAndTokens(context.Background()); err != nil {
-		db.Close()
+	if err := s.migrateSecretsAndTokens(context.Background()); err != nil {
 		return nil, fmt.Errorf("failed to migrate secrets and tokens: %w", err)
 	}
 
-	if !isMem {
-		_ = os.Chmod(dbPath, 0600)
-		for _, suffix := range []string{"-wal", "-shm"} {
-			if _, err := os.Stat(dbPath + suffix); err == nil {
-				_ = os.Chmod(dbPath+suffix, 0600)
-			}
-		}
-	}
-
-	return store, nil
+	return s, nil
 }
 
-// Close closes the database handle
+// NewStore opens or creates the SQLite database at dbPath backed by a unified *store.Store.
+func NewStore(dbPath string) (*Store, error) {
+	unifiedStore, err := store.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open unified store: %w", err)
+	}
+
+	masterDir := filepath.Dir(dbPath)
+	if isMemoryDB(dbPath) {
+		masterDir = ""
+	}
+	s, err := NewStoreFromUnified(unifiedStore, masterDir)
+	if err != nil {
+		_ = unifiedStore.Close()
+		return nil, err
+	}
+	s.ownsUnified = true
+	return s, nil
+}
+
+// Close closes the database handle.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.db.Close()
+	if s.ownsUnified && s.unified != nil {
+		return s.unified.Close()
+	}
+	if s.db != nil && s.unified == nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
+// WithTx executes fn inside an immediate writer transaction.
+func (s *Store) WithTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.unified != nil {
+		return s.unified.WithTx(ctx, fn)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SaveWorkerPool persists a pool.
@@ -94,11 +192,11 @@ func (s *Store) SaveWorkerPool(ctx context.Context, p *WorkerPool) error {
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
-	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_pools VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,labels_json=excluded.labels_json,policy_json=excluded.policy_json,updated_at=excluded.updated_at`, p.ID, p.Name, p.LabelsJSON, p.PolicyJSON, p.CreatedAt, p.UpdatedAt)
+	_, e := s.db.ExecContext(ctx, `INSERT INTO worker_pools (id,name,labels_json,policy_json,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,labels_json=excluded.labels_json,policy_json=excluded.policy_json,updated_at=excluded.updated_at`, p.ID, p.Name, p.LabelsJSON, p.PolicyJSON, p.CreatedAt, p.UpdatedAt)
 	return e
 }
 func (s *Store) ListWorkerPools(ctx context.Context) ([]*WorkerPool, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT id,name,labels_json,policy_json,created_at,updated_at FROM worker_pools ORDER BY name`)
+	rows, e := s.reader().QueryContext(ctx, `SELECT id,name,labels_json,policy_json,created_at,updated_at FROM worker_pools ORDER BY name`)
 	if e != nil {
 		return nil, e
 	}
@@ -106,9 +204,12 @@ func (s *Store) ListWorkerPools(ctx context.Context) ([]*WorkerPool, error) {
 	out := []*WorkerPool{}
 	for rows.Next() {
 		p := new(WorkerPool)
-		if e = rows.Scan(&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &p.CreatedAt, &p.UpdatedAt); e != nil {
+		var rawCreated, rawUpdated any
+		if e = rows.Scan(&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &rawCreated, &rawUpdated); e != nil {
 			return nil, e
 		}
+		p.CreatedAt = parseDBTime(rawCreated)
+		p.UpdatedAt = parseDBTime(rawUpdated)
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -249,7 +350,7 @@ func (s *Store) GetWorkerToken(ctx context.Context, token string) (*WorkerToken,
 	defer s.mu.RUnlock()
 	hashed := HashToken(token)
 	t := new(WorkerToken)
-	err := s.db.QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=? OR token=?`, hashed, token).
+	err := s.reader().QueryRowContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens WHERE token=? OR token=?`, hashed, token).
 		Scan(&t.Token, &t.Name, &t.PoolID, &t.LabelsJSON, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -267,7 +368,7 @@ func (s *Store) GetWorkerToken(ctx context.Context, token string) (*WorkerToken,
 func (s *Store) ListWorkerTokens(ctx context.Context) ([]*WorkerToken, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, e := s.db.QueryContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens ORDER BY created_at DESC`)
+	rows, e := s.reader().QueryContext(ctx, `SELECT token,name,pool_id,labels_json,expires_at,used_at,created_at FROM worker_tokens ORDER BY created_at DESC`)
 	if e != nil {
 		return nil, e
 	}
@@ -328,7 +429,7 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	return e
 }
 func (s *Store) ListQueuedJobs(ctx context.Context) ([]*Job, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
+	rows, e := s.reader().QueryContext(ctx, `SELECT id,owner_id,pool_id,type,state,priority,spec_json,result_json,repo_id,repo_url,repo_name,branch,commit_sha,source,vm_id,worker_id,queued_at,started_at,finished_at,deadline_at,created_at,updated_at FROM jobs WHERE state='queued' ORDER BY priority DESC,queued_at`)
 	if e != nil {
 		return nil, e
 	}
@@ -797,11 +898,89 @@ func (s *Store) migrateTableColumns(tableName string, cols []string) error {
 	return nil
 }
 
+// CreateVMWithQuotaCheck atomically checks quota limits and persists a new VM in a single writer transaction.
+func (s *Store) CreateVMWithQuotaCheck(ctx context.Context, vm *VM, limits QuotaLimits) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		ownerID := vm.OwnerID
+		if ownerID == "" {
+			ownerID = "default"
+		}
+		if ownerID != "" && (limits.Instances > 0 || limits.VCPUs > 0 || limits.MemoryMB > 0 || limits.DiskGB > 0) {
+			var currentInstances, currentVCPUs, currentMem, currentDiskMB int
+			err := tx.QueryRowContext(ctx, `
+				SELECT
+					COUNT(*),
+					COALESCE(SUM(vcpus), 0),
+					COALESCE(SUM(memory_mb), 0),
+					COALESCE(SUM(disk_mb), 0)
+				FROM vms
+				WHERE owner_id = ?
+			`, ownerID).Scan(&currentInstances, &currentVCPUs, &currentMem, &currentDiskMB)
+			if err != nil {
+				return fmt.Errorf("failed to check tenant VM usage: %w", err)
+			}
+
+			var currentVolDiskMB int
+			_ = tx.QueryRowContext(ctx, `
+				SELECT COALESCE(SUM(size_gb * 1024), 0)
+				FROM volumes
+				WHERE owner_id = ? AND id NOT LIKE 'vol_root_%'
+			`, ownerID).Scan(&currentVolDiskMB)
+			totalDiskMB := currentDiskMB + currentVolDiskMB
+
+			if limits.Instances > 0 && currentInstances+1 > limits.Instances {
+				return &ErrQuotaExceeded{
+					Resource:  "instance",
+					Limit:     int64(limits.Instances),
+					Current:   int64(currentInstances),
+					Requested: 1,
+					Message:   fmt.Sprintf("quota exceeded: instance limit is %d (currently %d)", limits.Instances, currentInstances),
+				}
+			}
+			if limits.VCPUs > 0 && currentVCPUs+vm.VCPUs > limits.VCPUs {
+				return &ErrQuotaExceeded{
+					Resource:  "vcpu",
+					Limit:     int64(limits.VCPUs),
+					Current:   int64(currentVCPUs),
+					Requested: int64(vm.VCPUs),
+					Message:   fmt.Sprintf("quota exceeded: vcpu limit is %d (currently %d, requested %d)", limits.VCPUs, currentVCPUs, vm.VCPUs),
+				}
+			}
+			if limits.MemoryMB > 0 && currentMem+vm.MemoryMB > limits.MemoryMB {
+				return &ErrQuotaExceeded{
+					Resource:  "memory",
+					Limit:     int64(limits.MemoryMB),
+					Current:   int64(currentMem),
+					Requested: int64(vm.MemoryMB),
+					Message:   fmt.Sprintf("quota exceeded: memory limit is %d MB (currently %d MB, requested %d MB)", limits.MemoryMB, currentMem, vm.MemoryMB),
+				}
+			}
+			if limits.DiskGB > 0 && totalDiskMB+vm.DiskMB > limits.DiskGB*1024 {
+				return &ErrQuotaExceeded{
+					Resource:  "disk",
+					Limit:     int64(limits.DiskGB),
+					Current:   int64(totalDiskMB),
+					Requested: int64(vm.DiskMB),
+					Message:   fmt.Sprintf("quota exceeded: disk limit is %d GB (currently %d MB, requested %d MB)", limits.DiskGB, totalDiskMB, vm.DiskMB),
+				}
+			}
+		}
+
+		return s.saveVMWithExecutor(ctx, tx, vm)
+	})
+}
+
 // SaveVM inserts or updates a VM record
 func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveVMWithExecutor(ctx, s.writer(), vm)
+}
 
+func (s *Store) saveVMWithExecutor(ctx context.Context, exec execContext, vm *VM) error {
 	now := time.Now().UTC()
 	if vm.CreatedAt.IsZero() {
 		vm.CreatedAt = now
@@ -852,7 +1031,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		pool_id = ?, worker_id = ?, last_activity_at = ?, auto_hibernated = ?, hibernate_reason = ?, owner_id = ?, updated_at = ?
 	WHERE internal_id = ? OR (owner_id = ? AND (id = ? OR name = ?));
 	`
-	res, err := s.db.ExecContext(ctx, updateQuery,
+	res, err := exec.ExecContext(ctx, updateQuery,
 		vm.ID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt, netIsolation,
 		vm.MACAddress, vm.TAPDevice, boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
@@ -880,7 +1059,7 @@ func (s *Store) SaveVM(ctx context.Context, vm *VM) error {
 		pid, socket_path, protected, description, startup_script, pool_id, worker_id, last_activity_at, auto_hibernated, hibernate_reason, created_at, updated_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
-	_, err = s.db.ExecContext(ctx, insertQuery,
+	_, err = exec.ExecContext(ctx, insertQuery,
 		vm.ID, vm.InternalID, vm.OwnerID, vm.Name, string(vm.Status), boolInt(vm.DesiredRunning), vm.VCPUs, vm.MemoryMB, vm.DiskMB,
 		vm.IPAddress, vm.PublicIP, pubEnabledInt, netIsolation, vm.MACAddress, vm.TAPDevice,
 		boolInt(vm.TailscaleEnabled), vm.TailnetIP, vm.TailnetDNS, vm.TailscaleDeviceID,
@@ -934,7 +1113,7 @@ func (s *Store) GetVMByOwner(ctx context.Context, ownerID, idOrName string) (*VM
 	LIMIT 1;
 	`
 
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName, idOrName, idOrName, idOrName, idOrName, idOrName)
+	row := s.reader().QueryRowContext(ctx, query, idOrName, idOrName, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName, idOrName, idOrName, idOrName, idOrName, idOrName)
 	vm := &VM{}
 	var status string
 	var pubEnabledInt int
@@ -994,7 +1173,7 @@ func (s *Store) ListVMsByOwner(ctx context.Context, ownerID string) ([]*VM, erro
 	ORDER BY created_at DESC;
 	`
 
-	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
+	rows, err := s.reader().QueryContext(ctx, query, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -1055,7 +1234,7 @@ func (s *Store) DeleteVMByOwner(ctx context.Context, ownerID, idOrName string) e
 	var name string
 	var protected int
 	checkQuery := `SELECT name, protected FROM vms WHERE (internal_id = ? OR id = ? OR name = ?) AND (? = '' OR owner_id = ?) LIMIT 1;`
-	if err := s.db.QueryRowContext(ctx, checkQuery, idOrName, idOrName, idOrName, ownerID, ownerID).Scan(&name, &protected); err == nil && protected != 0 {
+	if err := s.reader().QueryRowContext(ctx, checkQuery, idOrName, idOrName, idOrName, ownerID, ownerID).Scan(&name, &protected); err == nil && protected != 0 {
 		displayName := name
 		if displayName == "" {
 			displayName = idOrName
@@ -1080,7 +1259,7 @@ func (s *Store) DeleteVMByInternalID(ctx context.Context, internalID string) err
 	var name string
 	var protected int
 	checkQuery := `SELECT name, protected FROM vms WHERE internal_id = ? LIMIT 1;`
-	if err := s.db.QueryRowContext(ctx, checkQuery, internalID).Scan(&name, &protected); err == nil && protected != 0 {
+	if err := s.reader().QueryRowContext(ctx, checkQuery, internalID).Scan(&name, &protected); err == nil && protected != 0 {
 		displayName := name
 		if displayName == "" {
 			displayName = internalID
@@ -1097,7 +1276,7 @@ func (s *Store) GetAllocatedIPs(ctx context.Context) (map[string]bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, "SELECT ip_address FROM vms WHERE ip_address != ''")
+	rows, err := s.reader().QueryContext(ctx, "SELECT ip_address FROM vms WHERE ip_address != ''")
 	if err != nil {
 		return nil, err
 	}
@@ -1122,7 +1301,7 @@ func (s *Store) GetNetworkAllocations(ctx context.Context) ([]*NetworkAllocation
 	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, updated_at
 	FROM vms WHERE ip_address != '' ORDER BY ip_address ASC;
 	`
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.reader().QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -1159,7 +1338,7 @@ func (s *Store) GetNetworkAllocation(ctx context.Context, tapOrID string) (*Netw
 	SELECT id, name, owner_id, status, ip_address, public_ip, public_ip_enabled, network_isolation, mac_address, tap_device, updated_at
 	FROM vms WHERE tap_device = ? OR id = ? OR name = ? LIMIT 1;
 	`
-	row := s.db.QueryRowContext(ctx, query, tapOrID, tapOrID, tapOrID)
+	row := s.reader().QueryRowContext(ctx, query, tapOrID, tapOrID, tapOrID)
 	var a NetworkAllocation
 	var status string
 	var pubEnabledInt int
@@ -1273,7 +1452,7 @@ func (s *Store) GetImageByOwner(ctx context.Context, ownerID, idOrName string) (
 	LIMIT 1;
 	`
 
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName)
+	row := s.reader().QueryRowContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName)
 	img := &CustomImage{}
 	var pkgsStr, statusStr string
 	err := row.Scan(
@@ -1306,7 +1485,7 @@ func (s *Store) ListImages(ctx context.Context) ([]*CustomImage, error) {
 	FROM images ORDER BY created_at DESC;
 	`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.reader().QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -1425,7 +1604,7 @@ func (s *Store) GetTemplateByOwner(ctx context.Context, ownerID, idOrName string
 	LIMIT 1;
 	`
 
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName)
+	row := s.reader().QueryRowContext(ctx, query, idOrName, idOrName, idOrName, ownerID, ownerID, idOrName, idOrName)
 	tpl := &Template{}
 	err := row.Scan(
 		&tpl.ID, &tpl.InternalID, &tpl.OwnerID, &tpl.Name, &tpl.Description, &tpl.SourceVMID, &tpl.DiskPath,
@@ -1451,7 +1630,7 @@ func (s *Store) ListTemplates(ctx context.Context) ([]*Template, error) {
 	FROM templates ORDER BY created_at DESC;
 	`
 
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.reader().QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -1520,7 +1699,7 @@ func (s *Store) ListSSHKeys(ctx context.Context, ownerID string) ([]*SSHKey, err
 	WHERE (? = "" OR owner_id = ?)
 	ORDER BY created_at DESC;
 	`
-	rows, err := s.db.QueryContext(ctx, query, ownerID, ownerID)
+	rows, err := s.reader().QueryContext(ctx, query, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -1552,7 +1731,7 @@ func (s *Store) GetSSHKey(ctx context.Context, idOrName string) (*SSHKey, error)
 	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END
 	LIMIT 1;
 	`
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, idOrName)
+	row := s.reader().QueryRowContext(ctx, query, idOrName, idOrName, idOrName)
 	k := &SSHKey{}
 	var allSandboxes, isDefault int
 	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt)
@@ -1581,7 +1760,7 @@ func (s *Store) GetSSHKeyByOwner(ctx context.Context, ownerID, idOrName string) 
 	ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END, created_at DESC
 	LIMIT 1;
 	`
-	row := s.db.QueryRowContext(ctx, query, idOrName, idOrName, ownerID, ownerID, idOrName)
+	row := s.reader().QueryRowContext(ctx, query, idOrName, idOrName, ownerID, ownerID, idOrName)
 	k := &SSHKey{}
 	var allSandboxes, isDefault int
 	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt)
@@ -1610,7 +1789,7 @@ func (s *Store) GetDefaultSSHKey(ctx context.Context, ownerID string) (*SSHKey, 
 	ORDER BY created_at DESC
 	LIMIT 1;
 	`
-	row := s.db.QueryRowContext(ctx, query, ownerID)
+	row := s.reader().QueryRowContext(ctx, query, ownerID)
 	k := &SSHKey{}
 	var allSandboxes, isDefault int
 	err := row.Scan(&k.ID, &k.OwnerID, &k.Name, &k.PublicKey, &k.Fingerprint, &allSandboxes, &isDefault, &k.CreatedAt)
@@ -1675,8 +1854,9 @@ func (s *Store) GetWorkerPool(ctx context.Context, id string) (*WorkerPool, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	p := new(WorkerPool)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, labels_json, policy_json, created_at, updated_at FROM worker_pools WHERE id = ? OR name = ?`, id, id).Scan(
-		&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &p.CreatedAt, &p.UpdatedAt,
+	var rawCreated, rawUpdated any
+	err := s.reader().QueryRowContext(ctx, `SELECT id, name, labels_json, policy_json, created_at, updated_at FROM worker_pools WHERE id = ? OR name = ?`, id, id).Scan(
+		&p.ID, &p.Name, &p.LabelsJSON, &p.PolicyJSON, &rawCreated, &rawUpdated,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1684,6 +1864,8 @@ func (s *Store) GetWorkerPool(ctx context.Context, id string) (*WorkerPool, erro
 	if err != nil {
 		return nil, err
 	}
+	p.CreatedAt = parseDBTime(rawCreated)
+	p.UpdatedAt = parseDBTime(rawUpdated)
 	return p, nil
 }
 
@@ -1756,7 +1938,7 @@ func (s *Store) GetWorkerNode(ctx context.Context, id string) (*WorkerNode, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	n := new(WorkerNode)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, allocated_vcpus, allocated_mem_mb, allocated_disk_mb, physical_vcpus, physical_mem_mb, physical_disk_mb, used_vcpus, used_mem_mb, used_disk_mb, running_vms, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, allocated_vcpus, allocated_mem_mb, allocated_disk_mb, physical_vcpus, physical_mem_mb, physical_disk_mb, used_vcpus, used_mem_mb, used_disk_mb, running_vms, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes WHERE id = ? OR name = ? LIMIT 1`, id, id).Scan(
 		&n.ID, &n.Name, &n.PoolID, &n.Role, &n.Status, &n.UnderlayIP, &n.Arch,
 		&n.TotalVCPUs, &n.TotalMemMB, &n.TotalDiskMB,
 		&n.AllocatedVCPUs, &n.AllocatedMemMB, &n.AllocatedDiskMB,
@@ -1778,7 +1960,7 @@ func (s *Store) GetWorkerNode(ctx context.Context, id string) (*WorkerNode, erro
 func (s *Store) ListWorkerNodes(ctx context.Context) ([]*WorkerNode, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, allocated_vcpus, allocated_mem_mb, allocated_disk_mb, physical_vcpus, physical_mem_mb, physical_disk_mb, used_vcpus, used_mem_mb, used_disk_mb, running_vms, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes ORDER BY created_at DESC`)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, name, pool_id, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, allocated_vcpus, allocated_mem_mb, allocated_disk_mb, physical_vcpus, physical_mem_mb, physical_disk_mb, used_vcpus, used_mem_mb, used_disk_mb, running_vms, labels_json, capabilities_json, agent_version, fc_version, last_heartbeat, created_at, updated_at FROM worker_nodes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1823,7 +2005,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (*Job, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	j := new(Job)
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, owner_id, pool_id, type, state, priority, spec_json, result_json, repo_id, repo_url, repo_name, branch, commit_sha, source, vm_id, worker_id, queued_at, started_at, finished_at, deadline_at, created_at, updated_at FROM jobs WHERE id = ?`, id).Scan(
 		&j.ID, &j.OwnerID, &j.PoolID, &j.Type, &j.State, &j.Priority, &j.SpecJSON, &j.ResultJSON, &j.RepoID, &j.RepoURL, &j.RepoName, &j.Branch, &j.CommitSHA, &j.Source, &j.VMID, &j.WorkerID, &j.QueuedAt, &j.StartedAt, &j.FinishedAt, &j.DeadlineAt, &j.CreatedAt, &j.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -1845,11 +2027,11 @@ func (s *Store) ListJobs(ctx context.Context, ownerID string) ([]*Job, error) {
 		err  error
 	)
 	if ownerID == "" {
-		rows, err = s.db.QueryContext(ctx, selectCols+` ORDER BY queued_at DESC`)
+		rows, err = s.reader().QueryContext(ctx, selectCols+` ORDER BY queued_at DESC`)
 	} else {
 		// A specific owner sees strictly their own jobs; the legacy "default"
 		// owner is not shared with authenticated tenants.
-		rows, err = s.db.QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY queued_at DESC`, ownerID)
+		rows, err = s.reader().QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY queued_at DESC`, ownerID)
 	}
 	if err != nil {
 		return nil, err
@@ -1950,7 +2132,7 @@ func (s *Store) AppendJobLog(ctx context.Context, l *JobLog) error {
 func (s *Store) GetJobLogs(ctx context.Context, jobID string) ([]*JobLog, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, attempt_id, stream, seq, data, created_at FROM job_logs WHERE job_id = ? ORDER BY seq ASC, created_at ASC`, jobID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, job_id, attempt_id, stream, seq, data, created_at FROM job_logs WHERE job_id = ? ORDER BY seq ASC, created_at ASC`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -2032,7 +2214,7 @@ func (s *Store) GetVolumeByOwner(ctx context.Context, ownerID, idOrName string) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v := new(Volume)
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE (id = ? OR name = ?) AND (? = '' OR owner_id = ?) ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END LIMIT 1`, idOrName, idOrName, ownerID, ownerID, idOrName).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, owner_id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE (id = ? OR name = ?) AND (? = '' OR owner_id = ?) ORDER BY CASE WHEN id = ? THEN 1 ELSE 2 END LIMIT 1`, idOrName, idOrName, ownerID, ownerID, idOrName).Scan(
 		&v.ID, &v.OwnerID, &v.Name, &v.Pool, &v.SizeGB, &v.UsedGB, &v.Status, &v.AttachedVM,
 		&v.DevicePath, &v.MountPoint, &v.Filesystem, &v.Path, &v.IOPS, &v.Throughput, &v.Snapshots, &v.CreatedAt, &v.UpdatedAt,
 	)
@@ -2054,7 +2236,7 @@ func (s *Store) ListVolumes(ctx context.Context) ([]*Volume, error) {
 func (s *Store) ListVolumesByOwner(ctx context.Context, ownerID string) ([]*Volume, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, owner_id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE (? = '' OR owner_id = ?) ORDER BY created_at DESC`, ownerID, ownerID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, owner_id, name, pool, size_gb, used_gb, status, attached_vm, device_path, mount_point, filesystem, path, iops, throughput, snapshots, created_at, updated_at FROM volumes WHERE (? = '' OR owner_id = ?) ORDER BY created_at DESC`, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -2145,7 +2327,7 @@ func (s *Store) GetWebhook(ctx context.Context, id string) (*WebhookEndpoint, er
 	w := new(WebhookEndpoint)
 	var eventsJSON string
 	var activeInt int
-	err := s.db.QueryRowContext(ctx, `SELECT id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at FROM webhooks WHERE id = ? LIMIT 1`, id).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at FROM webhooks WHERE id = ? LIMIT 1`, id).Scan(
 		&w.ID, &w.URL, &w.Description, &w.Secret, &eventsJSON, &activeInt, &w.LastDelivery, &w.SuccessRate, &w.DeliveriesCount, &w.CreatedAt, &w.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2170,7 +2352,7 @@ func (s *Store) GetWebhook(ctx context.Context, id string) (*WebhookEndpoint, er
 func (s *Store) ListWebhooks(ctx context.Context) ([]*WebhookEndpoint, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at FROM webhooks ORDER BY created_at DESC`)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, url, description, secret, events, active, last_delivery, success_rate, deliveries_count, created_at, updated_at FROM webhooks ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -2213,7 +2395,7 @@ func (s *Store) GetOTelConfig(ctx context.Context) (*OTelConfig, error) {
 	defer s.mu.RUnlock()
 	c := new(OTelConfig)
 	var enabledInt, metricsInt, tracesInt, logsInt int
-	err := s.db.QueryRowContext(ctx, `SELECT enabled, endpoint, protocol, auth_header, service_name, sample_rate, export_interval, metrics_enabled, traces_enabled, logs_enabled, spans_exported, last_export_at FROM otel_config WHERE id = 1 LIMIT 1`).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT enabled, endpoint, protocol, auth_header, service_name, sample_rate, export_interval, metrics_enabled, traces_enabled, logs_enabled, spans_exported, last_export_at FROM otel_config WHERE id = 1 LIMIT 1`).Scan(
 		&enabledInt, &c.Endpoint, &c.Protocol, &c.AuthHeader, &c.ServiceName, &c.SampleRate, &c.ExportInterval, &metricsInt, &tracesInt, &logsInt, &c.SpansExported, &c.LastExportAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2310,7 +2492,7 @@ func (s *Store) ListAuditEvents(ctx context.Context, limit int) ([]*AuditEvent, 
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, timestamp, event, actor, target, status, duration_ms, payload FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, timestamp, event, actor, target, status, duration_ms, payload FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -2365,7 +2547,7 @@ func (s *Store) GetAccessAPIKey(ctx context.Context, id string) (*AccessAPIKey, 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	k := new(AccessAPIKey)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE id = ? LIMIT 1`, id).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE id = ? LIMIT 1`, id).Scan(
 		&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2383,7 +2565,7 @@ func (s *Store) GetAccessAPIKeyByToken(ctx context.Context, token string) (*Acce
 	defer s.mu.RUnlock()
 	hashed := HashToken(token)
 	k := new(AccessAPIKey)
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE token = ? OR token = ? LIMIT 1`, hashed, token).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE token = ? OR token = ? LIMIT 1`, hashed, token).Scan(
 		&k.ID, &k.Name, &k.Prefix, &k.Token, &k.Scope, &k.LastUsed, &k.ExpiresAt, &k.CreatedBy, &k.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2402,7 +2584,7 @@ func (s *Store) GetAccessAPIKeyByToken(ctx context.Context, token string) (*Acce
 func (s *Store) ListAccessAPIKeysByCreator(ctx context.Context, createdBy string) ([]*AccessAPIKey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE created_by = ? ORDER BY created_at DESC`, createdBy)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys WHERE created_by = ? ORDER BY created_at DESC`, createdBy)
 	if err != nil {
 		return nil, err
 	}
@@ -2422,7 +2604,7 @@ func (s *Store) ListAccessAPIKeysByCreator(ctx context.Context, createdBy string
 func (s *Store) ListAccessAPIKeys(ctx context.Context) ([]*AccessAPIKey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys ORDER BY created_at DESC`)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, name, prefix, token, scope, last_used, expires_at, created_by, created_at FROM access_api_keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -2520,7 +2702,7 @@ func (s *Store) GetEnvironmentByOwner(ctx context.Context, ownerID, name string)
 	var reposJSON string
 	var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
 	query := `SELECT owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments WHERE owner_id = ? AND name = ? LIMIT 1`
-	err := s.db.QueryRowContext(ctx, query, ownerID, name).Scan(
+	err := s.reader().QueryRowContext(ctx, query, ownerID, name).Scan(
 		&e.OwnerID, &e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2556,7 +2738,7 @@ func (s *Store) GetEnvironment(ctx context.Context, name string) (*EnvironmentPr
 	var reposJSON string
 	var isDefInt, safeInt, ghInt, secInt, boatInt, agInt int
 	query := `SELECT owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments WHERE name = ? ORDER BY CASE WHEN owner_id = '' OR owner_id = 'default' THEN 0 ELSE 1 END LIMIT 1`
-	err := s.db.QueryRowContext(ctx, query, name).Scan(
+	err := s.reader().QueryRowContext(ctx, query, name).Scan(
 		&e.OwnerID, &e.Name, &isDefInt, &safeInt, &ghInt, &reposJSON, &secInt, &e.Secrets, &boatInt, &agInt, &e.CredentialProfile, &e.Version, &e.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2592,9 +2774,9 @@ func (s *Store) ListEnvironmentsByOwner(ctx context.Context, ownerID string) ([]
 	var err error
 	const selectCols = `SELECT owner_id, name, is_default, safe_for_third_party, github_repos_enabled, github_repos, secrets_enabled, secrets, boat_creds_enabled, agent_creds_enabled, credential_profile, version, updated_at FROM environments`
 	if ownerID == "" {
-		rows, err = s.db.QueryContext(ctx, selectCols+` ORDER BY is_default DESC, name ASC`)
+		rows, err = s.reader().QueryContext(ctx, selectCols+` ORDER BY is_default DESC, name ASC`)
 	} else {
-		rows, err = s.db.QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY is_default DESC, name ASC`, ownerID)
+		rows, err = s.reader().QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY is_default DESC, name ASC`, ownerID)
 	}
 	if err != nil {
 		return nil, err
@@ -2708,7 +2890,7 @@ func (s *Store) GetPortForwardBySubdomain(ctx context.Context, subdomain string)
 	}
 	pf := new(PortForward)
 	var publicInt int
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE lower(subdomain) = ? LIMIT 1`, subdomain).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE lower(subdomain) = ? LIMIT 1`, subdomain).Scan(
 		&pf.ID, &pf.OwnerID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &publicInt, &pf.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2727,7 +2909,7 @@ func (s *Store) GetPortForward(ctx context.Context, id string) (*PortForward, er
 	defer s.mu.RUnlock()
 	pf := new(PortForward)
 	var publicInt int
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE id = ? LIMIT 1`, id).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE id = ? LIMIT 1`, id).Scan(
 		&pf.ID, &pf.OwnerID, &pf.HostPort, &pf.VMID, &pf.VMName, &pf.GuestPort, &pf.Protocol, &pf.Subdomain, &pf.PublicURL, &pf.Status, &publicInt, &pf.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -2749,7 +2931,7 @@ func (s *Store) ListPortForwards(ctx context.Context) ([]*PortForward, error) {
 func (s *Store) ListPortForwardsByOwner(ctx context.Context, ownerID string) ([]*PortForward, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE (? = '' OR owner_id = ?) ORDER BY created_at DESC`, ownerID, ownerID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE (? = '' OR owner_id = ?) ORDER BY created_at DESC`, ownerID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -2780,7 +2962,7 @@ func (s *Store) IsPortForwardPublicForOwner(ctx context.Context, ownerID, vmIDOr
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var count int
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM port_forwards WHERE (? = '' OR owner_id = ?) AND (vm_id = ? OR vm_name = ?) AND guest_port = ? AND public = 1`, ownerID, ownerID, vmIDOrName, vmIDOrName, guestPort).Scan(&count)
+	_ = s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM port_forwards WHERE (? = '' OR owner_id = ?) AND (vm_id = ? OR vm_name = ?) AND guest_port = ? AND public = 1`, ownerID, ownerID, vmIDOrName, vmIDOrName, guestPort).Scan(&count)
 	return count > 0
 }
 
@@ -2788,7 +2970,7 @@ func (s *Store) IsPortForwardPublicForOwner(ctx context.Context, ownerID, vmIDOr
 func (s *Store) ListPortForwardsForVM(ctx context.Context, ownerID, vmID, vmName string) ([]*PortForward, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE (? = '' OR owner_id = ?) AND (vm_id = ? OR (? != '' AND vm_name = ?)) ORDER BY guest_port ASC, created_at DESC`, ownerID, ownerID, vmID, vmName, vmName)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id, owner_id, host_port, vm_id, vm_name, guest_port, protocol, subdomain, public_url, status, public, created_at FROM port_forwards WHERE (? = '' OR owner_id = ?) AND (vm_id = ? OR (? != '' AND vm_name = ?)) ORDER BY guest_port ASC, created_at DESC`, ownerID, ownerID, vmID, vmName, vmName)
 	if err != nil {
 		return nil, err
 	}
@@ -2885,7 +3067,7 @@ func (s *Store) GetGitHubConnection(ctx context.Context, id string) (*GitHubConn
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	c := new(GitHubConnection)
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, name, repo_url, default_branch, github_token, webhook_secret, default_command, vcpus, memory_mb, timeout_sec, status, last_triggered_at, created_at FROM github_connections WHERE id = ? LIMIT 1`, id).Scan(
+	err := s.reader().QueryRowContext(ctx, `SELECT id, owner_id, name, repo_url, default_branch, github_token, webhook_secret, default_command, vcpus, memory_mb, timeout_sec, status, last_triggered_at, created_at FROM github_connections WHERE id = ? LIMIT 1`, id).Scan(
 		&c.ID, &c.OwnerID, &c.Name, &c.RepoURL, &c.DefaultBranch, &c.GitHubToken, &c.WebhookSecret,
 		&c.DefaultCommand, &c.VCPUs, &c.MemoryMB, &c.TimeoutSec, &c.Status, &c.LastTriggeredAt, &c.CreatedAt,
 	)
@@ -2915,9 +3097,9 @@ func (s *Store) ListGitHubConnections(ctx context.Context, ownerID string) ([]*G
 		err  error
 	)
 	if ownerID == "" {
-		rows, err = s.db.QueryContext(ctx, selectCols+` ORDER BY created_at DESC`)
+		rows, err = s.reader().QueryContext(ctx, selectCols+` ORDER BY created_at DESC`)
 	} else {
-		rows, err = s.db.QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
+		rows, err = s.reader().QueryContext(ctx, selectCols+` WHERE owner_id = ? ORDER BY created_at DESC`, ownerID)
 	}
 	if err != nil {
 		return nil, err
@@ -2996,7 +3178,7 @@ func (s *Store) GetSchedulingPolicy(ctx context.Context) (ClusterSchedulingPolic
 	defer s.mu.RUnlock()
 
 	var valueJSON string
-	err := s.db.QueryRowContext(ctx, `SELECT value_json FROM cluster_settings WHERE key = ? LIMIT 1`, schedulingPolicySettingKey).Scan(&valueJSON)
+	err := s.reader().QueryRowContext(ctx, `SELECT value_json FROM cluster_settings WHERE key = ? LIMIT 1`, schedulingPolicySettingKey).Scan(&valueJSON)
 	if err == sql.ErrNoRows {
 		return policy, nil
 	}

@@ -246,9 +246,19 @@ func (m *Manager) ProcessQueue(ctx context.Context) {
 }
 
 func (m *Manager) saveVMRecord(ctx context.Context, vm *db.VM) error {
+	return m.saveVMRecordWithQuota(ctx, vm, nil)
+}
+
+func (m *Manager) saveVMRecordWithQuota(ctx context.Context, vm *db.VM, quota *db.QuotaLimits) error {
 	if m.store != nil {
-		if err := m.store.SaveVM(ctx, vm); err != nil {
-			return err
+		if quota != nil {
+			if err := m.store.CreateVMWithQuotaCheck(ctx, vm, *quota); err != nil {
+				return err
+			}
+		} else {
+			if err := m.store.SaveVM(ctx, vm); err != nil {
+				return err
+			}
 		}
 	}
 	m.mu.Lock()
@@ -867,6 +877,8 @@ type CreateRequest struct {
 	// AllowCrossOwner lets a verified administrator use resources belonging to
 	// any tenant. It is set only by the control plane, never by API clients.
 	AllowCrossOwner bool `json:"-"`
+	// QuotaLimits specifies effective tenant quota limits to enforce atomically during VM insertion.
+	QuotaLimits *db.QuotaLimits `json:"-"`
 }
 
 func (r *CreateRequest) UnmarshalJSON(data []byte) error {
@@ -1976,7 +1988,7 @@ func (m *Manager) CreateVM(ctx context.Context, req CreateRequest) (*db.VM, erro
 		UpdatedAt:          time.Now().UTC(),
 	}
 
-	if err := m.saveVMRecord(ctx, vm); err != nil {
+	if err := m.saveVMRecordWithQuota(ctx, vm, req.QuotaLimits); err != nil {
 		m.ipAllocMu.Unlock()
 		m.storMgr.CleanupVM(internalID)
 		m.storMgr.CleanupVM(externalID)
