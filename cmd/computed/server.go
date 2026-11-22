@@ -869,6 +869,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/pools/", s.wrapAuth(s.handlePoolActions))
 	s.mux.HandleFunc("/api/v1/jobs", s.wrapAuth(s.handleJobs))
 	s.mux.HandleFunc("/api/v1/jobs/", s.wrapAuth(s.handleJobActions))
+	s.mux.HandleFunc("/api/v1/ci/jobs/", s.wrapAuth(s.handleJobActions))
 	s.mux.HandleFunc("/api/v1/ci/repos", s.wrapAuth(s.handleCIRepos))
 	s.mux.HandleFunc("/api/v1/ci/repos/", s.wrapAuth(s.handleCIRepoActions))
 	s.mux.HandleFunc("/api/v1/ci/webhooks/github", s.handleGitHubWebhook)
@@ -5709,26 +5710,48 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			req.Spec.CommitSHA = commitSHA
 		}
 
+		var (
+			envJSON    string
+			baseImage  string
+			templateID string
+		)
+		if req.Spec.Environment != nil {
+			if b, err := json.Marshal(req.Spec.Environment); err == nil {
+				envJSON = string(b)
+			}
+			baseImage = req.Spec.Environment.BaseImage
+			templateID = req.Spec.Environment.Template
+		}
+		if baseImage == "" {
+			baseImage = req.Spec.ImageID
+		}
+		if templateID == "" && req.Spec.TargetTemplate != "" {
+			templateID = req.Spec.TargetTemplate
+		}
+
 		specJSON, _ := json.Marshal(req.Spec)
 		jobID := fmt.Sprintf("job_%s", uuid.NewString()[:8])
 		now := time.Now().UTC()
 		job := &db.Job{
-			ID:        jobID,
-			OwnerID:   ownerID,
-			PoolID:    req.PoolID,
-			Type:      req.Type,
-			State:     "queued",
-			Priority:  req.Priority,
-			SpecJSON:  string(specJSON),
-			RepoID:    strings.TrimSpace(req.RepoID),
-			RepoURL:   repoURL,
-			RepoName:  repoName,
-			Branch:    branch,
-			CommitSHA: commitSHA,
-			Source:    source,
-			QueuedAt:  now,
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:              jobID,
+			OwnerID:         ownerID,
+			PoolID:          req.PoolID,
+			Type:            req.Type,
+			State:           "queued",
+			Priority:        req.Priority,
+			SpecJSON:        string(specJSON),
+			RepoID:          strings.TrimSpace(req.RepoID),
+			RepoURL:         repoURL,
+			RepoName:        repoName,
+			Branch:          branch,
+			CommitSHA:       commitSHA,
+			Source:          source,
+			EnvironmentJSON: envJSON,
+			BaseImage:       baseImage,
+			TemplateID:      templateID,
+			QueuedAt:        now,
+			CreatedAt:       now,
+			UpdatedAt:       now,
 		}
 		if job.Type == "" {
 			job.Type = "command"
@@ -5763,7 +5786,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleJobActions(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/v1/jobs/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/ci/jobs/")
+	path = strings.TrimPrefix(path, "/api/v1/jobs/")
 	parts := strings.Split(path, "/")
 	id := parts[0]
 	if id == "" {
@@ -5826,6 +5850,20 @@ func (s *Server) handleJobActions(w http.ResponseWriter, r *http.Request) {
 			logs = []*db.JobLog{}
 		}
 		json.NewEncoder(w).Encode(logs)
+	case "phases":
+		if r.Method != http.MethodGet {
+			httpError(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		phases, err := s.vmMgr.GetStore().ListJobPhasesByJob(r.Context(), id)
+		if err != nil {
+			httpError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if phases == nil {
+			phases = []*db.JobPhase{}
+		}
+		json.NewEncoder(w).Encode(phases)
 	default:
 		httpError(w, "unknown action", http.StatusNotFound)
 	}

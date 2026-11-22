@@ -23,6 +23,7 @@ import type {
   HealthResult,
   ImageListItem,
   JobLogRecord,
+  JobPhaseRecord,
   JobRecord,
   LaunchTemplateRequest,
   MigratePoolRequest,
@@ -893,6 +894,10 @@ export const api = {
 
   getJobLogs(id: string): Promise<JobLogRecord[]> {
     return request<JobLogRecord[]>(`/jobs/${encodeURIComponent(id)}/logs`);
+  },
+
+  getJobPhases(id: string): Promise<JobPhaseRecord[]> {
+    return request<JobPhaseRecord[]>(`/jobs/${encodeURIComponent(id)}/phases`);
   },
 
   // CI Connected GitHub Repositories

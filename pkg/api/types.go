@@ -178,20 +178,40 @@ type JobCreateRequest struct {
 	DeadlineAt  *int64                 `json:"deadline_at,omitempty"`
 }
 type JobResponse struct {
-	ID             string          `json:"id"`
-	OrganizationID string          `json:"organization_id"`
-	OwnerID        string          `json:"owner_id"`
-	PoolID         string          `json:"pool_id,omitempty"`
-	Type           string          `json:"type"`
-	State          string          `json:"state"`
-	Priority       int             `json:"priority"`
-	Spec           json.RawMessage `json:"spec"`
-	Result         json.RawMessage `json:"result,omitempty"`
-	QueuedAt       *int64          `json:"queued_at,omitempty"`
-	StartedAt      *int64          `json:"started_at,omitempty"`
-	FinishedAt     *int64          `json:"finished_at,omitempty"`
-	CreatedAt      int64           `json:"created_at"`
-	UpdatedAt      int64           `json:"updated_at"`
+	ID                  string              `json:"id"`
+	OrganizationID      string              `json:"organization_id"`
+	OwnerID             string              `json:"owner_id"`
+	PoolID              string              `json:"pool_id,omitempty"`
+	Type                string              `json:"type"`
+	State               string              `json:"state"`
+	Priority            int                 `json:"priority"`
+	Spec                json.RawMessage     `json:"spec"`
+	Result              json.RawMessage     `json:"result,omitempty"`
+	Environment         *JobEnvironmentSpec `json:"environment,omitempty"`
+	BaseImage           string              `json:"base_image,omitempty"`
+	TemplateID          string              `json:"template_id,omitempty"`
+	EnvSetupDurationMs  int64               `json:"env_setup_duration_ms,omitempty"`
+	ExecutionDurationMs int64               `json:"execution_duration_ms,omitempty"`
+	FailurePhase        string              `json:"failure_phase,omitempty"`
+	Phases              []JobPhaseResponse  `json:"phases,omitempty"`
+	QueuedAt            *int64              `json:"queued_at,omitempty"`
+	StartedAt           *int64              `json:"started_at,omitempty"`
+	FinishedAt          *int64              `json:"finished_at,omitempty"`
+	CreatedAt           int64               `json:"created_at"`
+	UpdatedAt           int64               `json:"updated_at"`
+}
+
+type JobPhaseResponse struct {
+	ID          string `json:"id"`
+	JobID       string `json:"job_id"`
+	Phase       string `json:"phase"`
+	StepIndex   int    `json:"step_index"`
+	Status      string `json:"status"`
+	ExitCode    int    `json:"exit_code"`
+	DurationMs  int64  `json:"duration_ms"`
+	Error       string `json:"error,omitempty"`
+	CreatedAt   int64  `json:"created_at"`
+	CompletedAt *int64 `json:"completed_at,omitempty"`
 }
 type JobListResponse struct {
 	Jobs       []JobResponse `json:"jobs"`

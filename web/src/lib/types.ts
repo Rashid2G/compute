@@ -379,6 +379,33 @@ export interface WorkerTokenRecord {
   created_at?: string;
 }
 
+export interface JobEnvironmentSpec {
+  template?: string;
+  base_image?: string;
+  packages?: string[];
+  setup_script?: string;
+  hardware?: {
+    vcpus?: number;
+    memory_mb?: number;
+    disk_mb?: number;
+  };
+}
+
+export interface JobPhaseRecord {
+  id: string;
+  job_id: string;
+  phase: 'boot' | 'env_setup' | 'workload' | string;
+  phase_name?: string;
+  step_index: number;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | string;
+  exit_code: number;
+  duration_ms: number;
+  error?: string;
+  error_message?: string;
+  created_at: string;
+  completed_at?: string | null;
+}
+
 export interface JobRecord {
   id: string;
   owner_id: string;
@@ -396,6 +423,13 @@ export interface JobRecord {
   source?: 'github' | 'manual' | 'cli' | string;
   vm_id?: string;
   worker_id?: string;
+  environment_json?: string;
+  base_image?: string;
+  template_id?: string;
+  env_setup_duration_ms?: number;
+  execution_duration_ms?: number;
+  failure_phase?: string;
+  phases?: JobPhaseRecord[];
   queued_at: string;
   started_at?: string | null;
   finished_at?: string | null;

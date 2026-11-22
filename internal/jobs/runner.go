@@ -18,6 +18,7 @@ import (
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/vm"
 	"github.com/Rashid2G/compute/pkg/api"
+	"github.com/google/uuid"
 )
 
 // DefaultWorkspace is where job commands run inside the sandbox when the job
@@ -161,26 +162,104 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		}
 	}
 
-	spec.ImageID = normalizeRunnerImageID(spec.ImageID)
-	logs.append("stdout", fmt.Sprintf("[compute] creating sandbox from image %q", spec.ImageID))
+	// Resolve environment specification: template, base image, guest packages, pre-flight setup script, hardware
+	var (
+		templateID  string
+		baseImage   string
+		packages    []string
+		setupScript string
+	)
+	if spec.Environment != nil {
+		templateID = strings.TrimSpace(spec.Environment.Template)
+		baseImage = strings.TrimSpace(spec.Environment.BaseImage)
+		packages = spec.Environment.Packages
+		setupScript = strings.TrimSpace(spec.Environment.SetupScript)
+		if spec.Environment.Hardware.VCPUs > 0 {
+			spec.VCPUs = spec.Environment.Hardware.VCPUs
+		}
+		if spec.Environment.Hardware.MemoryMB > 0 {
+			spec.MemoryMB = spec.Environment.Hardware.MemoryMB
+		}
+		if spec.Environment.Hardware.DiskMB > 0 {
+			spec.DiskMB = spec.Environment.Hardware.DiskMB
+		}
+	}
+	if len(packages) == 0 && len(spec.Packages) > 0 {
+		packages = spec.Packages
+	}
+	if setupScript == "" && !isImageBuild && strings.TrimSpace(spec.Script) != "" {
+		setupScript = strings.TrimSpace(spec.Script)
+	}
+	if baseImage == "" {
+		baseImage = spec.ImageID
+	}
+	baseImage = normalizeRunnerImageID(baseImage)
+	if spec.ImageID == "" {
+		spec.ImageID = baseImage
+	}
+
 	ownerID := job.OwnerID
 	if ownerID == "" {
 		ownerID = "jobs"
 	}
-	created, err := r.mgr.CreateVM(ctx, vm.CreateRequest{
+
+	// If templateID not explicitly specified, check if baseImage/ImageID matches an existing template
+	if templateID == "" && spec.ImageID != "" {
+		if tpl, _ := r.mgr.GetStore().GetTemplateByOwner(ctx, ownerID, spec.ImageID); tpl != nil {
+			templateID = tpl.Name
+		} else if tpl, _ := r.mgr.GetStore().GetTemplate(ctx, spec.ImageID); tpl != nil {
+			templateID = tpl.Name
+		}
+	}
+
+	// Update job record with environment info
+	if job.BaseImage == "" {
+		job.BaseImage = baseImage
+	}
+	if job.TemplateID == "" {
+		job.TemplateID = templateID
+	}
+	if job.EnvironmentJSON == "" && spec.Environment != nil {
+		if envBytes, err := json.Marshal(spec.Environment); err == nil {
+			job.EnvironmentJSON = string(envBytes)
+		}
+	}
+	_ = r.store.SaveJob(ctx, job)
+
+	// ==========================================
+	// Phase 1: Boot (Sandbox VM Provisioning)
+	// ==========================================
+	bootPhase := &db.JobPhase{
+		ID:        fmt.Sprintf("ph_%s", uuid.NewString()[:8]),
+		JobID:     job.ID,
+		Phase:     "boot",
+		StepIndex: 0,
+		Status:    "running",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = r.store.CreateJobPhase(ctx, bootPhase)
+	bootStarted := time.Now()
+
+	logs.append("stdout", fmt.Sprintf("[compute] Phase 1/3: Booting sandbox (template=%q, image=%q)", templateID, baseImage))
+	createReq := vm.CreateRequest{
 		Name:               jobSandboxName(job.ID),
 		OwnerID:            ownerID,
-		Image:              spec.ImageID,
+		Image:              baseImage,
+		Template:           templateID,
 		VCPUs:              spec.VCPUs,
 		MemoryMB:           spec.MemoryMB,
 		DiskMB:             spec.DiskMB,
 		AuthorizedOwnerIDs: spec.AuthorizedOwnerIDs,
 		AllowCrossOwner:    spec.AllowCrossOwner,
-	})
+	}
+	created, err := r.mgr.CreateVM(ctx, createReq)
 	if err != nil {
+		duration := time.Since(bootStarted).Milliseconds()
 		failure := "failed to create sandbox: " + err.Error()
 		logs.append("stderr", "[compute] "+failure)
-		r.finish(job.ID, "failed", map[string]interface{}{"error": failure})
+		_ = r.store.UpdateJobPhase(ctx, bootPhase.ID, "failed", 1, duration, failure)
+		_ = r.store.UpdateJobMetrics(ctx, job.ID, 0, 0, "environment_provision")
+		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "failure_phase": "environment_provision"})
 		return
 	}
 	vmID = created.ID
@@ -191,18 +270,40 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 	_ = r.store.UpdateJobExecution(ctx, job.ID, vmID, job.WorkerID)
 
 	if err := r.mgr.RunVM(ctx, created.ID); err != nil {
+		duration := time.Since(bootStarted).Milliseconds()
 		failure := "failed to start sandbox: " + err.Error()
 		logs.append("stderr", "[compute] "+failure)
-		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
+		_ = r.store.UpdateJobPhase(ctx, bootPhase.ID, "failed", 1, duration, failure)
+		_ = r.store.UpdateJobMetrics(ctx, job.ID, 0, 0, "environment_provision")
+		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
 		return
 	}
 
 	if err := r.waitReady(ctx, created.ID); err != nil {
+		duration := time.Since(bootStarted).Milliseconds()
 		logs.append("stderr", "[compute] "+err.Error())
-		r.finish(job.ID, "failed", map[string]interface{}{"error": err.Error(), "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
+		_ = r.store.UpdateJobPhase(ctx, bootPhase.ID, "failed", 1, duration, err.Error())
+		_ = r.store.UpdateJobMetrics(ctx, job.ID, 0, 0, "environment_provision")
+		r.finish(job.ID, "failed", map[string]interface{}{"error": err.Error(), "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
 		return
 	}
-	logs.append("stdout", "[compute] sandbox ready, running command")
+	bootDuration := time.Since(bootStarted).Milliseconds()
+	_ = r.store.UpdateJobPhase(ctx, bootPhase.ID, "succeeded", 0, bootDuration, "")
+	logs.append("stdout", fmt.Sprintf("[compute] Phase 1/3: Sandbox ready in %dms", bootDuration))
+
+	// ==========================================
+	// Phase 2: Environment Setup (Packages & Scripts)
+	// ==========================================
+	envPhase := &db.JobPhase{
+		ID:        fmt.Sprintf("ph_%s", uuid.NewString()[:8]),
+		JobID:     job.ID,
+		Phase:     "env_setup",
+		StepIndex: 1,
+		Status:    "running",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = r.store.CreateJobPhase(ctx, envPhase)
+	envStarted := time.Now()
 
 	cwd := strings.TrimSpace(spec.CWD)
 	if cwd == "" {
@@ -210,6 +311,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 	}
 	setup := fmt.Sprintf("sudo mkdir -p %s && sudo chown compute:compute %s", shellQuote(cwd), shellQuote(cwd))
 	if res, err := r.mgr.ExecVM(ctx, vmID, vm.ExecRequest{Command: setup, User: "compute", Timeout: 30}); err != nil || res.ExitCode != 0 {
+		duration := time.Since(envStarted).Milliseconds()
 		failure := "failed to prepare working directory " + cwd
 		if err != nil {
 			failure += ": " + err.Error()
@@ -217,21 +319,72 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 			failure += ": " + strings.TrimSpace(res.Stderr)
 		}
 		logs.append("stderr", "[compute] "+failure)
-		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
+		_ = r.store.UpdateJobPhase(ctx, envPhase.ID, "failed", 1, duration, failure)
+		_ = r.store.UpdateJobMetrics(ctx, job.ID, duration, 0, "environment_provision")
+		r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
 		return
 	}
 
+	// Install requested guest packages if any
+	if len(packages) > 0 {
+		logs.append("stdout", fmt.Sprintf("[compute] Phase 2/3: Installing %d environment packages: %s", len(packages), strings.Join(packages, ", ")))
+		pkgInstallCmd := fmt.Sprintf("sudo DEBIAN_FRONTEND=noninteractive apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y %s", strings.Join(packages, " "))
+		res, err := r.mgr.ExecVM(ctx, vmID, vm.ExecRequest{Command: pkgInstallCmd, User: "compute", Timeout: 300})
+		if err != nil || res.ExitCode != 0 {
+			duration := time.Since(envStarted).Milliseconds()
+			failure := "failed to install environment packages"
+			if err != nil {
+				failure += ": " + err.Error()
+			} else if res.Stderr != "" {
+				failure += ": " + strings.TrimSpace(res.Stderr)
+			}
+			logs.append("stderr", "[compute] "+failure)
+			_ = r.store.UpdateJobPhase(ctx, envPhase.ID, "failed", 1, duration, failure)
+			_ = r.store.UpdateJobMetrics(ctx, job.ID, duration, 0, "environment_provision")
+			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
+			return
+		}
+		logs.append("stdout", "[compute] Environment packages installed successfully")
+	}
+
+	// Run environment setup script if provided
+	if setupScript != "" {
+		logs.append("stdout", "[compute] Phase 2/3: Executing pre-flight environment setup script")
+		scriptCmd := fmt.Sprintf("cd %s && %s", shellQuote(cwd), setupScript)
+		res, err := r.mgr.ExecVM(ctx, vmID, vm.ExecRequest{Command: scriptCmd, User: "compute", Timeout: 300})
+		if err != nil || res.ExitCode != 0 {
+			duration := time.Since(envStarted).Milliseconds()
+			failure := "environment setup script failed"
+			if err != nil {
+				failure += ": " + err.Error()
+			} else if res.Stderr != "" {
+				failure += ": " + strings.TrimSpace(res.Stderr)
+			}
+			logs.append("stderr", "[compute] "+failure)
+			_ = r.store.UpdateJobPhase(ctx, envPhase.ID, "failed", 1, duration, failure)
+			_ = r.store.UpdateJobMetrics(ctx, job.ID, duration, 0, "environment_provision")
+			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
+			return
+		}
+		logs.append("stdout", "[compute] Environment setup script completed successfully")
+	}
+
+	// Extract job files if provided
 	if spec.Files != "" {
 		archive, err := base64.StdEncoding.DecodeString(spec.Files)
 		if err != nil {
+			duration := time.Since(envStarted).Milliseconds()
 			failure := "invalid file archive: " + err.Error()
 			logs.append("stderr", "[compute] "+failure)
-			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
+			_ = r.store.UpdateJobPhase(ctx, envPhase.ID, "failed", 1, duration, failure)
+			_ = r.store.UpdateJobMetrics(ctx, job.ID, duration, 0, "environment_provision")
+			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
 			return
 		}
 		cmd := fmt.Sprintf("tar -xzf - -C %s", shellQuote(cwd))
 		res, err := r.mgr.ExecVMInput(ctx, vmID, vm.ExecRequest{Command: cmd, User: "compute", Timeout: 120}, bytes.NewReader(archive))
 		if err != nil || res.ExitCode != 0 {
+			duration := time.Since(envStarted).Milliseconds()
 			failure := "failed to sync job files"
 			if err != nil {
 				failure += ": " + err.Error()
@@ -239,10 +392,30 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 				failure += ": " + strings.TrimSpace(res.Stderr)
 			}
 			logs.append("stderr", "[compute] "+failure)
-			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID})
+			_ = r.store.UpdateJobPhase(ctx, envPhase.ID, "failed", 1, duration, failure)
+			_ = r.store.UpdateJobMetrics(ctx, job.ID, duration, 0, "environment_provision")
+			r.finish(job.ID, "failed", map[string]interface{}{"error": failure, "sandbox_id": vmID, "vm_id": vmID, "worker_id": job.WorkerID, "failure_phase": "environment_provision"})
 			return
 		}
 	}
+
+	envDuration := time.Since(envStarted).Milliseconds()
+	_ = r.store.UpdateJobPhase(ctx, envPhase.ID, "succeeded", 0, envDuration, "")
+	logs.append("stdout", fmt.Sprintf("[compute] Phase 2/3: Environment provisioned in %dms", envDuration))
+
+	// ==========================================
+	// Phase 3: Workload Execution
+	// ==========================================
+	workloadPhase := &db.JobPhase{
+		ID:        fmt.Sprintf("ph_%s", uuid.NewString()[:8]),
+		JobID:     job.ID,
+		Phase:     "workload",
+		StepIndex: 2,
+		Status:    "running",
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = r.store.CreateJobPhase(ctx, workloadPhase)
+	workloadStarted := time.Now()
 
 	// Copy spec env so we can inject the stored GitHub token at execution time
 	// without ever persisting raw tokens inside jobs.spec_json.
@@ -268,6 +441,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		}
 	}
 
+	logs.append("stdout", "[compute] Phase 3/3: Executing workload command")
 	command := buildJobCommand(cwd, execSpec)
 	pending := map[string]string{}
 	flush := func(stream string) {
@@ -305,13 +479,33 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 	flush("stdout")
 	flush("stderr")
 
+	workloadDuration := time.Since(workloadStarted).Milliseconds()
+	failurePhase := ""
+	state := "succeeded"
+	if err != nil {
+		state = "failed"
+		failurePhase = "workload_execution"
+		_ = r.store.UpdateJobPhase(ctx, workloadPhase.ID, "failed", 1, workloadDuration, err.Error())
+	} else if exitCode != 0 {
+		state = "failed"
+		failurePhase = "workload_execution"
+		errMsg := fmt.Sprintf("workload command failed with exit code %d", exitCode)
+		_ = r.store.UpdateJobPhase(ctx, workloadPhase.ID, "failed", exitCode, workloadDuration, errMsg)
+	} else {
+		_ = r.store.UpdateJobPhase(ctx, workloadPhase.ID, "succeeded", 0, workloadDuration, "")
+	}
+
 	result := map[string]interface{}{
-		"exit_code":   exitCode,
-		"duration_ms": time.Since(started).Milliseconds(),
-		"sandbox_id":  vmID,
-		"vm_id":       vmID,
-		"worker_id":   job.WorkerID,
-		"image":       spec.ImageID,
+		"exit_code":             exitCode,
+		"duration_ms":           time.Since(started).Milliseconds(),
+		"env_setup_duration_ms": envDuration,
+		"execution_duration_ms": workloadDuration,
+		"failure_phase":         failurePhase,
+		"sandbox_id":            vmID,
+		"vm_id":                 vmID,
+		"worker_id":             job.WorkerID,
+		"image":                 baseImage,
+		"template_id":           templateID,
 	}
 	if job.Source != "" {
 		result["source"] = job.Source
@@ -328,14 +522,13 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 	if job.CommitSHA != "" {
 		result["commit_sha"] = job.CommitSHA
 	}
-	state := "succeeded"
 	if err != nil {
-		state = "failed"
 		result["error"] = err.Error()
 	} else if exitCode != 0 {
-		state = "failed"
-		result["error"] = fmt.Sprintf("configuration command failed with exit code %d", exitCode)
+		result["error"] = fmt.Sprintf("workload command failed with exit code %d", exitCode)
 	}
+
+	_ = r.store.UpdateJobMetrics(ctx, job.ID, envDuration, workloadDuration, failurePhase)
 
 	if state == "succeeded" && isImageBuild && targetTemplate != "" {
 		logs.append("stdout", fmt.Sprintf("[compute] image configuration complete. Creating template %q...", targetTemplate))
@@ -380,7 +573,7 @@ func (r *Runner) run(ctx context.Context, job *db.Job, spec api.JobSpec) {
 		}
 	}
 
-	logs.append("stdout", fmt.Sprintf("[compute] job finished with exit code %d", exitCode))
+	logs.append("stdout", fmt.Sprintf("[compute] Phase 3/3: Workload finished with exit code %d (executed in %dms)", exitCode, workloadDuration))
 	r.finish(job.ID, state, result)
 }
 

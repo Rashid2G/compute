@@ -23,6 +23,7 @@ import { formatMemory, formatRelativeTime } from '@/lib/format';
 import type {
   GitHubConnectionRecord,
   JobLogRecord,
+  JobPhaseRecord,
   JobRecord,
   QueueResult,
   Template,
@@ -101,6 +102,8 @@ export function CIPage({
   );
   const [jobImage, setJobImage] = useState('ubuntu-24');
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [jobPackages, setJobPackages] = useState('');
+  const [jobSetupScript, setJobSetupScript] = useState('');
   const [jobVcpus, setJobVcpus] = useState(2);
   const [jobMemoryMb, setJobMemoryMb] = useState(2048);
   const [jobTimeoutSec, setJobTimeoutSec] = useState(300);
@@ -109,6 +112,7 @@ export function CIPage({
   // Selected job logs drawer
   const [selectedJob, setSelectedJob] = useState<JobRecord | null>(null);
   const [jobLogs, setJobLogs] = useState<JobLogRecord[]>([]);
+  const [jobPhases, setJobPhases] = useState<JobPhaseRecord[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -161,10 +165,23 @@ export function CIPage({
     }
   }, []);
 
+  const fetchSelectedPhases = useCallback(async (jobId: string) => {
+    try {
+      const res = await api.getJobPhases(jobId);
+      setJobPhases(res || []);
+    } catch {
+      setJobPhases([]);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!selectedJob) return;
+    if (!selectedJob) {
+      setJobPhases([]);
+      return;
+    }
     void fetchSelectedLogs(selectedJob.id, jobLogs.length === 0);
-  }, [selectedJob?.id, selectedJob?.state, selectedJob?.updated_at, fetchSelectedLogs]);
+    void fetchSelectedPhases(selectedJob.id);
+  }, [selectedJob?.id, selectedJob?.state, selectedJob?.updated_at, fetchSelectedLogs, fetchSelectedPhases]);
 
   function openConnectModal() {
     setEditingRepo(null);
@@ -311,6 +328,14 @@ export function CIPage({
     if (!command) return;
     setDispatchOpen(false);
 
+    const parsedPkgs = jobPackages.trim()
+      ? jobPackages
+          .split(/[,\n]/)
+          .map((p) => p.trim())
+          .filter(Boolean)
+      : undefined;
+    const isTemplate = templates.some((t) => t.name === jobImage);
+
     const toastID = toast.loading('Dispatching CI job…');
     void api
       .createJob({
@@ -319,11 +344,21 @@ export function CIPage({
         priority: jobPriority,
         source: 'manual',
         spec: {
-          image_id: jobImage || 'ubuntu-24',
+          image_id: isTemplate ? undefined : (jobImage || 'ubuntu-24'),
           command: ['bash', '-lc', command],
           vcpus: jobVcpus,
           memory_mb: jobMemoryMb,
           timeout_seconds: jobTimeoutSec,
+          environment: {
+            template: isTemplate ? jobImage : undefined,
+            base_image: !isTemplate ? (jobImage || 'ubuntu-24') : undefined,
+            packages: parsedPkgs,
+            setup_script: jobSetupScript.trim() || undefined,
+            hardware: {
+              vcpus: jobVcpus,
+              memory_mb: jobMemoryMb,
+            },
+          },
         },
       })
       .then(async (created) => {
@@ -756,6 +791,84 @@ export function CIPage({
               </button>
             </div>
           </div>
+
+          {/* Environment & Phase Duration Badges */}
+          <div className="flex flex-wrap items-center gap-3 text-[11.5px] font-mono text-muted-foreground border-b border-border pb-2">
+            <div>
+              <span className="text-foreground font-medium">Environment: </span>
+              <span className="border border-border px-1.5 py-0.5 bg-muted/20 text-foreground">
+                {selectedJob.template_id
+                  ? `template:${selectedJob.template_id}`
+                  : selectedJob.base_image || 'ubuntu-24'}
+              </span>
+            </div>
+            {selectedJob.env_setup_duration_ms !== null &&
+              selectedJob.env_setup_duration_ms !== undefined && (
+                <div>
+                  <span className="text-foreground font-medium">Setup: </span>
+                  <span>{selectedJob.env_setup_duration_ms}ms</span>
+                </div>
+              )}
+            {selectedJob.execution_duration_ms !== null &&
+              selectedJob.execution_duration_ms !== undefined && (
+                <div>
+                  <span className="text-foreground font-medium">Workload: </span>
+                  <span>{selectedJob.execution_duration_ms}ms</span>
+                </div>
+              )}
+            {selectedJob.failure_phase && (
+              <div className="border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-destructive text-[11px]">
+                Failure Phase: {selectedJob.failure_phase}
+              </div>
+            )}
+          </div>
+
+          {/* Phase Timeline Breakdown */}
+          {jobPhases.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-border pb-2">
+              <span className="text-[11px] font-medium text-muted-foreground">
+                Phases:
+              </span>
+              {jobPhases.map((phase) => {
+                const phaseName = phase.phase || phase.phase_name;
+                const phaseErr = phase.error || phase.error_message;
+                return (
+                  <div
+                    key={phase.id || phaseName}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 border px-2 py-0.5 font-mono text-[11px]',
+                      phase.status === 'succeeded' &&
+                        'border-success/40 bg-success/10 text-success',
+                      phase.status === 'failed' &&
+                        'border-destructive/40 bg-destructive/10 text-destructive',
+                      phase.status === 'running' &&
+                        'border-primary bg-selected text-selected-foreground animate-pulse',
+                      phase.status === 'pending' &&
+                        'border-border text-muted-foreground',
+                    )}
+                  >
+                    <span className="font-semibold uppercase">
+                      {phaseName}
+                    </span>
+                    {phase.duration_ms !== null && phase.duration_ms !== undefined && (
+                      <span className="text-[10px] opacity-80">
+                        ({phase.duration_ms}ms)
+                      </span>
+                    )}
+                    {phaseErr && (
+                      <span
+                        className="text-[10px] text-destructive max-w-xs truncate"
+                        title={phaseErr}
+                      >
+                        · {phaseErr}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           <pre className="max-h-72 overflow-auto border border-border bg-[#060606] p-3 font-mono text-[11.5px] leading-relaxed text-[#fefefe]">
             {logsLoading
               ? 'Loading job execution logs…'
@@ -1149,6 +1262,32 @@ export function CIPage({
                   required
                   className="w-full border border-border bg-background p-2.5 font-mono text-[12px]"
                 />
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Packages (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={jobPackages}
+                    onChange={(e) => setJobPackages(e.target.value)}
+                    placeholder="e.g. git, curl, build-essential"
+                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[11.5px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-muted-foreground mb-1">
+                    Pre-flight Setup Script (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={jobSetupScript}
+                    onChange={(e) => setJobSetupScript(e.target.value)}
+                    placeholder="e.g. npm ci || cargo build"
+                    className="h-8 w-full border border-border bg-background px-2.5 font-mono text-[11.5px]"
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-4 gap-2">
                 <div>
