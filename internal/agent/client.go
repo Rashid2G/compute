@@ -50,6 +50,12 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("%w (%s): %v", ErrVsockConnect, c.udsPath, err)
 	}
 
+	// Honor caller context deadline during the CONNECT handshake so a stalled
+	// hypervisor socket cannot block ReadString indefinitely.
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+
 	// Step 1: Host sends "CONNECT <port>\n"
 	cmd := fmt.Sprintf("CONNECT %d\n", c.vsockPort)
 	if _, err := conn.Write([]byte(cmd)); err != nil {
@@ -70,6 +76,9 @@ func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("%w: server rejected connection with '%s'", ErrHandshake, ackTrim)
 	}
+
+	// Clear handshake deadline; callers (roundTrip / ExecStream) manage stream deadlines.
+	_ = conn.SetDeadline(time.Time{})
 
 	// The connection is now a transparent, full-duplex byte stream to compute-agent in guest!
 	return conn, nil

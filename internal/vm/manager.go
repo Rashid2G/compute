@@ -3707,9 +3707,19 @@ func (m *Manager) flushGuest(ctx context.Context, vm *db.VM) error {
 	if m.guestSyncer != nil {
 		return m.guestSyncer(ctx, vm)
 	}
-	// Prefer vsock compute-agent sync (supports airgapped microVMs)
+	// Prefer vsock compute-agent sync (supports airgapped microVMs without powering off the guest)
 	if client, ok := m.tryAgent(ctx, vm); ok {
-		return client.Shutdown(ctx)
+		res, err := client.Exec(ctx, agent.Request{
+			Cmd:        []string{"sync"},
+			TimeoutSec: 5,
+		})
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("agent sync failed with exit code %d: %s", res.ExitCode, strings.TrimSpace(res.Stderr))
+		}
+		return nil
 	}
 	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -4859,6 +4869,7 @@ func (m *Manager) handleProcessExit(vmID string, pid int) {
 
 	if vm.Status.IsActiveRunning() && ((pid > 0 && vm.PID == pid) || (vm.PID > 0 && !m.isAlive(vm.PID))) {
 		log.Printf("[vm-manager] VM %s (pid %d) exited, marking stopped", vmID, vm.PID)
+		m.invalidateAgent(vmID)
 		vm.Status = db.StatusStopped
 		vm.PID = 0
 		vm.UpdatedAt = time.Now().UTC()

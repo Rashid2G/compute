@@ -136,8 +136,16 @@ func TestManagerVsockAgentOperations(t *testing.T) {
 	m, store, _, _ := testManager(t)
 	ctx := context.Background()
 
-	sockPath, _, cleanup := setupMockVsockServer(t)
+	sockPath, srv, cleanup := setupMockVsockServer(t)
 	defer cleanup()
+
+	shutdownTriggered := make(chan struct{}, 1)
+	srv.OnShutdown = func() {
+		select {
+		case shutdownTriggered <- struct{}{}:
+		default:
+		}
+	}
 
 	client := agent.NewClient(sockPath, agent.DefaultVsockPort)
 	if err := client.Ping(ctx); err != nil {
@@ -264,6 +272,16 @@ func TestManagerVsockAgentOperations(t *testing.T) {
 	// Clock sync
 	if err := m.SyncClock(ctx, vm.ID, time.Now().UnixNano()); err != nil {
 		t.Logf("SyncClock completed (err: %v)", err)
+	}
+
+	// 6. flushGuest must execute sync without triggering guest shutdown/poweroff
+	if err := m.flushGuest(ctx, vm); err != nil {
+		t.Fatalf("flushGuest via vsock agent failed: %v", err)
+	}
+	select {
+	case <-shutdownTriggered:
+		t.Fatalf("flushGuest unexpectedly invoked agent Shutdown/poweroff instead of sync")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

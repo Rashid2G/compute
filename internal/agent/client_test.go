@@ -280,10 +280,13 @@ func TestAgentClientProcOps(t *testing.T) {
 }
 
 func TestAgentClientStatsClockShutdown(t *testing.T) {
-	shutdownCalled := false
+	shutdownCh := make(chan struct{}, 1)
 	srv := NewServer()
 	srv.OnShutdown = func() {
-		shutdownCalled = true
+		select {
+		case shutdownCh <- struct{}{}:
+		default:
+		}
 	}
 	sockPath, cleanup := setupMockVsock(t, srv)
 	defer cleanup()
@@ -309,7 +312,9 @@ func TestAgentClientStatsClockShutdown(t *testing.T) {
 	if err := client.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown failed: %v", err)
 	}
-	if !shutdownCalled {
+	select {
+	case <-shutdownCh:
+	case <-time.After(2 * time.Second):
 		t.Errorf("expected shutdown hook to be invoked")
 	}
 }
