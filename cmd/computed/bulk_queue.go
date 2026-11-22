@@ -423,6 +423,16 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
 	}
+	if s.authEnabled() && !isAdmin && s.authMgr != nil && req.OwnerID != "" && req.QuotaLimits == nil {
+		if limits, _, err := s.authMgr.GetLimits(ctx, req.OwnerID); err == nil && limits != nil {
+			req.QuotaLimits = &db.QuotaLimits{
+				Instances: limits.Instances,
+				VCPUs:     limits.VCPUs,
+				MemoryMB:  limits.MemoryMB,
+				DiskGB:    limits.DiskGB,
+			}
+		}
+	}
 
 	selectedNode, releasePlacement, err := s.reserveNodePlacement(ctx, req, vcpus, memoryMB, diskMB)
 	if err != nil {
@@ -448,6 +458,10 @@ func (s *Server) executeCreateVM(ctx context.Context, isAdmin bool, req vm.Creat
 	}
 
 	if err != nil {
+		var qErr *db.ErrQuotaExceeded
+		if errors.As(err, &qErr) {
+			return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
+		}
 		var rle *api.ResourceLimitError
 		if errors.As(err, &rle) {
 			return nil, err
@@ -511,6 +525,16 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 	if err := s.enforceCreateQuotaWithAdmin(ctx, isAdmin, req.OwnerID, vcpus, memoryMB, diskMB); err != nil {
 		return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
 	}
+	if s.authEnabled() && !isAdmin && s.authMgr != nil && req.OwnerID != "" && req.QuotaLimits == nil {
+		if limits, _, err := s.authMgr.GetLimits(ctx, req.OwnerID); err == nil && limits != nil {
+			req.QuotaLimits = &db.QuotaLimits{
+				Instances: limits.Instances,
+				VCPUs:     limits.VCPUs,
+				MemoryMB:  limits.MemoryMB,
+				DiskGB:    limits.DiskGB,
+			}
+		}
+	}
 	placeReq := req
 	if placeReq.WorkerID == "" && s.vmMgr != nil {
 		if src, gErr := s.vmMgr.GetVM(ctx, sourceVMID); gErr == nil && src != nil {
@@ -541,6 +565,10 @@ func (s *Server) executeCloneVM(ctx context.Context, isAdmin bool, sourceVMID st
 
 	cloned, err := s.vmMgr.CloneVM(ctx, sourceVMID, req)
 	if err != nil {
+		var qErr *db.ErrQuotaExceeded
+		if errors.As(err, &qErr) {
+			return nil, &httpStatusError{code: http.StatusTooManyRequests, err: err}
+		}
 		var rle *api.ResourceLimitError
 		if errors.As(err, &rle) {
 			return nil, err

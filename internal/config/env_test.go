@@ -167,7 +167,7 @@ func TestDataDirCompatibilityRoot(t *testing.T) {
 	if err := ApplyEnvOverrides(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Server.DBPath != filepath.Join(dir, "data", "compute.db") {
+	if cfg.Server.DBPath != filepath.Join(dir, "data", "state.db") {
 		t.Fatalf("db path = %q", cfg.Server.DBPath)
 	}
 	if cfg.Images.ImagesDir != filepath.Join(dir, "images") {

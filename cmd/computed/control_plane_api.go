@@ -1113,8 +1113,16 @@ func (s *Server) handleAccessAPIKeyActions(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	st := s.vmMgr.GetStore()
 
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/api-keys/")
-	id = strings.TrimSpace(id)
+	id := r.URL.Path
+	switch {
+	case strings.HasPrefix(id, "/api/v1/access/api-keys/"):
+		id = strings.TrimPrefix(id, "/api/v1/access/api-keys/")
+	case strings.HasPrefix(id, "/api/v1/api-keys/"):
+		id = strings.TrimPrefix(id, "/api/v1/api-keys/")
+	default:
+		id = ""
+	}
+	id = strings.Trim(strings.TrimSpace(id), "/")
 	if id == "" {
 		httpError(w, "key id required", http.StatusBadRequest)
 		return

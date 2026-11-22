@@ -457,7 +457,7 @@ func DefaultConfig() GlobalConfig {
 			// Bind loopback by default: a fresh install must not expose the
 			// API/GUI to the network until the operator sets COMPUTE_BIND_ADDRESS.
 			ListenAddr:     "127.0.0.1:18080",
-			DBPath:         "/var/lib/compute/data/compute.db",
+			DBPath:         "/var/lib/compute/data/state.db",
 			FirecrackerBin: "/usr/local/bin/firecracker",
 			SignupEnabled:  false,
 			AdminUsername:  "admin",
@@ -551,7 +551,7 @@ func LoadConfigFile(path string) (GlobalConfig, error) {
 		cfg.Server.ListenAddr = DefaultConfig().Server.ListenAddr
 	}
 	if cfg.Server.DBPath == "" {
-		cfg.Server.DBPath = "/var/lib/compute/data/compute.db"
+		cfg.Server.DBPath = "/var/lib/compute/data/state.db"
 	}
 	if cfg.Server.FirecrackerBin == "" {
 		cfg.Server.FirecrackerBin = "/usr/local/bin/firecracker"

@@ -313,20 +313,37 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 	var metaStore *store.Store
 
 	if cfg.Server.AuthEnabled || cfg.Server.AuthDBPath != "" {
-		authDB := cfg.Server.AuthDBPath
-		if authDB == "" {
-			masterDir := filepath.Dir(cfg.Server.DBPath)
+		var st *store.Store
+		var masterDir string
+		if cfg.Server.AuthDBPath != "" && cfg.Server.AuthDBPath != cfg.Server.DBPath {
+			masterDir = filepath.Dir(cfg.Server.AuthDBPath)
+			_ = os.MkdirAll(masterDir, 0700)
+			st, _ = store.Open(cfg.Server.AuthDBPath)
+		} else if vmMgr != nil && vmMgr.GetStore() != nil && vmMgr.GetStore().UnifiedStore() != nil {
+			st = vmMgr.GetStore().UnifiedStore()
+			masterDir = filepath.Dir(cfg.Server.DBPath)
 			if masterDir == "" || masterDir == "." {
 				masterDir = "/var/lib/compute/master"
 			}
-			authDB = filepath.Join(masterDir, "auth.db")
+		} else {
+			masterDir = filepath.Dir(cfg.Server.DBPath)
+			if masterDir == "" || masterDir == "." {
+				masterDir = "/var/lib/compute/master"
+			}
+			authDB := filepath.Join(masterDir, "auth.db")
+			_ = os.MkdirAll(masterDir, 0700)
+			st, _ = store.Open(authDB)
 		}
-		masterDir := filepath.Dir(authDB)
-		_ = os.MkdirAll(masterDir, 0700)
-		masterKeyPath := filepath.Join(masterDir, "master.key")
-		mk, err := pki.LoadOrCreateMasterKey(masterKeyPath)
-		if err == nil {
-			st, err := store.Open(authDB)
+
+		if st != nil {
+			var mk *pki.MasterKey
+			var err error
+			if vmMgr != nil && vmMgr.GetStore() != nil && st == vmMgr.GetStore().UnifiedStore() && vmMgr.GetStore().MasterKey() != nil {
+				mk = vmMgr.GetStore().MasterKey()
+			} else {
+				masterKeyPath := filepath.Join(masterDir, "master.key")
+				mk, err = pki.LoadOrCreateMasterKey(masterKeyPath)
+			}
 			if err == nil {
 				metaStore = st
 				queries := storeDB.New(st.Writer())
@@ -394,10 +411,10 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 					log.Printf("[computed] Warning: failed to bootstrap admin account (%v)", err)
 				}
 			} else {
-				log.Printf("[computed] Warning: failed to initialize auth store (%v)", err)
+				log.Printf("[computed] Warning: failed to load master key (%v)", err)
 			}
 		} else {
-			log.Printf("[computed] Warning: failed to load master key (%v)", err)
+			log.Printf("[computed] Warning: failed to initialize auth store")
 		}
 	}
 
@@ -890,10 +907,14 @@ func (s *Server) routes() {
 	// Audit Events & SSE Stream
 	s.mux.HandleFunc("/api/v1/events", s.wrapAuth(s.handleEvents))
 	s.mux.HandleFunc("/api/v1/events/stream", s.wrapAuth(s.handleEventsStream))
+	s.mux.HandleFunc("/api/v1/audit", s.wrapAuth(s.handleEvents))
+	s.mux.HandleFunc("/api/v1/audit/events", s.wrapAuth(s.handleEvents))
 
 	// Scoped Access API Keys
 	s.mux.HandleFunc("/api/v1/api-keys", s.wrapAuth(s.handleAccessAPIKeys))
 	s.mux.HandleFunc("/api/v1/api-keys/", s.wrapAuth(s.handleAccessAPIKeyActions))
+	s.mux.HandleFunc("/api/v1/access/api-keys", s.wrapAuth(s.handleAccessAPIKeys))
+	s.mux.HandleFunc("/api/v1/access/api-keys/", s.wrapAuth(s.handleAccessAPIKeyActions))
 
 	// Environments
 	s.mux.HandleFunc("/api/v1/environments", s.wrapAuth(s.handleEnvironments))

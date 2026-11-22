@@ -183,7 +183,7 @@ func (s *Store) GetOperation(ctx context.Context, id string) (*Operation, error)
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	op, err := scanOperation(s.db.QueryRowContext(ctx,
+	op, err := scanOperation(s.reader().QueryRowContext(ctx,
 		`SELECT `+operationColumns+` FROM operations WHERE id = ?`, id))
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -252,7 +252,7 @@ func (s *Store) ListOperations(ctx context.Context, filter OperationFilter) ([]*
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +367,7 @@ func (s *Store) GetTaskRecord(ctx context.Context, id string) (*TaskRecord, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec := new(TaskRecord)
-	err := s.db.QueryRowContext(ctx, `SELECT id, owner_id, action, status, requested, queued,
+	err := s.reader().QueryRowContext(ctx, `SELECT id, owner_id, action, status, requested, queued,
 		succeeded_json, failed_json, warnings_json, created_at, updated_at
 		FROM task_records WHERE id = ?`, id).Scan(
 		&rec.ID, &rec.OwnerID, &rec.Action, &rec.Status, &rec.Requested, &rec.Queued,

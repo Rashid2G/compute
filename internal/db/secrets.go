@@ -164,7 +164,7 @@ func (s *Store) ValidateAccessAPIKey(ctx context.Context, token string) (*Access
 // 2. Hashes legacy plaintext tokens in access_api_keys and worker_tokens with sha256:.
 func (s *Store) migrateSecretsAndTokens(ctx context.Context) error {
 	// 1. github_connections
-	ghRows, err := s.db.QueryContext(ctx, `SELECT id, github_token, webhook_secret FROM github_connections WHERE (github_token != '' AND github_token NOT LIKE 'enc:v1:%') OR (webhook_secret != '' AND webhook_secret NOT LIKE 'enc:v1:%')`)
+	ghRows, err := s.reader().QueryContext(ctx, `SELECT id, github_token, webhook_secret FROM github_connections WHERE (github_token != '' AND github_token NOT LIKE 'enc:v1:%') OR (webhook_secret != '' AND webhook_secret NOT LIKE 'enc:v1:%')`)
 	if err == nil {
 		type ghEntry struct{ id, tok, sec string }
 		var entries []ghEntry
@@ -183,7 +183,7 @@ func (s *Store) migrateSecretsAndTokens(ctx context.Context) error {
 	}
 
 	// 2. webhooks
-	whRows, err := s.db.QueryContext(ctx, `SELECT id, secret FROM webhooks WHERE secret != '' AND secret NOT LIKE 'enc:v1:%'`)
+	whRows, err := s.reader().QueryContext(ctx, `SELECT id, secret FROM webhooks WHERE secret != '' AND secret NOT LIKE 'enc:v1:%'`)
 	if err == nil {
 		type whEntry struct{ id, sec string }
 		var entries []whEntry
@@ -201,7 +201,7 @@ func (s *Store) migrateSecretsAndTokens(ctx context.Context) error {
 	}
 
 	// 3. environments
-	envRows, err := s.db.QueryContext(ctx, `SELECT rowid, secrets FROM environments WHERE secrets != '' AND secrets NOT LIKE 'enc:v1:%'`)
+	envRows, err := s.reader().QueryContext(ctx, `SELECT rowid, secrets FROM environments WHERE secrets != '' AND secrets NOT LIKE 'enc:v1:%'`)
 	if err == nil {
 		type envEntry struct {
 			rowid int64
@@ -222,7 +222,7 @@ func (s *Store) migrateSecretsAndTokens(ctx context.Context) error {
 	}
 
 	// 4. access_api_keys
-	keyRows, err := s.db.QueryContext(ctx, `SELECT id, token FROM access_api_keys WHERE token != '' AND token NOT LIKE 'sha256:%'`)
+	keyRows, err := s.reader().QueryContext(ctx, `SELECT id, token FROM access_api_keys WHERE token != '' AND token NOT LIKE 'sha256:%'`)
 	if err == nil {
 		type keyEntry struct{ id, tok string }
 		var entries []keyEntry
@@ -242,7 +242,7 @@ func (s *Store) migrateSecretsAndTokens(ctx context.Context) error {
 	}
 
 	// 5. worker_tokens
-	tokRows, err := s.db.QueryContext(ctx, `SELECT token FROM worker_tokens WHERE token != '' AND token NOT LIKE 'sha256:%'`)
+	tokRows, err := s.reader().QueryContext(ctx, `SELECT token FROM worker_tokens WHERE token != '' AND token NOT LIKE 'sha256:%'`)
 	if err == nil {
 		var legacyTokens []string
 		for tokRows.Next() {

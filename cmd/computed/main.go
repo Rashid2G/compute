@@ -20,6 +20,7 @@ import (
 	"github.com/Rashid2G/compute/internal/gui"
 	"github.com/Rashid2G/compute/internal/network"
 	"github.com/Rashid2G/compute/internal/storage"
+	storePkg "github.com/Rashid2G/compute/internal/store"
 	"github.com/Rashid2G/compute/internal/vm"
 	"github.com/Rashid2G/compute/pkg/version"
 )
@@ -194,6 +195,13 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 	defer store.Close()
+
+	if store.UnifiedStore() != nil {
+		dataDir := filepath.Dir(globalCfg.Server.DBPath)
+		if err := storePkg.MigrateLegacyDatabases(context.Background(), store.UnifiedStore(), dataDir); err != nil {
+			log.Printf("[computed] Warning: legacy database migration failed: %v", err)
+		}
+	}
 
 	// 3. Initialize Network Manager
 	netMgr, err := network.NewManager(globalCfg.Network, nil)
