@@ -52,3 +52,10 @@ type SnapshotLoadParams struct {
 	EnableDiffSnapshots bool   `json:"enable_diff_snapshots,omitempty"`
 	ResumeVM            bool   `json:"resume_vm"`
 }
+
+// VsockConfig defines virtio-vsock device configuration for Firecracker API
+type VsockConfig struct {
+	VsockID  string `json:"vsock_id"`
+	GuestCID uint32 `json:"guest_cid"`
+	UdsPath  string `json:"uds_path"`
+}

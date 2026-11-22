@@ -220,6 +220,33 @@ chmod 700 "${WORKDIR}/root/.ssh" "${WORKDIR}/home/compute/.ssh"
 [ -f "${WORKDIR}/home/compute/.ssh/authorized_keys" ] && chmod 600 "${WORKDIR}/home/compute/.ssh/authorized_keys"
 chown -R 1000:1000 "${WORKDIR}/home/compute"
 
+COMPUTE_AGENT_BIN="${COMPUTE_AGENT_BIN:-./bin/compute-agent}"
+if [ ! -f "${COMPUTE_AGENT_BIN}" ] && command -v go >/dev/null 2>&1; then
+    echo "==> Building compute-agent binary (${COMPUTE_AGENT_BIN})..."
+    CGO_ENABLED=0 GOOS=linux GOARCH="${UBUNTU_ARCH}" go build -ldflags="-s -w" -o "${COMPUTE_AGENT_BIN}" ./cmd/compute-agent 2>/dev/null || true
+fi
+
+if [ -f "${COMPUTE_AGENT_BIN}" ]; then
+    mkdir -p "${WORKDIR}/usr/local/bin" "${WORKDIR}/etc/systemd/system/multi-user.target.wants"
+    cp "${COMPUTE_AGENT_BIN}" "${WORKDIR}/usr/local/bin/compute-agent"
+    chmod 0755 "${WORKDIR}/usr/local/bin/compute-agent"
+    cat << 'SVCEOF' > "${WORKDIR}/etc/systemd/system/compute-agent.service"
+[Unit]
+Description=Compute In-Guest MicroVM Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/compute-agent
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    ln -sf /etc/systemd/system/compute-agent.service "${WORKDIR}/etc/systemd/system/multi-user.target.wants/compute-agent.service"
+fi
+
 mkdir -p "${WORKDIR}/etc/profile.d"
 cat << 'PROMPT' > "${WORKDIR}/etc/profile.d/00-prompt.sh"
 if [ -n "$BASH_VERSION" ]; then
@@ -324,6 +351,11 @@ fi
 # Ensure host keys exist
 if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
     ssh-keygen -A 2>/dev/null || true
+fi
+
+# Start compute-agent if installed
+if [ -x /usr/local/bin/compute-agent ]; then
+    /usr/local/bin/compute-agent &
 fi
 
 # Start SSH daemon

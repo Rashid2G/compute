@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Rashid2G/compute/internal/agent"
 	"github.com/Rashid2G/compute/internal/config"
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/dns"
@@ -86,6 +87,9 @@ type Manager struct {
 	execNextID            uint64
 	jailerMu              sync.Mutex
 	jailerProcs           map[string]*jailer.InstanceProcess
+	agentMu               sync.RWMutex
+	agentClients          map[string]*agent.Client
+	agentLive             map[string]bool
 }
 
 func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *storage.Manager) *Manager {
@@ -144,6 +148,8 @@ func NewManager(cfg Config, store *db.Store, netMgr *network.Manager, storMgr *s
 		images:         make(map[string]*db.CustomImage),
 		execCancels:    make(map[string]map[uint64]context.CancelFunc),
 		jailerProcs:    make(map[string]*jailer.InstanceProcess),
+		agentClients:   make(map[string]*agent.Client),
+		agentLive:      make(map[string]bool),
 	}
 	if imgBuilder != nil {
 		imgBuilder.SetVMRunner(m.AsImageVMRunner())
@@ -280,6 +286,14 @@ func (m *Manager) deleteVMRecord(ctx context.Context, vmID string) error {
 			id = v.ID
 			name = v.Name
 		}
+	}
+
+	m.invalidateAgent(vmID)
+	if internalID != "" {
+		m.invalidateAgent(internalID)
+	}
+	if id != "" {
+		m.invalidateAgent(id)
 	}
 
 	m.mu.Lock()
@@ -950,9 +964,14 @@ type CreateTemplateRequest struct {
 }
 
 type ExecRequest struct {
-	Command string `json:"command"`
-	User    string `json:"user,omitempty"`
-	Timeout int    `json:"timeout_seconds,omitempty"`
+	Command string            `json:"command"`
+	User    string            `json:"user,omitempty"`
+	Timeout int               `json:"timeout_seconds,omitempty"`
+	WorkDir string            `json:"workdir,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	PTY     bool              `json:"pty,omitempty"`
+	Rows    uint16            `json:"rows,omitempty"`
+	Cols    uint16            `json:"cols,omitempty"`
 }
 
 type ExecResponse struct {
@@ -2156,6 +2175,7 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 				_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
 			}
 			_ = os.Remove(sockPath)
+			_ = os.Remove(filepath.Join(vmDir, "vsock.sock"))
 		}
 	}()
 
@@ -2346,6 +2366,19 @@ func (m *Manager) startVMProcessWithCPUWeight(ctx context.Context, vm *db.VM, cp
 		HostDevName: vm.TAPDevice,
 	}); err != nil {
 		return fmt.Errorf("failed to attach network interface: %w", err)
+	}
+
+	// Vsock Device
+	vsockPath := filepath.Join(vmDir, "vsock.sock")
+	_ = os.Remove(vsockPath)
+	_ = os.Remove(filepath.Join(vmDir, "v.sock"))
+	guestCID := agent.AllocateGuestCID(vm.ID)
+	if err := fcClient.SetVsock(ctx, firecracker.VsockConfig{
+		VsockID:  "vsock",
+		GuestCID: guestCID,
+		UdsPath:  vsockPath,
+	}); err != nil {
+		log.Printf("[vm-manager] Warning: failed to configure vsock for vm %s: %v", vm.ID, err)
 	}
 
 	// Start Instance
@@ -2879,6 +2912,9 @@ func (m *Manager) saveStateInternal(ctx context.Context, vmID string, autoHibern
 	snapFn := m.snapshotter
 	m.mu.RUnlock()
 
+	// Flush guest filesystem before pause and snapshot
+	_ = m.flushGuest(ctx, vm)
+
 	if snapFn != nil {
 		if err := snapFn(ctx, vm, snapPath, memPath); err != nil {
 			vmLock.Unlock()
@@ -2907,6 +2943,13 @@ func (m *Manager) saveStateInternal(ctx context.Context, vmID string, autoHibern
 	}
 	if vm.SocketPath != "" {
 		os.Remove(vm.SocketPath)
+	}
+	if vsockPath := m.GetVMVsockPath(vm); vsockPath != "" {
+		_ = os.Remove(vsockPath)
+	}
+	m.invalidateAgent(vmID)
+	if vm.InternalID != "" {
+		m.invalidateAgent(vm.InternalID)
 	}
 	if m.netMgr != nil && vm.TAPDevice != "" {
 		_ = m.netMgr.RemoveTAP(ctx, vm.TAPDevice)
@@ -3165,6 +3208,14 @@ func (m *Manager) ResumeVM(ctx context.Context, vmID string) error {
 	}
 	m.reconcileAccountNetworkIsolation(ctx, vm.OwnerID)
 	m.maybeSyncSSHKeys(vm)
+
+	// Post-resume clock sync over vsock so guest clocks/JWT/TLS never fail on stale time
+	go func(id string) {
+		syncCtx, syncCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer syncCancel()
+		_ = m.SyncClock(syncCtx, id, time.Now().UnixNano())
+	}(vm.ID)
+
 	return nil
 }
 
@@ -3205,8 +3256,24 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 		return nil
 	}
 
+	m.invalidateAgent(vmID)
+	if vm != nil && vm.InternalID != "" {
+		m.invalidateAgent(vm.InternalID)
+	}
+
 	if vm.PID > 0 && m.isAlive(vm.PID) {
 		if !forceKill {
+			// 0. Try graceful shutdown via vsock compute-agent first (airgapped / no-network safe)
+			if client, ok := m.tryAgent(ctx, vm); ok {
+				_ = client.Shutdown(ctx)
+				for i := 0; i < 5; i++ {
+					if !m.isAlive(vm.PID) {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+
 			// 1. Try graceful sync over SSH only if guest SSH is actually reachable.
 			if m.launcher == nil && vm.SocketPath != "" && vm.IPAddress != "" && vm.IPAddress != "dhcp" && vm.SSHKeyPath != "" {
 				if conn, dialErr := net.DialTimeout("tcp", net.JoinHostPort(vm.IPAddress, "22"), 150*time.Millisecond); dialErr == nil {
@@ -3318,6 +3385,9 @@ func (m *Manager) stopVMUnlocked(ctx context.Context, vmID string, skipReconcile
 	_ = m.netMgr.ConfigureVMPublicIP(ctx, vm.IPAddress, vm.TAPDevice, false)
 	if vm.SocketPath != "" {
 		_ = os.Remove(vm.SocketPath)
+	}
+	if vsockPath := m.GetVMVsockPath(vm); vsockPath != "" {
+		_ = os.Remove(vsockPath)
 	}
 
 	vm.Status = db.StatusStopped
@@ -3616,7 +3686,7 @@ func (m *Manager) FlushGuestFilesystems(ctx context.Context) int {
 	var wg sync.WaitGroup
 	var flushed int32
 	for _, vm := range vms {
-		if vm == nil || IsRemoteVM(vm) || vm.Status != db.StatusRunning || vm.IPAddress == "" {
+		if vm == nil || IsRemoteVM(vm) || vm.Status != db.StatusRunning || (vm.IPAddress == "" && !m.hasLiveAgent(vm)) {
 			continue
 		}
 		wg.Add(1)
@@ -3637,8 +3707,15 @@ func (m *Manager) flushGuest(ctx context.Context, vm *db.VM) error {
 	if m.guestSyncer != nil {
 		return m.guestSyncer(ctx, vm)
 	}
+	// Prefer vsock compute-agent sync (supports airgapped microVMs)
+	if client, ok := m.tryAgent(ctx, vm); ok {
+		return client.Shutdown(ctx)
+	}
 	flushCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
+	if vm.IPAddress == "" {
+		return nil
+	}
 	args := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -4058,13 +4135,39 @@ func (m *Manager) newSSHExec(ctx context.Context, vmID string, req ExecRequest) 
 	return exec.CommandContext(execCtx, "ssh", sshArgs...), execCtx, cancel, nil
 }
 
-// ExecVM executes a remote command inside a running VM via SSH, buffering the
-// output until the command finishes.
+// ExecVM executes a remote command inside a running VM via compute-agent over vsock,
+// falling back cleanly to SSH if the vsock agent is not available.
 func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*ExecResponse, error) {
 	if req.Timeout <= 0 {
 		req.Timeout = 30
 	}
 	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
+	vm, _ := m.getVMUnsafe(ctx, vmID)
+	vmLock.RUnlock()
+
+	if vm != nil {
+		if client, ok := m.tryAgent(ctx, vm); ok {
+			cmdArgs := []string{"sh", "-c", req.Command}
+			res, err := client.Exec(ctx, agent.Request{
+				Cmd:        cmdArgs,
+				User:       req.User,
+				WorkDir:    req.WorkDir,
+				Env:        req.Env,
+				TimeoutSec: req.Timeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &ExecResponse{
+				Stdout:     res.Stdout,
+				Stderr:     res.Stderr,
+				ExitCode:   res.ExitCode,
+				DurationMs: res.DurationMS,
+			}, nil
+		}
+	}
+
 	vmLock.RLock()
 	cmd, _, cancel, err := m.newSSHExec(ctx, vmID, req)
 	vmLock.RUnlock()
@@ -4101,12 +4204,44 @@ func (m *Manager) ExecVM(ctx context.Context, vmID string, req ExecRequest) (*Ex
 }
 
 // ExecVMInput executes a remote command inside a running VM while piping stdin
-// to it. Output is buffered until the command finishes.
+// to it, preferring compute-agent over vsock with SSH fallback.
 func (m *Manager) ExecVMInput(ctx context.Context, vmID string, req ExecRequest, stdin io.Reader) (*ExecResponse, error) {
 	if req.Timeout <= 0 {
 		req.Timeout = 60
 	}
 	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
+	vm, _ := m.getVMUnsafe(ctx, vmID)
+	vmLock.RUnlock()
+
+	if vm != nil {
+		if client, ok := m.tryAgent(ctx, vm); ok {
+			var stdinStr string
+			if stdin != nil {
+				b, _ := io.ReadAll(stdin)
+				stdinStr = string(b)
+			}
+			cmdArgs := []string{"sh", "-c", req.Command}
+			res, err := client.Exec(ctx, agent.Request{
+				Cmd:        cmdArgs,
+				User:       req.User,
+				WorkDir:    req.WorkDir,
+				Env:        req.Env,
+				Stdin:      stdinStr,
+				TimeoutSec: req.Timeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &ExecResponse{
+				Stdout:     res.Stdout,
+				Stderr:     res.Stderr,
+				ExitCode:   res.ExitCode,
+				DurationMs: res.DurationMS,
+			}, nil
+		}
+	}
+
 	vmLock.RLock()
 	cmd, _, cancel, err := m.newSSHExec(ctx, vmID, req)
 	vmLock.RUnlock()
@@ -4144,10 +4279,47 @@ func (m *Manager) ExecVMInput(ctx context.Context, vmID string, req ExecRequest,
 }
 
 // ExecVMStream executes a remote command inside a running VM and emits output
-// chunks as they arrive. A zero Timeout means the command may run indefinitely.
-// The final event always carries the exit code (and an error, when relevant).
+// chunks as they arrive, preferring compute-agent over vsock with SSH fallback.
 func (m *Manager) ExecVMStream(ctx context.Context, vmID string, req ExecRequest, emit func(ExecStreamEvent) error) error {
 	vmLock := m.getVMLock(vmID)
+	vmLock.RLock()
+	vm, _ := m.getVMUnsafe(ctx, vmID)
+	vmLock.RUnlock()
+
+	if vm != nil {
+		if client, ok := m.tryAgent(ctx, vm); ok {
+			start := time.Now()
+			cmdArgs := []string{"sh", "-c", req.Command}
+			res, err := client.ExecStream(ctx, agent.Request{
+				Cmd:        cmdArgs,
+				User:       req.User,
+				WorkDir:    req.WorkDir,
+				Env:        req.Env,
+				TimeoutSec: req.Timeout,
+				PTY:        req.PTY,
+				Rows:       req.Rows,
+				Cols:       req.Cols,
+			}, func(f agent.StreamFrame) error {
+				if f.Type == agent.FrameStdout || f.Type == agent.FrameStderr {
+					return emit(ExecStreamEvent{
+						Stream: f.Type,
+						Data:   f.Data,
+					})
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			exitCode := res.ExitCode
+			return emit(ExecStreamEvent{
+				ExitCode:   &exitCode,
+				DurationMs: time.Since(start).Milliseconds(),
+				Error:      res.Error,
+			})
+		}
+	}
+
 	vmLock.RLock()
 	cmd, execCtx, cancel, err := m.newSSHExec(ctx, vmID, req)
 	vmLock.RUnlock()
@@ -4442,6 +4614,11 @@ func (m *Manager) CreateTemplate(ctx context.Context, req CreateTemplateRequest)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to clone VM disk for template: %w", err)
+	}
+
+	// Enforce lock-on-template: strip and lock any SSH passwords on the cloned template disk
+	if hasExtFilesystem(tplDiskPath) {
+		_ = m.storMgr.ConfigureSSHAccess(tplDiskPath, storage.SSHAccess{})
 	}
 
 	kernelPath := srcVM.KernelPath

@@ -227,7 +227,37 @@ PRUNE_OUT=$("${COMPUTE_BIN}" network prune)
 echo "${PRUNE_OUT}"
 assert_contains "${PRUNE_OUT}" "Network is clean" "network prune reports clean state"
 
+# -------------------------------------------------------------------------
+# Test 11: Opt-In SSH Password Auth & Lock-On-Clone/Template
+# -------------------------------------------------------------------------
+echo
+echo "--> [Test 11] Testing opt-in SSH password auth and lock-on-clone..."
+PW_CREATE_OUT=$("${COMPUTE_BIN}" sandbox create --name feat-test-pw --vcpus 1 --memory 256 --ssh-password "Password123!" --start)
+echo "${PW_CREATE_OUT}"
+assert_contains "${PW_CREATE_OUT}" "Sandbox Created" "CLI reports password-enabled sandbox created"
+assert_contains "${PW_CREATE_OUT}" "Status=running" "Password-enabled sandbox running"
+PW_VM_ID=$(echo "${PW_CREATE_OUT}" | grep -o 'ID=[a-zA-Z0-9._-]*' | cut -d= -f2)
+
+echo "    Verifying SSH password authentication on source VM..."
+PW_SSH_OUT=$("${COMPUTE_BIN}" sandbox ssh "${PW_VM_ID}" -p "Password123!" -- 'echo password-auth-success')
+assert_contains "${PW_SSH_OUT}" "password-auth-success" "SSH password authentication succeeded"
+
+echo "    Verifying lock-on-clone resets password auth to public-key-only..."
+CLONE_OUT=$("${COMPUTE_BIN}" sandbox create --name feat-test-clone --clone-from "${PW_VM_ID}" --start)
+echo "${CLONE_OUT}"
+assert_contains "${CLONE_OUT}" "Sandbox Created" "CLI reports cloned sandbox created"
+CLONE_VM_ID=$(echo "${CLONE_OUT}" | grep -o 'ID=[a-zA-Z0-9._-]*' | cut -d= -f2)
+
+CLONE_KEY_OUT=$("${COMPUTE_BIN}" sandbox ssh "${CLONE_VM_ID}" -- 'echo pubkey-only-success')
+assert_contains "${CLONE_KEY_OUT}" "pubkey-only-success" "Cloned sandbox enforces public key access"
+
+# Teardown Test 11 sandboxes
+"${COMPUTE_BIN}" sandbox stop "${CLONE_VM_ID}" >/dev/null 2>&1 || true
+"${COMPUTE_BIN}" sandbox delete "${CLONE_VM_ID}" >/dev/null 2>&1 || true
+"${COMPUTE_BIN}" sandbox stop "${PW_VM_ID}" >/dev/null 2>&1 || true
+"${COMPUTE_BIN}" sandbox delete "${PW_VM_ID}" >/dev/null 2>&1 || true
+
 echo
 echo "=================================================================="
-echo "    ALL 10 TEST SUITES PASSED SUCCESSFULLY!                      "
+echo "    ALL 11 TEST SUITES PASSED SUCCESSFULLY!                      "
 echo "=================================================================="

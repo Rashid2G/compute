@@ -58,6 +58,13 @@ func TestFirecrackerClientMock(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			case "/snapshot/load":
 				w.WriteHeader(http.StatusNoContent)
+			case "/vsock":
+				var vsock VsockConfig
+				json.NewDecoder(r.Body).Decode(&vsock)
+				if vsock.GuestCID != 3 || vsock.UdsPath != "/test/vsock.sock" {
+					t.Errorf("unexpected vsock config: %+v", vsock)
+				}
+				w.WriteHeader(http.StatusNoContent)
 			default:
 				http.NotFound(w, r)
 			}
@@ -83,6 +90,10 @@ func TestFirecrackerClientMock(t *testing.T) {
 
 	if err := client.AttachNetworkInterface(ctx, NetworkInterface{IfaceID: "eth0", GuestMAC: "06:00:ac:10:00:02", HostDevName: "tap0"}); err != nil {
 		t.Fatalf("AttachNetworkInterface failed: %v", err)
+	}
+
+	if err := client.SetVsock(ctx, VsockConfig{VsockID: "vsock", GuestCID: 3, UdsPath: "/test/vsock.sock"}); err != nil {
+		t.Fatalf("SetVsock failed: %v", err)
 	}
 
 	if err := client.StartInstance(ctx); err != nil {
@@ -114,6 +125,7 @@ func TestFirecrackerClientMock(t *testing.T) {
 		"PUT /boot-source",
 		"PUT /drives/rootfs",
 		"PUT /network-interfaces/eth0",
+		"PUT /vsock",
 		"PUT /actions",
 		"PATCH /vm",
 		"PUT /snapshot/create",

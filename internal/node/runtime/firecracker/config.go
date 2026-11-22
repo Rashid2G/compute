@@ -62,8 +62,16 @@ type BalloonConfig struct {
 
 // BuildVMConfig constructs a complete, valid Firecracker configuration.
 func BuildVMConfig(kernelPath, rootfsPath, bootArgs string, vcpus, memMB int, tapName, mac string, udsVsockPath string) (*VMConfig, error) {
+	return BuildVMConfigWithCID(kernelPath, rootfsPath, bootArgs, vcpus, memMB, tapName, mac, udsVsockPath, 3)
+}
+
+// BuildVMConfigWithCID constructs a complete, valid Firecracker configuration with custom guest CID.
+func BuildVMConfigWithCID(kernelPath, rootfsPath, bootArgs string, vcpus, memMB int, tapName, mac string, udsVsockPath string, guestCID uint32) (*VMConfig, error) {
 	if bootArgs == "" {
 		bootArgs = "console=ttyS0 reboot=k panic=1 pci=off nomodule 8250.nr_uarts=1 quiet root=/dev/vda rw"
+	}
+	if guestCID < 3 {
+		guestCID = 3
 	}
 
 	cfg := &VMConfig{
@@ -102,7 +110,7 @@ func BuildVMConfig(kernelPath, rootfsPath, bootArgs string, vcpus, memMB int, ta
 
 	if udsVsockPath != "" {
 		cfg.Vsock = &VsockConfig{
-			GuestCID: 3,
+			GuestCID: guestCID,
 			UdsPath:  udsVsockPath,
 		}
 	}

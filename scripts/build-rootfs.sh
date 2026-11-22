@@ -72,6 +72,39 @@ trap cleanup EXIT
 
 printf '%s\n' "${PUB_KEY}" > "${BUILD_DIR}/authorized_keys"
 
+COMPUTE_AGENT_BIN="${COMPUTE_AGENT_BIN:-./bin/compute-agent}"
+if [ ! -f "${COMPUTE_AGENT_BIN}" ] && command -v go >/dev/null 2>&1; then
+    echo "==> Building compute-agent binary (${COMPUTE_AGENT_BIN})..."
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o "${COMPUTE_AGENT_BIN}" ./cmd/compute-agent 2>/dev/null || true
+fi
+
+AGENT_DOCKER_SNIPPET=""
+if [ -f "${COMPUTE_AGENT_BIN}" ]; then
+    cp "${COMPUTE_AGENT_BIN}" "${BUILD_DIR}/compute-agent"
+    cat << 'SVCEOF' > "${BUILD_DIR}/compute-agent.service"
+[Unit]
+Description=Compute In-Guest MicroVM Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/compute-agent
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    AGENT_DOCKER_SNIPPET=$(cat << 'SNIP'
+COPY compute-agent /usr/local/bin/compute-agent
+COPY compute-agent.service /etc/systemd/system/compute-agent.service
+RUN chmod 0755 /usr/local/bin/compute-agent && \
+    mkdir -p /etc/systemd/system/multi-user.target.wants && \
+    ln -sf /etc/systemd/system/compute-agent.service /etc/systemd/system/multi-user.target.wants/compute-agent.service
+SNIP
+)
+fi
+
 cat << 'PROMPT' > "${BUILD_DIR}/00-prompt.sh"
 if [ -n "$BASH_VERSION" ]; then
     if [ "$(id -u)" -eq 0 ]; then
@@ -175,6 +208,11 @@ fi
 # Ensure host keys exist
 if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
     ssh-keygen -A 2>/dev/null || true
+fi
+
+# Start compute-agent if installed
+if [ -x /usr/local/bin/compute-agent ]; then
+    /usr/local/bin/compute-agent &
 fi
 
 # Start SSH daemon
@@ -286,6 +324,10 @@ RUN chmod 700 /root/.ssh /home/compute/.ssh && \
     chown -R 1000:1000 /home/compute && \
     chmod +x /sbin/init
 DOCKERFILE
+
+if [ -n "${AGENT_DOCKER_SNIPPET}" ]; then
+    printf '\n%s\n' "${AGENT_DOCKER_SNIPPET}" >> "${BUILD_DIR}/Dockerfile"
+fi
 
 echo "==> [Step 3/5] Building Ubuntu 24.04 Docker image..."
 docker build -t compute-ubuntu:24.04 "${BUILD_DIR}"

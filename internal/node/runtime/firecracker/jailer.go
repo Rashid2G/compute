@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Rashid2G/compute/internal/agent"
 	"github.com/Rashid2G/compute/internal/storage"
 )
 
@@ -346,7 +347,9 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		}
 
 		// UDS socket paths inside and outside chroot
-		vsockUDSOnHost := filepath.Join(chrootRoot, "v.sock")
+		vsockUDSOnHost := filepath.Join(chrootRoot, "vsock.sock")
+		_ = os.Remove(vsockUDSOnHost)
+		_ = os.Remove(filepath.Join(chrootRoot, "v.sock"))
 		apiSockOnHost := filepath.Join(chrootRoot, "run", "fc.sock")
 		_ = os.MkdirAll(filepath.Join(chrootRoot, "run"), 0755)
 		_ = SafeChown(filepath.Join(chrootRoot, "run"), opts.UID, opts.GID)
@@ -437,14 +440,18 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 	_ = SafeChown(targetRootfs, opts.UID, opts.GID)
 
 	// UDS socket paths inside and outside chroot
-	vsockUDSInChroot := "/v.sock"
-	vsockUDSOnHost := filepath.Join(chrootRoot, "v.sock")
+	vsockUDSInChroot := "/vsock.sock"
+	vsockUDSOnHost := filepath.Join(chrootRoot, "vsock.sock")
+	_ = os.Remove(vsockUDSOnHost)
+	_ = os.Remove(filepath.Join(chrootRoot, "v.sock"))
 	apiSockOnHost := filepath.Join(chrootRoot, "run", "fc.sock")
 	_ = os.MkdirAll(filepath.Join(chrootRoot, "run"), 0755)
 	_ = SafeChown(filepath.Join(chrootRoot, "run"), opts.UID, opts.GID)
 
+	guestCID := agent.AllocateGuestCID(opts.ID)
+
 	// Generate config.json inside chroot
-	cfg, err := BuildVMConfig(
+	cfg, err := BuildVMConfigWithCID(
 		"/vmlinux",
 		"/rootfs.ext4",
 		opts.BootArgs,
@@ -453,6 +460,7 @@ func LaunchJailer(ctx context.Context, opts JailerOptions) (*InstanceProcess, er
 		opts.TapName,
 		opts.MAC,
 		vsockUDSInChroot,
+		guestCID,
 	)
 	if err != nil {
 		unmountAll()
