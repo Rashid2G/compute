@@ -23,6 +23,7 @@ import type {
   HealthResult,
   ImageListItem,
   JobLogRecord,
+  JobPhaseRecord,
   JobRecord,
   LaunchTemplateRequest,
   MigratePoolRequest,
