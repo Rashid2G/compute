@@ -31,8 +31,8 @@ func ApplyEnvOverrides(cfg *GlobalConfig) error {
 
 	// Compatibility root first, so explicit path variables below can win.
 	if dataDir := strings.TrimSpace(os.Getenv("COMPUTE_DATA_DIR")); dataDir != "" {
-		if cfg.Server.DBPath == "" || cfg.Server.DBPath == "/var/lib/compute/data/compute.db" || strings.HasPrefix(cfg.Server.DBPath, "/home/") {
-			cfg.Server.DBPath = filepath.Join(dataDir, "data", "compute.db")
+		if cfg.Server.DBPath == "" || cfg.Server.DBPath == "/var/lib/compute/data/state.db" || cfg.Server.DBPath == "/var/lib/compute/data/compute.db" || strings.HasPrefix(cfg.Server.DBPath, "/home/") {
+			cfg.Server.DBPath = filepath.Join(dataDir, "data", "state.db")
 		}
 		if cfg.Images.ImagesDir == "" || cfg.Images.ImagesDir == "/var/lib/compute/images" || strings.HasPrefix(cfg.Images.ImagesDir, "/home/") {
 			cfg.Images.ImagesDir = filepath.Join(dataDir, "images")

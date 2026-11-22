@@ -453,8 +453,23 @@ func TestControlPlane_AccessAPIKeys(t *testing.T) {
 		t.Fatalf("expected 1 API key, got %d", len(keys))
 	}
 
-	// 3. Delete API key
-	reqDel, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/api-keys/"+key.ID, nil)
+	// 3. Get API key via /api/v1/access/api-keys/{id} alias
+	respAliasGet, err := http.Get(server.URL + "/api/v1/access/api-keys/" + key.ID)
+	if err != nil {
+		t.Fatalf("GET /access/api-keys/{id} failed: %v", err)
+	}
+	defer respAliasGet.Body.Close()
+	if respAliasGet.StatusCode != http.StatusOK {
+		t.Fatalf("GET /access/api-keys/{id} status: %d", respAliasGet.StatusCode)
+	}
+	var gotAlias db.AccessAPIKey
+	_ = json.NewDecoder(respAliasGet.Body).Decode(&gotAlias)
+	if gotAlias.ID != key.ID {
+		t.Fatalf("expected key ID %q, got %q", key.ID, gotAlias.ID)
+	}
+
+	// 4. Delete API key via /api/v1/access/api-keys/{id} alias
+	reqDel, _ := http.NewRequest(http.MethodDelete, server.URL+"/api/v1/access/api-keys/"+key.ID, nil)
 	respDel, err := http.DefaultClient.Do(reqDel)
 	if err != nil {
 		t.Fatalf("DELETE failed: %v", err)

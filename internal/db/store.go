@@ -900,9 +900,6 @@ func (s *Store) migrateTableColumns(tableName string, cols []string) error {
 
 // CreateVMWithQuotaCheck atomically checks quota limits and persists a new VM in a single writer transaction.
 func (s *Store) CreateVMWithQuotaCheck(ctx context.Context, vm *VM, limits QuotaLimits) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		ownerID := vm.OwnerID
 		if ownerID == "" {

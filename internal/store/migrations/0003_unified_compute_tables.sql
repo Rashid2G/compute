@@ -1,7 +1,9 @@
+-- +goose NO TRANSACTION
 -- +goose Up
 -- Migration 0003: Unify compute and auth tables onto single state.db
 
 PRAGMA foreign_keys = OFF;
+BEGIN TRANSACTION;
 
 -- ===== 1. Recreate Colliding Catalog & Storage Tables to Support Both Schemas =====
 
@@ -142,7 +144,7 @@ INSERT INTO operations_v2 (
   trace_id, idempotency_key, created_at, updated_at
 )
 SELECT
-  id, owner_id, kind, target_id, status, progress, error_code, error_msg,
+  id, owner_id, kind, target_id, status, progress, error_code, COALESCE(error_msg, ''),
   trace_id, idempotency_key, created_at, updated_at
 FROM operations;
 
@@ -208,8 +210,11 @@ INSERT INTO jobs_v2 (
 )
 SELECT
   id, organization_id, owner_id, pool_id, type, state, priority, spec_json,
-  result_json, retry_policy_json, idempotency_key,
-  CASE WHEN typeof(queued_at) = 'integer' THEN datetime(queued_at, 'unixepoch') ELSE queued_at END,
+  COALESCE(result_json, ''), retry_policy_json, idempotency_key,
+  COALESCE(
+    CASE WHEN typeof(queued_at) = 'integer' THEN datetime(queued_at, 'unixepoch') ELSE queued_at END,
+    CASE WHEN typeof(created_at) = 'integer' THEN datetime(created_at, 'unixepoch') ELSE created_at END
+  ),
   CASE WHEN typeof(started_at) = 'integer' THEN datetime(started_at, 'unixepoch') ELSE started_at END,
   CASE WHEN typeof(finished_at) = 'integer' THEN datetime(finished_at, 'unixepoch') ELSE finished_at END,
   CASE WHEN typeof(deadline_at) = 'integer' THEN datetime(deadline_at, 'unixepoch') ELSE deadline_at END,
@@ -566,11 +571,19 @@ CREATE INDEX IF NOT EXISTS idx_templates_id ON templates(id);
 CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name);
 CREATE INDEX IF NOT EXISTS idx_templates_owner ON templates(owner_id);
 
+CREATE INDEX IF NOT EXISTS idx_volumes_instance ON volumes(instance_id);
+CREATE INDEX IF NOT EXISTS idx_operations_target ON operations(target_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idempotency ON jobs(organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_jobs_state_priority ON jobs(state, priority DESC, queued_at);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_port_forwards_host_port ON port_forwards(host_port) WHERE host_port > 0;
 
+COMMIT;
 PRAGMA foreign_keys = ON;
 
 -- +goose Down
+PRAGMA foreign_keys = OFF;
+BEGIN TRANSACTION;
 DROP TABLE IF EXISTS legacy_migrations;
 DROP TABLE IF EXISTS port_forwards;
 DROP TABLE IF EXISTS environments;
@@ -587,3 +600,5 @@ DROP TABLE IF EXISTS worker_tokens;
 DROP TABLE IF EXISTS ssh_keys;
 DROP TRIGGER IF EXISTS trg_prevent_protected_vm_delete;
 DROP TABLE IF EXISTS vms;
+COMMIT;
+PRAGMA foreign_keys = ON;

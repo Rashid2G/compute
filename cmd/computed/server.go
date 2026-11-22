@@ -336,8 +336,14 @@ func NewServer(vmMgr *vm.Manager, cfg config.GlobalConfig) *Server {
 		}
 
 		if st != nil {
-			masterKeyPath := filepath.Join(masterDir, "master.key")
-			mk, err := pki.LoadOrCreateMasterKey(masterKeyPath)
+			var mk *pki.MasterKey
+			var err error
+			if vmMgr != nil && vmMgr.GetStore() != nil && st == vmMgr.GetStore().UnifiedStore() && vmMgr.GetStore().MasterKey() != nil {
+				mk = vmMgr.GetStore().MasterKey()
+			} else {
+				masterKeyPath := filepath.Join(masterDir, "master.key")
+				mk, err = pki.LoadOrCreateMasterKey(masterKeyPath)
+			}
 			if err == nil {
 				metaStore = st
 				queries := storeDB.New(st.Writer())

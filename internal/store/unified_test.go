@@ -12,9 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+
 	"github.com/Rashid2G/compute/internal/db"
 	"github.com/Rashid2G/compute/internal/store"
 	storeDB "github.com/Rashid2G/compute/internal/store/db"
+	"github.com/Rashid2G/compute/internal/store/migrations"
 )
 
 // TestUnifiedStore_ConcurrentStressNoSQLiteBusy verifies that 20 concurrent goroutines
@@ -387,5 +390,200 @@ func TestUnifiedAPIKeysAndAudit(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].ID != "audit_evt_1" {
 		t.Fatalf("expected audit event audit_evt_1, got %+v", events)
+	}
+}
+
+// TestMigration0003_PopulatedV2DatabaseWithForeignKeys verifies that upgrading a populated
+// schema-v2 database containing active foreign-key references succeeds cleanly without
+// FOREIGN KEY constraint failures and leaves foreign_keys enabled afterward.
+func TestMigration0003_PopulatedV2DatabaseWithForeignKeys(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "state.db")
+
+	// 1. Open without running migrations and migrate only up to version 2.
+	sV2, err := store.Open(dbPath, store.OpenOptions{SkipMigrations: true})
+	if err != nil {
+		t.Fatalf("Open(SkipMigrations) failed: %v", err)
+	}
+	goose.SetBaseFS(migrations.FS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		_ = sV2.Close()
+		t.Fatalf("SetDialect failed: %v", err)
+	}
+	if err := goose.UpTo(sV2.Writer(), ".", 2); err != nil {
+		_ = sV2.Close()
+		t.Fatalf("goose.UpTo(2) failed: %v", err)
+	}
+
+	now := time.Now().UTC().Unix()
+	seedStmts := []string{
+		fmt.Sprintf(`INSERT INTO users (id, email, username, password_hash, role, created_at, updated_at)
+			VALUES ('usr_fk', 'fk@compute.local', 'fkuser', 'hash', 'user', %d, %d)`, now, now),
+		fmt.Sprintf(`INSERT INTO nodes (id, name, role, status, underlay_ip, arch, total_vcpus, total_mem_mb, total_disk_mb, agent_version, fc_version, created_at, updated_at, organization_id, pool_id)
+			VALUES ('nod_fk', 'node-fk', 'remote', 'ready', '10.0.0.2', 'amd64', 4, 8192, 50000, '1.0', '1.17', %d, %d, 'org_default', 'pool_default')`, now, now),
+		`INSERT INTO kernels (id, arch, sha256, boot_args, is_default)
+			VALUES ('kern_fk', 'amd64', 'abc123', 'console=ttyS0', 1)`,
+		fmt.Sprintf(`INSERT INTO images (id, owner_id, kind, name, os_family, arch, kernel_id, status, created_at)
+			VALUES ('img_fk', 'usr_fk', 'vm', 'ubuntu-fk', 'ubuntu', 'amd64', 'kern_fk', 'ready', %d)`, now),
+		fmt.Sprintf(`INSERT INTO image_node_cache (image_id, node_id, status, bytes, last_used)
+			VALUES ('img_fk', 'nod_fk', 'ready', 1024, %d)`, now),
+		fmt.Sprintf(`INSERT INTO templates (id, owner_id, name, spec_json, created_at, updated_at)
+			VALUES ('tpl_fk', 'usr_fk', 'tpl-fk', '{}', %d, %d)`, now, now),
+		fmt.Sprintf(`INSERT INTO vpcs (id, owner_id, name, cidr, vni, created_at)
+			VALUES ('vpc_fk', 'usr_fk', 'vpc-fk', '10.20.0.0/24', 5000, %d)`, now),
+		fmt.Sprintf(`INSERT INTO instances (id, owner_id, name, kind, image_id, template_id, vcpus, memory_mb, node_id, vpc_id, desired_state, state, created_at, updated_at)
+			VALUES ('ins_fk', 'usr_fk', 'inst-fk', 'vm', 'img_fk', 'tpl_fk', 2, 1024, 'nod_fk', 'vpc_fk', 'running', 'running', %d, %d)`, now, now),
+		fmt.Sprintf(`INSERT INTO volumes (id, owner_id, name, node_id, size_mb, kind, source_image_id, instance_id, status, created_at)
+			VALUES ('vol_fk', 'usr_fk', 'vol-fk', 'nod_fk', 2048, 'root', 'img_fk', 'ins_fk', 'attached', %d)`, now),
+		fmt.Sprintf(`INSERT INTO jobs (id, organization_id, owner_id, pool_id, type, state, spec_json, queued_at, created_at, updated_at)
+			VALUES ('job_fk', 'org_default', 'usr_fk', 'pool_default', 'exec', 'running', '{}', %d, %d, %d)`, now, now, now),
+		fmt.Sprintf(`INSERT INTO job_attempts (id, job_id, node_id, state, created_at, updated_at)
+			VALUES ('att_fk', 'job_fk', 'nod_fk', 'running', %d, %d)`, now, now),
+		fmt.Sprintf(`INSERT INTO worker_leases (id, job_id, attempt_id, node_id, state, expires_at, created_at)
+			VALUES ('lease_fk', 'job_fk', 'att_fk', 'nod_fk', 'active', %d, %d)`, now+60, now),
+		fmt.Sprintf(`INSERT INTO job_events (id, job_id, attempt_id, sequence, type, created_at)
+			VALUES ('evt_fk', 'job_fk', 'att_fk', 1, 'started', %d)`, now),
+		fmt.Sprintf(`INSERT INTO job_logs (id, job_id, attempt_id, stream, sequence, data, created_at)
+			VALUES ('log_fk', 'job_fk', 'att_fk', 'stdout', 1, 'hello', %d)`, now),
+		fmt.Sprintf(`INSERT INTO artifacts (id, job_id, attempt_id, name, storage_key, status, created_at)
+			VALUES ('art_fk', 'job_fk', 'att_fk', 'out.txt', 'k1', 'ready', %d)`, now),
+		fmt.Sprintf(`INSERT INTO operations (id, owner_id, kind, target_id, status, trace_id, created_at, updated_at)
+			VALUES ('op_fk', 'usr_fk', 'instance.start', 'ins_fk', 'running', 'trc_1', %d, %d)`, now, now),
+	}
+	for _, stmt := range seedStmts {
+		if _, err := sV2.Writer().Exec(stmt); err != nil {
+			_ = sV2.Close()
+			t.Fatalf("seed statement failed (%s): %v", stmt, err)
+		}
+	}
+	if err := sV2.Close(); err != nil {
+		t.Fatalf("closing v2 store failed: %v", err)
+	}
+
+	// 2. Re-open with normal store.Open, which executes migration 0003.
+	sV3, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open upgrading populated v2 DB through migration 0003 failed: %v", err)
+	}
+	defer sV3.Close()
+
+	ctx := context.Background()
+	var fkEnabled int
+	if err := sV3.Writer().QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fkEnabled); err != nil || fkEnabled != 1 {
+		t.Fatalf("expected PRAGMA foreign_keys=1 after migration 0003, got %d (err=%v)", fkEnabled, err)
+	}
+
+	fkRows, err := sV3.Writer().QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		t.Fatalf("PRAGMA foreign_key_check failed: %v", err)
+	}
+	defer fkRows.Close()
+	if fkRows.Next() {
+		t.Fatalf("expected zero foreign key violations after migration 0003")
+	}
+
+	// 3. Verify seeded records survived table recreations intact.
+	checks := []struct {
+		table string
+		id    string
+	}{
+		{"images", "img_fk"},
+		{"templates", "tpl_fk"},
+		{"volumes", "vol_fk"},
+		{"worker_pools", "pool_default"},
+		{"jobs", "job_fk"},
+		{"job_attempts", "att_fk"},
+		{"worker_leases", "lease_fk"},
+		{"job_logs", "log_fk"},
+	}
+	for _, c := range checks {
+		var cnt int
+		if err := sV3.Reader().QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", c.table), c.id).Scan(&cnt); err != nil || cnt != 1 {
+			t.Fatalf("expected row %q preserved in %s, got count=%d err=%v", c.id, c.table, cnt, err)
+		}
+	}
+}
+
+// TestMigrateLegacyDatabases_StaggeredArrival verifies that running migration when no legacy DBs
+// exist or when only one legacy DB is present does not prevent migrating the other DB later.
+func TestMigrateLegacyDatabases_StaggeredArrival(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx := context.Background()
+
+	stateDBPath := filepath.Join(dataDir, "data", "state.db")
+	unifiedStore, err := store.Open(stateDBPath)
+	if err != nil {
+		t.Fatalf("failed to open unified state.db: %v", err)
+	}
+	defer unifiedStore.Close()
+
+	// 1. Initial run with no legacy files should succeed and leave no tombstone markers.
+	if err := store.MigrateLegacyDatabases(ctx, unifiedStore, filepath.Dir(stateDBPath)); err != nil {
+		t.Fatalf("initial empty MigrateLegacyDatabases failed: %v", err)
+	}
+	var markerCount int
+	if err := unifiedStore.Reader().QueryRowContext(ctx, "SELECT COUNT(*) FROM legacy_migrations").Scan(&markerCount); err != nil || markerCount != 0 {
+		t.Fatalf("expected 0 migration markers when no legacy files exist, got %d (err=%v)", markerCount, err)
+	}
+
+	// 2. Place only legacy auth.db and run migration.
+	authDBPath := filepath.Join(dataDir, "master", "auth.db")
+	if err := os.MkdirAll(filepath.Dir(authDBPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	legacyAuth, err := store.Open(authDBPath)
+	if err != nil {
+		t.Fatalf("failed to create legacy auth.db: %v", err)
+	}
+	now := time.Now().UTC().Unix()
+	if err := storeDB.New(legacyAuth.Writer()).CreateUser(ctx, &storeDB.User{
+		ID:           "usr_staggered",
+		Email:        "staggered@compute.local",
+		Username:     "staggered",
+		PasswordHash: "hash",
+		Role:         "user",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("failed to seed staggered user: %v", err)
+	}
+	_ = legacyAuth.Close()
+
+	if err := store.MigrateLegacyDatabases(ctx, unifiedStore, filepath.Dir(stateDBPath)); err != nil {
+		t.Fatalf("auth-only MigrateLegacyDatabases failed: %v", err)
+	}
+	var userCount int
+	if err := unifiedStore.Reader().QueryRowContext(ctx, "SELECT COUNT(*) FROM users WHERE id = 'usr_staggered'").Scan(&userCount); err != nil || userCount != 1 {
+		t.Fatalf("expected migrated user usr_staggered, got count=%d err=%v", userCount, err)
+	}
+
+	// 3. Later restore legacy compute.db and run migration again -> compute.db must still migrate!
+	computeDBPath := filepath.Join(dataDir, "data", "compute.db")
+	legacyCompute, err := db.NewStore(computeDBPath)
+	if err != nil {
+		t.Fatalf("failed to create legacy compute.db: %v", err)
+	}
+	if err := legacyCompute.SaveVM(ctx, &db.VM{
+		ID:         "vm-staggered",
+		Name:       "vm-staggered",
+		OwnerID:    "usr_staggered",
+		Status:     db.StatusStopped,
+		VCPUs:      1,
+		MemoryMB:   512,
+		IPAddress:  "172.16.0.60",
+		MACAddress: "02:00:ac:10:00:3c",
+		TAPDevice:  "mftap-stag",
+	}); err != nil {
+		t.Fatalf("failed to seed staggered VM: %v", err)
+	}
+	_ = legacyCompute.Close()
+
+	if err := store.MigrateLegacyDatabases(ctx, unifiedStore, filepath.Dir(stateDBPath)); err != nil {
+		t.Fatalf("compute-arrival MigrateLegacyDatabases failed: %v", err)
+	}
+	var vmCount int
+	if err := unifiedStore.Reader().QueryRowContext(ctx, "SELECT COUNT(*) FROM vms WHERE id = 'vm-staggered'").Scan(&vmCount); err != nil || vmCount != 1 {
+		t.Fatalf("expected migrated vm vm-staggered after staggered arrival, got count=%d err=%v", vmCount, err)
 	}
 }
