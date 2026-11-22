@@ -393,6 +393,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 		disk := createCmd.Int("disk", 0, "Disk size in GiB or MiB")
 		image := createCmd.String("image", "", "Base image name")
 		template := createCmd.String("template", "", "Template name or ID")
+		cloneFrom := createCmd.String("clone-from", "", "VM ID or name to clone persistent disk from")
 		sshKey := createCmd.String("ssh-key", "", "SSH public key name or path")
 		noSSHKey := createCmd.Bool("no-ssh-key", false, "Exclude the account's default SSH key from this sandbox")
 		sshPassword := createCmd.String("ssh-password", "", "Optional SSH password for compute/root (min 8 chars; use '-' to read from stdin)")
@@ -488,6 +489,7 @@ func handleSandboxCommand(ctx context.Context, client *DaemonClient, args []stri
 			DiskMB:           *disk,
 			Image:            *image,
 			Template:         *template,
+			CloneFrom:        *cloneFrom,
 			SSHKeyID:         sshKeyID,
 			SSHPublicKey:     sshPublicKey,
 			SSHNoDefaultKey:  *noSSHKey,

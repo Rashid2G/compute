@@ -88,6 +88,11 @@ func (c *Client) AttachNetworkInterface(ctx context.Context, iface NetworkInterf
 	return c.request(ctx, http.MethodPut, "/network-interfaces/"+iface.IfaceID, iface)
 }
 
+// SetVsock configures the virtio-vsock device
+func (c *Client) SetVsock(ctx context.Context, vsock VsockConfig) error {
+	return c.request(ctx, http.MethodPut, "/vsock", vsock)
+}
+
 // StartInstance sends the InstanceStart action
 func (c *Client) StartInstance(ctx context.Context) error {
 	return c.request(ctx, http.MethodPut, "/actions", Action{ActionType: "InstanceStart"})

@@ -17,13 +17,19 @@ help: ## Show available Make targets
 
 all: build ## Build Go binaries
 
-build: ## Build compute, computed, compute-worker, and compute-bench binaries
+build: ## Build compute, computed, compute-worker, compute-bench, and compute-agent binaries
 	@command -v go >/dev/null 2>&1 || { echo "Error: 'go' is not installed or not in PATH (Go 1.26+ required)" >&2; exit 127; }
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/compute ./cmd/compute
 	go build $(LDFLAGS) -o bin/computed ./cmd/computed
 	go build $(LDFLAGS) -o bin/compute-worker ./cmd/compute-worker
 	go build $(LDFLAGS) -o bin/compute-bench ./cmd/compute-bench
+	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/compute-agent ./cmd/compute-agent
+
+compute-agent: ## Build compute-agent static binary
+	@command -v go >/dev/null 2>&1 || { echo "Error: 'go' is not installed or not in PATH (Go 1.26+ required)" >&2; exit 127; }
+	mkdir -p bin
+	CGO_ENABLED=0 go build $(LDFLAGS) -o bin/compute-agent ./cmd/compute-agent
 
 build-ui: ## Build the React/Vite Web UI into internal/gui/assets
 	cd web && (bun run build || npm run build)
@@ -111,6 +117,7 @@ install: build ## Install compiled binaries, helper scripts, and default config
 	sudo install -m 755 bin/compute /usr/local/bin/compute
 	sudo install -m 755 bin/computed /usr/local/bin/computed
 	@if [ -f bin/compute-worker ]; then sudo install -m 755 bin/compute-worker /usr/local/bin/compute-worker; fi
+	@if [ -f bin/compute-agent ]; then sudo install -m 755 bin/compute-agent /usr/local/bin/compute-agent; fi
 	@if [ -f scripts/build-rootfs-chroot.sh ]; then sudo install -m 755 scripts/build-rootfs-chroot.sh /usr/local/share/compute/build-rootfs-chroot.sh; fi
 	@if [ -f config/daemon.json ] && [ ! -f /etc/compute/daemon.json ]; then sudo install -m 644 config/daemon.json /etc/compute/daemon.json; fi
 
@@ -129,11 +136,13 @@ release-tarballs: ## Build cross-platform release tarballs and SHA-256 checksums
 		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/computed ./cmd/computed; \
 		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/compute-worker ./cmd/compute-worker; \
 		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/compute-bench ./cmd/compute-bench; \
+		GOOS=linux GOARCH=$${arch} CGO_ENABLED=0 go build $(LDFLAGS) -o dist/linux-$${arch}/compute-agent ./cmd/compute-agent; \
 		tar -czf dist/compute_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute; \
 		tar -czf dist/computed_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} computed; \
 		tar -czf dist/compute-worker_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute-worker; \
 		tar -czf dist/compute-bench_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute-bench; \
-		tar -czf dist/compute-suite_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute computed compute-worker compute-bench; \
+		tar -czf dist/compute-agent_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute-agent; \
+		tar -czf dist/compute-suite_$(VERSION)_linux_$${arch}.tar.gz -C dist/linux-$${arch} compute computed compute-worker compute-bench compute-agent; \
 	done
 	cd dist && sha256sum *.tar.gz > checksums.txt
 
